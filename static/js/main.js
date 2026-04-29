@@ -29,6 +29,7 @@ connStatus.subscribe((s) => {
 folders.subscribe((list) => {
     renderFolders(list);
     renderSidebar();
+    updateToolbarState();
 });
 files.subscribe(() => {
     renderFolders(folders.get());
@@ -190,47 +191,6 @@ function renderTreeRow({ ul, folder, node, relDir, displayName, depth, isRoot })
     tag.textContent = summary.status;
     li.append(tag);
 
-    const actions = document.createElement("span");
-    actions.className = "row-actions";
-    if (folder.managed && canHaveChildren) {
-        const add = document.createElement("button");
-        add.textContent = "+";
-        add.title = "Add subfolder";
-        add.addEventListener("click", async (e) => {
-            e.stopPropagation();
-            const name = prompt("Subfolder name:");
-            if (!name) return;
-            const target = relDir ? `${relDir}/${name.trim()}` : name.trim();
-            try {
-                await api.mkdir(folder.id, target);
-                if (!ghostDirs.has(folder.id)) ghostDirs.set(folder.id, new Set());
-                ghostDirs.get(folder.id).add(target);
-                expandedNodes.add(key);
-                expandedNodes.add(nodeKey(folder.id, target));
-                renderFolders(folders.get());
-            } catch (err) { alert(err.message); }
-        });
-        actions.append(add);
-    }
-    if (isRoot) {
-        const del = document.createElement("button");
-        del.className = "delete";
-        del.textContent = "×";
-        del.title = "Remove folder";
-        del.addEventListener("click", async (e) => {
-            e.stopPropagation();
-            if (!confirm(`Remove ${folder.display_name}?`)) return;
-            try {
-                await api.deleteFolder(folder.id);
-                if (selectedFolderId === folder.id) {
-                    selectedFolderId = null;
-                    selectedRelDir = "";
-                }
-            } catch (err) { alert(err.message); }
-        });
-        actions.append(del);
-    }
-    li.append(actions);
 
     li.addEventListener("click", () => selectNode(folder.id, relDir));
     ul.append(li);
@@ -292,10 +252,6 @@ function renderFileRow(ul, folder, file, depth) {
     tag.textContent = file.state;
     li.append(tag);
 
-    const actions = document.createElement("span");
-    actions.className = "row-actions";
-    li.append(actions);
-
     ul.append(li);
 }
 
@@ -306,6 +262,35 @@ function selectNode(folderId, relDir) {
     renderFolders(folders.get());
     renderSidebar();
     refreshStats();
+    updateToolbarState();
+}
+
+function updateToolbarState() {
+    const folder = folders.get().find((f) => f.id === selectedFolderId);
+    const subBtn = $("#btn-new-subfolder");
+    subBtn.disabled = !(folder && folder.managed);
+    subBtn.title = folder?.managed
+        ? `Add subfolder under ${folder.display_name}${selectedRelDir ? "/" + selectedRelDir : ""}`
+        : "Select a managed folder to add a subfolder";
+}
+
+async function createSubfolder() {
+    const folder = folders.get().find((f) => f.id === selectedFolderId);
+    if (!folder?.managed) return;
+    const name = prompt("Subfolder name:");
+    if (!name?.trim()) return;
+    const target = selectedRelDir
+        ? `${selectedRelDir}/${name.trim()}`
+        : name.trim();
+    try {
+        await api.mkdir(folder.id, target);
+        if (!ghostDirs.has(folder.id)) ghostDirs.set(folder.id, new Set());
+        ghostDirs.get(folder.id).add(target);
+        expandedNodes.add(nodeKey(folder.id, selectedRelDir));
+        renderFolders(folders.get());
+    } catch (err) {
+        alert(err.message);
+    }
 }
 
 // ----- Sidebar -----
@@ -479,21 +464,8 @@ $("#upload-submit").addEventListener("click", async () => {
     } catch (err) { alert(err.message); }
 });
 
-$("#mkdir-btn").addEventListener("click", async () => {
-    if (!selectedFolderId) return;
-    const folder = folders.get().find((f) => f.id === selectedFolderId);
-    if (!folder?.managed) return;
-    const name = prompt("Subfolder name:");
-    if (!name) return;
-    const target = selectedRelDir ? `${selectedRelDir}/${name.trim()}` : name.trim();
-    try {
-        await api.mkdir(selectedFolderId, target);
-        if (!ghostDirs.has(selectedFolderId)) ghostDirs.set(selectedFolderId, new Set());
-        ghostDirs.get(selectedFolderId).add(target);
-        expandedNodes.add(nodeKey(selectedFolderId, selectedRelDir));
-        renderFolders(folders.get());
-    } catch (err) { alert(err.message); }
-});
+$("#mkdir-btn").addEventListener("click", createSubfolder);
+$("#btn-new-subfolder").addEventListener("click", createSubfolder);
 
 $("#btn-retry-all").addEventListener("click", async () => {
     try {

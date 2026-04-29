@@ -188,29 +188,34 @@ input[type="text"], input[type="file"] {
 .tree { list-style: none; margin: 0; padding: 0; }
 .tree-row {
     display: grid;
-    grid-template-columns: auto auto 1fr 60px 70px 130px auto;
+    grid-template-columns: auto auto 1fr 60px 70px 110px;
     align-items: center;
-    gap: 8px;
-    padding: 6px 12px;
+    gap: 10px;
+    padding: 5px 16px;
     border-bottom: 1px solid var(--color-border-light);
     cursor: pointer;
     transition: background var(--t);
+    user-select: none;
 }
 .tree-row:last-child { border-bottom: none; }
 .tree-row:hover { background: var(--color-bg-hover); }
-.tree-row.selected { background: rgba(0, 113, 227, 0.1); }
-[data-theme="dark"] .tree-row.selected { background: rgba(10, 132, 255, 0.15); }
+.tree-row.selected,
+.tree-row.selected:hover { background: var(--color-accent); color: #fff; }
+.tree-row.selected .num,
+.tree-row.selected .label,
+.tree-row.selected .chevron { color: #fff; }
+.tree-row.selected .glyph { color: #fff; }
 
 .tree-row .indent { display: inline-block; }
 .tree-row .chevron {
-    width: 16px;
+    width: 14px;
     text-align: center;
-    color: var(--color-text-tertiary);
-    user-select: none;
+    color: var(--color-text-secondary);
+    font-size: 10px;
     transition: transform 120ms ease;
 }
 .tree-row .chevron.open { transform: rotate(90deg); }
-.tree-row .chevron.leaf { color: transparent; cursor: default; }
+.tree-row .chevron.leaf { visibility: hidden; }
 .tree-row .label {
     display: flex;
     align-items: center;
@@ -219,8 +224,9 @@ input[type="text"], input[type="file"] {
     text-overflow: ellipsis;
     white-space: nowrap;
     min-width: 0;
+    font-size: 13px;
 }
-.tree-row .label .glyph { flex-shrink: 0; }
+.tree-row .label .glyph { flex-shrink: 0; font-size: 14px; }
 .tree-row.folder-root .label .glyph,
 .tree-row.dir .label .glyph { color: var(--color-accent); }
 .tree-row.file .label { color: var(--color-text-secondary); }
@@ -231,24 +237,18 @@ input[type="text"], input[type="file"] {
     font-size: 12px;
     color: var(--color-text-secondary);
 }
-.tree-row .row-actions {
-    display: flex;
-    gap: 4px;
-    opacity: 0.4;
-    transition: opacity var(--t);
+
+/* Status pill: smaller and quieter inside tree rows. */
+.tree-row .status-tag {
+    min-width: auto;
+    font-size: 10px;
+    padding: 1px 8px;
+    text-transform: lowercase;
 }
-.tree-row:hover .row-actions { opacity: 1; }
-.tree-row .row-actions button {
-    border: none;
-    background: transparent;
-    color: var(--color-text-tertiary);
-    cursor: pointer;
-    font-size: 14px;
-    line-height: 1;
-    padding: 0 4px;
+.tree-row.selected .status-tag {
+    background: rgba(255, 255, 255, 0.25);
+    color: #fff;
 }
-.tree-row .row-actions button:hover { color: var(--color-accent); }
-.tree-row .row-actions button.delete:hover { color: var(--color-error); }
 
 /* ---------- Status pills ---------- */
 
