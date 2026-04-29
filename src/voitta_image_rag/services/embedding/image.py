@@ -37,6 +37,7 @@ class SiglipImageEmbedder(ImageEmbedder):
         self.model_name = model_name
         self._model: Any | None = None
         self._processor: Any | None = None
+        self._dim: int | None = None
         self._lock = threading.Lock()
 
     def _ensure_loaded(self) -> tuple[Any, Any]:
@@ -54,9 +55,25 @@ class SiglipImageEmbedder(ImageEmbedder):
 
     @property
     def dim(self) -> int:
+        if self._dim is not None:
+            return self._dim
+        # CLIP/SigLIP/BLIP all expose hidden_size on the text/vision sub-config.
+        # Fall back to embedding a tiny string and measuring if the attribute
+        # path differs.
         _, model = self._ensure_loaded()
-        # Both vision and text projection heads share the same dim in CLIP-family models.
-        return int(model.config.projection_dim)
+        cfg = model.config
+        for attr in ("projection_dim",):
+            if hasattr(cfg, attr):
+                self._dim = int(getattr(cfg, attr))
+                return self._dim
+        for sub_attr in ("text_config", "vision_config"):
+            sub = getattr(cfg, sub_attr, None)
+            if sub is not None and hasattr(sub, "hidden_size"):
+                self._dim = int(sub.hidden_size)
+                return self._dim
+        # Last resort: probe.
+        self._dim = len(self.embed_text("dim probe"))
+        return self._dim
 
     def embed_image(self, data: bytes) -> list[float]:
         import torch
