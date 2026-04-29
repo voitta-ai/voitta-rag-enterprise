@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Test / type-check caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Env
+.env
+.env.local
+
+# Data
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# UI build outputs (Stage 5)
+static/dist/
+node_modules/
+
+# Editor
+.vscode/
+.idea/
+.DS_Store

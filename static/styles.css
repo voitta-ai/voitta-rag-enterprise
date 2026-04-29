@@ -1,0 +1,78 @@
+:root {
+    --bg: #1e1e1e;
+    --panel: #252526;
+    --border: #3c3c3c;
+    --fg: #d4d4d4;
+    --fg-dim: #888;
+    --accent: #0e7afe;
+    --error: #f48771;
+    --ok: #6abf68;
+    --warn: #d7ba7d;
+}
+
+* { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 13px -apple-system, "SF Pro Text", system-ui, sans-serif;
+}
+
+header {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.5rem 1rem;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+}
+
+h1 { font-size: 1rem; margin: 0; }
+h2 { font-size: 0.75rem; text-transform: uppercase; color: var(--fg-dim); margin: 1rem 0 0.5rem; }
+
+.status { font-size: 0.75rem; padding: 0.1rem 0.5rem; border-radius: 3px; }
+.status.connected { background: var(--ok); color: var(--bg); }
+.status.disconnected { background: var(--error); color: var(--bg); }
+
+main {
+    display: grid;
+    grid-template-columns: 280px 1fr 320px;
+    height: calc(100vh - 41px);
+    overflow: hidden;
+}
+
+aside, .center { padding: 0.5rem 1rem; overflow-y: auto; border-right: 1px solid var(--border); }
+.jobs { border-right: none; border-left: 1px solid var(--border); }
+
+form { display: flex; gap: 0.25rem; margin: 0.5rem 0; }
+input, button {
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    padding: 0.25rem 0.5rem;
+    border-radius: 3px;
+    font: inherit;
+}
+input { flex: 1; }
+button { background: var(--accent); color: white; border-color: var(--accent); cursor: pointer; }
+button:hover { opacity: 0.9; }
+
+ul { list-style: none; padding: 0; margin: 0; }
+li { padding: 0.25rem 0; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 0.5rem; }
+li.dim { color: var(--fg-dim); }
+li .badge { font-size: 0.7rem; padding: 0 0.25rem; border-radius: 2px; }
+.badge.indexed { background: var(--ok); color: var(--bg); }
+.badge.error { background: var(--error); color: var(--bg); }
+.badge.pending, .badge.extracting, .badge.extracted, .badge.embedding { background: var(--warn); color: var(--bg); }
+.badge.deleted { background: var(--fg-dim); color: var(--bg); }
+
+#search-results { font-family: ui-monospace, monospace; font-size: 12px; }
+.hit { padding: 0.5rem; margin: 0.5rem 0; background: var(--panel); border-radius: 4px; }
+.hit .meta { color: var(--fg-dim); font-size: 0.7rem; }
+.hit .text { white-space: pre-wrap; word-break: break-word; }
+
+.job { font-size: 0.75rem; }
+.job .kind { color: var(--accent); }
+.job.error { color: var(--error); }
+.job.done { color: var(--fg-dim); }

@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>voitta-image-rag</title>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <header>
+        <h1>voitta-image-rag</h1>
+        <span id="conn-status" class="status disconnected">disconnected</span>
+    </header>
+    <main>
+        <aside class="sidebar">
+            <section>
+                <h2>Folders</h2>
+                <form id="add-folder">
+                    <input type="text" name="path" placeholder="/abs/path/to/folder" required>
+                    <button type="submit">Add</button>
+                </form>
+                <ul id="folder-list"></ul>
+            </section>
+            <section>
+                <h2>Files</h2>
+                <ul id="file-list"></ul>
+            </section>
+        </aside>
+        <section class="center">
+            <h2>Search</h2>
+            <form id="search-form">
+                <input type="text" name="query" placeholder="search query" required>
+                <button type="submit">Search</button>
+            </form>
+            <div id="search-results"></div>
+        </section>
+        <aside class="jobs">
+            <h2>Jobs</h2>
+            <ul id="job-list"></ul>
+        </aside>
+    </main>
+    <script type="module" src="/static/js/main.js"></script>
+</body>
+</html>

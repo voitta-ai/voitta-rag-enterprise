@@ -1,0 +1,424 @@
+"""MCP server.
+
+Exposes the same data the HTTP API does, but as MCP tools that an LLM agent
+can call. ACL identity comes from the ``X-User-Name`` header (set by Voitta
+Desktop or the ``mcp inspector`` CLI). When ``VOITTA_SINGLE_USER=true`` or
+``VOITTA_DEV_USER`` is set, the configured user wins regardless of the header.
+
+Run standalone::
+
+    python -m voitta_image_rag.mcp_server
+"""
+
+from __future__ import annotations
+
+import base64
+import logging
+from contextvars import ContextVar
+
+from fastmcp import FastMCP
+from pydantic import BaseModel, Field
+from sqlalchemy import select
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+
+from .cas import store as cas_store
+from .config import get_settings
+from .db.database import init_db, session_scope
+from .db.models import Chunk, ChunkImageLink, File, Folder, Image
+from .services.acl import ROOT_EMAIL, get_or_create_user, visible_folder_ids
+from .services.embedding import (
+    get_image_embedder,
+    get_sparse_embedder,
+    get_text_embedder,
+)
+from .services.vector_store import (
+    SearchHit,
+)
+from .services.vector_store import (
+    search_chunks as vs_search_chunks,
+)
+from .services.vector_store import (
+    search_images as vs_search_images,
+)
+
+logger = logging.getLogger(__name__)
+
+_current_user: ContextVar[str | None] = ContextVar("voitta_mcp_user", default=None)
+
+mcp = FastMCP("voitta-image-rag")
+
+
+def _resolved_user() -> str:
+    """Mirror the HTTP ACL resolver. Three modes per ARCHITECTURE.md §9."""
+    s = get_settings()
+    if s.single_user:
+        return ROOT_EMAIL
+    if s.dev_user:
+        return s.dev_user
+    return _current_user.get() or "anonymous"
+
+
+def _resolved_user_id() -> int | None:
+    """Resolve the caller's user id, creating the user row on first call."""
+    email = _resolved_user()
+    if email == "anonymous":
+        return None
+    with session_scope() as s:
+        user = get_or_create_user(s, email)
+        return user.id
+
+
+# ---------------------------------------------------------------------------
+# Pydantic schemas — mirror the HTTP responses but trimmed for LLM friendliness
+# ---------------------------------------------------------------------------
+
+
+class FolderInfo(BaseModel):
+    id: int
+    path: str
+    display_name: str
+    source_type: str
+    files_total: int
+    files_indexed: int
+
+
+class FileInfo(BaseModel):
+    id: int
+    folder_id: int
+    rel_path: str
+    state: str
+    source_url: str | None
+    last_indexed_at: int | None
+
+
+class ChunkInfo(BaseModel):
+    chunk_id: int
+    file_id: int
+    file_path: str
+    chunk_index: int
+    text: str
+    nearby_image_ids: list[int] = Field(default_factory=list)
+    score: float | None = None
+
+
+class ImageInfo(BaseModel):
+    image_id: int
+    file_id: int
+    file_path: str
+    image_cas_id: str
+    page: int | None
+    width: int | None
+    height: int | None
+    mime: str | None
+    score: float | None = None
+
+
+# ---------------------------------------------------------------------------
+# Tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def list_indexed_folders() -> list[FolderInfo]:
+    """List the folders visible to the calling user, with file-count breakdown."""
+    user_id = _resolved_user_id()
+    with session_scope() as s:
+        visible = set(visible_folder_ids(s, user_id)) if user_id is not None else set()
+        out: list[FolderInfo] = []
+        for f in s.execute(select(Folder).order_by(Folder.id)).scalars():
+            if user_id is not None and f.id not in visible:
+                continue
+            total = (
+                s.execute(
+                    select(File).where(File.folder_id == f.id, File.state != "deleted")
+                )
+                .scalars()
+                .all()
+            )
+            indexed = [x for x in total if x.state == "indexed"]
+            out.append(
+                FolderInfo(
+                    id=f.id,
+                    path=f.path,
+                    display_name=f.display_name,
+                    source_type=f.source_type,
+                    files_total=len(total),
+                    files_indexed=len(indexed),
+                )
+            )
+        return out
+
+
+@mcp.tool()
+def search(
+    query: str,
+    folder_ids: list[int] | None = None,
+    limit: int = 20,
+) -> list[ChunkInfo]:
+    """Hybrid (dense + sparse, RRF-fused) search over text chunks.
+
+    :param query: free-text query
+    :param folder_ids: restrict search to these folder ids
+    :param limit: max hits (1..100)
+    """
+    limit = max(1, min(limit, 100))
+    text_emb = get_text_embedder()
+    sparse_emb = get_sparse_embedder()
+    hits = vs_search_chunks(
+        dense=text_emb.embed_query(query),
+        sparse=sparse_emb.embed_query(query),
+        limit=limit,
+        folder_ids=folder_ids,
+        allowed_user_id=_resolved_user_id(),
+    )
+    return [_chunk_from_hit(h) for h in hits]
+
+
+@mcp.tool()
+def search_images(
+    query: str,
+    folder_ids: list[int] | None = None,
+    limit: int = 20,
+) -> list[ImageInfo]:
+    """Cross-modal text→image search via the image embedder's text encoder."""
+    limit = max(1, min(limit, 100))
+    image_emb = get_image_embedder()
+    hits = vs_search_images(
+        vector=image_emb.embed_text(query),
+        limit=limit,
+        folder_ids=folder_ids,
+        allowed_user_id=_resolved_user_id(),
+    )
+    return [_image_from_hit(h) for h in hits]
+
+
+@mcp.tool()
+def get_file(file_id: int) -> dict:
+    """Return file metadata + the full extracted markdown content."""
+    with session_scope() as s:
+        f = s.get(File, file_id)
+        if f is None:
+            raise ValueError(f"File {file_id} not found")
+        info = FileInfo(
+            id=f.id,
+            folder_id=f.folder_id,
+            rel_path=f.rel_path,
+            state=f.state,
+            source_url=f.source_url,
+            last_indexed_at=f.last_indexed_at,
+        )
+        cas_id = f.file_cas_id
+
+    text = ""
+    if cas_id:
+        try:
+            text = cas_store.read_file_blob(cas_id, "text.md").decode("utf-8")
+        except FileNotFoundError:
+            text = ""
+    return {"file": info.model_dump(), "text": text}
+
+
+@mcp.tool()
+def get_chunk_range(
+    file_id: int,
+    start_index: int = 0,
+    end_index: int = 10,
+) -> list[ChunkInfo]:
+    """Return chunks ``[start_index, end_index)`` of a file, in order."""
+    start_index = max(0, start_index)
+    end_index = min(end_index, start_index + 500)
+    if end_index <= start_index:
+        return []
+    with session_scope() as s:
+        f = s.get(File, file_id)
+        if f is None:
+            raise ValueError(f"File {file_id} not found")
+        rows = list(
+            s.execute(
+                select(Chunk)
+                .where(
+                    Chunk.file_id == file_id,
+                    Chunk.chunk_index >= start_index,
+                    Chunk.chunk_index < end_index,
+                )
+                .order_by(Chunk.chunk_index)
+            ).scalars()
+        )
+        return [
+            ChunkInfo(
+                chunk_id=c.id,
+                file_id=c.file_id,
+                file_path=f.rel_path,
+                chunk_index=c.chunk_index,
+                text=c.text,
+                nearby_image_ids=_nearby_image_ids(s, c.id),
+            )
+            for c in rows
+        ]
+
+
+@mcp.tool()
+def get_chunk_images(chunk_id: int) -> list[ImageInfo]:
+    """Return the images linked to ``chunk_id`` (within the configured radius)."""
+    with session_scope() as s:
+        chunk = s.get(Chunk, chunk_id)
+        if chunk is None:
+            raise ValueError(f"Chunk {chunk_id} not found")
+        file = s.get(File, chunk.file_id)
+        rows = list(
+            s.execute(
+                select(Image, ChunkImageLink.distance)
+                .join(ChunkImageLink, ChunkImageLink.image_id == Image.id)
+                .where(ChunkImageLink.chunk_id == chunk_id)
+                .order_by(ChunkImageLink.distance)
+            )
+        )
+        return [
+            ImageInfo(
+                image_id=img.id,
+                file_id=img.file_id,
+                file_path=file.rel_path if file else "",
+                image_cas_id=img.image_cas_id,
+                page=img.page,
+                width=img.width,
+                height=img.height,
+                mime=img.mime,
+                score=float(distance),
+            )
+            for (img, distance) in rows
+        ]
+
+
+@mcp.tool()
+def get_image(image_id: int) -> dict:
+    """Return image bytes (base64) + mime for inline rendering by an MCP client."""
+    with session_scope() as s:
+        img = s.get(Image, image_id)
+        if img is None:
+            raise ValueError(f"Image {image_id} not found")
+        cas_id = img.image_cas_id
+        mime = img.mime or "application/octet-stream"
+    try:
+        data = cas_store.read_image_blob(cas_id)
+    except FileNotFoundError as e:
+        raise ValueError(f"Image bytes missing for {image_id}") from e
+    return {
+        "image_id": image_id,
+        "mime": mime,
+        "data_base64": base64.b64encode(data).decode("ascii"),
+    }
+
+
+@mcp.tool()
+def resolve_url(url: str) -> list[FileInfo]:
+    """Reverse-lookup an external URL (set by sync connectors) → matching files."""
+    with session_scope() as s:
+        rows = list(
+            s.execute(select(File).where(File.source_url == url)).scalars()
+        )
+        if not rows:
+            # Fallback: prefix match (handles fragment-bearing URLs).
+            rows = list(
+                s.execute(
+                    select(File).where(
+                        File.source_url.is_not(None),
+                        File.source_url == url.split("#", 1)[0],
+                    )
+                ).scalars()
+            )
+        return [
+            FileInfo(
+                id=f.id,
+                folder_id=f.folder_id,
+                rel_path=f.rel_path,
+                state=f.state,
+                source_url=f.source_url,
+                last_indexed_at=f.last_indexed_at,
+            )
+            for f in rows
+        ]
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _chunk_from_hit(h: SearchHit) -> ChunkInfo:
+    p = h.payload
+    return ChunkInfo(
+        chunk_id=int(p.get("chunk_id", h.id)),
+        file_id=int(p["file_id"]),
+        file_path=str(p.get("file_path", "")),
+        chunk_index=int(p.get("chunk_index", 0)),
+        text=str(p.get("text", "")),
+        nearby_image_ids=list(p.get("nearby_image_ids") or []),
+        score=h.score,
+    )
+
+
+def _image_from_hit(h: SearchHit) -> ImageInfo:
+    p = h.payload
+    return ImageInfo(
+        image_id=int(p.get("image_id", h.id)),
+        file_id=int((p.get("file_ids") or [0])[0]),
+        file_path=str(p.get("file_path", "")),
+        image_cas_id=str(p.get("image_cas_id", "")),
+        page=p.get("page"),
+        width=None,
+        height=None,
+        mime=None,
+        score=h.score,
+    )
+
+
+def _nearby_image_ids(session, chunk_id: int) -> list[int]:
+    return [
+        link.image_id
+        for link in session.execute(
+            select(ChunkImageLink).where(ChunkImageLink.chunk_id == chunk_id)
+        )
+        .scalars()
+        .all()
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Middleware: read X-User-Name header into the ContextVar before each tool call
+# ---------------------------------------------------------------------------
+
+
+class UserHeaderMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        token = _current_user.set(request.headers.get("X-User-Name"))
+        try:
+            return await call_next(request)
+        finally:
+            _current_user.reset(token)
+
+
+# ---------------------------------------------------------------------------
+# Standalone runner
+# ---------------------------------------------------------------------------
+
+
+def build_app(transport: str = "streamable-http"):
+    """Return the ASGI app exposing the MCP server. Useful for tests."""
+    init_db()
+    app = mcp.http_app(transport=transport, stateless_http=True)
+    app.add_middleware(UserHeaderMiddleware)
+    return app
+
+
+def run() -> None:
+    import uvicorn
+
+    settings = get_settings()
+    logging.basicConfig(level=logging.INFO)
+    app = build_app()
+    uvicorn.run(app, host="0.0.0.0", port=settings.mcp_port)
+
+
+if __name__ == "__main__":
+    run()
