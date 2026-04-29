@@ -11,6 +11,7 @@ import contextlib
 import logging
 from collections.abc import Awaitable, Callable
 
+from ..logging_config import bind_context
 from . import job_queue
 
 logger = logging.getLogger(__name__)
@@ -71,11 +72,14 @@ class WorkerPool:
                         job_queue.mark_error, claimed.id, f"no handler for {claimed.kind}"
                     )
                     continue
-                try:
-                    await handler(claimed.payload)
-                    await asyncio.to_thread(job_queue.mark_done, claimed.id)
-                except Exception as e:
-                    logger.exception("%s job %d (%s) failed", name, claimed.id, claimed.kind)
-                    await asyncio.to_thread(job_queue.mark_error, claimed.id, str(e))
+                with bind_context(job_id=claimed.id, kind=claimed.kind):
+                    logger.info("%s claim job", name)
+                    try:
+                        await handler(claimed.payload)
+                        await asyncio.to_thread(job_queue.mark_done, claimed.id)
+                        logger.info("%s job done", name)
+                    except Exception as e:
+                        logger.exception("%s job failed", name)
+                        await asyncio.to_thread(job_queue.mark_error, claimed.id, str(e))
         finally:
             logger.info("%s stopped", name)

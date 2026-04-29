@@ -16,6 +16,7 @@ from .api import api_router, ws_router
 from .config import get_settings
 from .db.database import init_db, session_scope
 from .db.models import Folder
+from .logging_config import setup_logging
 from .services import events
 from .services.scanner import scan_folder
 
@@ -63,6 +64,7 @@ def create_app() -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings = get_settings()
         settings.data_dir.mkdir(parents=True, exist_ok=True)
+        setup_logging(settings.data_dir / "logs")
         logger.info("voitta-image-rag starting (data_dir=%s)", settings.data_dir)
         init_db()
         events.install_loop(asyncio.get_running_loop())

@@ -10,6 +10,8 @@ import hashlib
 import json
 import logging
 import time
+import traceback
+from contextlib import contextmanager
 from pathlib import Path
 
 from sqlalchemy import select
@@ -18,11 +20,42 @@ from ..cas import store as cas_store
 from ..config import get_settings
 from ..db.database import session_scope
 from ..db.models import Chunk, ChunkImageLink, File, Folder, Image
+from ..logging_config import bind_context
 from . import events, job_queue
 from .chunking import ChunkInfo, anchor_chunk_for_position, chunk_markdown
 from .parsers.registry import get_default_registry
 
 logger = logging.getLogger(__name__)
+
+_ERROR_FIELD_MAX = 4000  # cap stored traceback so an error row stays scannable
+
+
+@contextmanager
+def _stage(name: str, **extra):
+    """Log entry/exit + elapsed ms for a single indexing stage."""
+    start = time.perf_counter()
+    if extra:
+        logger.debug("stage %s start %s", name, extra)
+    else:
+        logger.debug("stage %s start", name)
+    try:
+        yield
+    except Exception:
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        logger.exception("stage %s failed after %.1fms", name, elapsed_ms)
+        raise
+    else:
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        logger.debug("stage %s done in %.1fms", name, elapsed_ms)
+
+
+def _format_exception(prefix: str) -> str:
+    """Build the string we put into File.error — prefix + tail of traceback."""
+    tb = traceback.format_exc()
+    msg = f"{prefix}\n{tb}"
+    if len(msg) > _ERROR_FIELD_MAX:
+        msg = msg[: _ERROR_FIELD_MAX - 3] + "..."
+    return msg
 
 
 async def run_extract(payload: dict) -> None:
@@ -31,66 +64,125 @@ async def run_extract(payload: dict) -> None:
 
 
 def _run_extract_sync(file_id: int) -> None:
-    abs_path = _resolve_path(file_id)
+    with bind_context(file_id=file_id):
+        try:
+            _run_extract_inner(file_id)
+        except Exception:
+            _mark_error(file_id, _format_exception("extract crashed"))
+
+
+def _run_extract_inner(file_id: int) -> None:
+    extract_started = time.perf_counter()
+    logger.info("extract begin")
+
+    with _stage("resolve_path"):
+        abs_path = _resolve_path(file_id)
     if abs_path is None:
+        logger.info("extract abort: file or folder gone")
         return  # file or folder gone; ``delete_file`` cleans up
 
     if not abs_path.exists() or not abs_path.is_file():
+        logger.info("extract abort: path missing on disk path=%s", abs_path)
         _mark_state(file_id, state="deleted")
         return
 
+    logger.debug("path=%s", abs_path)
     settings = get_settings()
     try:
-        stat = abs_path.stat()
+        with _stage("stat"):
+            stat = abs_path.stat()
     except OSError as e:
         _mark_error(file_id, f"stat failed: {e}")
         return
     if stat.st_size > settings.max_file_bytes:
+        logger.warning(
+            "size %d exceeds limit %d", stat.st_size, settings.max_file_bytes
+        )
         _mark_error(file_id, "size exceeds VOITTA_MAX_FILE_BYTES")
         return
 
-    raw = abs_path.read_bytes()
-    new_sha = hashlib.sha256(raw).hexdigest()
-
-    if _short_circuit_unchanged(file_id, new_sha, stat.st_mtime_ns):
+    try:
+        with _stage("read_bytes", size=stat.st_size):
+            raw = abs_path.read_bytes()
+    except OSError as e:
+        _mark_error(file_id, f"read failed: {e}")
         return
 
-    parser = get_default_registry().find(abs_path)
+    with _stage("sha256"):
+        new_sha = hashlib.sha256(raw).hexdigest()
+    logger.debug("sha=%s size=%d", new_sha, len(raw))
+
+    if _short_circuit_unchanged(file_id, new_sha, stat.st_mtime_ns):
+        logger.info("extract skip: unchanged sha")
+        return
+
+    with _stage("find_parser"):
+        parser = get_default_registry().find(abs_path)
     if parser is None:
         _mark_error(file_id, f"no parser for {abs_path.suffix}")
         return
+    logger.info("parser=%s", parser.__class__.__name__)
 
-    result = parser.parse(abs_path)
+    try:
+        with _stage("parse"):
+            result = parser.parse(abs_path)
+    except Exception:
+        _mark_error(file_id, _format_exception(f"{parser.__class__.__name__}.parse raised"))
+        return
     if not result.success:
+        logger.warning("parser reported failure: %s", result.error)
         _mark_error(file_id, result.error or "parse failed")
         return
-
-    cas_store.write_file_blob(new_sha, "text.md", result.content)
-    image_shas: list[str] = [cas_store.write_image_blob(img.bytes) for img in result.images]
-    chunks = chunk_markdown(result.content)
-
-    cas_store.write_file_blob(
-        new_sha,
-        "manifest.json",
-        json.dumps(
-            {
-                "parser": parser.__class__.__name__,
-                "chunk_count": len(chunks),
-                "image_count": len(result.images),
-                "image_positions": [img.position for img in result.images],
-                "metadata": result.metadata,
-            },
-            indent=2,
-        ),
+    logger.info(
+        "parsed: chars=%d images=%d", len(result.content), len(result.images)
     )
 
-    _commit_indexing(
-        file_id=file_id,
-        new_sha=new_sha,
-        mtime_ns=stat.st_mtime_ns,
-        chunks=chunks,
-        images=list(zip(image_shas, result.images, strict=True)),
-        nearby_radius=settings.nearby_radius,
+    try:
+        with _stage("cas_write_text"):
+            cas_store.write_file_blob(new_sha, "text.md", result.content)
+        with _stage("cas_write_images", count=len(result.images)):
+            image_shas: list[str] = [
+                cas_store.write_image_blob(img.bytes) for img in result.images
+            ]
+        with _stage("chunk_markdown"):
+            chunks = chunk_markdown(result.content)
+        logger.info("chunked: count=%d", len(chunks))
+
+        with _stage("cas_write_manifest"):
+            cas_store.write_file_blob(
+                new_sha,
+                "manifest.json",
+                json.dumps(
+                    {
+                        "parser": parser.__class__.__name__,
+                        "chunk_count": len(chunks),
+                        "image_count": len(result.images),
+                        "image_positions": [img.position for img in result.images],
+                        "metadata": result.metadata,
+                    },
+                    indent=2,
+                ),
+            )
+
+        with _stage("commit_indexing"):
+            _commit_indexing(
+                file_id=file_id,
+                new_sha=new_sha,
+                mtime_ns=stat.st_mtime_ns,
+                chunks=chunks,
+                images=list(zip(image_shas, result.images, strict=True)),
+                nearby_radius=settings.nearby_radius,
+            )
+    except Exception:
+        _mark_error(file_id, _format_exception("post-parse pipeline failed"))
+        return
+
+    elapsed_ms = (time.perf_counter() - extract_started) * 1000
+    logger.info(
+        "extract done: chunks=%d images=%d in %.1fms",
+        len(chunks),
+        len(result.images),
+        elapsed_ms,
     )
 
 
@@ -260,8 +352,10 @@ async def run_embed_text(payload: dict) -> None:
     file_id = int(payload["file_id"])
     try:
         await asyncio.to_thread(_embed_text_sync, file_id)
-    except Exception as e:
-        _mark_file_error_for_text(file_id, f"embed_text failed: {e}")
+    except Exception:
+        with bind_context(file_id=file_id):
+            logger.exception("embed_text failed")
+        _mark_file_error_for_text(file_id, _format_exception("embed_text failed"))
         raise
 
 
@@ -269,8 +363,10 @@ async def run_embed_image(payload: dict) -> None:
     image_id = int(payload["image_id"])
     try:
         await asyncio.to_thread(_embed_image_sync, image_id)
-    except Exception as e:
-        _mark_file_error_for_image(image_id, f"embed_image failed: {e}")
+    except Exception:
+        with bind_context(image_id=image_id):
+            logger.exception("embed_image failed")
+        _mark_file_error_for_image(image_id, _format_exception("embed_image failed"))
         raise
 
 
@@ -284,56 +380,68 @@ def _embed_text_sync(file_id: int) -> None:
     from .acl import allowed_user_ids_for_file
     from .embedding import get_sparse_embedder, get_text_embedder
 
-    settings = get_settings()
-    with session_scope() as s:
-        file = s.get(File, file_id)
-        if file is None:
-            return
-        chunks = list(
-            s.execute(select(Chunk).where(Chunk.file_id == file_id).order_by(Chunk.chunk_index))
-            .scalars()
-        )
-        chunk_data = [
-            (c.id, c.text, c.chunk_index, _nearby_image_ids(s, c.id)) for c in chunks
-        ]
-        folder_id = file.folder_id
-        rel_path = file.rel_path
-        source_url = file.source_url
-        allowed_users = allowed_user_ids_for_file(s, file_id)
-
-    text_emb = get_text_embedder()
-    sparse_emb = get_sparse_embedder()
-    vector_store.ensure_chunks_collection(text_dim=text_emb.dim)
-
-    if chunk_data:
-        texts = [t for _, t, _, _ in chunk_data]
-        denses = text_emb.embed_documents(texts)
-        sparses = sparse_emb.embed_documents(texts)
-        points = [
-            vector_store.ChunkPoint(
-                chunk_id=cid,
-                file_id=file_id,
-                folder_id=folder_id,
-                file_path=rel_path,
-                chunk_index=idx,
-                text=text,
-                dense=dense,
-                sparse=sparse,
-                nearby_image_ids=nearby,
-                source_url=source_url,
-                dense_model_version=settings.dense_version,
-                sparse_model_version=settings.sparse_version,
-                allowed_users=allowed_users,
+    with bind_context(file_id=file_id):
+        logger.info("embed_text begin")
+        settings = get_settings()
+        with _stage("embed_text.load_chunks"), session_scope() as s:
+            file = s.get(File, file_id)
+            if file is None:
+                logger.info("embed_text abort: file gone")
+                return
+            chunks = list(
+                s.execute(
+                    select(Chunk)
+                    .where(Chunk.file_id == file_id)
+                    .order_by(Chunk.chunk_index)
+                ).scalars()
             )
-            for (cid, text, idx, nearby), dense, sparse in zip(
-                chunk_data, denses, sparses, strict=True
-            )
-        ]
-    else:
-        points = []
+            chunk_data = [
+                (c.id, c.text, c.chunk_index, _nearby_image_ids(s, c.id))
+                for c in chunks
+            ]
+            folder_id = file.folder_id
+            rel_path = file.rel_path
+            source_url = file.source_url
+            allowed_users = allowed_user_ids_for_file(s, file_id)
 
-    vector_store.replace_chunks_for_file(file_id, points)
-    _decrement_pending_embeds(file_id)
+        text_emb = get_text_embedder()
+        sparse_emb = get_sparse_embedder()
+        with _stage("embed_text.ensure_collection"):
+            vector_store.ensure_chunks_collection(text_dim=text_emb.dim)
+
+        if chunk_data:
+            texts = [t for _, t, _, _ in chunk_data]
+            with _stage("embed_text.dense", count=len(texts)):
+                denses = text_emb.embed_documents(texts)
+            with _stage("embed_text.sparse", count=len(texts)):
+                sparses = sparse_emb.embed_documents(texts)
+            points = [
+                vector_store.ChunkPoint(
+                    chunk_id=cid,
+                    file_id=file_id,
+                    folder_id=folder_id,
+                    file_path=rel_path,
+                    chunk_index=idx,
+                    text=text,
+                    dense=dense,
+                    sparse=sparse,
+                    nearby_image_ids=nearby,
+                    source_url=source_url,
+                    dense_model_version=settings.dense_version,
+                    sparse_model_version=settings.sparse_version,
+                    allowed_users=allowed_users,
+                )
+                for (cid, text, idx, nearby), dense, sparse in zip(
+                    chunk_data, denses, sparses, strict=True
+                )
+            ]
+        else:
+            points = []
+
+        with _stage("embed_text.upsert", count=len(points)):
+            vector_store.replace_chunks_for_file(file_id, points)
+        _decrement_pending_embeds(file_id)
+        logger.info("embed_text done: points=%d", len(points))
 
 
 def _embed_image_sync(image_id: int) -> None:
@@ -342,48 +450,61 @@ def _embed_image_sync(image_id: int) -> None:
     from .acl import allowed_user_ids_for_file
     from .embedding import get_image_embedder
 
-    settings = get_settings()
-    with session_scope() as s:
-        image = s.get(Image, image_id)
-        if image is None:
-            return
-        file_id = image.file_id
-        cas_id = image.image_cas_id
-        anchor = image.anchor_chunk
-        page = image.page
-        file = s.get(File, file_id)
-        if file is None:
-            return
-        folder_id = file.folder_id
-        rel_path = file.rel_path
-        allowed_users = allowed_user_ids_for_file(s, file_id)
+    with bind_context(image_id=image_id):
+        logger.info("embed_image begin")
+        settings = get_settings()
+        with _stage("embed_image.load"), session_scope() as s:
+            image = s.get(Image, image_id)
+            if image is None:
+                logger.info("embed_image abort: image gone")
+                return
+            file_id = image.file_id
+            cas_id = image.image_cas_id
+            anchor = image.anchor_chunk
+            page = image.page
+            file = s.get(File, file_id)
+            if file is None:
+                logger.info("embed_image abort: parent file gone")
+                return
+            folder_id = file.folder_id
+            rel_path = file.rel_path
+            allowed_users = allowed_user_ids_for_file(s, file_id)
 
-    image_emb = get_image_embedder()
-    vector_store.ensure_images_collection(image_dim=image_emb.dim)
+    with bind_context(image_id=image_id, file_id=file_id):
+        image_emb = get_image_embedder()
+        with _stage("embed_image.ensure_collection"):
+            vector_store.ensure_images_collection(image_dim=image_emb.dim)
 
-    existing = vector_store.find_image_point_by_cas(cas_id)
-    if existing is not None:
-        vector_store.add_file_to_image_point(existing["id"], file_id)
-    else:
-        data = cas_store.read_image_blob(cas_id)
-        vec = image_emb.embed_image(data)
-        vector_store.upsert_image_point(
-            vector_store.ImagePoint(
-                point_id=image_id,
-                image_cas_id=cas_id,
-                file_id=file_id,
-                folder_id=folder_id,
-                file_path=rel_path,
-                anchor_chunk=anchor,
-                page=page,
-                image=vec,
-                image_model_version=settings.image_version,
-                allowed_users=allowed_users,
-            ),
-            file_ids=[file_id],
-        )
+        with _stage("embed_image.find_existing"):
+            existing = vector_store.find_image_point_by_cas(cas_id)
+        if existing is not None:
+            with _stage("embed_image.attach_existing"):
+                vector_store.add_file_to_image_point(existing["id"], file_id)
+            logger.info("embed_image dedup: reused cas=%s", cas_id)
+        else:
+            with _stage("embed_image.read_blob"):
+                data = cas_store.read_image_blob(cas_id)
+            with _stage("embed_image.encode", bytes=len(data)):
+                vec = image_emb.embed_image(data)
+            with _stage("embed_image.upsert"):
+                vector_store.upsert_image_point(
+                    vector_store.ImagePoint(
+                        point_id=image_id,
+                        image_cas_id=cas_id,
+                        file_id=file_id,
+                        folder_id=folder_id,
+                        file_path=rel_path,
+                        anchor_chunk=anchor,
+                        page=page,
+                        image=vec,
+                        image_model_version=settings.image_version,
+                        allowed_users=allowed_users,
+                    ),
+                    file_ids=[file_id],
+                )
+            logger.info("embed_image done: cas=%s", cas_id)
 
-    _decrement_pending_embeds(file_id)
+        _decrement_pending_embeds(file_id)
 
 
 def _delete_file_sync(file_id: int) -> None:
