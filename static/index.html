@@ -1,65 +1,119 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
     <meta charset="UTF-8">
     <title>voitta-image-rag</title>
     <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
-    <header>
-        <h1>voitta-image-rag</h1>
-        <span id="conn-status" class="status disconnected">disconnected</span>
-    </header>
-    <main>
-        <aside class="sidebar">
-            <section>
-                <h2>Folders</h2>
-                <div class="tabs">
-                    <button class="tab active" data-mode="managed">Create new</button>
-                    <button class="tab" data-mode="external">Add existing</button>
-                </div>
-                <form id="add-folder-managed" class="add-form">
-                    <input type="text" name="name" placeholder="folder name" required>
-                    <button type="submit">Create</button>
-                </form>
-                <div id="add-folder-external" class="add-form picker" hidden>
-                    <div class="picker-header">
-                        <button id="picker-up" type="button" title="up">↑</button>
-                        <code id="picker-path" class="picker-path"></code>
-                    </div>
-                    <ul id="picker-list" class="picker-list"></ul>
-                    <button id="picker-pick" type="button">Add this folder</button>
-                </div>
-                <p id="root-hint" class="hint"></p>
-                <ul id="folder-list"></ul>
-            </section>
-            <section>
-                <h2>Files</h2>
-                <form id="upload-form" hidden>
-                    <select id="upload-folder" required></select>
-                    <input type="file" id="upload-input" required>
-                    <button type="submit">Upload</button>
-                </form>
-                <ul id="file-list"></ul>
-            </section>
-        </aside>
-        <section class="center">
-            <h2>Search</h2>
-            <form id="search-form">
-                <input type="text" name="query" placeholder="search query" required>
-                <button type="submit">Search</button>
-            </form>
-            <div id="search-results"></div>
-        </section>
-        <aside class="jobs">
-            <h2>Jobs</h2>
-            <div class="job-actions">
-                <button id="job-retry-all" type="button">Retry all failed</button>
-                <button id="job-cleanup" type="button">Clear failed</button>
+    <header class="app-header">
+        <div class="header-content">
+            <a href="/" class="logo">voitta-image-rag</a>
+            <div class="header-actions">
+                <span id="conn-status" class="status-pill disconnected">disconnected</span>
             </div>
-            <ul id="job-list"></ul>
-        </aside>
+        </div>
+    </header>
+
+    <main class="app-main">
+        <div class="browser-container">
+            <div class="toolbar">
+                <button id="btn-new-folder" class="btn btn-primary">+ New folder</button>
+                <button id="btn-add-existing" class="btn btn-secondary">Add existing</button>
+                <span id="root-hint" class="hint"></span>
+            </div>
+
+            <div class="browser-layout">
+                <section class="folder-list-container">
+                    <div class="folder-list-header">
+                        <span>Name</span>
+                        <span class="num">Files</span>
+                        <span class="num">Indexed</span>
+                        <span>Status</span>
+                    </div>
+                    <ul id="folder-list" class="folder-list"></ul>
+                </section>
+
+                <aside class="sidebar" id="sidebar">
+                    <div class="sidebar-section sidebar-empty" id="sidebar-empty">
+                        <p class="hint-large">Select a folder to see details.</p>
+                    </div>
+
+                    <div class="sidebar-section" id="folder-detail" hidden>
+                        <h3 id="folder-name"></h3>
+                        <p id="folder-path" class="path"></p>
+                        <div class="badge-row">
+                            <span id="folder-managed-badge" class="badge badge-managed" hidden>managed</span>
+                            <span id="folder-source-badge" class="badge"></span>
+                        </div>
+                        <div class="kv-grid">
+                            <span class="k">Files</span><span class="v" id="kv-files">–</span>
+                            <span class="k">Indexed</span><span class="v" id="kv-indexed">–</span>
+                            <span class="k">Errors</span><span class="v" id="kv-errors">–</span>
+                            <span class="k">Pending</span><span class="v" id="kv-pending">–</span>
+                        </div>
+                        <div class="actions">
+                            <button id="btn-delete-folder" class="btn btn-danger btn-sm">Delete folder</button>
+                        </div>
+                    </div>
+
+                    <div class="sidebar-section" id="upload-card" hidden>
+                        <h3>Upload</h3>
+                        <p class="hint">Drop a file under this managed folder. The watcher picks it up automatically.</p>
+                        <input type="file" id="upload-input">
+                        <button id="upload-submit" class="btn btn-primary btn-sm">Upload</button>
+                    </div>
+
+                    <div class="sidebar-section" id="files-card" hidden>
+                        <h3>Files</h3>
+                        <ul id="files" class="file-rows"></ul>
+                    </div>
+
+                    <div class="sidebar-section" id="jobs-card">
+                        <h3>
+                            Recent jobs
+                            <span class="header-actions-inline">
+                                <button id="btn-retry-all" class="btn-text">Retry failed</button>
+                                <button id="btn-clear-failed" class="btn-text">Clear</button>
+                            </span>
+                        </h3>
+                        <ul id="jobs" class="job-rows"></ul>
+                    </div>
+                </aside>
+            </div>
+        </div>
     </main>
+
+    <!-- Modal: pick or create folder -->
+    <div id="modal-backdrop" class="modal-backdrop" hidden>
+        <div class="modal">
+            <div class="modal-header">
+                <h3 id="modal-title">Add folder</h3>
+                <button id="modal-close" class="btn-text">×</button>
+            </div>
+
+            <div id="modal-managed" class="modal-body" hidden>
+                <label>Folder name</label>
+                <input type="text" id="managed-name" placeholder="project-x">
+                <p class="hint">Created under <code id="modal-root"></code>.</p>
+                <div class="actions actions-right">
+                    <button id="managed-create" class="btn btn-primary">Create folder</button>
+                </div>
+            </div>
+
+            <div id="modal-picker" class="modal-body" hidden>
+                <div class="picker-header">
+                    <button id="picker-up" type="button" class="btn btn-secondary btn-sm">↑</button>
+                    <code id="picker-path" class="picker-path"></code>
+                </div>
+                <ul id="picker-list" class="picker-list"></ul>
+                <div class="actions actions-right">
+                    <button id="picker-pick" class="btn btn-primary">Add this folder</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script type="module" src="/static/js/main.js"></script>
 </body>
 </html>
