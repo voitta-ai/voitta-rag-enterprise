@@ -46,8 +46,15 @@ function aggregateStatus(folderFiles) {
     if (folderFiles.length === 0) return "none";
     if (folderFiles.some((f) => f.state === "error")) return "error";
     if (folderFiles.every((f) => f.state === "indexed")) return "indexed";
-    if (folderFiles.some((f) => f.pending_embeds > 0 || f.state === "extracted" || f.state === "embedding")) return "indexing";
-    return "pending";
+    return "indexing";
+}
+
+// Collapse the indexer's internal substate vocabulary into three user-facing
+// labels. The full transitions (pending → extracting → extracted → embedding)
+// are mid-pipeline and not actionable for the user.
+function userStateLabel(state) {
+    if (state === "indexed" || state === "error" || state === "deleted") return state;
+    return "indexing";
 }
 
 // ---------- Tree model ----------
@@ -248,8 +255,10 @@ function renderFileRow(ul, folder, file, depth) {
     li.append(blank1, blank2);
 
     const tag = document.createElement("span");
-    tag.className = `status-tag ${file.state}`;
-    tag.textContent = file.state;
+    const label = userStateLabel(file.state);
+    tag.className = `status-tag ${label}`;
+    tag.textContent = label;
+    tag.title = `state=${file.state}, pending_embeds=${file.pending_embeds}`;
     li.append(tag);
 
     ul.append(li);
