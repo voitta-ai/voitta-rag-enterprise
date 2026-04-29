@@ -58,11 +58,13 @@ class RootInfo(BaseModel):
 
 class FileOut(BaseModel):
     id: int
+    folder_id: int
     rel_path: str
     state: str
     size_bytes: int | None
     mtime_ns: int | None
     last_indexed_at: int | None
+    pending_embeds: int
     source_url: str | None
 
 
@@ -109,11 +111,13 @@ def _resolve_managed(name: str) -> Path:
 def _to_file_out(f: File) -> FileOut:
     return FileOut(
         id=f.id,
+        folder_id=f.folder_id,
         rel_path=f.rel_path,
         state=f.state,
         size_bytes=f.size_bytes,
         mtime_ns=f.mtime_ns,
         last_indexed_at=f.last_indexed_at,
+        pending_embeds=f.pending_embeds,
         source_url=f.source_url,
     )
 
