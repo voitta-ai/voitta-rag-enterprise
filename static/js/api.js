@@ -54,6 +54,9 @@ export const api = {
         return r.json();
     },
     recentJobs: () => req("GET", "/api/jobs/recent?limit=50"),
+    retryJob: (id) => req("POST", `/api/jobs/${id}/retry`),
+    retryAllFailed: () => req("POST", "/api/jobs/retry-failed"),
+    cleanupFailedJobs: () => req("DELETE", "/api/jobs/cleanup-failed"),
     search: (query, modes = ["chunks"], folderIds = null, limit = 10) =>
         req("POST", "/api/search", { query, modes, folder_ids: folderIds, limit }),
 };

@@ -125,3 +125,34 @@ input[type="file"] { color: var(--fg-dim); }
 .picker-list li.file { color: var(--fg-dim); }
 .picker-list li::before { content: "📄 "; }
 .picker-list li.dir::before { content: "📁 "; }
+
+.job-actions { display: flex; gap: 0.25rem; margin: 0.5rem 0; }
+.job-actions button {
+    flex: 1;
+    background: var(--panel);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    padding: 0.2rem 0.4rem;
+    font-size: 0.7rem;
+    cursor: pointer;
+}
+.job-actions button:hover { background: var(--accent); border-color: var(--accent); color: white; }
+
+.job-retry {
+    background: transparent;
+    color: var(--accent);
+    border: 1px solid var(--accent);
+    padding: 0 0.4rem;
+    font-size: 0.65rem;
+    cursor: pointer;
+    border-radius: 2px;
+}
+.job-retry:hover { background: var(--accent); color: white; }
+.job-error-msg {
+    color: var(--error);
+    font-size: 0.65rem;
+    word-break: break-word;
+    margin-top: 0.15rem;
+    display: block;
+}
+.job .col { display: flex; flex-direction: column; flex: 1; }

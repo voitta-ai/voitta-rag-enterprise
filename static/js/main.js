@@ -80,12 +80,55 @@ jobs.subscribe((list) => {
     for (const j of list.slice(0, 30)) {
         const li = document.createElement("li");
         li.className = `job ${j.state}`;
-        const left = document.createElement("span");
-        left.innerHTML = `<span class="kind">${j.kind}</span> #${j.id}`;
-        const right = document.createElement("span");
-        right.textContent = j.state;
-        li.append(left, right);
+        const col = document.createElement("div");
+        col.className = "col";
+        const top = document.createElement("span");
+        top.innerHTML = `<span class="kind">${j.kind}</span> #${j.id} — ${j.state}`;
+        col.append(top);
+        if (j.state === "error" && j.error) {
+            const err = document.createElement("span");
+            err.className = "job-error-msg";
+            err.textContent = j.error;
+            col.append(err);
+        }
+        li.append(col);
+        if (j.state === "error") {
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "job-retry";
+            btn.textContent = "↻";
+            btn.title = "retry";
+            btn.addEventListener("click", async () => {
+                try {
+                    await api.retryJob(j.id);
+                } catch (err) {
+                    alert(err.message);
+                }
+            });
+            li.append(btn);
+        }
         ul.append(li);
+    }
+});
+
+$("#job-retry-all").addEventListener("click", async () => {
+    try {
+        const r = await api.retryAllFailed();
+        if (r.retried === 0) alert("No failed jobs to retry");
+    } catch (err) {
+        alert(err.message);
+    }
+});
+
+$("#job-cleanup").addEventListener("click", async () => {
+    if (!confirm("Permanently delete all failed-job records?")) return;
+    try {
+        const r = await api.cleanupFailedJobs();
+        // refresh listing
+        jobs.set(await api.recentJobs());
+        if (r.retried) console.log(`removed ${r.retried} failed job(s)`);
+    } catch (err) {
+        alert(err.message);
     }
 });
 
