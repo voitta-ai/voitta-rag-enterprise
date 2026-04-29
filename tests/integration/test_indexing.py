@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
+import json
 import time
 from pathlib import Path
 
@@ -86,10 +87,12 @@ def test_extract_text_creates_chunks_and_cas(env: None, tmp_path: Path) -> None:
         # CAS rooting
         ref = s.get(CasRef, (f.file_cas_id, "file"))
         assert ref is not None and ref.refcount == 1
-        # embed_text job enqueued
+        # embed_text job enqueued, stamped with the current embed_round
         jobs = list(s.execute(select(Job).where(Job.kind == "embed_text")).scalars())
         assert len(jobs) == 1
-        assert jobs[0].dedup_key == f"embed_text:{file_id}"
+        payload = json.loads(jobs[0].payload)
+        assert payload["file_id"] == file_id
+        assert payload["round"] == f.embed_round
 
     assert (cas_store.file_dir(f.file_cas_id) / "text.md").exists()
     assert (cas_store.file_dir(f.file_cas_id) / "manifest.json").exists()

@@ -60,15 +60,35 @@ def session_scope() -> Iterator[Session]:
 
 
 def init_db() -> None:
-    """Apply ``schema.sql``. Idempotent (uses CREATE … IF NOT EXISTS)."""
+    """Apply ``schema.sql`` plus idempotent ALTER migrations for older DBs."""
     engine = get_engine()
     sql = SCHEMA_PATH.read_text()
     raw_conn: sqlite3.Connection = engine.raw_connection()
     try:
         raw_conn.executescript(sql)
+        _apply_migrations(raw_conn)
         raw_conn.commit()
     finally:
         raw_conn.close()
+
+
+def _apply_migrations(conn: sqlite3.Connection) -> None:
+    """Apply additive column migrations that ``CREATE TABLE IF NOT EXISTS`` skips
+    on existing databases. Each ALTER is wrapped to ignore the "duplicate
+    column" error so the function is idempotent.
+    """
+    cur = conn.cursor()
+    try:
+        for stmt in (
+            "ALTER TABLE files ADD COLUMN embed_round INTEGER NOT NULL DEFAULT 0",
+        ):
+            try:
+                cur.execute(stmt)
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
+    finally:
+        cur.close()
 
 
 def reset_engine_cache() -> None:

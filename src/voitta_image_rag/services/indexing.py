@@ -19,7 +19,7 @@ from sqlalchemy import select
 from ..cas import store as cas_store
 from ..config import get_settings
 from ..db.database import session_scope
-from ..db.models import Chunk, ChunkImageLink, File, Folder, Image
+from ..db.models import Chunk, ChunkImageLink, File, Folder, Image, Job
 from ..logging_config import bind_context
 from . import events, job_queue
 from .chunking import ChunkInfo, anchor_chunk_for_position, chunk_markdown
@@ -324,6 +324,12 @@ def _commit_indexing(
                             )
                         )
 
+        # Bump embed_round so any in-flight decrements from a prior round are
+        # ignored (see ``_decrement_pending_embeds``). Without this guard, a
+        # stale embed completing after re-extract would corrupt the new
+        # ``pending_embeds`` counter and leave the file permanently stuck.
+        new_round = (file.embed_round or 0) + 1
+        file.embed_round = new_round
         file.file_cas_id = new_sha
         file.mtime_ns = mtime_ns
         file.last_seen_at = now
@@ -333,16 +339,22 @@ def _commit_indexing(
         file.pending_embeds = (1 if chunks else 0) + len(images)
         _committed_file_id = file.id
 
+        # No dedup_key on embed jobs: an in-flight job from a previous round
+        # would otherwise block the new round's job from being enqueued, and
+        # the new round's pending counter would never reach zero. Stale-round
+        # jobs short-circuit cheaply via the embed_round check, so the extra
+        # rows are harmless.
         if chunks:
             job_queue.enqueue(
-                s, "embed_text", {"file_id": file_id}, dedup_key=f"embed_text:{file_id}"
+                s,
+                "embed_text",
+                {"file_id": file_id, "round": new_round},
             )
         for image in s.execute(select(Image).where(Image.file_id == file_id)).scalars():
             job_queue.enqueue(
                 s,
                 "embed_image",
-                {"image_id": image.id},
-                dedup_key=f"embed_image:{image.id}",
+                {"image_id": image.id, "file_id": file_id, "round": new_round},
             )
 
     _publish_file_upserted(_committed_file_id)
@@ -350,8 +362,9 @@ def _commit_indexing(
 
 async def run_embed_text(payload: dict) -> None:
     file_id = int(payload["file_id"])
+    round_token = payload.get("round")
     try:
-        await asyncio.to_thread(_embed_text_sync, file_id)
+        await asyncio.to_thread(_embed_text_sync, file_id, round_token)
     except Exception:
         with bind_context(file_id=file_id):
             logger.exception("embed_text failed")
@@ -361,8 +374,9 @@ async def run_embed_text(payload: dict) -> None:
 
 async def run_embed_image(payload: dict) -> None:
     image_id = int(payload["image_id"])
+    round_token = payload.get("round")
     try:
-        await asyncio.to_thread(_embed_image_sync, image_id)
+        await asyncio.to_thread(_embed_image_sync, image_id, round_token)
     except Exception:
         with bind_context(image_id=image_id):
             logger.exception("embed_image failed")
@@ -375,18 +389,25 @@ async def run_delete_file(payload: dict) -> None:
     await asyncio.to_thread(_delete_file_sync, file_id)
 
 
-def _embed_text_sync(file_id: int) -> None:
+def _embed_text_sync(file_id: int, round_token: int | None = None) -> None:
     from . import vector_store
     from .acl import allowed_user_ids_for_file
     from .embedding import get_sparse_embedder, get_text_embedder
 
-    with bind_context(file_id=file_id):
+    with bind_context(file_id=file_id, round=round_token):
         logger.info("embed_text begin")
         settings = get_settings()
         with _stage("embed_text.load_chunks"), session_scope() as s:
             file = s.get(File, file_id)
             if file is None:
                 logger.info("embed_text abort: file gone")
+                return
+            if round_token is not None and file.embed_round != round_token:
+                logger.info(
+                    "embed_text abort: stale round (job=%s file=%s)",
+                    round_token,
+                    file.embed_round,
+                )
                 return
             chunks = list(
                 s.execute(
@@ -440,17 +461,17 @@ def _embed_text_sync(file_id: int) -> None:
 
         with _stage("embed_text.upsert", count=len(points)):
             vector_store.replace_chunks_for_file(file_id, points)
-        _decrement_pending_embeds(file_id)
+        _decrement_pending_embeds(file_id, round_token)
         logger.info("embed_text done: points=%d", len(points))
 
 
-def _embed_image_sync(image_id: int) -> None:
+def _embed_image_sync(image_id: int, round_token: int | None = None) -> None:
     from ..cas import store as cas_store
     from . import vector_store
     from .acl import allowed_user_ids_for_file
     from .embedding import get_image_embedder
 
-    with bind_context(image_id=image_id):
+    with bind_context(image_id=image_id, round=round_token):
         logger.info("embed_image begin")
         settings = get_settings()
         with _stage("embed_image.load"), session_scope() as s:
@@ -465,6 +486,13 @@ def _embed_image_sync(image_id: int) -> None:
             file = s.get(File, file_id)
             if file is None:
                 logger.info("embed_image abort: parent file gone")
+                return
+            if round_token is not None and file.embed_round != round_token:
+                logger.info(
+                    "embed_image abort: stale round (job=%s file=%s)",
+                    round_token,
+                    file.embed_round,
+                )
                 return
             folder_id = file.folder_id
             rel_path = file.rel_path
@@ -504,7 +532,7 @@ def _embed_image_sync(image_id: int) -> None:
                 )
             logger.info("embed_image done: cas=%s", cas_id)
 
-        _decrement_pending_embeds(file_id)
+        _decrement_pending_embeds(file_id, round_token)
 
 
 def _delete_file_sync(file_id: int) -> None:
@@ -529,14 +557,33 @@ def _delete_file_sync(file_id: int) -> None:
     events.publish("files", {"type": "file.deleted", "file_id": file_id})
 
 
-def _decrement_pending_embeds(file_id: int) -> None:
+def _decrement_pending_embeds(file_id: int, round_token: int | None = None) -> None:
+    """Decrement ``pending_embeds`` from a finishing embed job.
+
+    Skips the decrement when ``round_token`` does not match the file's current
+    ``embed_round`` — that means a re-extract has already replaced the chunk /
+    image set this job belongs to, so its result is stale and must not touch
+    the new round's counter.
+
+    On reaching zero, transitions the file to ``indexed`` and clears any
+    previously-recorded ``error`` (a successful embed cycle supersedes a
+    transient failure that has since been retried).
+    """
     with session_scope() as s:
         file = s.get(File, file_id)
         if file is None:
             return
+        if round_token is not None and file.embed_round != round_token:
+            logger.debug(
+                "skip pending decrement: stale round (job=%s file=%s)",
+                round_token,
+                file.embed_round,
+            )
+            return
         file.pending_embeds = max(0, file.pending_embeds - 1)
-        if file.pending_embeds == 0 and file.state in ("extracted", "embedding"):
+        if file.pending_embeds == 0 and file.state in ("extracted", "embedding", "error"):
             file.state = "indexed"
+            file.error = None
     _publish_file_upserted(file_id)
 
 
@@ -563,6 +610,73 @@ def _nearby_image_ids(session, chunk_id: int) -> list[int]:
         .scalars()
         .all()
     ]
+
+
+def reconcile_pending_embeds() -> int:
+    """Resolve files left in a non-terminal state with no in-flight jobs.
+
+    Called once at startup. A re-extract racing with stale embed completions
+    used to leave a file with ``state=extracted`` and ``pending_embeds>0`` but
+    no queued / running embed jobs to ever drive it back to ``indexed``. The
+    embed_round token in ``_commit_indexing`` prevents new occurrences; this
+    pass cleans up rows from before the fix was deployed.
+
+    For every such row we treat the file as fully embedded (chunks and images
+    exist in the DB; the corresponding Qdrant points were upserted before the
+    decrement was lost) and force ``state=indexed``, ``pending_embeds=0``.
+    """
+    repaired_ids: list[int] = []
+    with session_scope() as s:
+        candidates = list(
+            s.execute(
+                select(File).where(
+                    File.pending_embeds > 0,
+                    File.state.in_(("extracted", "embedding")),
+                )
+            ).scalars()
+        )
+        # Build the set of file_ids that actually have an in-flight embed job
+        # right now. We parse payloads because newer embed jobs have no
+        # dedup_key (the round-token mechanism replaces that role).
+        inflight_files: set[int] = set()
+        live_jobs = s.execute(
+            select(Job).where(
+                Job.state.in_(("queued", "running")),
+                Job.kind.in_(("embed_text", "embed_image")),
+            )
+        ).scalars()
+        for j in live_jobs:
+            try:
+                payload = json.loads(j.payload)
+            except (TypeError, ValueError):
+                continue
+            fid = payload.get("file_id")
+            if isinstance(fid, int):
+                inflight_files.add(fid)
+            # Legacy embed_image jobs only carried image_id; resolve via row.
+            elif "image_id" in payload:
+                row = s.execute(
+                    select(Image.file_id).where(Image.id == int(payload["image_id"]))
+                ).first()
+                if row is not None:
+                    inflight_files.add(row[0])
+
+        for f in candidates:
+            if f.id in inflight_files:
+                continue
+            logger.warning(
+                "reconcile: file_id=%d was stuck (state=%s pending=%d) — forcing indexed",
+                f.id,
+                f.state,
+                f.pending_embeds,
+            )
+            f.pending_embeds = 0
+            f.state = "indexed"
+            f.error = None
+            repaired_ids.append(f.id)
+    for fid in repaired_ids:
+        _publish_file_upserted(fid)
+    return len(repaired_ids)
 
 
 HANDLERS = {

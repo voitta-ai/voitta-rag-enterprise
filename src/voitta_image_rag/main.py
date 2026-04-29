@@ -72,12 +72,24 @@ def create_app() -> FastAPI:
         _startup_scan()
 
         if not settings.disable_background:
-            from .services.indexing import HANDLERS as INDEXING_HANDLERS
+            from .services.indexing import (
+                HANDLERS as INDEXING_HANDLERS,
+            )
+            from .services.indexing import (
+                reconcile_pending_embeds,
+            )
             from .services.watcher import (
                 from_settings_for_all_folders,
                 install_default,
             )
             from .services.worker import DEFAULT_HANDLERS, WorkerPool
+
+            repaired = reconcile_pending_embeds()
+            if repaired:
+                logger.warning(
+                    "reconciled %d file(s) stuck in pending state at startup",
+                    repaired,
+                )
 
             watcher = from_settings_for_all_folders()
             watcher.start()

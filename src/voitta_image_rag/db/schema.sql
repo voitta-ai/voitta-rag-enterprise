@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS files (
     last_indexed_at INTEGER,
     state           TEXT NOT NULL,
     pending_embeds  INTEGER NOT NULL DEFAULT 0,
+    embed_round     INTEGER NOT NULL DEFAULT 0,
     source_url      TEXT,
     error           TEXT,
     UNIQUE (folder_id, rel_path)

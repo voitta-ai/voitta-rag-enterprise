@@ -62,6 +62,7 @@ class File(Base):
     last_indexed_at: Mapped[int | None] = mapped_column(default=None)
     state: Mapped[str] = mapped_column(default="pending")
     pending_embeds: Mapped[int] = mapped_column(default=0)
+    embed_round: Mapped[int] = mapped_column(default=0)
     source_url: Mapped[str | None] = mapped_column(default=None)
     error: Mapped[str | None] = mapped_column(default=None)
 
