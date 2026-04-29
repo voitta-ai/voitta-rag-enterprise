@@ -237,6 +237,48 @@ async def upload_file(
     return UploadOut(rel_path=str(target_rel), size_bytes=bytes_written)
 
 
+class MkdirIn(BaseModel):
+    path: str = Field(..., description="Relative path under the folder root.")
+
+
+class MkdirOut(BaseModel):
+    rel_path: str
+
+
+@router.post(
+    "/{folder_id}/mkdir",
+    status_code=status.HTTP_201_CREATED,
+    response_model=MkdirOut,
+)
+def mkdir(
+    folder_id: int,
+    body: MkdirIn,
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(current_user),
+) -> MkdirOut:
+    """Create an empty subdirectory inside a managed folder.
+
+    Useful for organising uploads ahead of dropping files. Watcher won't see
+    the empty directory (no file events), so the directory exists on disk
+    but no DB rows are created.
+    """
+    folder = db.get(Folder, folder_id)
+    if folder is None or not user_can_see_folder(db, folder_id, user.id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Folder not found")
+    if not folder.managed:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Subfolders are only allowed under managed folders.",
+        )
+    rel = _safe_rel_path(body.path)
+    target = (Path(folder.path) / rel).resolve()
+    folder_root = Path(folder.path).resolve()
+    if folder_root not in target.parents and target != folder_root:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "rel path escapes folder")
+    target.mkdir(parents=True, exist_ok=True)
+    return MkdirOut(rel_path=str(rel))
+
+
 class FolderStats(BaseModel):
     folder_id: int
     files_total: int

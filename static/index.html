@@ -25,13 +25,7 @@
 
             <div class="browser-layout">
                 <section class="folder-list-container">
-                    <div class="folder-list-header">
-                        <span>Name</span>
-                        <span class="num">Files</span>
-                        <span class="num">Indexed</span>
-                        <span>Status</span>
-                    </div>
-                    <ul id="folder-list" class="folder-list"></ul>
+                    <ul id="folder-list" class="tree"></ul>
                 </section>
 
                 <aside class="sidebar" id="sidebar">
@@ -69,14 +63,12 @@
 
                     <div class="sidebar-section" id="upload-card" hidden>
                         <h3>Upload</h3>
-                        <p class="hint">Drop a file under this managed folder. The watcher picks it up automatically.</p>
+                        <p class="hint">Files are written to <code id="upload-target">/</code>; the watcher indexes them automatically.</p>
                         <input type="file" id="upload-input">
-                        <button id="upload-submit" class="btn btn-primary btn-sm">Upload</button>
-                    </div>
-
-                    <div class="sidebar-section" id="files-card" hidden>
-                        <h3>Files</h3>
-                        <ul id="files" class="file-rows"></ul>
+                        <div class="actions">
+                            <button id="upload-submit" class="btn btn-primary btn-sm">Upload</button>
+                            <button id="mkdir-btn" class="btn btn-secondary btn-sm">+ Subfolder</button>
+                        </div>
                     </div>
 
                     <div class="sidebar-section" id="jobs-card">

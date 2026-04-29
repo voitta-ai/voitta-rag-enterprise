@@ -43,10 +43,12 @@ export const api = {
         const all = await Promise.all(fs.map(f => req("GET", `/api/folders/${f.id}/files`)));
         return all.flat();
     },
-    upload: async (folderId, file) => {
+    upload: async (folderId, file, relDir = "") => {
         const form = new FormData();
         form.append("file", file);
-        const r = await fetch(`/api/folders/${folderId}/upload`, {
+        const relPath = relDir ? `${relDir}/${file.name}` : file.name;
+        const url = `/api/folders/${folderId}/upload?rel_path=${encodeURIComponent(relPath)}`;
+        const r = await fetch(url, {
             method: "POST",
             headers: { "X-Forwarded-Email": userEmail() },
             body: form,
@@ -54,6 +56,8 @@ export const api = {
         if (!r.ok) throw new Error(`${r.status} upload: ${await r.text()}`);
         return r.json();
     },
+    mkdir: (folderId, path) =>
+        req("POST", `/api/folders/${folderId}/mkdir`, { path }),
     recentJobs: () => req("GET", "/api/jobs/recent?limit=50"),
     retryJob: (id) => req("POST", `/api/jobs/${id}/retry`),
     retryAllFailed: () => req("POST", "/api/jobs/retry-failed"),

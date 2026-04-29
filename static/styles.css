@@ -184,48 +184,71 @@ input[type="text"], input[type="file"] {
     border-radius: var(--radius-lg);
     overflow: hidden;
 }
-.folder-list-header,
-.folder-row {
+
+.tree { list-style: none; margin: 0; padding: 0; }
+.tree-row {
     display: grid;
-    grid-template-columns: 1fr 70px 80px 130px 32px;
+    grid-template-columns: auto auto 1fr 60px 70px 130px auto;
     align-items: center;
-    gap: var(--md);
-    padding: 8px 16px;
-}
-.folder-list-header {
-    font-size: 11px;
-    font-weight: 500;
-    color: var(--color-text-secondary);
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-    background: var(--color-bg);
-    border-bottom: 1px solid var(--color-border);
-}
-.folder-list-header .num,
-.folder-row .num { text-align: right; }
-.folder-list { list-style: none; margin: 0; padding: 0; }
-.folder-row {
+    gap: 8px;
+    padding: 6px 12px;
     border-bottom: 1px solid var(--color-border-light);
     cursor: pointer;
     transition: background var(--t);
 }
-.folder-row:last-child { border-bottom: none; }
-.folder-row:hover { background: var(--color-bg-hover); }
-.folder-row.selected { background: rgba(0, 113, 227, 0.1); }
-[data-theme="dark"] .folder-row.selected { background: rgba(10, 132, 255, 0.15); }
-.folder-row .name { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.folder-row .name .icon { color: var(--color-accent); flex-shrink: 0; }
-.folder-row .name .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.folder-row .delete {
+.tree-row:last-child { border-bottom: none; }
+.tree-row:hover { background: var(--color-bg-hover); }
+.tree-row.selected { background: rgba(0, 113, 227, 0.1); }
+[data-theme="dark"] .tree-row.selected { background: rgba(10, 132, 255, 0.15); }
+
+.tree-row .indent { display: inline-block; }
+.tree-row .chevron {
+    width: 16px;
+    text-align: center;
+    color: var(--color-text-tertiary);
+    user-select: none;
+    transition: transform 120ms ease;
+}
+.tree-row .chevron.open { transform: rotate(90deg); }
+.tree-row .chevron.leaf { color: transparent; cursor: default; }
+.tree-row .label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+.tree-row .label .glyph { flex-shrink: 0; }
+.tree-row.folder-root .label .glyph,
+.tree-row.dir .label .glyph { color: var(--color-accent); }
+.tree-row.file .label { color: var(--color-text-secondary); }
+.tree-row.file .label .glyph { color: var(--color-text-tertiary); }
+
+.tree-row .num {
+    text-align: right;
+    font-size: 12px;
+    color: var(--color-text-secondary);
+}
+.tree-row .row-actions {
+    display: flex;
+    gap: 4px;
+    opacity: 0.4;
+    transition: opacity var(--t);
+}
+.tree-row:hover .row-actions { opacity: 1; }
+.tree-row .row-actions button {
     border: none;
     background: transparent;
     color: var(--color-text-tertiary);
     cursor: pointer;
-    font-size: 16px;
+    font-size: 14px;
     line-height: 1;
     padding: 0 4px;
 }
-.folder-row .delete:hover { color: var(--color-error); }
+.tree-row .row-actions button:hover { color: var(--color-accent); }
+.tree-row .row-actions button.delete:hover { color: var(--color-error); }
 
 /* ---------- Status pills ---------- */
 

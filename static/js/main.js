@@ -7,9 +7,16 @@ import { connect } from "./ws.js";
 const $ = (sel) => document.querySelector(sel);
 
 let selectedFolderId = null;
+let selectedRelDir = ""; // "" = folder root; otherwise "subdir/inner"
 let rootInfo = { configured: false, root_path: null };
 let statsCache = null; // last successful FolderStats response
 let statsTimer = null;
+const expandedNodes = new Set(); // keys: `${folder_id}:${rel_dir}`
+const ghostDirs = new Map(); // folder_id → Set<rel_dir> (created via mkdir but no files yet)
+
+function nodeKey(folderId, relDir) {
+    return `${folderId}:${relDir}`;
+}
 
 // ----- Connection pill -----
 connStatus.subscribe((s) => {
@@ -42,13 +49,70 @@ function aggregateStatus(folderFiles) {
     return "pending";
 }
 
+// ---------- Tree model ----------
+
+function buildTree(folderFiles, folderId) {
+    /* Returns { dirs: Map<name, node>, files: [] } */
+    const root = { dirs: new Map(), files: [] };
+    for (const f of folderFiles) {
+        if (f.state === "deleted") continue;
+        const parts = f.rel_path.split("/").filter(Boolean);
+        let node = root;
+        for (let i = 0; i < parts.length - 1; i++) {
+            const part = parts[i];
+            if (!node.dirs.has(part)) node.dirs.set(part, { dirs: new Map(), files: [] });
+            node = node.dirs.get(part);
+        }
+        node.files.push(f);
+    }
+    // Merge in any ghost (mkdir-created) directories.
+    const ghosts = ghostDirs.get(folderId);
+    if (ghosts) {
+        for (const relDir of ghosts) {
+            const parts = relDir.split("/").filter(Boolean);
+            let node = root;
+            for (const part of parts) {
+                if (!node.dirs.has(part)) node.dirs.set(part, { dirs: new Map(), files: [] });
+                node = node.dirs.get(part);
+            }
+        }
+    }
+    return root;
+}
+
+function summariseSubtree(node) {
+    /* Aggregates file totals across the subtree rooted at node. */
+    let total = 0, indexed = 0, errored = 0, pending = 0, embedding = 0;
+    function walk(n) {
+        for (const f of n.files) {
+            total++;
+            if (f.state === "indexed") indexed++;
+            else if (f.state === "error") errored++;
+            else if (f.state === "extracted" || f.state === "embedding" || f.pending_embeds > 0) embedding++;
+            else pending++;
+        }
+        for (const child of n.dirs.values()) walk(child);
+    }
+    walk(node);
+    let status = "none";
+    if (total > 0) {
+        if (errored > 0) status = "error";
+        else if (indexed === total) status = "indexed";
+        else if (embedding > 0) status = "indexing";
+        else status = "pending";
+    }
+    return { total, indexed, errored, status };
+}
+
+// ---------- Tree rendering ----------
+
 function renderFolders(list) {
     const ul = $("#folder-list");
     ul.innerHTML = "";
     const sorted = [...list].sort((a, b) => a.id - b.id);
     if (sorted.length === 0) {
         const empty = document.createElement("li");
-        empty.className = "folder-row";
+        empty.className = "tree-row";
         empty.style.gridTemplateColumns = "1fr";
         empty.style.color = "var(--color-text-secondary)";
         empty.textContent = "No folders yet — create or add one above.";
@@ -56,103 +120,239 @@ function renderFolders(list) {
         return;
     }
     const allFiles = files.get();
-    for (const f of sorted) {
-        const folderFiles = allFiles.filter((x) => x.folder_id === f.id);
-        const total = folderFiles.length;
-        const indexed = folderFiles.filter((x) => x.state === "indexed").length;
-        const errored = folderFiles.filter((x) => x.state === "error").length;
-        const status = aggregateStatus(folderFiles);
-
-        const li = document.createElement("li");
-        li.className = "folder-row" + (f.id === selectedFolderId ? " selected" : "");
-        li.dataset.id = f.id;
-        li.addEventListener("click", () => selectFolder(f.id));
-
-        const name = document.createElement("div");
-        name.className = "name";
-        name.innerHTML = `<span class="icon">▸</span><span class="label"></span>`;
-        name.querySelector(".label").textContent = f.display_name;
-        li.append(name);
-
-        const fileCount = document.createElement("span");
-        fileCount.className = "num";
-        fileCount.textContent = total;
-        li.append(fileCount);
-
-        const indexedCount = document.createElement("span");
-        indexedCount.className = "num";
-        indexedCount.textContent = `${indexed}${errored ? ` · ${errored}!` : ""}`;
-        li.append(indexedCount);
-
-        const tag = document.createElement("span");
-        tag.className = `status-tag ${status}`;
-        tag.textContent = status;
-        li.append(tag);
-
-        const del = document.createElement("button");
-        del.className = "delete";
-        del.title = "Remove folder";
-        del.textContent = "×";
-        del.addEventListener("click", async (e) => {
-            e.stopPropagation();
-            if (!confirm(`Remove ${f.display_name}?`)) return;
-            try {
-                await api.deleteFolder(f.id);
-                if (selectedFolderId === f.id) selectedFolderId = null;
-            } catch (err) { alert(err.message); }
+    for (const folder of sorted) {
+        const folderFiles = allFiles.filter((x) => x.folder_id === folder.id);
+        const tree = buildTree(folderFiles, folder.id);
+        renderTreeRow({
+            ul,
+            folder,
+            node: tree,
+            relDir: "",
+            displayName: folder.display_name,
+            depth: 0,
+            isRoot: true,
         });
-        li.append(del);
-
-        ul.append(li);
     }
 }
 
-// ----- Sidebar -----
+function renderTreeRow({ ul, folder, node, relDir, displayName, depth, isRoot }) {
+    const summary = summariseSubtree(node);
+    const key = nodeKey(folder.id, relDir);
+    const hasChildren = node.dirs.size > 0 || node.files.length > 0;
+    const isOpen = expandedNodes.has(key);
+    const isSelected = folder.id === selectedFolderId && relDir === selectedRelDir;
+    const canHaveChildren = isRoot || true; // dir nodes always
 
-function selectFolder(id) {
-    selectedFolderId = id;
+    const li = document.createElement("li");
+    li.className = `tree-row ${isRoot ? "folder-root" : "dir"}` + (isSelected ? " selected" : "");
+    li.dataset.key = key;
+
+    const indent = document.createElement("span");
+    indent.className = "indent";
+    indent.style.width = `${depth * 16}px`;
+    li.append(indent);
+
+    const chevron = document.createElement("span");
+    chevron.className = "chevron" + (isOpen ? " open" : "") + (hasChildren ? "" : " leaf");
+    chevron.textContent = "▸";
+    chevron.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (!hasChildren) return;
+        if (isOpen) expandedNodes.delete(key); else expandedNodes.add(key);
+        renderFolders(folders.get());
+    });
+    li.append(chevron);
+
+    const label = document.createElement("span");
+    label.className = "label";
+    const glyph = document.createElement("span");
+    glyph.className = "glyph";
+    glyph.textContent = isRoot ? "▣" : "📁";
+    const text = document.createElement("span");
+    text.textContent = displayName;
+    label.append(glyph, text);
+    li.append(label);
+
+    const fileCount = document.createElement("span");
+    fileCount.className = "num";
+    fileCount.textContent = summary.total || "";
+    li.append(fileCount);
+
+    const indexedCount = document.createElement("span");
+    indexedCount.className = "num";
+    indexedCount.textContent = summary.total
+        ? `${summary.indexed}${summary.errored ? ` · ${summary.errored}!` : ""}`
+        : "";
+    li.append(indexedCount);
+
+    const tag = document.createElement("span");
+    tag.className = `status-tag ${summary.status}`;
+    tag.textContent = summary.status;
+    li.append(tag);
+
+    const actions = document.createElement("span");
+    actions.className = "row-actions";
+    if (folder.managed && canHaveChildren) {
+        const add = document.createElement("button");
+        add.textContent = "+";
+        add.title = "Add subfolder";
+        add.addEventListener("click", async (e) => {
+            e.stopPropagation();
+            const name = prompt("Subfolder name:");
+            if (!name) return;
+            const target = relDir ? `${relDir}/${name.trim()}` : name.trim();
+            try {
+                await api.mkdir(folder.id, target);
+                if (!ghostDirs.has(folder.id)) ghostDirs.set(folder.id, new Set());
+                ghostDirs.get(folder.id).add(target);
+                expandedNodes.add(key);
+                expandedNodes.add(nodeKey(folder.id, target));
+                renderFolders(folders.get());
+            } catch (err) { alert(err.message); }
+        });
+        actions.append(add);
+    }
+    if (isRoot) {
+        const del = document.createElement("button");
+        del.className = "delete";
+        del.textContent = "×";
+        del.title = "Remove folder";
+        del.addEventListener("click", async (e) => {
+            e.stopPropagation();
+            if (!confirm(`Remove ${folder.display_name}?`)) return;
+            try {
+                await api.deleteFolder(folder.id);
+                if (selectedFolderId === folder.id) {
+                    selectedFolderId = null;
+                    selectedRelDir = "";
+                }
+            } catch (err) { alert(err.message); }
+        });
+        actions.append(del);
+    }
+    li.append(actions);
+
+    li.addEventListener("click", () => selectNode(folder.id, relDir));
+    ul.append(li);
+
+    if (isOpen) {
+        // Subdirs first.
+        for (const [name, child] of [...node.dirs.entries()].sort()) {
+            const childRelDir = relDir ? `${relDir}/${name}` : name;
+            renderTreeRow({
+                ul,
+                folder,
+                node: child,
+                relDir: childRelDir,
+                displayName: name,
+                depth: depth + 1,
+                isRoot: false,
+            });
+        }
+        // Then files.
+        for (const f of [...node.files].sort((a, b) => a.rel_path.localeCompare(b.rel_path))) {
+            renderFileRow(ul, folder, f, depth + 1);
+        }
+    }
+}
+
+function renderFileRow(ul, folder, file, depth) {
+    const li = document.createElement("li");
+    li.className = "tree-row file";
+    li.dataset.fileId = file.id;
+
+    const indent = document.createElement("span");
+    indent.className = "indent";
+    indent.style.width = `${depth * 16}px`;
+    li.append(indent);
+
+    const chevron = document.createElement("span");
+    chevron.className = "chevron leaf";
+    chevron.textContent = "·";
+    li.append(chevron);
+
+    const label = document.createElement("span");
+    label.className = "label";
+    const glyph = document.createElement("span");
+    glyph.className = "glyph";
+    glyph.textContent = "·";
+    const text = document.createElement("span");
+    const basename = file.rel_path.split("/").pop();
+    text.textContent = basename;
+    label.append(glyph, text);
+    label.title = file.rel_path;
+    li.append(label);
+
+    const blank1 = document.createElement("span");
+    const blank2 = document.createElement("span");
+    li.append(blank1, blank2);
+
+    const tag = document.createElement("span");
+    tag.className = `status-tag ${file.state}`;
+    tag.textContent = file.state;
+    li.append(tag);
+
+    const actions = document.createElement("span");
+    actions.className = "row-actions";
+    li.append(actions);
+
+    ul.append(li);
+}
+
+function selectNode(folderId, relDir) {
+    selectedFolderId = folderId;
+    selectedRelDir = relDir;
     statsCache = null;
     renderFolders(folders.get());
     renderSidebar();
     refreshStats();
 }
 
+// ----- Sidebar -----
+
 function renderSidebar() {
     const folder = folders.get().find((f) => f.id === selectedFolderId);
     const empty = $("#sidebar-empty");
     const detail = $("#folder-detail");
     const upload = $("#upload-card");
-    const filesCard = $("#files-card");
 
     if (!folder) {
         empty.hidden = false;
         detail.hidden = true;
         upload.hidden = true;
-        filesCard.hidden = true;
         return;
     }
 
     empty.hidden = true;
     detail.hidden = false;
 
-    $("#folder-name").textContent = folder.display_name;
-    $("#folder-path").textContent = folder.path;
+    const displayName = selectedRelDir
+        ? `${folder.display_name}/${selectedRelDir}`
+        : folder.display_name;
+    $("#folder-name").textContent = displayName;
+    $("#folder-path").textContent = selectedRelDir
+        ? `${folder.path}/${selectedRelDir}`
+        : folder.path;
     $("#folder-managed-badge").hidden = !folder.managed;
     $("#folder-source-badge").textContent = folder.source_type;
 
-    const folderFiles = files.get().filter((x) => x.folder_id === folder.id);
-    const total = folderFiles.length;
-    const indexed = folderFiles.filter((x) => x.state === "indexed").length;
-    const errors = folderFiles.filter((x) => x.state === "error").length;
-    const pending = folderFiles.filter(
-        (x) => x.state !== "indexed" && x.state !== "error" && x.state !== "deleted",
+    // Subtree-scoped counts (fall back to whole folder when relDir is empty).
+    const allFolderFiles = files.get().filter((x) => x.folder_id === folder.id && x.state !== "deleted");
+    const subtreeFiles = selectedRelDir
+        ? allFolderFiles.filter((f) => f.rel_path.startsWith(`${selectedRelDir}/`))
+        : allFolderFiles;
+    const total = subtreeFiles.length;
+    const indexed = subtreeFiles.filter((x) => x.state === "indexed").length;
+    const errors = subtreeFiles.filter((x) => x.state === "error").length;
+    const pending = subtreeFiles.filter(
+        (x) => x.state !== "indexed" && x.state !== "error",
     ).length;
     $("#kv-files").textContent = total;
     $("#kv-indexed").textContent = indexed;
     $("#kv-errors").textContent = errors;
     $("#kv-pending").textContent = pending;
 
-    // Stats from /api/folders/{id}/stats — populated lazily.
+    // Folder-level stats from /api/folders/{id}/stats — independent of subdir.
     const s = statsCache && statsCache.folder_id === folder.id ? statsCache : null;
     $("#kv-bytes").textContent = s ? humanBytes(s.bytes_total) : "…";
     $("#kv-chunks").textContent = s ? s.chunks_total : "…";
@@ -177,8 +377,7 @@ function renderSidebar() {
     }
 
     upload.hidden = !folder.managed;
-    filesCard.hidden = total === 0;
-    if (total > 0) renderFiles(folderFiles);
+    $("#upload-target").textContent = selectedRelDir ? `/${selectedRelDir}/` : "/";
 }
 
 function humanBytes(n) {
@@ -209,24 +408,6 @@ function scheduleStatsRefresh() {
     if (!selectedFolderId) return;
     if (statsTimer) clearTimeout(statsTimer);
     statsTimer = setTimeout(() => { statsTimer = null; refreshStats(); }, 400);
-}
-
-function renderFiles(folderFiles) {
-    const ul = $("#files");
-    ul.innerHTML = "";
-    const sorted = [...folderFiles].sort((a, b) => a.rel_path.localeCompare(b.rel_path));
-    for (const f of sorted.slice(0, 100)) {
-        const li = document.createElement("li");
-        const name = document.createElement("span");
-        name.className = "name";
-        name.textContent = f.rel_path;
-        name.title = f.rel_path;
-        const tag = document.createElement("span");
-        tag.className = `status-tag ${f.state}`;
-        tag.textContent = f.state;
-        li.append(name, tag);
-        ul.append(li);
-    }
 }
 
 // ----- Jobs -----
@@ -284,6 +465,7 @@ $("#btn-delete-folder").addEventListener("click", async () => {
     try {
         await api.deleteFolder(selectedFolderId);
         selectedFolderId = null;
+        selectedRelDir = "";
     } catch (err) { alert(err.message); }
 });
 
@@ -292,8 +474,24 @@ $("#upload-submit").addEventListener("click", async () => {
     const file = $("#upload-input").files[0];
     if (!file) return;
     try {
-        await api.upload(selectedFolderId, file);
+        await api.upload(selectedFolderId, file, selectedRelDir);
         $("#upload-input").value = "";
+    } catch (err) { alert(err.message); }
+});
+
+$("#mkdir-btn").addEventListener("click", async () => {
+    if (!selectedFolderId) return;
+    const folder = folders.get().find((f) => f.id === selectedFolderId);
+    if (!folder?.managed) return;
+    const name = prompt("Subfolder name:");
+    if (!name) return;
+    const target = selectedRelDir ? `${selectedRelDir}/${name.trim()}` : name.trim();
+    try {
+        await api.mkdir(selectedFolderId, target);
+        if (!ghostDirs.has(selectedFolderId)) ghostDirs.set(selectedFolderId, new Set());
+        ghostDirs.get(selectedFolderId).add(target);
+        expandedNodes.add(nodeKey(selectedFolderId, selectedRelDir));
+        renderFolders(folders.get());
     } catch (err) { alert(err.message); }
 });
 
