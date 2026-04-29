@@ -415,10 +415,16 @@ class UserHeaderMiddleware(BaseHTTPMiddleware):
 # ---------------------------------------------------------------------------
 
 
-def build_app(transport: str = "streamable-http"):
-    """Return the ASGI app exposing the MCP server. Useful for tests."""
+def build_app(transport: str = "streamable-http", path: str | None = None):
+    """Return the ASGI app exposing the MCP server.
+
+    ``path`` controls the *internal* route the MCP transport binds to. The
+    standalone runner leaves it at the default (``/mcp``); the unified app
+    in ``main.py`` sets it to ``"/"`` and then mounts the whole sub-app at
+    ``/mcp``.
+    """
     init_db()
-    app = mcp.http_app(transport=transport, stateless_http=True)
+    app = mcp.http_app(transport=transport, stateless_http=True, path=path)
     app.add_middleware(UserHeaderMiddleware)
     return app
 

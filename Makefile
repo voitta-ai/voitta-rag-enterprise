@@ -9,9 +9,9 @@ DOTENV := set -a; [ -f .env ] && . ./.env; set +a;
 help:
 	@echo "Targets:"
 	@echo "  install    - install package in editable mode with dev extras"
-	@echo "  run        - run the web app (port from .env VOITTA_PORT, default 8000)"
-	@echo "  dev        - run the web app with --reload"
-	@echo "  mcp        - run the MCP server (port from .env VOITTA_MCP_PORT, default 8001)"
+	@echo "  run        - run web + MCP on the same port (.env VOITTA_PORT, default 8000)"
+	@echo "  dev        - same, with --reload"
+	@echo "  mcp        - (legacy) run only the MCP server on its own port"
 	@echo "  test           - run pytest"
 	@echo "  lint           - ruff check"
 	@echo "  typecheck      - mypy"
