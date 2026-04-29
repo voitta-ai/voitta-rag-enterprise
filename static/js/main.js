@@ -255,9 +255,9 @@ function renderFileRow(ul, folder, file, depth) {
     li.append(blank1, blank2);
 
     const tag = document.createElement("span");
-    const label = userStateLabel(file.state);
-    tag.className = `status-tag ${label}`;
-    tag.textContent = label;
+    const stateLabel = userStateLabel(file.state);
+    tag.className = `status-tag ${stateLabel}`;
+    tag.textContent = stateLabel;
     tag.title = `state=${file.state}, pending_embeds=${file.pending_embeds}`;
     li.append(tag);
 
