@@ -270,8 +270,10 @@ def list_folders(
     db: Session = Depends(db_session),
     user: CurrentUser = Depends(current_user),
 ) -> list[FolderOut]:
-    visible = set(visible_folder_ids(db, user.id))
     rows = db.execute(select(Folder).order_by(Folder.id)).scalars().all()
+    if get_settings().single_user:
+        return [_to_folder_out(f) for f in rows]
+    visible = set(visible_folder_ids(db, user.id))
     return [_to_folder_out(f) for f in rows if f.id in visible]
 
 

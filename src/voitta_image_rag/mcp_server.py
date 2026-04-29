@@ -60,7 +60,13 @@ def _resolved_user() -> str:
 
 
 def _resolved_user_id() -> int | None:
-    """Resolve the caller's user id, creating the user row on first call."""
+    """Resolve the caller's user id, creating the user row on first call.
+
+    Returns ``None`` when single-user mode is on — the search-time ACL filter
+    becomes a no-op (per ARCHITECTURE.md §9).
+    """
+    if get_settings().single_user:
+        return None
     email = _resolved_user()
     if email == "anonymous":
         return None
@@ -122,12 +128,18 @@ class ImageInfo(BaseModel):
 @mcp.tool()
 def list_indexed_folders() -> list[FolderInfo]:
     """List the folders visible to the calling user, with file-count breakdown."""
+    settings = get_settings()
     user_id = _resolved_user_id()
+    show_all = settings.single_user
     with session_scope() as s:
-        visible = set(visible_folder_ids(s, user_id)) if user_id is not None else set()
+        visible = (
+            set(visible_folder_ids(s, user_id))
+            if user_id is not None and not show_all
+            else set()
+        )
         out: list[FolderInfo] = []
         for f in s.execute(select(Folder).order_by(Folder.id)).scalars():
-            if user_id is not None and f.id not in visible:
+            if not show_all and user_id is not None and f.id not in visible:
                 continue
             total = (
                 s.execute(

@@ -29,6 +29,7 @@ from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..db.models import File, FolderAcl, User
+from ..db.models import Folder as _Folder
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +109,8 @@ def visible_folder_ids(session: Session, user_id: int) -> list[int]:
 
 
 def user_can_see_folder(session: Session, folder_id: int, user_id: int) -> bool:
+    if get_settings().single_user:
+        return session.get(_Folder, folder_id) is not None
     return (
         session.execute(
             select(FolderAcl).where(
@@ -122,6 +125,8 @@ def user_can_see_file(session: Session, file_id: int, user_id: int) -> bool:
     file = session.get(File, file_id)
     if file is None:
         return False
+    if get_settings().single_user:
+        return True
     return user_can_see_folder(session, file.folder_id, user_id)
 
 

@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
+from ...config import get_settings
 from ...services.acl import CurrentUser
 from ...services.embedding import get_image_embedder, get_sparse_embedder, get_text_embedder
 from ...services.vector_store import search_chunks, search_images
@@ -35,6 +36,8 @@ class SearchOut(BaseModel):
 
 @router.post("", response_model=SearchOut)
 def search(body: SearchIn, user: CurrentUser = Depends(current_user)) -> SearchOut:
+    # Single-user mode → ACL filter is a no-op (matches ARCHITECTURE.md §9).
+    user_filter = None if get_settings().single_user else user.id
     out = SearchOut()
     if "chunks" in body.modes:
         text_emb = get_text_embedder()
@@ -46,7 +49,7 @@ def search(body: SearchIn, user: CurrentUser = Depends(current_user)) -> SearchO
             sparse=sparse,
             limit=body.limit,
             folder_ids=body.folder_ids,
-            allowed_user_id=user.id,
+            allowed_user_id=user_filter,
         )
         out.chunks = [Hit(id=h.id, score=h.score, payload=h.payload) for h in hits]
     if "images" in body.modes:
@@ -56,7 +59,7 @@ def search(body: SearchIn, user: CurrentUser = Depends(current_user)) -> SearchO
             vector=vec,
             limit=body.limit,
             folder_ids=body.folder_ids,
-            allowed_user_id=user.id,
+            allowed_user_id=user_filter,
         )
         out.images = [Hit(id=h.id, score=h.score, payload=h.payload) for h in hits]
     return out
