@@ -108,6 +108,39 @@ def test_root_endpoint_when_unconfigured(env: None, monkeypatch, tmp_path: Path)
         assert r.json() == {"root_path": None, "configured": False}
 
 
+def test_upload_to_managed_folder_writes_file(root_env: Path) -> None:
+    with _client(root_env) as c:
+        fid = c.post("/api/folders", json={"name": "u"}).json()["id"]
+        r = c.post(
+            f"/api/folders/{fid}/upload",
+            files={"file": ("hello.txt", b"hello world", "text/plain")},
+        )
+        assert r.status_code == 201, r.text
+        assert (root_env / "u" / "hello.txt").read_bytes() == b"hello world"
+
+
+def test_upload_to_external_folder_rejected(root_env: Path, tmp_path: Path) -> None:
+    ext = tmp_path / "external"
+    ext.mkdir()
+    with _client(root_env) as c:
+        fid = c.post("/api/folders", json={"path": str(ext)}).json()["id"]
+        r = c.post(
+            f"/api/folders/{fid}/upload",
+            files={"file": ("x.txt", b"x", "text/plain")},
+        )
+        assert r.status_code == 400
+
+
+def test_upload_path_traversal_rejected(root_env: Path) -> None:
+    with _client(root_env) as c:
+        fid = c.post("/api/folders", json={"name": "u2"}).json()["id"]
+        r = c.post(
+            f"/api/folders/{fid}/upload?rel_path=../escape.txt",
+            files={"file": ("x.txt", b"x", "text/plain")},
+        )
+        assert r.status_code == 400
+
+
 def test_listing_includes_managed_flag(root_env: Path, tmp_path: Path) -> None:
     ext = tmp_path / "external"
     ext.mkdir()

@@ -20,6 +20,15 @@ folders.subscribe((list) => {
         const label = document.createElement("span");
         label.textContent = f.display_name || f.path;
         label.title = f.path;
+        const right = document.createElement("span");
+        right.style.display = "flex";
+        right.style.gap = "0.25rem";
+        if (f.managed) {
+            const tag = document.createElement("span");
+            tag.className = "badge managed";
+            tag.textContent = "managed";
+            right.append(tag);
+        }
         const del = document.createElement("button");
         del.textContent = "×";
         del.title = "remove";
@@ -27,10 +36,26 @@ folders.subscribe((list) => {
         del.addEventListener("click", async () => {
             if (confirm(`Remove ${f.display_name}?`)) await api.deleteFolder(f.id);
         });
-        li.append(label, del);
+        right.append(del);
+        li.append(label, right);
         ul.append(li);
     }
+    refreshUploadFolderOptions(list);
 });
+
+function refreshUploadFolderOptions(list) {
+    const sel = $("#upload-folder");
+    const form = $("#upload-form");
+    const managed = list.filter((f) => f.managed);
+    sel.innerHTML = "";
+    for (const f of managed) {
+        const opt = document.createElement("option");
+        opt.value = f.id;
+        opt.textContent = f.display_name;
+        sel.append(opt);
+    }
+    form.hidden = managed.length === 0;
+}
 
 files.subscribe((list) => {
     const ul = $("#file-list");
@@ -64,13 +89,49 @@ jobs.subscribe((list) => {
     }
 });
 
-$("#add-folder").addEventListener("submit", async (e) => {
+// Tabbed folder-create form: managed (name) vs external (path).
+const tabs = document.querySelectorAll(".tab");
+const formManaged = $("#add-folder-managed");
+const formExternal = $("#add-folder-external");
+tabs.forEach((t) => {
+    t.addEventListener("click", () => {
+        tabs.forEach((x) => x.classList.toggle("active", x === t));
+        const mode = t.dataset.mode;
+        formManaged.hidden = mode !== "managed";
+        formExternal.hidden = mode !== "external";
+    });
+});
+
+formManaged.addEventListener("submit", async (e) => {
     e.preventDefault();
-    const fd = new FormData(e.target);
-    const path = fd.get("path");
+    const name = new FormData(e.target).get("name");
     try {
-        await api.addFolder(path);
+        await api.addFolderByName(name);
         e.target.reset();
+    } catch (err) {
+        alert(err.message);
+    }
+});
+
+formExternal.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const path = new FormData(e.target).get("path");
+    try {
+        await api.addFolderByPath(path);
+        e.target.reset();
+    } catch (err) {
+        alert(err.message);
+    }
+});
+
+$("#upload-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const folderId = $("#upload-folder").value;
+    const file = $("#upload-input").files[0];
+    if (!file) return;
+    try {
+        await api.upload(folderId, file);
+        $("#upload-input").value = "";
     } catch (err) {
         alert(err.message);
     }
@@ -124,9 +185,29 @@ function renderHits(out, res) {
     }
 }
 
+async function applyRoot() {
+    const hint = $("#root-hint");
+    try {
+        const r = await api.root();
+        if (r.configured) {
+            hint.textContent = `Managed root: ${r.root_path}`;
+        } else {
+            hint.textContent = "VOITTA_ROOT_PATH not set — only 'Add existing' works.";
+            // Auto-switch tab to external when root isn't configured.
+            const ext = document.querySelector('.tab[data-mode="external"]');
+            if (ext) ext.click();
+            const managedTab = document.querySelector('.tab[data-mode="managed"]');
+            if (managedTab) managedTab.disabled = true;
+        }
+    } catch (err) {
+        hint.textContent = `(${err.message})`;
+    }
+}
+
 // Initial snapshot, then live updates via WS.
 async function bootstrap() {
     try {
+        await applyRoot();
         folders.set(await api.listFolders());
         files.set(await api.listAllFiles());
         jobs.set(await api.recentJobs());

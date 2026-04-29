@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -177,6 +177,60 @@ def folder_root(
     if settings.root_path is None:
         return RootInfo(root_path=None, configured=False)
     return RootInfo(root_path=str(settings.root_path), configured=True)
+
+
+class UploadOut(BaseModel):
+    rel_path: str
+    size_bytes: int
+
+
+def _safe_rel_path(rel_path: str) -> Path:
+    """Reject path-traversal in user-supplied rel_paths."""
+    candidate = Path(rel_path.lstrip("/"))
+    if candidate.is_absolute() or any(part in ("..", "") for part in candidate.parts):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid rel_path: {rel_path!r}")
+    return candidate
+
+
+@router.post(
+    "/{folder_id}/upload",
+    status_code=status.HTTP_201_CREATED,
+    response_model=UploadOut,
+)
+async def upload_file(
+    folder_id: int,
+    file: UploadFile,
+    rel_path: str | None = None,
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(current_user),
+) -> UploadOut:
+    """Upload a file into a managed folder. The watcher picks it up and indexes it.
+
+    External (non-managed) folders are read-only via the API by design — write
+    files there with your usual tooling and the watcher will catch the change.
+    """
+    folder = db.get(Folder, folder_id)
+    if folder is None or not user_can_see_folder(db, folder_id, user.id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Folder not found")
+    if not folder.managed:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Uploads are only allowed on managed folders (created with {'name': ...}).",
+        )
+
+    target_rel = _safe_rel_path(rel_path or file.filename or "uploaded.bin")
+    target = (Path(folder.path) / target_rel).resolve()
+    folder_root = Path(folder.path).resolve()
+    if folder_root not in target.parents and target.parent != folder_root:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "rel_path escapes folder")
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    bytes_written = 0
+    with target.open("wb") as out:
+        while chunk := await file.read(1024 * 1024):
+            out.write(chunk)
+            bytes_written += len(chunk)
+    return UploadOut(rel_path=str(target_rel), size_bytes=bytes_written)
 
 
 class GrantBody(BaseModel):

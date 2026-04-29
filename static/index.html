@@ -14,14 +14,28 @@
         <aside class="sidebar">
             <section>
                 <h2>Folders</h2>
-                <form id="add-folder">
+                <div class="tabs">
+                    <button class="tab active" data-mode="managed">Create new</button>
+                    <button class="tab" data-mode="external">Add existing</button>
+                </div>
+                <form id="add-folder-managed" class="add-form">
+                    <input type="text" name="name" placeholder="folder name" required>
+                    <button type="submit">Create</button>
+                </form>
+                <form id="add-folder-external" class="add-form" hidden>
                     <input type="text" name="path" placeholder="/abs/path/to/folder" required>
                     <button type="submit">Add</button>
                 </form>
+                <p id="root-hint" class="hint"></p>
                 <ul id="folder-list"></ul>
             </section>
             <section>
                 <h2>Files</h2>
+                <form id="upload-form" hidden>
+                    <select id="upload-folder" required></select>
+                    <input type="file" id="upload-input" required>
+                    <button type="submit">Upload</button>
+                </form>
                 <ul id="file-list"></ul>
             </section>
         </aside>

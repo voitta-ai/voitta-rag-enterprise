@@ -76,3 +76,19 @@ li .badge { font-size: 0.7rem; padding: 0 0.25rem; border-radius: 2px; }
 .job .kind { color: var(--accent); }
 .job.error { color: var(--error); }
 .job.done { color: var(--fg-dim); }
+
+.tabs { display: flex; gap: 0.25rem; margin-top: 0.5rem; }
+.tab {
+    flex: 1;
+    background: var(--panel);
+    color: var(--fg-dim);
+    border: 1px solid var(--border);
+    padding: 0.25rem 0.5rem;
+    cursor: pointer;
+}
+.tab.active { background: var(--accent); color: white; border-color: var(--accent); }
+.add-form { margin-top: 0.5rem; }
+.hint { font-size: 0.7rem; color: var(--fg-dim); margin: 0.25rem 0; }
+.badge.managed { background: var(--accent); color: white; }
+select { background: var(--bg); color: var(--fg); border: 1px solid var(--border); padding: 0.25rem; border-radius: 3px; font: inherit; }
+input[type="file"] { color: var(--fg-dim); }
