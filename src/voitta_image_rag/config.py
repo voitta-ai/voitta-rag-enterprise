@@ -61,6 +61,14 @@ class Settings(BaseSettings):
     max_file_bytes: int = 1024 * 1024 * 1024
     ignore_patterns: str = ".git,node_modules,.DS_Store,__pycache__,.venv,*.tmp"
 
+    # PDF parsing (MinerU)
+    pdf_pages_per_bucket: int = 20
+    pdf_parse_method: str = "auto"  # MinerU parse_method: auto|txt|ocr
+    pdf_lang: str = "en"
+    # Test override: when true, the PDF parser returns a deterministic stub
+    # without invoking MinerU. Used by the test suite to keep runs fast.
+    use_fake_pdf_parser: bool = False
+
     # Auth — see ARCHITECTURE.md §9
     single_user: bool = False
     dev_user: str | None = None
