@@ -83,7 +83,7 @@ class SiglipImageEmbedder(ImageEmbedder):
         img = PILImage.open(io.BytesIO(data)).convert("RGB")
         inputs = processor(images=[img], return_tensors="pt")
         with torch.no_grad():
-            features = model.get_image_features(**inputs)
+            features = _as_tensor(model.get_image_features(**inputs))
         features = features / features.norm(dim=-1, keepdim=True)
         return features[0].cpu().tolist()
 
@@ -93,7 +93,7 @@ class SiglipImageEmbedder(ImageEmbedder):
         processor, model = self._ensure_loaded()
         inputs = processor(text=[text], return_tensors="pt", padding=True)
         with torch.no_grad():
-            features = model.get_text_features(**inputs)
+            features = _as_tensor(model.get_text_features(**inputs))
         features = features / features.norm(dim=-1, keepdim=True)
         return features[0].cpu().tolist()
 
@@ -103,3 +103,20 @@ def _hash_to_vec(digest: bytes) -> list[float]:
     out = (raw * ((FAKE_DIM // len(raw)) + 1))[:FAKE_DIM]
     n = math.sqrt(sum(x * x for x in out)) or 1.0
     return [x / n for x in out]
+
+
+def _as_tensor(result: Any) -> Any:
+    """Different HF dual-encoder versions return either a bare tensor or a
+    ``BaseModelOutputWithPooling`` wrapper from ``get_image_features`` /
+    ``get_text_features``. Normalise to a tensor.
+    """
+    if hasattr(result, "norm"):
+        return result
+    if hasattr(result, "pooler_output") and result.pooler_output is not None:
+        return result.pooler_output
+    if hasattr(result, "last_hidden_state"):
+        # Mean-pool patch / token embeddings as a last resort.
+        return result.last_hidden_state.mean(dim=1)
+    raise RuntimeError(
+        f"unexpected output type from image/text encoder: {type(result).__name__}"
+    )
