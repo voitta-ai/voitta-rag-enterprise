@@ -6,11 +6,11 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ...config import get_settings
-from ...db.models import File, Folder
+from ...db.models import Chunk, File, Folder, Image
 from ...services import events
 from ...services.acl import (
     CurrentUser,
@@ -235,6 +235,86 @@ async def upload_file(
             out.write(chunk)
             bytes_written += len(chunk)
     return UploadOut(rel_path=str(target_rel), size_bytes=bytes_written)
+
+
+class FolderStats(BaseModel):
+    folder_id: int
+    files_total: int
+    files_indexed: int
+    files_error: int
+    files_pending: int
+    chunks_total: int
+    images_total: int
+    images_unique: int  # distinct image SHAs (Qdrant point count after dedup)
+    bytes_total: int
+    by_extension: dict[str, int]  # ext (incl. dot, e.g. ".pdf") → file count
+
+
+@router.get("/{folder_id}/stats", response_model=FolderStats)
+def folder_stats(
+    folder_id: int,
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(current_user),
+) -> FolderStats:
+    folder = db.get(Folder, folder_id)
+    if folder is None or not user_can_see_folder(db, folder_id, user.id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Folder not found")
+
+    files = list(
+        db.execute(
+            select(File).where(File.folder_id == folder_id, File.state != "deleted")
+        ).scalars()
+    )
+    files_total = len(files)
+    files_indexed = sum(1 for f in files if f.state == "indexed")
+    files_error = sum(1 for f in files if f.state == "error")
+    files_pending = sum(
+        1 for f in files if f.state not in ("indexed", "error", "deleted")
+    )
+    bytes_total = sum(f.size_bytes or 0 for f in files)
+    file_ids = [f.id for f in files]
+
+    by_extension: dict[str, int] = {}
+    for f in files:
+        ext = Path(f.rel_path).suffix.lower() or "(no ext)"
+        by_extension[ext] = by_extension.get(ext, 0) + 1
+
+    chunks_total = (
+        db.execute(
+            select(func.count(Chunk.id)).where(Chunk.file_id.in_(file_ids))
+        ).scalar_one()
+        if file_ids
+        else 0
+    )
+    images_total = (
+        db.execute(
+            select(func.count(Image.id)).where(Image.file_id.in_(file_ids))
+        ).scalar_one()
+        if file_ids
+        else 0
+    )
+    images_unique = (
+        db.execute(
+            select(func.count(func.distinct(Image.image_cas_id))).where(
+                Image.file_id.in_(file_ids)
+            )
+        ).scalar_one()
+        if file_ids
+        else 0
+    )
+
+    return FolderStats(
+        folder_id=folder_id,
+        files_total=files_total,
+        files_indexed=files_indexed,
+        files_error=files_error,
+        files_pending=files_pending,
+        chunks_total=int(chunks_total),
+        images_total=int(images_total),
+        images_unique=int(images_unique),
+        bytes_total=bytes_total,
+        by_extension=by_extension,
+    )
 
 
 class GrantBody(BaseModel):

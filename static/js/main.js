@@ -8,6 +8,8 @@ const $ = (sel) => document.querySelector(sel);
 
 let selectedFolderId = null;
 let rootInfo = { configured: false, root_path: null };
+let statsCache = null; // last successful FolderStats response
+let statsTimer = null;
 
 // ----- Connection pill -----
 connStatus.subscribe((s) => {
@@ -24,8 +26,13 @@ folders.subscribe((list) => {
 files.subscribe(() => {
     renderFolders(folders.get());
     renderSidebar();
+    scheduleStatsRefresh();
 });
-jobs.subscribe(() => renderJobs());
+jobs.subscribe(() => {
+    renderJobs();
+    // A job finishing usually means chunks/images counts moved.
+    scheduleStatsRefresh();
+});
 
 function aggregateStatus(folderFiles) {
     if (folderFiles.length === 0) return "none";
@@ -104,8 +111,10 @@ function renderFolders(list) {
 
 function selectFolder(id) {
     selectedFolderId = id;
+    statsCache = null;
     renderFolders(folders.get());
     renderSidebar();
+    refreshStats();
 }
 
 function renderSidebar() {
@@ -143,9 +152,63 @@ function renderSidebar() {
     $("#kv-errors").textContent = errors;
     $("#kv-pending").textContent = pending;
 
+    // Stats from /api/folders/{id}/stats — populated lazily.
+    const s = statsCache && statsCache.folder_id === folder.id ? statsCache : null;
+    $("#kv-bytes").textContent = s ? humanBytes(s.bytes_total) : "…";
+    $("#kv-chunks").textContent = s ? s.chunks_total : "…";
+    $("#kv-images").textContent = s ? s.images_total : "…";
+    $("#kv-images-unique").textContent = s ? s.images_unique : "…";
+
+    const extTable = $("#ext-table");
+    const extTbody = $("#ext-tbody");
+    extTbody.innerHTML = "";
+    const exts = s ? Object.entries(s.by_extension).sort((a, b) => b[1] - a[1]) : [];
+    extTable.hidden = exts.length === 0;
+    for (const [ext, count] of exts) {
+        const tr = document.createElement("tr");
+        const tdExt = document.createElement("td");
+        tdExt.className = "ext";
+        tdExt.textContent = ext;
+        const tdCount = document.createElement("td");
+        tdCount.className = "num";
+        tdCount.textContent = count;
+        tr.append(tdExt, tdCount);
+        extTbody.append(tr);
+    }
+
     upload.hidden = !folder.managed;
     filesCard.hidden = total === 0;
     if (total > 0) renderFiles(folderFiles);
+}
+
+function humanBytes(n) {
+    if (!n) return "0 B";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let i = 0;
+    let v = n;
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+    return `${v.toFixed(v >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+async function refreshStats() {
+    if (!selectedFolderId) return;
+    const id = selectedFolderId;
+    try {
+        const s = await api.folderStats(id);
+        if (id === selectedFolderId) {
+            statsCache = s;
+            renderSidebar();
+        }
+    } catch (err) {
+        // Folder might have been deleted; surface only the first error.
+        console.warn("stats fetch failed", err);
+    }
+}
+
+function scheduleStatsRefresh() {
+    if (!selectedFolderId) return;
+    if (statsTimer) clearTimeout(statsTimer);
+    statsTimer = setTimeout(() => { statsTimer = null; refreshStats(); }, 400);
 }
 
 function renderFiles(folderFiles) {
