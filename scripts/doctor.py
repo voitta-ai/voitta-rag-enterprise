@@ -46,6 +46,7 @@ def main() -> int:
     print(f"  cas_dir          : {settings.resolved_cas_dir()}")
     print(f"  qdrant_url       : {settings.qdrant_url or '(embedded)'}")
     print(f"  qdrant_path      : {settings.resolved_qdrant_path()}")
+    print(f"  root_path        : {settings.root_path or '(unset — managed folders disabled)'}")
     print(f"  port             : {settings.port}")
     print(f"  mcp_port         : {settings.mcp_port}")
     print(f"  workers          : {settings.resolved_workers()}")
@@ -74,6 +75,17 @@ def main() -> int:
             _ok(f"{label} writable: {path}")
         except OSError as e:
             _fail(f"{label} not writable ({e}): {path}")
+            failures += 1
+
+    if settings.root_path is not None:
+        try:
+            Path(settings.root_path).mkdir(parents=True, exist_ok=True)
+            test = Path(settings.root_path) / ".doctor.tmp"
+            test.write_text("x")
+            test.unlink()
+            _ok(f"root_path writable: {settings.root_path}")
+        except OSError as e:
+            _fail(f"root_path not writable ({e}): {settings.root_path}")
             failures += 1
 
     _section("SQLite")

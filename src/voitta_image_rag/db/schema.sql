@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS folders (
     source_type   TEXT NOT NULL DEFAULT 'filesystem',
     source_config TEXT,
     enabled       INTEGER NOT NULL DEFAULT 1,
+    managed       INTEGER NOT NULL DEFAULT 0,  -- 1 if created under VOITTA_ROOT_PATH; sync connectors require managed=1
     created_at    INTEGER NOT NULL
 );
 

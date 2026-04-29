@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     qdrant_url: str | None = None
     qdrant_path: Path | None = None
 
+    # Optional parent for "managed" folders: folders the API itself creates,
+    # which can later have sync connectors attached. Folders registered by
+    # absolute path are "external" and never get syncs.
+    root_path: Path | None = None
+
     # Network
     port: int = 8000
     mcp_port: int = 8001
@@ -70,7 +75,7 @@ class Settings(BaseSettings):
     # set in dev to avoid the model-download cost.
     use_fake_embedders: bool = False
 
-    @field_validator("data_dir", "db_path", "cas_dir", "qdrant_path", mode="before")
+    @field_validator("data_dir", "db_path", "cas_dir", "qdrant_path", "root_path", mode="before")
     @classmethod
     def _expand_user(cls, v: Any) -> Any:
         if isinstance(v, str) and v:

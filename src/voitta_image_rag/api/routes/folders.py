@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ...config import get_settings
 from ...db.models import File, Folder
 from ...services import events
 from ...services.acl import (
@@ -26,7 +27,17 @@ router = APIRouter(prefix="/folders", tags=["folders"])
 
 
 class FolderIn(BaseModel):
-    path: str = Field(..., description="Absolute host path to watch.")
+    """Two modes:
+
+    - **External**: pass ``path`` (absolute host path that already exists).
+      ``managed=False``; never gets a sync connector.
+    - **Managed**: pass ``name`` (single path segment). Server creates
+      ``$VOITTA_ROOT_PATH/<name>`` if missing. ``managed=True``; sync
+      connectors can later be attached.
+    """
+
+    path: str | None = Field(default=None, description="Absolute host path (external mode)")
+    name: str | None = Field(default=None, description="Folder name under VOITTA_ROOT_PATH (managed mode)")
     display_name: str | None = None
 
 
@@ -36,7 +47,13 @@ class FolderOut(BaseModel):
     display_name: str
     source_type: str
     enabled: bool
+    managed: bool
     created_at: int
+
+
+class RootInfo(BaseModel):
+    root_path: str | None
+    configured: bool
 
 
 class FileOut(BaseModel):
@@ -56,8 +73,37 @@ def _to_folder_out(f: Folder) -> FolderOut:
         display_name=f.display_name,
         source_type=f.source_type,
         enabled=f.enabled,
+        managed=f.managed,
         created_at=f.created_at,
     )
+
+
+def _resolve_managed(name: str) -> Path:
+    """Validate ``name`` and return the absolute path it should occupy.
+
+    Raises ``HTTPException`` on misconfig or unsafe input.
+    """
+    settings = get_settings()
+    if settings.root_path is None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Managed folders require VOITTA_ROOT_PATH to be configured.",
+        )
+    name = (name or "").strip()
+    if not name or "/" in name or "\\" in name or name in (".", "..") or name.startswith("."):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"Invalid folder name: {name!r}",
+        )
+    root = Path(settings.root_path).expanduser().resolve()
+    target = (root / name).resolve()
+    # Defence in depth against ``../`` slipping past the substring check.
+    if root != target.parent:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"Folder name escapes root: {name!r}",
+        )
+    return target
 
 
 def _to_file_out(f: File) -> FileOut:
@@ -78,12 +124,24 @@ def create_folder(
     db: Session = Depends(db_session),
     user: CurrentUser = Depends(current_user),
 ) -> FolderOut:
-    abs_path = Path(body.path).expanduser().resolve()
-    if not abs_path.exists() or not abs_path.is_dir():
+    if bool(body.path) == bool(body.name):
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            f"Path does not exist or is not a directory: {abs_path}",
+            "Provide exactly one of: 'path' (external) or 'name' (managed under VOITTA_ROOT_PATH)",
         )
+
+    if body.name is not None:
+        abs_path = _resolve_managed(body.name)
+        abs_path.mkdir(parents=True, exist_ok=True)
+        managed = True
+    else:
+        abs_path = Path(body.path).expanduser().resolve()
+        if not abs_path.exists() or not abs_path.is_dir():
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"Path does not exist or is not a directory: {abs_path}",
+            )
+        managed = False
 
     existing = db.execute(
         select(Folder).where(Folder.path == str(abs_path))
@@ -97,6 +155,7 @@ def create_folder(
         path=str(abs_path),
         display_name=body.display_name or abs_path.name or str(abs_path),
         source_type="filesystem",
+        managed=managed,
     )
     db.add(folder)
     db.flush()
@@ -107,6 +166,17 @@ def create_folder(
     out = _to_folder_out(folder)
     events.publish("folders", {"type": "folder.added", "folder": out.model_dump()})
     return out
+
+
+@router.get("/root", response_model=RootInfo)
+def folder_root(
+    user: CurrentUser = Depends(current_user),
+) -> RootInfo:
+    """Where managed folders are created, or null if not configured."""
+    settings = get_settings()
+    if settings.root_path is None:
+        return RootInfo(root_path=None, configured=False)
+    return RootInfo(root_path=str(settings.root_path), configured=True)
 
 
 class GrantBody(BaseModel):

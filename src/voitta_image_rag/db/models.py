@@ -44,6 +44,7 @@ class Folder(Base):
     source_type: Mapped[str] = mapped_column(default="filesystem")
     source_config: Mapped[str | None] = mapped_column(default=None)
     enabled: Mapped[bool] = mapped_column(default=True)
+    managed: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[int] = mapped_column(default=_now_s)
 
 
