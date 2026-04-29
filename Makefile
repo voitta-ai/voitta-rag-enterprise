@@ -1,14 +1,17 @@
 .PHONY: install run dev mcp test lint typecheck clean ui-dev ui-build help doctor seed-users rebuild-index reembed
 
 PYTHON ?= python3
-PORT ?= 8000
+
+# Single source of truth: .env. Recipes that need ports source it at run time
+# and fall back to compiled-in defaults if the var is unset.
+DOTENV := set -a; [ -f .env ] && . ./.env; set +a;
 
 help:
 	@echo "Targets:"
 	@echo "  install    - install package in editable mode with dev extras"
-	@echo "  run        - run the web app on PORT (default 8000)"
+	@echo "  run        - run the web app (port from .env VOITTA_PORT, default 8000)"
 	@echo "  dev        - run the web app with --reload"
-	@echo "  mcp        - run the MCP server on VOITTA_MCP_PORT (default 8001)"
+	@echo "  mcp        - run the MCP server (port from .env VOITTA_MCP_PORT, default 8001)"
 	@echo "  test           - run pytest"
 	@echo "  lint           - ruff check"
 	@echo "  typecheck      - mypy"
@@ -24,12 +27,15 @@ install:
 	$(PYTHON) -m pip install -e ".[dev]"
 
 run:
-	$(PYTHON) -m uvicorn voitta_image_rag.main:app --host 0.0.0.0 --port $(PORT)
+	@$(DOTENV) \
+	$(PYTHON) -m uvicorn voitta_image_rag.main:app --host 0.0.0.0 --port "$${VOITTA_PORT:-8000}"
 
 dev:
-	$(PYTHON) -m uvicorn voitta_image_rag.main:app --host 0.0.0.0 --port $(PORT) --reload
+	@$(DOTENV) \
+	$(PYTHON) -m uvicorn voitta_image_rag.main:app --host 0.0.0.0 --port "$${VOITTA_PORT:-8000}" --reload
 
 mcp:
+	@$(DOTENV) \
 	$(PYTHON) -m voitta_image_rag.mcp_server
 
 doctor:
