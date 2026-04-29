@@ -92,3 +92,36 @@ li .badge { font-size: 0.7rem; padding: 0 0.25rem; border-radius: 2px; }
 .badge.managed { background: var(--accent); color: white; }
 select { background: var(--bg); color: var(--fg); border: 1px solid var(--border); padding: 0.25rem; border-radius: 3px; font: inherit; }
 input[type="file"] { color: var(--fg-dim); }
+
+.picker { display: flex; flex-direction: column; gap: 0.25rem; }
+.picker-header { display: flex; align-items: center; gap: 0.25rem; }
+.picker-header button { padding: 0 0.5rem; }
+.picker-path {
+    flex: 1;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    padding: 0.2rem 0.4rem;
+    border-radius: 3px;
+    font-size: 0.75rem;
+    overflow-x: auto;
+    white-space: nowrap;
+    color: var(--fg-dim);
+}
+.picker-list {
+    max-height: 220px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    margin: 0;
+}
+.picker-list li {
+    padding: 0.2rem 0.5rem;
+    border-bottom: 1px solid var(--border);
+    cursor: default;
+    user-select: none;
+}
+.picker-list li.dir { cursor: pointer; }
+.picker-list li.dir:hover { background: var(--panel); }
+.picker-list li.file { color: var(--fg-dim); }
+.picker-list li::before { content: "📄 "; }
+.picker-list li.dir::before { content: "📁 "; }

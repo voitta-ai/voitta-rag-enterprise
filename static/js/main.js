@@ -89,16 +89,22 @@ jobs.subscribe((list) => {
     }
 });
 
-// Tabbed folder-create form: managed (name) vs external (path).
+// Tabbed folder-create form: managed (name) vs external (picker).
 const tabs = document.querySelectorAll(".tab");
 const formManaged = $("#add-folder-managed");
-const formExternal = $("#add-folder-external");
+const pickerEl = $("#add-folder-external");
+let pickerInitialized = false;
+
 tabs.forEach((t) => {
     t.addEventListener("click", () => {
         tabs.forEach((x) => x.classList.toggle("active", x === t));
         const mode = t.dataset.mode;
         formManaged.hidden = mode !== "managed";
-        formExternal.hidden = mode !== "external";
+        pickerEl.hidden = mode !== "external";
+        if (mode === "external" && !pickerInitialized) {
+            pickerInitialized = true;
+            pickerNavigate(null);
+        }
     });
 });
 
@@ -113,12 +119,44 @@ formManaged.addEventListener("submit", async (e) => {
     }
 });
 
-formExternal.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const path = new FormData(e.target).get("path");
+// --- Folder picker --------------------------------------------------
+let pickerCwd = null;
+
+async function pickerNavigate(path) {
     try {
-        await api.addFolderByPath(path);
-        e.target.reset();
+        const res = await api.fsList(path);
+        pickerCwd = res.path;
+        $("#picker-path").textContent = res.path;
+        const ul = $("#picker-list");
+        ul.innerHTML = "";
+        for (const entry of res.entries) {
+            const li = document.createElement("li");
+            li.textContent = entry.name;
+            li.className = entry.is_dir ? "dir" : "file";
+            if (entry.is_dir) {
+                li.addEventListener("click", () => {
+                    const sep = res.path === "/" ? "" : "/";
+                    pickerNavigate(`${res.path}${sep}${entry.name}`);
+                });
+            }
+            ul.append(li);
+        }
+        $("#picker-up").disabled = !res.parent;
+        $("#picker-up").dataset.target = res.parent || "";
+    } catch (err) {
+        alert(err.message);
+    }
+}
+
+$("#picker-up").addEventListener("click", () => {
+    const target = $("#picker-up").dataset.target;
+    if (target) pickerNavigate(target);
+});
+
+$("#picker-pick").addEventListener("click", async () => {
+    if (!pickerCwd) return;
+    try {
+        await api.addFolderByPath(pickerCwd);
     } catch (err) {
         alert(err.message);
     }

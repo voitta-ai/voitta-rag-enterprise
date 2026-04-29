@@ -22,10 +22,14 @@
                     <input type="text" name="name" placeholder="folder name" required>
                     <button type="submit">Create</button>
                 </form>
-                <form id="add-folder-external" class="add-form" hidden>
-                    <input type="text" name="path" placeholder="/abs/path/to/folder" required>
-                    <button type="submit">Add</button>
-                </form>
+                <div id="add-folder-external" class="add-form picker" hidden>
+                    <div class="picker-header">
+                        <button id="picker-up" type="button" title="up">↑</button>
+                        <code id="picker-path" class="picker-path"></code>
+                    </div>
+                    <ul id="picker-list" class="picker-list"></ul>
+                    <button id="picker-pick" type="button">Add this folder</button>
+                </div>
                 <p id="root-hint" class="hint"></p>
                 <ul id="folder-list"></ul>
             </section>
