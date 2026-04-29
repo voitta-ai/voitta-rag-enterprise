@@ -91,8 +91,8 @@ def reset_client_cache() -> None:
     _client = None
 
 
-def ensure_collections(text_dim: int, image_dim: int) -> None:
-    """Idempotently create the two collections."""
+def ensure_chunks_collection(text_dim: int) -> None:
+    """Idempotent — only the chunks (text) collection."""
 
     def _do() -> None:
         client = get_client()
@@ -107,6 +107,15 @@ def ensure_collections(text_dim: int, image_dim: int) -> None:
                 },
             )
             logger.info("created qdrant collection: %s (dense dim=%d)", CHUNKS, text_dim)
+
+    run_on_qdrant(_do)
+
+
+def ensure_images_collection(image_dim: int) -> None:
+    """Idempotent — only the images collection."""
+
+    def _do() -> None:
+        client = get_client()
         if not _collection_exists(client, IMAGES):
             client.create_collection(
                 IMAGES,
@@ -117,6 +126,12 @@ def ensure_collections(text_dim: int, image_dim: int) -> None:
             logger.info("created qdrant collection: %s (dim=%d)", IMAGES, image_dim)
 
     run_on_qdrant(_do)
+
+
+def ensure_collections(text_dim: int, image_dim: int) -> None:
+    """Convenience wrapper — bootstrap both collections in one call."""
+    ensure_chunks_collection(text_dim)
+    ensure_images_collection(image_dim)
 
 
 def _collection_exists(client: QdrantClient, name: str) -> bool:

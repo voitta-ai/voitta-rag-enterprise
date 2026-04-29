@@ -258,12 +258,20 @@ def _commit_indexing(
 
 async def run_embed_text(payload: dict) -> None:
     file_id = int(payload["file_id"])
-    await asyncio.to_thread(_embed_text_sync, file_id)
+    try:
+        await asyncio.to_thread(_embed_text_sync, file_id)
+    except Exception as e:
+        _mark_file_error_for_text(file_id, f"embed_text failed: {e}")
+        raise
 
 
 async def run_embed_image(payload: dict) -> None:
     image_id = int(payload["image_id"])
-    await asyncio.to_thread(_embed_image_sync, image_id)
+    try:
+        await asyncio.to_thread(_embed_image_sync, image_id)
+    except Exception as e:
+        _mark_file_error_for_image(image_id, f"embed_image failed: {e}")
+        raise
 
 
 async def run_delete_file(payload: dict) -> None:
@@ -295,8 +303,7 @@ def _embed_text_sync(file_id: int) -> None:
 
     text_emb = get_text_embedder()
     sparse_emb = get_sparse_embedder()
-    image_emb_dim = _resolve_image_dim()
-    vector_store.ensure_collections(text_dim=text_emb.dim, image_dim=image_emb_dim)
+    vector_store.ensure_chunks_collection(text_dim=text_emb.dim)
 
     if chunk_data:
         texts = [t for _, t, _, _ in chunk_data]
@@ -333,7 +340,7 @@ def _embed_image_sync(image_id: int) -> None:
     from ..cas import store as cas_store
     from . import vector_store
     from .acl import allowed_user_ids_for_file
-    from .embedding import get_image_embedder, get_text_embedder
+    from .embedding import get_image_embedder
 
     settings = get_settings()
     with session_scope() as s:
@@ -352,8 +359,7 @@ def _embed_image_sync(image_id: int) -> None:
         allowed_users = allowed_user_ids_for_file(s, file_id)
 
     image_emb = get_image_embedder()
-    text_emb = get_text_embedder()
-    vector_store.ensure_collections(text_dim=text_emb.dim, image_dim=image_emb.dim)
+    vector_store.ensure_images_collection(image_dim=image_emb.dim)
 
     existing = vector_store.find_image_point_by_cas(cas_id)
     if existing is not None:
@@ -413,6 +419,20 @@ def _decrement_pending_embeds(file_id: int) -> None:
     _publish_file_upserted(file_id)
 
 
+def _mark_file_error_for_image(image_id: int, message: str) -> None:
+    """Called by the worker when ``embed_image`` fails — propagate to the file."""
+    with session_scope() as s:
+        image = s.get(Image, image_id)
+        if image is None:
+            return
+        file_id = image.file_id
+    _mark_state(file_id, state="error", error=message)
+
+
+def _mark_file_error_for_text(file_id: int, message: str) -> None:
+    _mark_state(file_id, state="error", error=message)
+
+
 def _nearby_image_ids(session, chunk_id: int) -> list[int]:
     return [
         link.image_id
@@ -422,13 +442,6 @@ def _nearby_image_ids(session, chunk_id: int) -> list[int]:
         .scalars()
         .all()
     ]
-
-
-def _resolve_image_dim() -> int:
-    """Lazy import to avoid loading the image model when only embedding text."""
-    from .embedding import get_image_embedder
-
-    return get_image_embedder().dim
 
 
 HANDLERS = {

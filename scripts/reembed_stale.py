@@ -28,6 +28,10 @@ def _scan_for_stale(collection: str, version_keys: list[str], expected: dict[str
 
     def _do() -> list:
         client = vector_store.get_client()
+        try:
+            client.get_collection(collection)
+        except Exception:
+            return []
         offset = None
         out: list = []
         while True:
