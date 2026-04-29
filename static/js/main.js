@@ -267,11 +267,12 @@ function selectNode(folderId, relDir) {
 
 function updateToolbarState() {
     const folder = folders.get().find((f) => f.id === selectedFolderId);
-    const subBtn = $("#btn-new-subfolder");
-    subBtn.disabled = !(folder && folder.managed);
-    subBtn.title = folder?.managed
-        ? `Add subfolder under ${folder.display_name}${selectedRelDir ? "/" + selectedRelDir : ""}`
-        : "Select a managed folder to add a subfolder";
+    const isManaged = !!(folder && folder.managed);
+    const isRoot = !!folder && selectedRelDir === "";
+
+    $("#btn-new-subfolder").disabled = !isManaged;
+    $("#btn-upload").disabled = !isManaged;
+    $("#btn-remove").disabled = !isRoot;
 }
 
 async function createSubfolder() {
@@ -299,12 +300,10 @@ function renderSidebar() {
     const folder = folders.get().find((f) => f.id === selectedFolderId);
     const empty = $("#sidebar-empty");
     const detail = $("#folder-detail");
-    const upload = $("#upload-card");
 
     if (!folder) {
         empty.hidden = false;
         detail.hidden = true;
-        upload.hidden = true;
         return;
     }
 
@@ -361,7 +360,8 @@ function renderSidebar() {
         extTbody.append(tr);
     }
 
-    upload.hidden = !folder.managed;
+    const hint = $("#upload-target-hint");
+    hint.hidden = !folder.managed;
     $("#upload-target").textContent = selectedRelDir ? `/${selectedRelDir}/` : "/";
 }
 
@@ -443,29 +443,34 @@ $("#modal-backdrop").addEventListener("click", (e) => {
     if (e.target.id === "modal-backdrop") closeModal();
 });
 
-$("#btn-delete-folder").addEventListener("click", async () => {
+$("#btn-new-subfolder").addEventListener("click", createSubfolder);
+
+$("#btn-upload").addEventListener("click", () => $("#upload-input").click());
+$("#upload-input").addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    if (!file || !selectedFolderId) return;
+    try {
+        await api.upload(selectedFolderId, file, selectedRelDir);
+    } catch (err) {
+        alert(err.message);
+    } finally {
+        e.target.value = "";
+    }
+});
+
+$("#btn-remove").addEventListener("click", async () => {
     if (!selectedFolderId) return;
     const folder = folders.get().find((f) => f.id === selectedFolderId);
-    if (!folder || !confirm(`Remove ${folder.display_name}?`)) return;
+    if (!folder) return;
+    if (!confirm(`Unregister "${folder.display_name}"?\n\nFiles on disk are not deleted.`)) return;
     try {
         await api.deleteFolder(selectedFolderId);
         selectedFolderId = null;
         selectedRelDir = "";
-    } catch (err) { alert(err.message); }
+    } catch (err) {
+        alert(err.message);
+    }
 });
-
-$("#upload-submit").addEventListener("click", async () => {
-    if (!selectedFolderId) return;
-    const file = $("#upload-input").files[0];
-    if (!file) return;
-    try {
-        await api.upload(selectedFolderId, file, selectedRelDir);
-        $("#upload-input").value = "";
-    } catch (err) { alert(err.message); }
-});
-
-$("#mkdir-btn").addEventListener("click", createSubfolder);
-$("#btn-new-subfolder").addEventListener("click", createSubfolder);
 
 $("#btn-retry-all").addEventListener("click", async () => {
     try {

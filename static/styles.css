@@ -114,6 +114,17 @@ body {
     gap: var(--sm);
     align-items: center;
     flex-wrap: wrap;
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border-light);
+    border-radius: var(--radius-lg);
+    padding: 8px 12px;
+}
+.toolbar-group { display: flex; gap: 6px; align-items: center; }
+.toolbar-divider {
+    width: 1px;
+    height: 22px;
+    background: var(--color-border);
+    margin: 0 4px;
 }
 .browser-layout {
     display: grid;

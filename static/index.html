@@ -18,9 +18,17 @@
     <main class="app-main">
         <div class="browser-container">
             <div class="toolbar">
-                <button id="btn-new-folder" class="btn btn-primary">+ New folder</button>
-                <button id="btn-new-subfolder" class="btn btn-secondary" disabled>+ New subfolder</button>
-                <button id="btn-add-existing" class="btn btn-secondary">Add existing</button>
+                <div class="toolbar-group">
+                    <button id="btn-new-folder" class="btn btn-primary" title="Create a managed folder under VOITTA_ROOT_PATH">📁 New folder</button>
+                    <button id="btn-add-existing" class="btn btn-secondary" title="Register an existing folder anywhere on the host">＋ Add existing</button>
+                </div>
+                <div class="toolbar-divider"></div>
+                <div class="toolbar-group">
+                    <button id="btn-new-subfolder" class="btn btn-secondary" disabled title="Create a subfolder inside the selected managed folder">📂 New subfolder</button>
+                    <button id="btn-upload" class="btn btn-secondary" disabled title="Upload a file into the selected managed folder">⬆ Upload</button>
+                    <button id="btn-remove" class="btn btn-secondary" disabled title="Unregister the selected folder">🗑 Remove</button>
+                </div>
+                <input type="file" id="upload-input" hidden>
                 <span id="root-hint" class="hint"></span>
             </div>
 
@@ -57,19 +65,9 @@
                             </thead>
                             <tbody id="ext-tbody"></tbody>
                         </table>
-                        <div class="actions">
-                            <button id="btn-delete-folder" class="btn btn-danger btn-sm">Delete folder</button>
-                        </div>
-                    </div>
-
-                    <div class="sidebar-section" id="upload-card" hidden>
-                        <h3>Upload</h3>
-                        <p class="hint">Files are written to <code id="upload-target">/</code>; the watcher indexes them automatically.</p>
-                        <input type="file" id="upload-input">
-                        <div class="actions">
-                            <button id="upload-submit" class="btn btn-primary btn-sm">Upload</button>
-                            <button id="mkdir-btn" class="btn btn-secondary btn-sm">+ Subfolder</button>
-                        </div>
+                        <p id="upload-target-hint" class="hint" hidden>
+                            Uploads go to <code id="upload-target">/</code>
+                        </p>
                     </div>
 
                     <div class="sidebar-section" id="jobs-card">
