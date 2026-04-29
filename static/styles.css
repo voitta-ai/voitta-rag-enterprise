@@ -46,6 +46,9 @@
 
 * { box-sizing: border-box; }
 
+/* Re-assert the [hidden] attribute against display:flex/grid rules below. */
+[hidden] { display: none !important; }
+
 html, body { height: 100%; }
 
 body {
