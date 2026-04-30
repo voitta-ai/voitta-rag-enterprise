@@ -43,6 +43,17 @@ function handleEvent(event) {
         case "folder.added":
             folders.update((list) => [...list.filter(f => f.id !== event.folder.id), event.folder]);
             return;
+        case "folder.upserted":
+            // Mutation that doesn't add or remove a folder — e.g. has_sync_source
+            // toggled when the user saves or deletes a sync config.
+            folders.update((list) => {
+                const idx = list.findIndex(f => f.id === event.folder.id);
+                if (idx === -1) return [...list, event.folder];
+                const next = list.slice();
+                next[idx] = { ...next[idx], ...event.folder };
+                return next;
+            });
+            return;
         case "folder.removed":
             folders.update((list) => list.filter(f => f.id !== event.folder_id));
             files.update((list) => list.filter(f => f.folder_id !== event.folder_id));

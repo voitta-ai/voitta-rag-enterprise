@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ...config import get_settings
-from ...db.models import Chunk, File, Folder, Image
+from ...db.models import Chunk, File, Folder, FolderSyncSource, Image
 from ...services import events, job_queue
 from ...services.acl import (
     CurrentUser,
@@ -49,6 +49,7 @@ class FolderOut(BaseModel):
     enabled: bool
     managed: bool
     created_at: int
+    has_sync_source: bool = False
 
 
 class RootInfo(BaseModel):
@@ -68,7 +69,7 @@ class FileOut(BaseModel):
     source_url: str | None
 
 
-def _to_folder_out(f: Folder) -> FolderOut:
+def _to_folder_out(f: Folder, *, has_sync_source: bool = False) -> FolderOut:
     return FolderOut(
         id=f.id,
         path=f.path,
@@ -77,6 +78,7 @@ def _to_folder_out(f: Folder) -> FolderOut:
         enabled=f.enabled,
         managed=f.managed,
         created_at=f.created_at,
+        has_sync_source=has_sync_source,
     )
 
 
@@ -427,10 +429,17 @@ def list_folders(
     user: CurrentUser = Depends(current_user),
 ) -> list[FolderOut]:
     rows = db.execute(select(Folder).order_by(Folder.id)).scalars().all()
+    sync_ids = {
+        fid for (fid,) in db.execute(select(FolderSyncSource.folder_id)).all()
+    }
     if get_settings().single_user:
-        return [_to_folder_out(f) for f in rows]
+        return [_to_folder_out(f, has_sync_source=f.id in sync_ids) for f in rows]
     visible = set(visible_folder_ids(db, user.id))
-    return [_to_folder_out(f) for f in rows if f.id in visible]
+    return [
+        _to_folder_out(f, has_sync_source=f.id in sync_ids)
+        for f in rows
+        if f.id in visible
+    ]
 
 
 class ReindexIn(BaseModel):

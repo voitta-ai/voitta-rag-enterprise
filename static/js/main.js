@@ -34,6 +34,9 @@ folders.subscribe((list) => {
 files.subscribe(() => {
     renderFolders(folders.get());
     renderSidebar();
+    // The Sync / Config button visibility depends on whether the folder is
+    // empty, which is computed from the files store — re-evaluate on change.
+    updateToolbarState();
     scheduleStatsRefresh();
 });
 jobs.subscribe(() => {
@@ -297,8 +300,29 @@ function updateToolbarState() {
     $("#btn-new-subfolder").disabled = !isManaged;
     $("#btn-upload").disabled = !isManaged;
     $("#btn-reindex").disabled = !folder;
-    // Sync only makes sense at the folder root, on managed folders.
-    $("#btn-sync").disabled = !(isManaged && isRoot);
+    // Sync button: only at the folder root on managed folders. Hidden when
+    // the folder is non-empty AND has no sync source — sync can't be
+    // configured on an existing folder of files. When a sync source already
+    // exists, the same button reads "Config" (re-opens the same modal).
+    const syncBtn = $("#btn-sync");
+    if (!(isManaged && isRoot)) {
+        syncBtn.hidden = true;
+    } else {
+        const hasSync = !!folder.has_sync_source;
+        const folderFiles = files.get().filter(
+            (x) => x.folder_id === folder.id && x.state !== "deleted",
+        );
+        const isEmpty = folderFiles.length === 0;
+        if (!hasSync && !isEmpty) {
+            syncBtn.hidden = true;
+        } else {
+            syncBtn.hidden = false;
+            syncBtn.textContent = hasSync ? "🔄 Config" : "🔄 Sync";
+            syncBtn.title = hasSync
+                ? "Edit the remote sync configuration for this folder"
+                : "Configure a remote sync (e.g. GitHub) for this empty folder";
+        }
+    }
     $("#btn-remove").disabled = !isRoot;
 }
 

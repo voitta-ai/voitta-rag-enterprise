@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ...db.models import File, Folder, FolderSyncSource
-from ...services import job_queue
+from ...services import events, job_queue
 from ...services.acl import CurrentUser, user_can_see_folder
 from ...services.sync.github import (
     GitAuth,
@@ -196,7 +196,30 @@ def upsert_sync_source(
 
     db.commit()
     db.refresh(src)
+    if existing is None:
+        # Toolbar visibility & label depend on has_sync_source — push the
+        # update so the UI doesn't need to refetch the folder list.
+        _publish_folder_changed(folder, has_sync_source=True)
     return _to_out(src)
+
+
+def _publish_folder_changed(folder: Folder, *, has_sync_source: bool) -> None:
+    events.publish(
+        "folders",
+        {
+            "type": "folder.upserted",
+            "folder": {
+                "id": folder.id,
+                "path": folder.path,
+                "display_name": folder.display_name,
+                "source_type": folder.source_type,
+                "enabled": folder.enabled,
+                "managed": folder.managed,
+                "created_at": folder.created_at,
+                "has_sync_source": has_sync_source,
+            },
+        },
+    )
 
 
 @router.delete("", status_code=status.HTTP_204_NO_CONTENT)
@@ -205,12 +228,13 @@ def delete_sync_source(
     db: Session = Depends(db_session),
     user: CurrentUser = Depends(current_user),
 ) -> None:
-    _check_access(folder_id, db, user)
+    folder = _check_access(folder_id, db, user)
     src = db.get(FolderSyncSource, folder_id)
     if src is None:
         return
     db.delete(src)
     db.commit()
+    _publish_folder_changed(folder, has_sync_source=False)
 
 
 class SyncTriggerOut(BaseModel):

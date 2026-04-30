@@ -374,6 +374,32 @@ def test_sync_trigger_without_source_returns_400(
     assert r.status_code == 400
 
 
+def test_folder_listing_exposes_has_sync_source_flag(
+    client: TestClient, tmp_path: Path
+) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    folder_id = client.post("/api/folders", json={"path": str(src)}).json()["id"]
+
+    folders = client.get("/api/folders").json()
+    me = next(f for f in folders if f["id"] == folder_id)
+    assert me["has_sync_source"] is False
+
+    client.put(
+        f"/api/folders/{folder_id}/sync",
+        json={
+            "source_type": "github",
+            "github": {"repo": "https://x/r", "branches": ["main"], "auth_method": "ssh"},
+        },
+    )
+    me = next(f for f in client.get("/api/folders").json() if f["id"] == folder_id)
+    assert me["has_sync_source"] is True
+
+    client.delete(f"/api/folders/{folder_id}/sync")
+    me = next(f for f in client.get("/api/folders").json() if f["id"] == folder_id)
+    assert me["has_sync_source"] is False
+
+
 def test_sync_delete_removes_source(client: TestClient, tmp_path: Path) -> None:
     src = tmp_path / "src"
     src.mkdir()
