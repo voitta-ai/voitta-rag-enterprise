@@ -14,7 +14,7 @@ import traceback
 from contextlib import contextmanager
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from ..cas import store as cas_store
 from ..config import get_settings
@@ -560,30 +560,53 @@ def _delete_file_sync(file_id: int) -> None:
 def _decrement_pending_embeds(file_id: int, round_token: int | None = None) -> None:
     """Decrement ``pending_embeds`` from a finishing embed job.
 
-    Skips the decrement when ``round_token`` does not match the file's current
-    ``embed_round`` — that means a re-extract has already replaced the chunk /
-    image set this job belongs to, so its result is stale and must not touch
-    the new round's counter.
+    The decrement is performed via an atomic SQL ``UPDATE`` so concurrent
+    callers cannot lose updates — a read-modify-write through the ORM is racy
+    when many embed jobs finish in the same SQLite WAL window (which happens
+    constantly: image embeds that hit the dedup path complete in ~1 ms each).
+
+    The same UPDATE doubles as the round-token guard: when a re-extract has
+    already bumped ``embed_round``, ``rowcount`` comes back as 0 and we skip
+    the state-transition check entirely.
 
     On reaching zero, transitions the file to ``indexed`` and clears any
     previously-recorded ``error`` (a successful embed cycle supersedes a
     transient failure that has since been retried).
     """
+    params: dict[str, object] = {"id": file_id}
+    guard = ""
+    if round_token is not None:
+        guard = " AND embed_round = :r"
+        params["r"] = round_token
     with session_scope() as s:
-        file = s.get(File, file_id)
-        if file is None:
-            return
-        if round_token is not None and file.embed_round != round_token:
+        res = s.execute(
+            text(
+                "UPDATE files SET pending_embeds = MAX(0, pending_embeds - 1) "
+                "WHERE id = :id" + guard
+            ),
+            params,
+        )
+        if res.rowcount == 0:
             logger.debug(
-                "skip pending decrement: stale round (job=%s file=%s)",
+                "skip pending decrement: file gone or stale round (job=%s)",
                 round_token,
-                file.embed_round,
             )
             return
-        file.pending_embeds = max(0, file.pending_embeds - 1)
-        if file.pending_embeds == 0 and file.state in ("extracted", "embedding", "error"):
-            file.state = "indexed"
-            file.error = None
+        row = s.execute(
+            text("SELECT pending_embeds, state FROM files WHERE id = :id"),
+            {"id": file_id},
+        ).first()
+        if row is None:
+            return
+        pending, state = row
+        if pending == 0 and state in ("extracted", "embedding", "error"):
+            s.execute(
+                text(
+                    "UPDATE files SET state = 'indexed', error = NULL "
+                    "WHERE id = :id"
+                ),
+                {"id": file_id},
+            )
     _publish_file_upserted(file_id)
 
 
