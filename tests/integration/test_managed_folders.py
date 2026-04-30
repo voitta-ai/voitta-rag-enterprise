@@ -119,6 +119,22 @@ def test_upload_to_managed_folder_writes_file(root_env: Path) -> None:
         assert (root_env / "u" / "hello.txt").read_bytes() == b"hello world"
 
 
+def test_upload_multiple_files_to_managed_folder(root_env: Path) -> None:
+    with _client(root_env) as c:
+        fid = c.post("/api/folders", json={"name": "batch"}).json()["id"]
+        r = c.post(
+            f"/api/folders/{fid}/upload",
+            files=[
+                ("file", ("a.txt", b"alpha", "text/plain")),
+                ("file", ("b.txt", b"beta", "text/plain")),
+            ],
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["count"] == 2
+        assert (root_env / "batch" / "a.txt").read_bytes() == b"alpha"
+        assert (root_env / "batch" / "b.txt").read_bytes() == b"beta"
+
+
 def test_upload_to_external_folder_rejected(root_env: Path, tmp_path: Path) -> None:
     ext = tmp_path / "external"
     ext.mkdir()

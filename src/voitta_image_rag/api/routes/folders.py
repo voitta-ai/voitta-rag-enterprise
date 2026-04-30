@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File as FormFile, HTTPException, UploadFile, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -190,6 +192,12 @@ class UploadOut(BaseModel):
     size_bytes: int
 
 
+class UploadBatchOut(BaseModel):
+    files: list[UploadOut]
+    count: int
+    size_bytes: int
+
+
 def _safe_rel_path(rel_path: str) -> Path:
     """Reject path-traversal in user-supplied rel_paths."""
     candidate = Path(rel_path.lstrip("/"))
@@ -198,19 +206,29 @@ def _safe_rel_path(rel_path: str) -> Path:
     return candidate
 
 
+def _safe_filename(filename: str | None) -> str:
+    name = filename or "uploaded.bin"
+    if "/" in name or "\\" in name:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid filename: {filename!r}")
+    if not name or name in (".", ".."):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid filename: {filename!r}")
+    return name
+
+
 @router.post(
     "/{folder_id}/upload",
     status_code=status.HTTP_201_CREATED,
-    response_model=UploadOut,
+    response_model=UploadBatchOut,
 )
 async def upload_file(
     folder_id: int,
-    file: UploadFile,
+    file: list[UploadFile] = FormFile(...),
     rel_path: str | None = None,
+    rel_dir: str | None = None,
     db: Session = Depends(db_session),
     user: CurrentUser = Depends(current_user),
-) -> UploadOut:
-    """Upload a file into a managed folder. The watcher picks it up and indexes it.
+) -> UploadBatchOut:
+    """Upload files into a managed folder. The watcher picks them up and indexes them.
 
     External (non-managed) folders are read-only via the API by design — write
     files there with your usual tooling and the watcher will catch the change.
@@ -224,19 +242,47 @@ async def upload_file(
             "Uploads are only allowed on managed folders (created with {'name': ...}).",
         )
 
-    target_rel = _safe_rel_path(rel_path or file.filename or "uploaded.bin")
-    target = (Path(folder.path) / target_rel).resolve()
     folder_root = Path(folder.path).resolve()
-    if folder_root not in target.parents and target.parent != folder_root:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "rel_path escapes folder")
+    if rel_path is not None and len(file) != 1:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "rel_path can only be used when uploading one file; use rel_dir for batches.",
+        )
 
-    target.parent.mkdir(parents=True, exist_ok=True)
-    bytes_written = 0
-    with target.open("wb") as out:
-        while chunk := await file.read(1024 * 1024):
-            out.write(chunk)
-            bytes_written += len(chunk)
-    return UploadOut(rel_path=str(target_rel), size_bytes=bytes_written)
+    rel_base = _safe_rel_path(rel_dir) if rel_dir else Path()
+    uploaded: list[UploadOut] = []
+    for item in file:
+        target_rel = (
+            _safe_rel_path(rel_path)
+            if rel_path is not None
+            else rel_base / _safe_filename(item.filename)
+        )
+        target = (folder_root / target_rel).resolve()
+        if folder_root not in target.parents and target.parent != folder_root:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "rel_path escapes folder")
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        bytes_written = 0
+        tmp_name: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "wb", dir=target.parent, prefix=f".{target.name}.", delete=False
+            ) as out:
+                tmp_name = out.name
+                while chunk := await item.read(1024 * 1024):
+                    out.write(chunk)
+                    bytes_written += len(chunk)
+            os.replace(tmp_name, target)
+        finally:
+            if tmp_name is not None and Path(tmp_name).exists():
+                Path(tmp_name).unlink()
+        uploaded.append(UploadOut(rel_path=target_rel.as_posix(), size_bytes=bytes_written))
+
+    return UploadBatchOut(
+        files=uploaded,
+        count=len(uploaded),
+        size_bytes=sum(item.size_bytes for item in uploaded),
+    )
 
 
 class MkdirIn(BaseModel):

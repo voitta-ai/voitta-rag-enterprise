@@ -545,10 +545,10 @@ $("#btn-new-subfolder").addEventListener("click", createSubfolder);
 
 $("#btn-upload").addEventListener("click", () => $("#upload-input").click());
 $("#upload-input").addEventListener("change", async (e) => {
-    const file = e.target.files[0];
-    if (!file || !selectedFolderId) return;
+    const selected = Array.from(e.target.files);
+    if (!selected.length || !selectedFolderId) return;
     try {
-        await api.upload(selectedFolderId, file, selectedRelDir);
+        await api.upload(selectedFolderId, selected, selectedRelDir);
     } catch (err) {
         alert(err.message);
     } finally {

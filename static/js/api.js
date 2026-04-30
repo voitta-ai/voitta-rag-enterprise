@@ -43,11 +43,12 @@ export const api = {
         const all = await Promise.all(fs.map(f => req("GET", `/api/folders/${f.id}/files`)));
         return all.flat();
     },
-    upload: async (folderId, file, relDir = "") => {
+    upload: async (folderId, files, relDir = "") => {
+        const batch = Array.from(files);
         const form = new FormData();
-        form.append("file", file);
-        const relPath = relDir ? `${relDir}/${file.name}` : file.name;
-        const url = `/api/folders/${folderId}/upload?rel_path=${encodeURIComponent(relPath)}`;
+        for (const file of batch) form.append("file", file);
+        const query = relDir ? `?rel_dir=${encodeURIComponent(relDir)}` : "";
+        const url = `/api/folders/${folderId}/upload${query}`;
         const r = await fetch(url, {
             method: "POST",
             headers: { "X-Forwarded-Email": userEmail() },
