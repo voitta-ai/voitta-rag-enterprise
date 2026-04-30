@@ -27,6 +27,12 @@ from ...services.sync.github import (
     list_remote_branches,
 )
 from ...services.sync.google_drive import (
+    coerce_folders_field as gd_coerce_folders,
+)
+from ...services.sync.google_drive import (
+    encode_folders_field as gd_encode_folders,
+)
+from ...services.sync.google_drive import (
     exchange_code_for_tokens as gd_exchange_code,
 )
 from ...services.sync.google_drive import (
@@ -60,12 +66,19 @@ class GithubSyncIn(BaseModel):
     ssh_key: str = ""
 
 
+class GoogleDriveFolder(BaseModel):
+    """One Drive folder selection: identity + display name shown in the UI."""
+
+    id: str
+    name: str = ""
+
+
 class GoogleDriveSyncIn(BaseModel):
     """Payload for ``PUT /folders/{id}/sync`` when ``source_type == 'google_drive'``."""
 
     client_id: str = ""
     client_secret: str = ""
-    folder_id: str = ""  # Drive folder/Drive ID
+    folders: list[GoogleDriveFolder] = Field(default_factory=list)
     service_account_json: str = ""
 
 
@@ -89,7 +102,7 @@ class GithubSyncOut(BaseModel):
 
 class GoogleDriveSyncOut(BaseModel):
     client_id: str
-    folder_id: str
+    folders: list[GoogleDriveFolder]
     has_client_secret: bool
     has_service_account: bool
     connected: bool  # true once a refresh_token has been stored
@@ -123,7 +136,9 @@ def _to_out(src: FolderSyncSource) -> SyncSourceOut:
     elif src.source_type == "google_drive":
         gd = GoogleDriveSyncOut(
             client_id=src.gd_client_id or "",
-            folder_id=src.gd_folder_id or "",
+            folders=[
+                GoogleDriveFolder(**f) for f in gd_coerce_folders(src.gd_folder_id)
+            ],
             has_client_secret=bool(src.gd_client_secret),
             has_service_account=bool(src.gd_service_account_json),
             connected=bool(src.gd_refresh_token),
@@ -245,7 +260,6 @@ def upsert_sync_source(
                 "Missing 'google_drive' config for source_type='google_drive'",
             )
         gd_cfg = body.google_drive
-        has_oauth_pair = bool(gd_cfg.client_id and gd_cfg.client_secret)
         # ``has_client_secret`` is true when only the public client_id was
         # re-sent for an existing row (the secret stays masked client-side
         # and is only re-posted when the user types a new one).
@@ -281,7 +295,9 @@ def upsert_sync_source(
             src.gd_client_secret = gd_cfg.client_secret
         if gd_cfg.service_account_json:
             src.gd_service_account_json = gd_cfg.service_account_json
-        src.gd_folder_id = gd_cfg.folder_id.strip() or None
+        src.gd_folder_id = gd_encode_folders(
+            [{"id": f.id, "name": f.name} for f in gd_cfg.folders]
+        )
         # Refresh-token field is set by the OAuth callback, never by save.
 
     else:  # pragma: no cover — Pydantic Literal guards this
@@ -373,10 +389,10 @@ def trigger_sync(
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST, "No sync source configured"
         )
-    if src.source_type == "google_drive" and not (src.gd_folder_id or "").strip():
+    if src.source_type == "google_drive" and not gd_coerce_folders(src.gd_folder_id):
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            "Google Drive folder_id not set — paste a folder ID or click Pick",
+            "Pick at least one Google Drive folder before syncing",
         )
     job_id = job_queue.enqueue(
         db,

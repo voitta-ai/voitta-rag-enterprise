@@ -503,8 +503,10 @@ async def _run_sync_inner(folder_id: int) -> None:
                 ),
             }
         elif source_type == "google_drive":
+            from .sync.google_drive import coerce_folders_field
+
             cfg = {
-                "drive_folder_id": source.gd_folder_id or "",
+                "drive_folders": coerce_folders_field(source.gd_folder_id),
                 "auth": GoogleDriveAuth(
                     client_id=source.gd_client_id or "",
                     client_secret=source.gd_client_secret or "",

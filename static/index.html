@@ -199,12 +199,13 @@
                         <span id="sync-gd-conn-status" class="hint" style="margin-left:auto;"></span>
                     </div>
 
-                    <label>Drive folder ID</label>
+                    <label>Drive folders</label>
                     <div class="branches-row">
-                        <input type="text" id="sync-gd-folder-id" placeholder="0AB…or shared-drive ID" style="flex:1;">
-                        <button type="button" id="sync-gd-pick-folder" class="btn btn-secondary btn-sm" disabled title="Connect first">Pick…</button>
+                        <button type="button" id="sync-gd-pick-folder" class="btn btn-secondary btn-sm" disabled title="Connect first">Pick folders…</button>
+                        <span id="sync-gd-folder-count" class="hint">none selected</span>
                     </div>
-                    <p class="hint">Paste a folder ID, or click Pick after connecting to choose from your Drive.</p>
+                    <ul id="sync-gd-folders-list" style="margin:6px 0 0;padding-left:18px;font-size:13px;color:var(--muted, #666);"></ul>
+                    <p class="hint">Each picked folder syncs into its own subdirectory under this folder.</p>
 
                     <details>
                         <summary>Service account (alternative to OAuth — no Connect step needed)</summary>
@@ -220,6 +221,24 @@
                     <button id="sync-trigger" class="btn btn-primary">Sync now</button>
                 </div>
                 <p id="sync-status-line" class="hint" hidden></p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: Google Drive folder picker (multi-select) -->
+    <div id="gd-pick-backdrop" class="modal-backdrop" hidden>
+        <div class="modal modal-wide">
+            <div class="modal-header">
+                <h3>Pick Google Drive folders</h3>
+                <button id="gd-pick-close" class="btn-text">×</button>
+            </div>
+            <div class="modal-body">
+                <label class="check-row"><input type="checkbox" id="gd-pick-all"> Select all</label>
+                <div id="gd-pick-list" style="max-height:50vh;overflow-y:auto;border:1px solid var(--border, #ddd);border-radius:4px;padding:8px;margin-top:8px;"></div>
+                <div class="actions actions-right">
+                    <button id="gd-pick-cancel" class="btn btn-secondary">Cancel</button>
+                    <button id="gd-pick-ok" class="btn btn-primary">Use selection</button>
+                </div>
             </div>
         </div>
     </div>

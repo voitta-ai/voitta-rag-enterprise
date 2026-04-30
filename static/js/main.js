@@ -769,7 +769,7 @@ function openSyncModal() {
     $("#sync-gd-client-id").value = "";
     $("#sync-gd-client-secret").value = "";
     $("#sync-gd-client-secret").placeholder = "GOCSPX-…";
-    $("#sync-gd-folder-id").value = "";
+    setGdFolders([]);
     $("#sync-gd-sa-json").value = "";
     $("#sync-gd-sa-json").placeholder = '{"type":"service_account","client_email":"…","private_key":"…"}';
     setGdConnState({ connected: false, hasClientSecret: false });
@@ -785,6 +785,27 @@ function setSyncType(t) {
         // copy-paste it verbatim into "Authorized redirect URIs".
         const hint = $("#sync-gd-redirect-hint");
         if (hint) hint.textContent = `${window.location.origin}/api/sync/oauth/google/callback`;
+    }
+}
+
+// Mirror of the user's current selection in the GD picker; flushed to the
+// form on every set. Keeps the rendered list and the form-config call in
+// sync without parsing the DOM at submit time.
+let gdFolders = [];
+
+function setGdFolders(folders) {
+    gdFolders = (folders || []).map((f) => ({ id: String(f.id || ""), name: String(f.name || "") }));
+    const ul = $("#sync-gd-folders-list");
+    ul.innerHTML = "";
+    if (gdFolders.length === 0) {
+        $("#sync-gd-folder-count").textContent = "none selected";
+    } else {
+        $("#sync-gd-folder-count").textContent = `${gdFolders.length} folder${gdFolders.length === 1 ? "" : "s"} selected`;
+        for (const f of gdFolders) {
+            const li = document.createElement("li");
+            li.textContent = f.name ? `${f.name}` : f.id;
+            ul.append(li);
+        }
     }
 }
 
@@ -846,7 +867,7 @@ async function loadSyncSource() {
         } else if (src.source_type === "google_drive" && src.google_drive) {
             const gd = src.google_drive;
             $("#sync-gd-client-id").value = gd.client_id || "";
-            $("#sync-gd-folder-id").value = gd.folder_id || "";
+            setGdFolders(gd.folders || []);
             $("#sync-gd-client-secret").placeholder = gd.has_client_secret ? "(saved — type to replace)" : "GOCSPX-…";
             $("#sync-gd-sa-json").placeholder = gd.has_service_account ? "(service account JSON saved — paste a new one to replace)" : '{"type":"service_account","client_email":"…","private_key":"…"}';
             setGdConnState({ connected: gd.connected, hasClientSecret: gd.has_client_secret });
@@ -895,7 +916,7 @@ function gdFormConfig() {
     return {
         client_id: $("#sync-gd-client-id").value.trim(),
         client_secret: $("#sync-gd-client-secret").value,  // not trimmed — preserve
-        folder_id: $("#sync-gd-folder-id").value.trim(),
+        folders: gdFolders,
         service_account_json: $("#sync-gd-sa-json").value, // not trimmed — preserve
     };
 }
@@ -1032,15 +1053,15 @@ $("#sync-gd-connect").addEventListener("click", async () => {
 $("#sync-gd-pick-folder").addEventListener("click", async () => {
     try {
         const data = await api.gdListFolders(syncFolderId);
-        const id = await pickGdFolder(data);
-        if (id) $("#sync-gd-folder-id").value = id;
+        await openGdPicker(data);
     } catch (err) {
         alert(err.message);
     }
 });
 
-function pickGdFolder(data) {
-    // Lightweight prompt-based picker — one line per option, group-prefixed.
+// ----- Google Drive folder-picker modal -----
+
+function openGdPicker(data) {
     const all = [
         ...data.folders.map((f) => ({ ...f, group: "My Drive" })),
         ...data.shared_folders.map((f) => ({ ...f, group: "Shared with me" })),
@@ -1048,18 +1069,75 @@ function pickGdFolder(data) {
     ];
     if (all.length === 0) {
         alert("No Drive folders found.");
-        return null;
+        return;
     }
-    const labels = all.map((f, i) => `${i + 1}. [${f.group}] ${f.name}`).join("\n");
-    const ans = prompt(`Pick a folder by number:\n\n${labels}`);
-    if (!ans) return null;
-    const idx = parseInt(ans, 10) - 1;
-    if (Number.isNaN(idx) || idx < 0 || idx >= all.length) {
-        alert("Invalid selection.");
-        return null;
+    const list = $("#gd-pick-list");
+    list.innerHTML = "";
+    const preselected = new Set(gdFolders.map((f) => f.id));
+
+    // Group rows under a section heading so the user can scan visually.
+    const groups = ["My Drive", "Shared with me", "Shared drives"];
+    for (const group of groups) {
+        const items = all.filter((f) => f.group === group);
+        if (items.length === 0) continue;
+        const header = document.createElement("div");
+        header.style.cssText = "font-weight:600;margin:6px 0 2px;color:var(--muted, #666);font-size:12px;text-transform:uppercase;";
+        header.textContent = group;
+        list.append(header);
+        for (const f of items) {
+            const row = document.createElement("label");
+            row.className = "check-row";
+            row.style.cssText = "display:flex;gap:8px;align-items:center;padding:2px 0;";
+            const cb = document.createElement("input");
+            cb.type = "checkbox";
+            cb.dataset.id = f.id;
+            cb.dataset.name = f.name;
+            cb.checked = preselected.has(f.id);
+            const span = document.createElement("span");
+            span.textContent = f.name;
+            row.append(cb, span);
+            list.append(row);
+        }
     }
-    return all[idx].id;
+    refreshGdPickAllState();
+    $("#gd-pick-backdrop").hidden = false;
 }
+
+function refreshGdPickAllState() {
+    const boxes = $("#gd-pick-list").querySelectorAll('input[type="checkbox"]');
+    const all = $("#gd-pick-all");
+    if (boxes.length === 0) { all.checked = false; all.indeterminate = false; return; }
+    let on = 0;
+    boxes.forEach((b) => { if (b.checked) on += 1; });
+    all.checked = on === boxes.length;
+    all.indeterminate = on > 0 && on < boxes.length;
+}
+
+$("#gd-pick-list").addEventListener("change", refreshGdPickAllState);
+
+$("#gd-pick-all").addEventListener("change", () => {
+    const on = $("#gd-pick-all").checked;
+    $("#gd-pick-list").querySelectorAll('input[type="checkbox"]').forEach((b) => { b.checked = on; });
+});
+
+function closeGdPicker() {
+    $("#gd-pick-backdrop").hidden = true;
+}
+
+$("#gd-pick-close").addEventListener("click", closeGdPicker);
+$("#gd-pick-cancel").addEventListener("click", closeGdPicker);
+$("#gd-pick-backdrop").addEventListener("click", (e) => {
+    if (e.target.id === "gd-pick-backdrop") closeGdPicker();
+});
+
+$("#gd-pick-ok").addEventListener("click", () => {
+    const picked = [];
+    $("#gd-pick-list").querySelectorAll('input[type="checkbox"]:checked').forEach((b) => {
+        picked.push({ id: b.dataset.id, name: b.dataset.name });
+    });
+    setGdFolders(picked);
+    closeGdPicker();
+});
 
 $("#sync-delete").addEventListener("click", async () => {
     if (!confirm("Remove the sync configuration?\n\nFiles already on disk will not be deleted.")) return;

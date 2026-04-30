@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from collections.abc import Callable
 from contextlib import suppress
@@ -91,6 +92,61 @@ EXPORT_MAP: dict[str, tuple[str, str]] = {
 # without touching the Docs API again.
 FINGERPRINT_PREFIX = "<!--voitta-fingerprint:"
 FINGERPRINT_SUFFIX = "-->"
+
+_SAFE_NAME_RE = re.compile(r"[<>:\"/\\|?*\x00-\x1f]")
+
+
+def _safe_folder_name(name: str, fallback: str = "drive") -> str:
+    """Sanitize a Drive folder name for use as a local directory component."""
+    out = _SAFE_NAME_RE.sub("-", name).strip().strip(".")
+    out = re.sub(r"\s+", " ", out)
+    out = re.sub(r"-{2,}", "-", out)
+    return out[:80] or fallback
+
+
+def coerce_folders_field(raw: str | None) -> list[dict[str, str]]:
+    """Decode the JSON array stored in ``folder_sync_sources.gd_folder_id``.
+
+    Accepts three on-disk shapes for backwards compatibility:
+
+    * ``None`` / empty → ``[]``
+    * Legacy plain-string folder ID → wrapped as ``[{"id": <s>, "name": ""}]``
+    * JSON array of ``{"id": str, "name": str}`` objects → returned as-is
+
+    Older single-folder rows persisted before multi-folder support landed
+    fall through the second branch and keep working.
+    """
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return [{"id": raw, "name": ""}]
+    if isinstance(parsed, list):
+        out: list[dict[str, str]] = []
+        for entry in parsed:
+            if isinstance(entry, dict) and "id" in entry:
+                out.append(
+                    {
+                        "id": str(entry["id"]),
+                        "name": str(entry.get("name") or ""),
+                    }
+                )
+        return out
+    if isinstance(parsed, str):
+        return [{"id": parsed, "name": ""}]
+    return []
+
+
+def encode_folders_field(folders: list[dict[str, str]] | None) -> str | None:
+    if not folders:
+        return None
+    cleaned = [
+        {"id": str(f["id"]), "name": str(f.get("name") or "")}
+        for f in folders
+        if isinstance(f, dict) and f.get("id")
+    ]
+    return json.dumps(cleaned) if cleaned else None
 
 
 # ---------------------------------------------------------------------------
@@ -287,15 +343,17 @@ class GoogleDriveConnector:
         *,
         folder_root: Path,
         auth: GoogleDriveAuth,
-        drive_folder_id: str,
+        drive_folders: list[dict[str, str]],
     ) -> GoogleDriveSyncStats:
         if not auth.configured:
             raise RuntimeError(
                 "Google Drive not connected. Open the folder's sync settings "
                 "and click Connect, or supply a service-account JSON."
             )
-        if not drive_folder_id:
-            raise RuntimeError("drive_folder_id is required")
+        if not drive_folders:
+            raise RuntimeError(
+                "No Drive folders selected. Click Pick to choose at least one."
+            )
 
         folder_root = folder_root.expanduser().resolve()
         folder_root.mkdir(parents=True, exist_ok=True)
@@ -304,7 +362,7 @@ class GoogleDriveConnector:
             self._sync_sync,
             folder_root=folder_root,
             auth=auth,
-            drive_folder_id=drive_folder_id,
+            drive_folders=drive_folders,
         )
 
     # -- service plumbing ---------------------------------------------------
@@ -361,18 +419,39 @@ class GoogleDriveConnector:
         *,
         folder_root: Path,
         auth: GoogleDriveAuth,
-        drive_folder_id: str,
+        drive_folders: list[dict[str, str]],
     ) -> GoogleDriveSyncStats:
         access_token = self._sync_access_token(auth) if auth.refresh_token else None
         drive, docs = self._build_services(auth, access_token)
 
         stats = GoogleDriveSyncStats()
         entries: list[_RemoteEntry] = []
-        try:
-            self._enumerate(drive, docs, drive_folder_id, "", entries, stats)
-        except Exception as e:
-            logger.exception("Drive enumeration failed")
-            stats.errors.append(f"list: {e}")
+        # Each picked Drive folder is mirrored under its own subdirectory so
+        # multi-folder syncs can't collide on same-named children. The
+        # subdirectory is the folder's display name when we have one (set by
+        # the picker UI), with a stable fallback when it's missing — rare
+        # legacy single-folder rows where only the ID was stored.
+        used_dirs: set[str] = set()
+        for folder in drive_folders:
+            folder_id = folder["id"]
+            display = folder.get("name") or ""
+            base = _safe_folder_name(display) if display else f"drive-{folder_id[:8]}"
+            # Disambiguate if two picked folders sanitise to the same dir.
+            unique = base
+            n = 2
+            while unique in used_dirs:
+                unique = f"{base}-{n}"
+                n += 1
+            used_dirs.add(unique)
+            try:
+                self._enumerate(drive, docs, folder_id, unique, entries, stats)
+            except Exception as e:
+                logger.exception("Drive enumeration failed for %s", folder_id)
+                stats.errors.append(f"list {display or folder_id}: {e}")
+
+        if stats.errors and not entries:
+            # Every selected folder failed to enumerate — bail before we
+            # delete every local file as "not on remote".
             return stats
 
         expected_paths: set[str] = {e.rel_path for e in entries}

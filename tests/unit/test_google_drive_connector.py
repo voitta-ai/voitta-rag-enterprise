@@ -13,16 +13,14 @@ from typing import Any
 
 import pytest
 
-from voitta_image_rag.services.sync import google_drive
 from voitta_image_rag.services.sync.google_drive import (
-    GoogleDriveAuth,
-    GoogleDriveConnector,
     NATIVE_DOC,
     NATIVE_FOLDER,
     NATIVE_SHEET,
     NATIVE_SLIDES,
+    GoogleDriveAuth,
+    GoogleDriveConnector,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fakes
@@ -37,17 +35,17 @@ class _FakeFiles:
         self._export_payloads = export_payloads
         self._download_payloads = download_payloads
 
-    def list(self, **kwargs):  # noqa: ANN001
+    def list(self, **kwargs):
         q = kwargs["q"]
         # q looks like: "'<folder_id>' in parents and trashed=false"
         folder_id = q.split("'")[1]
         files = self._listings.get(folder_id, [])
         return _FakeRequest({"files": files})
 
-    def export_media(self, *, fileId: str, mimeType: str):  # noqa: N803
+    def export_media(self, *, fileId: str, mimeType: str):
         return _FakeMediaRequest(self._export_payloads[fileId])
 
-    def get_media(self, *, fileId: str, supportsAllDrives: bool = True):  # noqa: N803
+    def get_media(self, *, fileId: str, supportsAllDrives: bool = True):
         return _FakeMediaRequest(self._download_payloads[fileId])
 
 
@@ -87,7 +85,7 @@ class _FakeDocs:
     def documents(self):
         return self
 
-    def get(self, *, documentId: str, includeTabsContent: bool):  # noqa: N803
+    def get(self, *, documentId: str, includeTabsContent: bool):
         return _FakeRequest(self._docs[documentId])
 
 
@@ -176,16 +174,16 @@ async def test_native_types_export_to_expected_extensions(
     stats = await connector.sync(
         folder_root=tmp_path / "root",
         auth=_make_auth(),
-        drive_folder_id="ROOT",
+        drive_folders=[{"id": "ROOT", "name": "Root"}],
     )
     assert stats.errors == []
     root = (tmp_path / "root").resolve()
-    assert (root / "Q4.xlsx").read_bytes() == b"xlsx-bytes"
-    assert (root / "Pitch.pptx").read_bytes() == b"pptx-bytes"
+    assert (root / "Root" / "Q4.xlsx").read_bytes() == b"xlsx-bytes"
+    assert (root / "Root" / "Pitch.pptx").read_bytes() == b"pptx-bytes"
     sidecar = json.loads((root / ".voitta_sources.json").read_text())
-    assert sidecar["Q4.xlsx"]["url"] == "https://docs.google.com/spreadsheets/d/sheet1/edit"
+    assert sidecar["Root/Q4.xlsx"]["url"] == "https://docs.google.com/spreadsheets/d/sheet1/edit"
     # Non-tab files don't carry a `tab` key.
-    assert "tab" not in sidecar["Q4.xlsx"]
+    assert "tab" not in sidecar["Root/Q4.xlsx"]
 
 
 @pytest.mark.asyncio
@@ -251,14 +249,14 @@ async def test_multi_tab_doc_writes_one_md_per_tab(
     stats = await connector.sync(
         folder_root=tmp_path / "root",
         auth=_make_auth(),
-        drive_folder_id="ROOT",
+        drive_folders=[{"id": "ROOT", "name": "Root"}],
     )
     assert stats.errors == []
     assert stats.tabs_written == 2
 
     root = (tmp_path / "root").resolve()
-    intro = root / "Specs" / "01-Intro.md"
-    api = root / "Specs" / "02-API.md"
+    intro = root / "Root" / "Specs" / "01-Intro.md"
+    api = root / "Root" / "Specs" / "02-API.md"
     assert intro.exists() and api.exists()
     assert "hello" in intro.read_text()
     assert "endpoints" in api.read_text()
@@ -266,11 +264,11 @@ async def test_multi_tab_doc_writes_one_md_per_tab(
     assert intro.read_text().splitlines()[0].startswith("<!--voitta-fingerprint:")
 
     sidecar = json.loads((root / ".voitta_sources.json").read_text())
-    assert sidecar["Specs/01-Intro.md"]["tab"] == "Intro"
-    assert sidecar["Specs/02-API.md"]["tab"] == "API"
+    assert sidecar["Root/Specs/01-Intro.md"]["tab"] == "Intro"
+    assert sidecar["Root/Specs/02-API.md"]["tab"] == "API"
     # URL deep-links into the right tab.
-    assert "tab=t.intro" in sidecar["Specs/01-Intro.md"]["url"]
-    assert "tab=t.api" in sidecar["Specs/02-API.md"]["url"]
+    assert "tab=t.intro" in sidecar["Root/Specs/01-Intro.md"]["url"]
+    assert "tab=t.api" in sidecar["Root/Specs/02-API.md"]["url"]
 
 
 @pytest.mark.asyncio
@@ -303,12 +301,12 @@ async def test_doc_without_tabs_falls_back_to_docx_export(
     stats = await connector.sync(
         folder_root=tmp_path / "root",
         auth=_make_auth(),
-        drive_folder_id="ROOT",
+        drive_folders=[{"id": "ROOT", "name": "Root"}],
     )
     assert stats.errors == []
     assert stats.tabs_written == 0
     root = (tmp_path / "root").resolve()
-    assert (root / "Plain.docx").read_bytes() == b"docx-bytes"
+    assert (root / "Root" / "Plain.docx").read_bytes() == b"docx-bytes"
 
 
 @pytest.mark.asyncio
@@ -349,13 +347,13 @@ async def test_subfolder_recursion(
     stats = await connector.sync(
         folder_root=tmp_path / "root",
         auth=_make_auth(),
-        drive_folder_id="ROOT",
+        drive_folders=[{"id": "ROOT", "name": "Root"}],
     )
     assert stats.errors == []
     root = (tmp_path / "root").resolve()
-    assert (root / "child" / "note.txt").read_bytes() == b"hello"
+    assert (root / "Root" / "child" / "note.txt").read_bytes() == b"hello"
     sidecar = json.loads((root / ".voitta_sources.json").read_text())
-    assert sidecar["child/note.txt"]["url"] == "https://drive.google.com/file/d/f1/view"
+    assert sidecar["Root/child/note.txt"]["url"] == "https://drive.google.com/file/d/f1/view"
 
 
 @pytest.mark.asyncio
@@ -391,15 +389,15 @@ async def test_unsupported_native_type_is_skipped(
     connector = GoogleDriveConnector()
     _patch_services(connector, drive, _FakeDocs({}), monkeypatch)
 
-    stats = await connector.sync(
+    await connector.sync(
         folder_root=tmp_path / "root",
         auth=_make_auth(),
-        drive_folder_id="ROOT",
+        drive_folders=[{"id": "ROOT", "name": "Root"}],
     )
     root = (tmp_path / "root").resolve()
-    assert (root / "kept.bin").exists()
+    assert (root / "Root" / "kept.bin").exists()
     # The form should not have produced any local file.
-    assert not list(root.glob("Survey*"))
+    assert not list(root.rglob("Survey*"))
 
 
 @pytest.mark.asyncio
@@ -436,8 +434,87 @@ async def test_mirror_deletes_locals_not_on_remote(
     stats = await connector.sync(
         folder_root=root,
         auth=_make_auth(),
-        drive_folder_id="ROOT",
+        drive_folders=[{"id": "ROOT", "name": "Root"}],
     )
     assert stats.files_removed == 1
     assert not stale.exists()
-    assert (root / "kept.bin").exists()
+    assert (root / "Root" / "kept.bin").exists()
+
+
+@pytest.mark.asyncio
+async def test_multiple_folders_each_get_own_subdirectory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two picked folders → two top-level subdirectories, no collisions."""
+    listings = {
+        "A": [
+            {
+                "id": "a1",
+                "name": "shared.bin",
+                "mimeType": "application/octet-stream",
+                "size": "3",
+                "modifiedTime": "2026-01-01T00:00:00Z",
+                "md5Checksum": "x",
+            },
+        ],
+        "B": [
+            # Same filename in a different Drive folder — must NOT collide.
+            {
+                "id": "b1",
+                "name": "shared.bin",
+                "mimeType": "application/octet-stream",
+                "size": "3",
+                "modifiedTime": "2026-01-01T00:00:00Z",
+                "md5Checksum": "y",
+            },
+        ],
+    }
+    drive = _FakeDrive(
+        _FakeFiles(
+            listings,
+            export_payloads={},
+            download_payloads={"a1": b"AAA", "b1": b"BBB"},
+        )
+    )
+    connector = GoogleDriveConnector()
+    _patch_services(connector, drive, _FakeDocs({}), monkeypatch)
+
+    stats = await connector.sync(
+        folder_root=tmp_path / "root",
+        auth=_make_auth(),
+        drive_folders=[
+            {"id": "A", "name": "Project Alpha"},
+            {"id": "B", "name": "Project Beta"},
+        ],
+    )
+    assert stats.errors == []
+    root = (tmp_path / "root").resolve()
+    assert (root / "Project Alpha" / "shared.bin").read_bytes() == b"AAA"
+    assert (root / "Project Beta" / "shared.bin").read_bytes() == b"BBB"
+
+
+def test_coerce_folders_field_handles_legacy_and_new_shapes() -> None:
+    from voitta_image_rag.services.sync.google_drive import (
+        coerce_folders_field,
+        encode_folders_field,
+    )
+
+    # Empty / None → empty list
+    assert coerce_folders_field(None) == []
+    assert coerce_folders_field("") == []
+
+    # Legacy plain-string folder ID → wrapped
+    assert coerce_folders_field("0AB123") == [{"id": "0AB123", "name": ""}]
+
+    # New JSON-array shape round-trips
+    encoded = encode_folders_field(
+        [{"id": "x", "name": "X"}, {"id": "y", "name": "Y"}]
+    )
+    assert coerce_folders_field(encoded) == [
+        {"id": "x", "name": "X"},
+        {"id": "y", "name": "Y"},
+    ]
+
+    # Empty / drop-id entries are filtered on encode
+    assert encode_folders_field([{"id": "", "name": ""}]) is None
+    assert encode_folders_field(None) is None
