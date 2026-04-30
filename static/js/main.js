@@ -307,6 +307,7 @@ function updateToolbarState() {
     const syncBtn = $("#btn-sync");
     if (!(isManaged && isRoot)) {
         syncBtn.hidden = true;
+        syncBtn.disabled = true;
     } else {
         const hasSync = !!folder.has_sync_source;
         const folderFiles = files.get().filter(
@@ -315,8 +316,13 @@ function updateToolbarState() {
         const isEmpty = folderFiles.length === 0;
         if (!hasSync && !isEmpty) {
             syncBtn.hidden = true;
+            syncBtn.disabled = true;
         } else {
+            // The HTML starts with `disabled` so the button doesn't flicker
+            // before the first updateToolbarState — clear it whenever the
+            // button is meant to be usable.
             syncBtn.hidden = false;
+            syncBtn.disabled = false;
             syncBtn.textContent = hasSync ? "🔄 Config" : "🔄 Sync";
             syncBtn.title = hasSync
                 ? "Edit the remote sync configuration for this folder"
