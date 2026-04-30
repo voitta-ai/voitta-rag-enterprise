@@ -175,7 +175,30 @@ def test_reindex_folder_resets_files_and_enqueues_extracts(
     r = client.post(f"/api/folders/{folder_id}/reindex", json={})
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body == {"folder_id": folder_id, "rel_dir": "", "scheduled": 4}
+    assert body["folder_id"] == folder_id
+    assert body["rel_dir"] == ""
+    assert body["scheduled"] == 4
+    assert isinstance(body["job_id"], int)
+
+    # Reindex is async (queued for the worker). The endpoint returns
+    # immediately so we drive the handler directly — exactly what the
+    # worker would do when it dequeues this job.
+    import asyncio
+
+    from voitta_image_rag.services.indexing import run_reindex_folder
+
+    with session_scope() as s:
+        file_ids = [
+            fid
+            for (fid,) in s.execute(
+                select(File.id).where(File.folder_id == folder_id)
+            ).all()
+        ]
+    asyncio.run(
+        run_reindex_folder(
+            {"folder_id": folder_id, "rel_dir": "", "file_ids": file_ids}
+        )
+    )
 
     # Reindex must wipe every chunk row attached to those files.
     with session_scope() as s:
@@ -193,8 +216,7 @@ def test_reindex_folder_resets_files_and_enqueues_extracts(
             assert f.file_cas_id is None
             assert f.state == "pending"
             assert f.error is None
-        # One extract job per file (plus the original ones from registration —
-        # those completed/failed without handlers, so we filter on state).
+        # One extract job per file in queued state.
         live = list(
             s.execute(
                 select(Job).where(
@@ -224,7 +246,33 @@ def test_reindex_subdir_scopes_to_subtree(client: TestClient, tmp_path: Path) ->
 
     r = client.post(f"/api/folders/{folder_id}/reindex", json={"rel_dir": "b"})
     assert r.status_code == 200
-    assert r.json() == {"folder_id": folder_id, "rel_dir": "b", "scheduled": 2}
+    body = r.json()
+    assert body["folder_id"] == folder_id
+    assert body["rel_dir"] == "b"
+    assert body["scheduled"] == 2
+
+    # Drive the queued reindex job through the handler (worker is disabled
+    # in tests via VOITTA_DISABLE_BACKGROUND).
+    import asyncio
+
+    from voitta_image_rag.services.indexing import run_reindex_folder
+
+    with session_scope() as s:
+        # rel_dir="b" → match files under the b/ subtree only.
+        file_ids = [
+            fid
+            for (fid,) in s.execute(
+                select(File.id).where(
+                    File.folder_id == folder_id,
+                    File.rel_path.like("b/%"),
+                )
+            ).all()
+        ]
+    asyncio.run(
+        run_reindex_folder(
+            {"folder_id": folder_id, "rel_dir": "b", "file_ids": file_ids}
+        )
+    )
 
     with session_scope() as s:
         states = {

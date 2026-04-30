@@ -551,6 +551,77 @@ async def run_delete_file(payload: dict) -> None:
     await asyncio.to_thread(_delete_file_sync, file_id)
 
 
+async def run_reindex_folder(payload: dict) -> None:
+    """Worker handler: wipe + reset + re-enqueue every matched file.
+
+    The REST endpoint enqueues this and returns immediately so the request
+    thread isn't blocked behind ``_EXTRACT_LOCK`` waiting for the current
+    extract to finish. Once this handler runs, *we* are the extract worker
+    — no other extract can be in flight, so wipes are uncontended and the
+    state machine transitions cleanly.
+    """
+    file_ids: list[int] = list(payload.get("file_ids") or [])
+    folder_id = payload.get("folder_id")
+    if not file_ids:
+        return
+    with bind_context(folder_id=folder_id):
+        logger.info("reindex begin: %d file(s)", len(file_ids))
+        await asyncio.to_thread(_run_reindex_sync, file_ids)
+        logger.info("reindex done: %d file(s)", len(file_ids))
+
+
+def _run_reindex_sync(file_ids: list[int]) -> None:
+    """Synchronous body of run_reindex_folder. Runs in the worker thread."""
+    # Cancel any queued extract jobs for these files. Without this, a
+    # queued extract from before reindex would run on the now-wiped file
+    # using stale assumptions about what's there. With dedup_key our
+    # follow-up enqueue would return the OLD job id and never schedule a
+    # fresh one — so we cancel first, then enqueue fresh.
+    cancelled = 0
+    with session_scope() as s:
+        for fid in file_ids:
+            q = s.execute(
+                select(Job).where(
+                    Job.state == "queued",
+                    Job.kind == "extract",
+                    Job.dedup_key == f"extract:{fid}",
+                )
+            ).scalars()
+            for j in q:
+                j.state = "done"
+                j.error = "superseded by reindex"
+                j.finished_at = int(time.time())
+                cancelled += 1
+    if cancelled:
+        logger.info("reindex: cancelled %d stale extract job(s)", cancelled)
+
+    # Wipe + reset + enqueue, one file at a time. wipe_file_data's
+    # _EXTRACT_LOCK is uncontended here — we're the only extract worker
+    # and we're not running an extract right now.
+    upserts: list[int] = []
+    for fid in file_ids:
+        try:
+            wipe_file_data(fid)
+        except Exception:
+            logger.exception("reindex: wipe failed for file_id=%d", fid)
+            continue
+        with session_scope() as s:
+            f = s.get(File, fid)
+            if f is None:
+                continue
+            f.file_cas_id = None
+            f.state = "pending"
+            f.error = None
+            f.pending_embeds = 0
+            job_queue.enqueue(
+                s, "extract", {"file_id": fid}, dedup_key=f"extract:{fid}"
+            )
+            upserts.append(fid)
+
+    for fid in upserts:
+        _publish_file_upserted(fid)
+
+
 def _embed_text_sync(file_id: int, round_token: int | None = None) -> None:
     from . import vector_store
     from .acl import allowed_user_ids_for_file
@@ -1028,4 +1099,5 @@ HANDLERS = {
     "embed_image": run_embed_image,
     "delete_file": run_delete_file,
     "sync": run_sync,
+    "reindex_folder": run_reindex_folder,
 }

@@ -13,7 +13,6 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ...config import get_settings
-from ...db.database import session_scope
 from ...db.models import Chunk, File, Folder, FolderSyncSource, Image
 from ...services import events, job_queue
 from ...services.acl import (
@@ -517,6 +516,7 @@ class ReindexOut(BaseModel):
     folder_id: int
     rel_dir: str
     scheduled: int
+    job_id: int
 
 
 @router.post("/{folder_id}/reindex", response_model=ReindexOut)
@@ -528,15 +528,18 @@ def reindex_folder(
 ) -> ReindexOut:
     """Hard-reindex every file under a folder (or a subdirectory of it).
 
-    Wipes ALL existing data for the matched files — chunks, images,
-    ChunkImageLinks, CAS refcounts, and Qdrant chunk + image points — so
-    the folder's chunk / image counts drop to zero immediately and stale
-    artifacts can't leak into search until the re-extract finishes.
+    Returns immediately after enqueuing a single ``reindex_folder`` job at
+    high priority. The worker picks it up after its current job finishes
+    (one file, max), then wipes every matched file's chunks / images /
+    CAS refs / Qdrant points, resets the file rows to
+    ``state='pending', file_cas_id=NULL``, and enqueues fresh extracts.
 
-    Then resets each file row to ``state='pending', file_cas_id=NULL`` and
-    enqueues a fresh extract. The watcher's unchanged-SHA short-circuit is
-    bypassed via the blanked CAS id, so files re-extract even if the bytes
-    haven't changed.
+    Doing the wipe in the worker (instead of in this request thread) means
+    we don't fight ``_EXTRACT_LOCK`` against an in-flight extract — by the
+    time the handler runs, *we* are the extract worker, so wipes are
+    uncontended. Pre-redesign this endpoint blocked under the lock for
+    the duration of the running extract, with the browser timing out and
+    the user seeing nothing happen.
     """
     folder = db.get(Folder, folder_id)
     if folder is None or not user_can_see_folder(db, folder_id, user.id):
@@ -550,51 +553,30 @@ def reindex_folder(
             status.HTTP_400_BAD_REQUEST, f"Invalid rel_dir: {body.rel_dir!r}"
         )
 
-    q = select(File).where(File.folder_id == folder_id, File.state != "deleted")
+    q = select(File.id).where(File.folder_id == folder_id, File.state != "deleted")
     if rel_dir:
-        # SQLite LIKE is case-sensitive when the operand is BLOB-like; rel_path
-        # is TEXT, so a literal prefix works. We escape ``%``/``_`` in the
-        # caller-supplied dir name to keep the match exact.
         like_prefix = (
             rel_dir.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             + "/%"
         )
         q = q.where(File.rel_path.like(like_prefix, escape="\\"))
 
-    from ...services.indexing import wipe_file_data
-
-    candidates = list(db.execute(q).scalars())
-    candidate_ids = [f.id for f in candidates]
-    # We must release this session before wipe_file_data runs — wipe_file_data
-    # opens its own session_scope and we don't want to hold a writer lock on
-    # the candidates while it does. Stash what we need and reload after.
+    file_ids = [fid for (fid,) in db.execute(q).all()]
+    job_id = job_queue.enqueue(
+        db,
+        "reindex_folder",
+        {"folder_id": folder_id, "rel_dir": rel_dir, "file_ids": file_ids},
+        dedup_key=f"reindex:{folder_id}:{rel_dir}",
+        priority=100,  # ahead of routine extracts so wipe runs ASAP
+    )
     db.commit()
 
-    for fid in candidate_ids:
-        wipe_file_data(fid)
-
-    scheduled = 0
-    upserts: list[dict] = []
-    with session_scope() as s2:
-        for fid in candidate_ids:
-            f = s2.get(File, fid)
-            if f is None:  # gone mid-flight, skip
-                continue
-            f.file_cas_id = None  # force re-extract regardless of SHA
-            f.state = "pending"
-            f.error = None
-            f.pending_embeds = 0
-            # ``_commit_indexing`` bumps embed_round on the next extract.
-            job_queue.enqueue(
-                s2, "extract", {"file_id": fid}, dedup_key=f"extract:{fid}"
-            )
-            scheduled += 1
-            upserts.append(_to_file_out(f).model_dump())
-
-    for payload in upserts:
-        events.publish("files", {"type": "file.upserted", "file": payload})
-
-    return ReindexOut(folder_id=folder_id, rel_dir=rel_dir, scheduled=scheduled)
+    return ReindexOut(
+        folder_id=folder_id,
+        rel_dir=rel_dir,
+        scheduled=len(file_ids),
+        job_id=job_id,
+    )
 
 
 @router.delete("/{folder_id}", status_code=status.HTTP_204_NO_CONTENT)
