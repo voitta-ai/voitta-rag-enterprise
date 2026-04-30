@@ -441,12 +441,23 @@ class GdAuthInitOut(BaseModel):
 
 
 def _oauth_redirect_uri(request: Request) -> str:
-    """Mirror the user's actual base URL — works behind a reverse proxy
-    (uses the ``Forwarded`` / ``X-Forwarded-*`` headers FastAPI normalises
-    into ``request.base_url``).
+    """Build the redirect URI the way Google's consent screen will see it.
+
+    ``request.base_url`` reflects what the ASGI server received on the wire,
+    which is plain HTTP when a reverse proxy (Cloudflare, Caddy, nginx)
+    terminates TLS in front of the app. Google then rejects the code-
+    exchange with ``redirect_uri_mismatch`` because the value we registered
+    is ``https://…``. Read ``X-Forwarded-Proto`` and ``X-Forwarded-Host``
+    ourselves so this works without requiring uvicorn to be launched with
+    ``--proxy-headers``.
+
+    Falls back to ``request.url`` for the localhost / no-proxy case.
     """
-    base = str(request.base_url).rstrip("/")
-    return f"{base}/api/sync/oauth/google/callback"
+    fwd_proto = request.headers.get("x-forwarded-proto", "").split(",")[0].strip()
+    fwd_host = request.headers.get("x-forwarded-host", "").split(",")[0].strip()
+    proto = fwd_proto or request.url.scheme
+    host = fwd_host or request.url.netloc
+    return f"{proto}://{host}/api/sync/oauth/google/callback"
 
 
 @router.post("/google-drive/auth", response_model=GdAuthInitOut)
