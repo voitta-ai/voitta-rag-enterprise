@@ -13,6 +13,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ...config import get_settings
+from ...db.database import session_scope
 from ...db.models import Chunk, File, Folder, FolderSyncSource, Image
 from ...services import events, job_queue
 from ...services.acl import (
@@ -527,13 +528,15 @@ def reindex_folder(
 ) -> ReindexOut:
     """Hard-reindex every file under a folder (or a subdirectory of it).
 
-    Bypasses the unchanged-SHA short-circuit in ``_run_extract_sync`` by
-    blanking ``file_cas_id`` before enqueuing — useful after the parser is
-    upgraded and the existing markdown is no longer the best representation.
+    Wipes ALL existing data for the matched files — chunks, images,
+    ChunkImageLinks, CAS refcounts, and Qdrant chunk + image points — so
+    the folder's chunk / image counts drop to zero immediately and stale
+    artifacts can't leak into search until the re-extract finishes.
 
-    The current files are kept, but their state is reset to ``pending`` so
-    the UI immediately reflects that work is in flight; ``_commit_indexing``
-    bumps ``embed_round`` and resets ``pending_embeds`` when extract runs.
+    Then resets each file row to ``state='pending', file_cas_id=NULL`` and
+    enqueues a fresh extract. The watcher's unchanged-SHA short-circuit is
+    bypassed via the blanked CAS id, so files re-extract even if the bytes
+    haven't changed.
     """
     folder = db.get(Folder, folder_id)
     if folder is None or not user_can_see_folder(db, folder_id, user.id):
@@ -558,29 +561,38 @@ def reindex_folder(
         )
         q = q.where(File.rel_path.like(like_prefix, escape="\\"))
 
+    from ...services.indexing import wipe_file_data
+
     candidates = list(db.execute(q).scalars())
-    scheduled = 0
-    for f in candidates:
-        f.file_cas_id = None  # force re-extract regardless of SHA
-        f.state = "pending"
-        f.error = None
-        # We deliberately leave ``pending_embeds`` and ``embed_round`` alone;
-        # ``_commit_indexing`` bumps the round and resets the counter when the
-        # extract job runs, and any stale embeds short-circuit on round.
-        job_queue.enqueue(
-            db, "extract", {"file_id": f.id}, dedup_key=f"extract:{f.id}"
-        )
-        scheduled += 1
+    candidate_ids = [f.id for f in candidates]
+    # We must release this session before wipe_file_data runs — wipe_file_data
+    # opens its own session_scope and we don't want to hold a writer lock on
+    # the candidates while it does. Stash what we need and reload after.
     db.commit()
 
-    for f in candidates:
-        events.publish(
-            "files",
-            {
-                "type": "file.upserted",
-                "file": _to_file_out(f).model_dump(),
-            },
-        )
+    for fid in candidate_ids:
+        wipe_file_data(fid)
+
+    scheduled = 0
+    upserts: list[dict] = []
+    with session_scope() as s2:
+        for fid in candidate_ids:
+            f = s2.get(File, fid)
+            if f is None:  # gone mid-flight, skip
+                continue
+            f.file_cas_id = None  # force re-extract regardless of SHA
+            f.state = "pending"
+            f.error = None
+            f.pending_embeds = 0
+            # ``_commit_indexing`` bumps embed_round on the next extract.
+            job_queue.enqueue(
+                s2, "extract", {"file_id": fid}, dedup_key=f"extract:{fid}"
+            )
+            scheduled += 1
+            upserts.append(_to_file_out(f).model_dump())
+
+    for payload in upserts:
+        events.publish("files", {"type": "file.upserted", "file": payload})
 
     return ReindexOut(folder_id=folder_id, rel_dir=rel_dir, scheduled=scheduled)
 

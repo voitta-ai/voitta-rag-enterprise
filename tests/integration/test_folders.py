@@ -140,22 +140,49 @@ def test_reindex_folder_resets_files_and_enqueues_extracts(
     _seed(src, {"a.txt": "a", "b/c.txt": "c", "b/d.txt": "d", "e.txt": "e"})
     folder_id = client.post("/api/folders", json={"path": str(src)}).json()["id"]
 
-    # Pretend everything has already been indexed once: SHA set, state=indexed.
+    # Pretend everything has already been indexed once: SHA set, state=indexed,
+    # plus some chunks attached so we can verify reindex wipes them.
     from sqlalchemy import select
 
     from voitta_image_rag.db.database import session_scope
-    from voitta_image_rag.db.models import File, Job
+    from voitta_image_rag.db.models import Chunk, File, Job
 
     with session_scope() as s:
         for f in s.execute(select(File).where(File.folder_id == folder_id)).scalars():
             f.file_cas_id = "deadbeef" * 8
             f.state = "indexed"
             f.error = None
+            for i in range(3):
+                s.add(
+                    Chunk(
+                        file_id=f.id,
+                        chunk_index=i,
+                        chunk_hash=f"hash_{f.id}_{i}",
+                        text=f"chunk {i}",
+                        char_start=0,
+                        char_end=10,
+                        created_at=0,
+                    )
+                )
+
+    # Sanity: chunks are there before reindex.
+    with session_scope() as s:
+        before = s.execute(select(Chunk).where(Chunk.file_id.in_(
+            [r[0] for r in s.execute(select(File.id).where(File.folder_id == folder_id)).all()]
+        ))).scalars().all()
+        assert len(before) == 12  # 4 files * 3 chunks
 
     r = client.post(f"/api/folders/{folder_id}/reindex", json={})
     assert r.status_code == 200, r.text
     body = r.json()
     assert body == {"folder_id": folder_id, "rel_dir": "", "scheduled": 4}
+
+    # Reindex must wipe every chunk row attached to those files.
+    with session_scope() as s:
+        after = s.execute(select(Chunk).where(Chunk.file_id.in_(
+            [r[0] for r in s.execute(select(File.id).where(File.folder_id == folder_id)).all()]
+        ))).scalars().all()
+        assert after == [], f"reindex left {len(after)} chunk(s) behind"
 
     with session_scope() as s:
         files = list(

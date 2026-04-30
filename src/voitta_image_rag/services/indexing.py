@@ -696,7 +696,23 @@ def _embed_image_sync(image_id: int, round_token: int | None = None) -> None:
         _decrement_pending_embeds(file_id, round_token)
 
 
-def _delete_file_sync(file_id: int) -> None:
+def wipe_file_data(file_id: int) -> None:
+    """Delete every artifact associated with ``file_id`` *except* the file row.
+
+    Wipes chunks, images, ChunkImageLinks, CAS refcounts, Qdrant chunk points,
+    and removes the file_id from any shared image points (deleting the image
+    point entirely if no other file references it).
+
+    Used by:
+    * ``_delete_file_sync`` — file is gone; we then delete the file row.
+    * ``reindex_folder`` — caller wants the file row to stay (state will be
+      reset to ``pending``) but every downstream artifact must vanish so the
+      stats counts reflect reality and stale Qdrant points don't leak into
+      search results during the re-extract window.
+
+    Caller must commit the session for the SQL deletes to land before the
+    follow-up Qdrant calls (which depend only on file_id).
+    """
     from ..cas import store as cas_store
     from . import vector_store
 
@@ -705,16 +721,33 @@ def _delete_file_sync(file_id: int) -> None:
         if file is None:
             return
         old_sha = file.file_cas_id
-        old_images = list(s.execute(select(Image).where(Image.file_id == file_id)).scalars())
+        old_images = list(
+            s.execute(select(Image).where(Image.file_id == file_id)).scalars()
+        )
         for img in old_images:
             cas_store.decref(s, cas_store.KIND_IMAGE, img.image_cas_id)
         if old_sha is not None:
             cas_store.decref(s, cas_store.KIND_FILE, old_sha)
-        # SQLAlchemy CASCADE on file row will drop chunks/images/links.
-        s.delete(file)
+        # Drop chunks / images / links. ChunkImageLink has CASCADE on both
+        # sides so removing chunk or image rows takes the link rows with them.
+        for img in old_images:
+            s.delete(img)
+        for ch in list(
+            s.execute(select(Chunk).where(Chunk.file_id == file_id)).scalars()
+        ):
+            s.delete(ch)
 
     vector_store.delete_chunks_for_file(file_id)
     vector_store.remove_file_from_image_points(file_id)
+
+
+def _delete_file_sync(file_id: int) -> None:
+    """Worker handler: delete the file row plus every artifact under it."""
+    wipe_file_data(file_id)
+    with session_scope() as s:
+        file = s.get(File, file_id)
+        if file is not None:
+            s.delete(file)
     events.publish("files", {"type": "file.deleted", "file_id": file_id})
 
 

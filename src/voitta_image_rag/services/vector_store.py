@@ -298,11 +298,15 @@ def upsert_image_point(point: ImagePoint, file_ids: list[int]) -> None:
 def remove_file_from_image_points(file_id: int) -> list[int]:
     """Drop ``file_id`` from every image point's ``file_ids``; delete points that empty.
 
-    Returns the list of point ids that were deleted.
+    Returns the list of point ids that were deleted. No-op (returns []) if
+    the ``images`` collection has not been created yet — that just means we
+    have nothing to clean up.
     """
 
     def _do() -> list[int]:
         client = get_client()
+        if not client.collection_exists(IMAGES):
+            return []
         res, _ = client.scroll(
             IMAGES,
             scroll_filter=qm.Filter(
@@ -330,6 +334,8 @@ def remove_file_from_image_points(file_id: int) -> list[int]:
 def delete_chunks_for_file(file_id: int) -> None:
     def _do() -> None:
         client = get_client()
+        if not client.collection_exists(CHUNKS):
+            return
         client.delete(
             CHUNKS,
             points_selector=qm.FilterSelector(
