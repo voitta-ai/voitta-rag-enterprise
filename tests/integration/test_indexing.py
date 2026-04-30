@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
-import json
 import time
 from pathlib import Path
 
@@ -77,22 +76,24 @@ def test_extract_text_creates_chunks_and_cas(env: None, tmp_path: Path) -> None:
 
     with session_scope() as s:
         f = s.get(File, file_id)
-        assert f.state == "extracted"
+        # Embeds now run inline within the extract handler so the file
+        # goes pending → indexed in one job, with pending_embeds back to
+        # 0. No embed jobs are enqueued — that whole queue path is gone.
+        assert f.state == "indexed"
         assert f.file_cas_id == hashlib.sha256(text.encode()).hexdigest()
         assert f.last_indexed_at is not None
-        assert f.pending_embeds == 1  # one embed_text, no images
+        assert f.pending_embeds == 0
         chunks = list(s.execute(select(Chunk).where(Chunk.file_id == file_id)).scalars())
         assert len(chunks) >= 1
         assert all(c.text and c.char_start is not None for c in chunks)
         # CAS rooting
         ref = s.get(CasRef, (f.file_cas_id, "file"))
         assert ref is not None and ref.refcount == 1
-        # embed_text job enqueued, stamped with the current embed_round
-        jobs = list(s.execute(select(Job).where(Job.kind == "embed_text")).scalars())
-        assert len(jobs) == 1
-        payload = json.loads(jobs[0].payload)
-        assert payload["file_id"] == file_id
-        assert payload["round"] == f.embed_round
+        # No embed jobs in the queue (they ran inline).
+        embed_jobs = list(
+            s.execute(select(Job).where(Job.kind.in_(("embed_text", "embed_image")))).scalars()
+        )
+        assert embed_jobs == []
 
     assert (cas_store.file_dir(f.file_cas_id) / "text.md").exists()
     assert (cas_store.file_dir(f.file_cas_id) / "manifest.json").exists()
@@ -107,8 +108,9 @@ def test_extract_standalone_image_zero_chunks_one_image(env: None, tmp_path: Pat
 
     with session_scope() as s:
         f = s.get(File, file_id)
-        assert f.state == "extracted"
-        assert f.pending_embeds == 1  # only embed_image, no chunks
+        # Inline embeds drive the file straight to indexed.
+        assert f.state == "indexed"
+        assert f.pending_embeds == 0
         chunks = list(s.execute(select(Chunk).where(Chunk.file_id == file_id)).scalars())
         assert chunks == []
         images = list(s.execute(select(Image).where(Image.file_id == file_id)).scalars())
@@ -118,13 +120,11 @@ def test_extract_standalone_image_zero_chunks_one_image(env: None, tmp_path: Pat
         assert img.mime == "image/png"
         assert img.width == 8 and img.height == 8
         assert img.anchor_chunk is None  # no chunks → no anchor
-        # embed_image enqueued
-        embed_jobs = list(s.execute(select(Job).where(Job.kind == "embed_image")).scalars())
-        assert len(embed_jobs) == 1
-        embed_text_jobs = list(
-            s.execute(select(Job).where(Job.kind == "embed_text")).scalars()
+        # No embed jobs in the queue (they ran inline).
+        embed_jobs = list(
+            s.execute(select(Job).where(Job.kind.in_(("embed_text", "embed_image")))).scalars()
         )
-        assert embed_text_jobs == []
+        assert embed_jobs == []
 
     assert cas_store.image_path(img.image_cas_id).exists()
 
@@ -149,8 +149,8 @@ def test_extract_unchanged_file_is_a_noop(env: None, tmp_path: Path) -> None:
         after_chunk_ids = sorted(c.id for c in after_chunks)
         assert f.file_cas_id == before_sha
         assert after_chunk_ids == before_chunk_ids  # same rows, not deleted-and-re-inserted
-        # No new embed jobs enqueued because the dedup_key is still in flight,
-        # AND no chunk churn either.
+        # Embeds run inline so we never enqueue them; the unchanged-SHA
+        # short-circuit means no chunk churn either.
         assert s.query(Job).count() == before_jobs
 
 

@@ -201,7 +201,7 @@ def _run_extract_inner(file_id: int) -> None:
             )
 
         with _stage("commit_indexing"):
-            _commit_indexing(
+            commit = _commit_indexing(
                 file_id=file_id,
                 new_sha=new_sha,
                 mtime_ns=stat.st_mtime_ns,
@@ -211,6 +211,28 @@ def _run_extract_inner(file_id: int) -> None:
             )
     except Exception:
         _mark_error(file_id, _format_exception("post-parse pipeline failed"))
+        return
+
+    if commit is None:
+        # File row vanished mid-commit — nothing to embed.
+        return
+    round_token, image_ids = commit
+
+    # Run embeds inline. _EXTRACT_LOCK is still held, so this guarantees the
+    # file goes pending → indexed within a single extract job — no other
+    # file can sneak past us into the "extracted" / "embedding" buckets
+    # while we're embedding. Each individual embed still acquires gpu_lock
+    # for the actual GPU forward pass; everything else (DB writes, Qdrant
+    # upserts) is plain sequential I/O.
+    try:
+        if chunks:
+            with _stage("embed_text_inline"):
+                _embed_text_sync(file_id, round_token=round_token)
+        for image_id in image_ids:
+            with _stage("embed_image_inline", image_id=image_id):
+                _embed_image_sync(image_id, round_token=round_token)
+    except Exception:
+        _mark_error(file_id, _format_exception("inline embeds failed"))
         return
 
     elapsed_ms = (time.perf_counter() - extract_started) * 1000
@@ -294,12 +316,26 @@ def _commit_indexing(
     chunks: list[ChunkInfo],
     images: list[tuple[str, object]],  # (sha, ExtractedImage)
     nearby_radius: int,
-) -> None:
+) -> tuple[int, list[int]] | None:
+    """Commit chunks/images for ``file_id`` and return ``(round_token, image_ids)``.
+
+    Embeds are NOT enqueued here — the caller in ``_run_extract_inner`` runs
+    them inline so the entire pipeline (extract + embeds) runs end-to-end
+    within a single extract job, holding ``_EXTRACT_LOCK``. That makes the
+    whole pipeline file-by-file: there is at most one file in
+    ``state='extracted'`` (or ``'embedding'``) at any time across the
+    process. Previously we fanned the embeds out to other workers, which
+    produced "in progress: N" buildup in the UI.
+
+    Returns ``None`` if the file was deleted between scan and commit.
+    """
     now = int(time.time())
+    image_ids: list[int] = []
+    new_round: int | None = None
     with session_scope() as s:
         file = s.get(File, file_id)
         if file is None:
-            return
+            return None
 
         old_sha = file.file_cas_id
 
@@ -375,25 +411,17 @@ def _commit_indexing(
         file.pending_embeds = (1 if chunks else 0) + len(images)
         _committed_file_id = file.id
 
-        # No dedup_key on embed jobs: an in-flight job from a previous round
-        # would otherwise block the new round's job from being enqueued, and
-        # the new round's pending counter would never reach zero. Stale-round
-        # jobs short-circuit cheaply via the embed_round check, so the extra
-        # rows are harmless.
-        if chunks:
-            job_queue.enqueue(
-                s,
-                "embed_text",
-                {"file_id": file_id, "round": new_round},
-            )
-        for image in s.execute(select(Image).where(Image.file_id == file_id)).scalars():
-            job_queue.enqueue(
-                s,
-                "embed_image",
-                {"image_id": image.id, "file_id": file_id, "round": new_round},
-            )
+        image_ids = [
+            iid
+            for (iid,) in s.execute(
+                select(Image.id)
+                .where(Image.file_id == file_id)
+                .order_by(Image.image_index)
+            ).all()
+        ]
 
     _publish_file_upserted(_committed_file_id)
+    return new_round, image_ids
 
 
 async def run_embed_text(payload: dict) -> None:

@@ -11,10 +11,8 @@ from PIL import Image as PILImage
 from sqlalchemy import select
 
 from voitta_image_rag.db.database import init_db, session_scope
-from voitta_image_rag.db.models import File, Image
+from voitta_image_rag.db.models import File
 from voitta_image_rag.services.indexing import (
-    run_embed_image,
-    run_embed_text,
     run_extract,
 )
 
@@ -41,12 +39,10 @@ def _seed(client: TestClient, root: Path, layout: dict[str, bytes | str]) -> int
         ids = [
             f.id for f in s.execute(select(File).where(File.folder_id == folder_id)).scalars()
         ]
+    # run_extract now drives the entire pipeline (extract + embeds inline)
+    # so we don't need to fan out to run_embed_text / run_embed_image here.
     for fid in ids:
         asyncio.run(run_extract({"file_id": fid}))
-        asyncio.run(run_embed_text({"file_id": fid}))
-        with session_scope() as s:
-            for img in s.execute(select(Image).where(Image.file_id == fid)).scalars():
-                asyncio.run(run_embed_image({"image_id": img.id}))
     return folder_id
 
 
@@ -102,11 +98,6 @@ def test_stats_unsupported_files_not_counted_as_error(
         ]
     for fid in ids:
         asyncio.run(run_extract({"file_id": fid}))
-        # only the .md will produce embed jobs
-        with session_scope() as s:
-            f = s.get(File, fid)
-            if f and f.state == "extracted":
-                asyncio.run(run_embed_text({"file_id": fid}))
 
     s = client.get(f"/api/folders/{folder_id}/stats").json()
     assert s["files_total"] == 3
@@ -123,30 +114,31 @@ def test_stats_distinguishes_in_progress_from_pending(
     client: TestClient, tmp_path: Path
 ) -> None:
     """Files past extract but pre-indexed must show as 'in_progress', not as
-    'pending'. Otherwise the sidebar reads 'Pending: N, Chunks: N*5' which
-    contradicts itself when the embed queue is deep."""
+    'pending'. With inline embeds, normal extract goes straight to 'indexed'
+    so the in-progress state is only observable when something external
+    (a manual reembed, a crash mid-pipeline) leaves a file in 'extracted' or
+    'embedding' state. We simulate that by setting the state directly.
+    """
     src = tmp_path / "src"
     src.mkdir()
-    (src / "a.md").write_text("alpha alpha alpha")
-    (src / "b.md").write_text("bravo bravo bravo")
+    (src / "a.md").write_text("alpha")
+    (src / "b.md").write_text("bravo")
     folder_id = client.post("/api/folders", json={"path": str(src)}).json()["id"]
     init_db()
     with session_scope() as s:
-        ids = [
-            f.id
-            for f in s.execute(select(File).where(File.folder_id == folder_id)).scalars()
-        ]
-    # Run extract only — DON'T run embed_text. Files should land in
-    # 'extracted' state with chunks committed and pending_embeds > 0.
-    for fid in ids:
-        asyncio.run(run_extract({"file_id": fid}))
+        files_in_db = list(
+            s.execute(select(File).where(File.folder_id == folder_id)).scalars()
+        )
+        for f in files_in_db:
+            f.state = "extracted"
+            f.pending_embeds = 1
+            f.file_cas_id = "deadbeef" * 8
 
     s = client.get(f"/api/folders/{folder_id}/stats").json()
     assert s["files_total"] == 2
     assert s["files_indexed"] == 0
-    assert s["files_pending"] == 0  # not raw 'pending' anymore
+    assert s["files_pending"] == 0  # not raw 'pending' — those are mid-pipeline
     assert s["files_in_progress"] == 2
-    assert s["chunks_total"] >= 2  # work *did* land
     md = s["by_extension"][".md"]
     assert md["in_progress"] == 2
     assert md["pending"] == 0
