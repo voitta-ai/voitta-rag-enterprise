@@ -30,25 +30,26 @@ logger = logging.getLogger(__name__)
 
 _ERROR_FIELD_MAX = 4000  # cap stored traceback so an error row stays scannable
 
-# Process-wide lock around the entire extract pipeline. Several C libraries
-# we depend on are not fully thread-safe — running them from N worker threads
-# concurrently produced glibc heap corruption in the field ("corrupted
-# double-linked list"). The known offenders:
+# Process-wide lock around the extract pipeline.
 #
-# * PyMuPDF (fitz)     — used by pdf_parser for page count + bucket split,
-#                        and indirectly by MinerU.
-# * cairo (cairosvg)   — used by svg_parser for SVG → PNG rasterization.
-# * Pillow (libjpeg /  — most operations are thread-safe but format-specific
-#   libpng / libwebp)    decoders depend on system library builds.
+# Originally added because PyMuPDF / cairo / some Pillow decoders are not
+# fully thread-safe at the C level and N parallel extracts produced glibc
+# heap corruption. The default worker pool is now size=1 (see
+# settings.resolved_workers), so two workers cannot collide here even
+# without the lock.
 #
-# gpu_lock only covers MinerU's neural net + the GPU embedders, not the C
-# parsing layers around them. Until each of those libraries is verified
-# safe to call from multiple threads (or replaced), we serialize the whole
-# extract handler.
+# The lock is still necessary because ``wipe_file_data`` runs from a REST
+# handler thread (the /reindex endpoint) and must not race with the
+# worker thread mid-extract: the worker reads + replaces image rows for
+# a file, and a concurrent wipe in another thread would either delete
+# stale rows by id (no-op) or leave the new rows in place (the bug
+# users see as "reindex did nothing"). Holding _EXTRACT_LOCK across the
+# wipe waits out any in-flight extract before deleting.
 #
-# Embeds (embed_text / embed_image) are not gated here — they're already
-# serialized on the GPU via gpu_lock and the non-GPU parts are DB / Qdrant
-# network calls that handle concurrency.
+# gpu_lock (services/gpu_lock.py) is a separate, finer-grained lock that
+# also serializes search query embeds against indexing — search runs on
+# the asyncio loop, not the worker, so this is the only thing keeping
+# query and indexing from racing on the GPU.
 _EXTRACT_LOCK = threading.Lock()
 
 

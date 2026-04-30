@@ -118,7 +118,14 @@ def create_app() -> FastAPI:
             watcher.start()
             install_default(watcher)
             handlers = {**DEFAULT_HANDLERS, **INDEXING_HANDLERS}
-            workers = WorkerPool(size=settings.resolved_workers(), handlers=handlers)
+            n_workers = settings.resolved_workers()
+            logger.info(
+                "starting indexer pool with %d worker%s "
+                "(serial extract is the design — set VOITTA_WORKERS to override)",
+                n_workers,
+                "" if n_workers == 1 else "s",
+            )
+            workers = WorkerPool(size=n_workers, handlers=handlers)
             await workers.start()
             app.state.watcher = watcher
             app.state.workers = workers

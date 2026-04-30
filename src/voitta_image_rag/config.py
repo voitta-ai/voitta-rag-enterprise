@@ -45,7 +45,20 @@ class Settings(BaseSettings):
     port: int = 8000
     mcp_port: int = 8001
 
-    # Workers (None → cpu_count at resolve time)
+    # Workers. Hard default = 1.
+    #
+    # Indexing is fundamentally serial: extract holds _EXTRACT_LOCK for the
+    # whole pipeline (PyMuPDF / cairo are not thread-safe at the C level)
+    # and gpu_lock serializes every GPU touch. With multiple workers, N-1
+    # of them spin idle on claim_one() most of the time; the only effect
+    # of a higher count is more memory pressure and the occasional
+    # interleaved sync/delete job. The queue + worker structure is kept
+    # so jobs survive a uvicorn restart and the UI sees progress events;
+    # parallelism in the worker pool itself buys nothing.
+    #
+    # The UI is unaffected: REST/WS run on the asyncio loop, the worker
+    # runs sync code via asyncio.to_thread, and gpu_lock keeps query
+    # embeds from competing with extract.
     workers: int | None = None
 
     # Embedding models + version stamps
@@ -103,9 +116,11 @@ class Settings(BaseSettings):
         return self.qdrant_path or (self.data_dir / "qdrant")
 
     def resolved_workers(self) -> int:
+        # Default to a single worker so indexing is strictly serial; opt
+        # into more by setting VOITTA_WORKERS explicitly.
         if self.workers and self.workers > 0:
             return self.workers
-        return os.cpu_count() or 1
+        return 1
 
     def ignore_globs(self) -> list[str]:
         return [g.strip() for g in self.ignore_patterns.split(",") if g.strip()]
