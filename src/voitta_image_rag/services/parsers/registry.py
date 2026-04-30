@@ -33,6 +33,7 @@ def build_default_registry() -> ParserRegistry:
     from .image_parser import ImageFileParser
     from .pdf_parser import PdfParser
     from .pptx_parser import PptxParser
+    from .svg_parser import SvgParser
     from .text_parser import TextParser
 
     r = ParserRegistry()
@@ -40,6 +41,7 @@ def build_default_registry() -> ParserRegistry:
     r.register(PdfParser())
     r.register(DocxParser())
     r.register(PptxParser())
+    r.register(SvgParser())
     r.register(ImageFileParser())
     return r
 

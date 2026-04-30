@@ -70,8 +70,35 @@ def test_registry_dispatches_by_extension(tmp_path: Path) -> None:
     assert r.find(Path("x.pdf")) is not None
     assert r.find(Path("x.docx")) is not None
     assert r.find(Path("x.pptx")) is not None
+    assert r.find(Path("x.svg")) is not None
     assert r.find(Path("x.xyz")) is None
 
 
 def test_default_registry_is_cached() -> None:
     assert get_default_registry() is get_default_registry()
+
+
+def test_svg_parser_rasterizes_to_png(tmp_path: Path) -> None:
+    pytest = __import__("pytest")
+    cairosvg = pytest.importorskip("cairosvg")
+    del cairosvg  # only used to gate the test
+    from voitta_image_rag.services.parsers.svg_parser import SvgParser
+
+    p = tmp_path / "shape.svg"
+    p.write_text(
+        '<?xml version="1.0"?>'
+        '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20">'
+        '<rect width="20" height="20" fill="red"/></svg>'
+    )
+    r = SvgParser().parse(p)
+    assert r.success
+    assert r.content == ""
+    assert len(r.images) == 1
+    img = r.images[0]
+    assert img.mime == "image/png"
+    # cairosvg honours output_width=512 with aspect-preserved height; for a
+    # square source that's 512x512.
+    assert img.width and img.width >= 256
+    assert img.height and img.height >= 256
+    # Sanity: output really is a PNG.
+    assert img.bytes[:8] == b"\x89PNG\r\n\x1a\n"

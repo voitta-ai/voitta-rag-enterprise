@@ -91,8 +91,8 @@ def test_stats_unsupported_files_not_counted_as_error(
     src = tmp_path / "src"
     src.mkdir()
     (src / "a.md").write_text("hello")
-    (src / "b.svg").write_text("<svg></svg>")
     (src / "c.mp4").write_bytes(b"\x00\x00\x00\x18ftypmp42")
+    (src / "d.zzz").write_bytes(b"unknown blob")
     folder_id = client.post("/api/folders", json={"path": str(src)}).json()["id"]
     init_db()
     with session_scope() as s:
@@ -112,10 +112,10 @@ def test_stats_unsupported_files_not_counted_as_error(
     assert s["files_indexed"] == 1
     assert s["files_error"] == 0  # critical: no parser is NOT an error
     assert s["files_unsupported"] == 2
-    svg = s["by_extension"][".svg"]
-    assert svg["files"] == 1 and svg["unsupported"] == 1 and svg["error"] == 0
     mp4 = s["by_extension"][".mp4"]
     assert mp4["files"] == 1 and mp4["unsupported"] == 1 and mp4["error"] == 0
+    zzz = s["by_extension"][".zzz"]
+    assert zzz["files"] == 1 and zzz["unsupported"] == 1 and zzz["error"] == 0
 
 
 def test_stats_unknown_folder_returns_404(client: TestClient) -> None:
