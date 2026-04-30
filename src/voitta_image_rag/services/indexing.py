@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import threading
 import time
 import traceback
 from contextlib import contextmanager
@@ -28,6 +29,27 @@ from .parsers.registry import get_default_registry
 logger = logging.getLogger(__name__)
 
 _ERROR_FIELD_MAX = 4000  # cap stored traceback so an error row stays scannable
+
+# Process-wide lock around the entire extract pipeline. Several C libraries
+# we depend on are not fully thread-safe — running them from N worker threads
+# concurrently produced glibc heap corruption in the field ("corrupted
+# double-linked list"). The known offenders:
+#
+# * PyMuPDF (fitz)     — used by pdf_parser for page count + bucket split,
+#                        and indirectly by MinerU.
+# * cairo (cairosvg)   — used by svg_parser for SVG → PNG rasterization.
+# * Pillow (libjpeg /  — most operations are thread-safe but format-specific
+#   libpng / libwebp)    decoders depend on system library builds.
+#
+# gpu_lock only covers MinerU's neural net + the GPU embedders, not the C
+# parsing layers around them. Until each of those libraries is verified
+# safe to call from multiple threads (or replaced), we serialize the whole
+# extract handler.
+#
+# Embeds (embed_text / embed_image) are not gated here — they're already
+# serialized on the GPU via gpu_lock and the non-GPU parts are DB / Qdrant
+# network calls that handle concurrency.
+_EXTRACT_LOCK = threading.Lock()
 
 
 @contextmanager
@@ -64,11 +86,19 @@ async def run_extract(payload: dict) -> None:
 
 
 def _run_extract_sync(file_id: int) -> None:
+    # Serialize the extract pipeline process-wide. See the comment on
+    # _EXTRACT_LOCK for why — TL;DR: PyMuPDF + cairo are not thread-safe
+    # at the C level and were producing heap corruption under N=24 workers.
     with bind_context(file_id=file_id):
-        try:
-            _run_extract_inner(file_id)
-        except Exception:
-            _mark_error(file_id, _format_exception("extract crashed"))
+        wait_started = time.perf_counter()
+        with _EXTRACT_LOCK:
+            wait_ms = (time.perf_counter() - wait_started) * 1000
+            if wait_ms > 100:
+                logger.debug("extract queue wait=%.0fms", wait_ms)
+            try:
+                _run_extract_inner(file_id)
+            except Exception:
+                _mark_error(file_id, _format_exception("extract crashed"))
 
 
 def _run_extract_inner(file_id: int) -> None:
