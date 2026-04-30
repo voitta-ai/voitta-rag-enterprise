@@ -81,6 +81,12 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
     try:
         for stmt in (
             "ALTER TABLE files ADD COLUMN embed_round INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE files ADD COLUMN tab TEXT",
+            "ALTER TABLE folder_sync_sources ADD COLUMN gd_client_id TEXT",
+            "ALTER TABLE folder_sync_sources ADD COLUMN gd_client_secret TEXT",
+            "ALTER TABLE folder_sync_sources ADD COLUMN gd_refresh_token TEXT",
+            "ALTER TABLE folder_sync_sources ADD COLUMN gd_service_account_json TEXT",
+            "ALTER TABLE folder_sync_sources ADD COLUMN gd_folder_id TEXT",
         ):
             try:
                 cur.execute(stmt)
