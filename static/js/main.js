@@ -394,15 +394,24 @@ function renderSidebar() {
     const indexed = subtreeFiles.filter((x) => x.state === "indexed").length;
     const errors = subtreeFiles.filter((x) => x.state === "error").length;
     const unsupported = subtreeFiles.filter((x) => x.state === "unsupported").length;
-    const pending = subtreeFiles.filter(
-        (x) => x.state !== "indexed" && x.state !== "error" && x.state !== "unsupported",
+    // 'In progress' = chunks/images already committed (state ∈
+    // {extracted, embedding}) but the file hasn't reached 'indexed' yet.
+    // Pending = literally state == 'pending', i.e. not started. Splitting
+    // these stops the sidebar from showing 'Pending: 329, Chunks: 1943'
+    // when most of the work has actually landed and is just queued for
+    // GPU embedding.
+    const inProgress = subtreeFiles.filter(
+        (x) => x.state === "extracted" || x.state === "embedding",
     ).length;
+    const pending = subtreeFiles.filter((x) => x.state === "pending").length;
     $("#kv-files").textContent = total;
     $("#kv-indexed").textContent = indexed;
     $("#kv-errors").textContent = errors;
     $("#kv-pending").textContent = pending;
     const kvUnsupported = $("#kv-unsupported");
     if (kvUnsupported) kvUnsupported.textContent = unsupported;
+    const kvInProgress = $("#kv-in-progress");
+    if (kvInProgress) kvInProgress.textContent = inProgress;
 
     // Folder-level stats from /api/folders/{id}/stats — independent of subdir.
     const s = statsCache && statsCache.folder_id === folder.id ? statsCache : null;

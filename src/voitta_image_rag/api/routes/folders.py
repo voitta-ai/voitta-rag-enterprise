@@ -333,6 +333,7 @@ class ExtensionStats(BaseModel):
     indexed: int = 0
     error: int = 0
     unsupported: int = 0
+    in_progress: int = 0
     pending: int = 0
     chunks: int = 0
 
@@ -343,6 +344,12 @@ class FolderStats(BaseModel):
     files_indexed: int
     files_error: int
     files_unsupported: int
+    # In-progress: chunks / images already committed but the file hasn't
+    # finished embedding (state in ('extracted', 'embedding')). Pending: not
+    # started yet (state == 'pending'). Distinguishing the two stops the
+    # sidebar from reading "Pending: 329, Chunks: 1943" — which made it
+    # look like nothing had happened despite half the work being done.
+    files_in_progress: int
     files_pending: int
     chunks_total: int
     images_total: int
@@ -366,14 +373,16 @@ def folder_stats(
             select(File).where(File.folder_id == folder_id, File.state != "deleted")
         ).scalars()
     )
+    _IN_PROGRESS_STATES = ("extracted", "embedding")
     files_total = len(files)
     files_indexed = sum(1 for f in files if f.state == "indexed")
     files_error = sum(1 for f in files if f.state == "error")
     files_unsupported = sum(1 for f in files if f.state == "unsupported")
+    files_in_progress = sum(1 for f in files if f.state in _IN_PROGRESS_STATES)
     files_pending = sum(
         1
         for f in files
-        if f.state not in ("indexed", "error", "unsupported", "deleted")
+        if f.state == "pending"
     )
     bytes_total = sum(f.size_bytes or 0 for f in files)
     file_ids = [f.id for f in files]
@@ -401,6 +410,8 @@ def folder_stats(
             es.error += 1
         elif f.state == "unsupported":
             es.unsupported += 1
+        elif f.state in _IN_PROGRESS_STATES:
+            es.in_progress += 1
         else:
             es.pending += 1
         es.chunks += chunks_by_file.get(f.id, 0)
@@ -429,6 +440,7 @@ def folder_stats(
         files_indexed=files_indexed,
         files_error=files_error,
         files_unsupported=files_unsupported,
+        files_in_progress=files_in_progress,
         files_pending=files_pending,
         chunks_total=int(chunks_total),
         images_total=int(images_total),

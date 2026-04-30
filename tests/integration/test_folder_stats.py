@@ -61,6 +61,7 @@ def test_stats_basic_counts(client: TestClient, tmp_path: Path) -> None:
     assert s["files_indexed"] == 3
     assert s["files_error"] == 0
     assert s["files_unsupported"] == 0
+    assert s["files_in_progress"] == 0
     assert s["files_pending"] == 0
     assert s["chunks_total"] >= 2  # at least one per text file
     assert s["images_total"] == 1
@@ -118,6 +119,39 @@ def test_stats_unsupported_files_not_counted_as_error(
     assert zzz["files"] == 1 and zzz["unsupported"] == 1 and zzz["error"] == 0
 
 
+def test_stats_distinguishes_in_progress_from_pending(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """Files past extract but pre-indexed must show as 'in_progress', not as
+    'pending'. Otherwise the sidebar reads 'Pending: N, Chunks: N*5' which
+    contradicts itself when the embed queue is deep."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.md").write_text("alpha alpha alpha")
+    (src / "b.md").write_text("bravo bravo bravo")
+    folder_id = client.post("/api/folders", json={"path": str(src)}).json()["id"]
+    init_db()
+    with session_scope() as s:
+        ids = [
+            f.id
+            for f in s.execute(select(File).where(File.folder_id == folder_id)).scalars()
+        ]
+    # Run extract only — DON'T run embed_text. Files should land in
+    # 'extracted' state with chunks committed and pending_embeds > 0.
+    for fid in ids:
+        asyncio.run(run_extract({"file_id": fid}))
+
+    s = client.get(f"/api/folders/{folder_id}/stats").json()
+    assert s["files_total"] == 2
+    assert s["files_indexed"] == 0
+    assert s["files_pending"] == 0  # not raw 'pending' anymore
+    assert s["files_in_progress"] == 2
+    assert s["chunks_total"] >= 2  # work *did* land
+    md = s["by_extension"][".md"]
+    assert md["in_progress"] == 2
+    assert md["pending"] == 0
+
+
 def test_stats_unknown_folder_returns_404(client: TestClient) -> None:
     assert client.get("/api/folders/9999/stats").status_code == 404
 
@@ -133,6 +167,7 @@ def test_stats_empty_folder(client: TestClient, tmp_path: Path) -> None:
         "files_indexed": 0,
         "files_error": 0,
         "files_unsupported": 0,
+        "files_in_progress": 0,
         "files_pending": 0,
         "chunks_total": 0,
         "images_total": 0,
