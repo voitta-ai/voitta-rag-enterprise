@@ -780,6 +780,12 @@ function openSyncModal() {
 function setSyncType(t) {
     $("#sync-form-github").hidden = t !== "github";
     $("#sync-form-google_drive").hidden = t !== "google_drive";
+    if (t === "google_drive") {
+        // Mirror the URL the backend will hand to Google so the user can
+        // copy-paste it verbatim into "Authorized redirect URIs".
+        const hint = $("#sync-gd-redirect-hint");
+        if (hint) hint.textContent = `${window.location.origin}/api/sync/oauth/google/callback`;
+    }
 }
 
 function setGdConnState({ connected, hasClientSecret }) {
