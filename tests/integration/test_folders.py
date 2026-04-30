@@ -227,6 +227,168 @@ def test_reindex_unknown_folder_returns_404(client: TestClient) -> None:
     assert r.status_code == 404
 
 
+def test_sync_get_returns_null_when_unconfigured(
+    client: TestClient, tmp_path: Path
+) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    folder_id = client.post("/api/folders", json={"path": str(src)}).json()["id"]
+    r = client.get(f"/api/folders/{folder_id}/sync")
+    assert r.status_code == 200
+    assert r.json() is None
+
+
+def test_sync_put_rejects_non_empty_folder(client: TestClient, tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    _seed(src, {"already.txt": "existing"})
+    folder_id = client.post("/api/folders", json={"path": str(src)}).json()["id"]
+
+    body = {
+        "source_type": "github",
+        "github": {
+            "repo": "https://github.com/example/repo",
+            "branches": ["main"],
+            "auth_method": "ssh",
+        },
+    }
+    r = client.put(f"/api/folders/{folder_id}/sync", json=body)
+    assert r.status_code == 400
+    assert "empty" in r.text.lower()
+
+
+def test_sync_put_then_get_round_trips(client: TestClient, tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    folder_id = client.post("/api/folders", json={"path": str(src)}).json()["id"]
+
+    body = {
+        "source_type": "github",
+        "github": {
+            "repo": "https://github.com/example/repo",
+            "path": "docs",
+            "branches": ["main", "develop"],
+            "all_branches": False,
+            "extended": True,
+            "auth_method": "token",
+            "username": "x-access-token",
+            "pat": "ghp_secret_abc",
+        },
+    }
+    r = client.put(f"/api/folders/{folder_id}/sync", json=body)
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["source_type"] == "github"
+    gh = out["github"]
+    assert gh["repo"] == "https://github.com/example/repo"
+    assert gh["branches"] == ["main", "develop"]
+    assert gh["extended"] is True
+    assert gh["auth_method"] == "token"
+    assert gh["has_pat"] is True
+    assert gh["has_ssh_key"] is False
+
+    # Reading back should not echo the token.
+    r2 = client.get(f"/api/folders/{folder_id}/sync").json()
+    assert r2["github"]["has_pat"] is True
+    assert "pat" not in r2["github"]
+
+
+def test_sync_put_rejects_no_branch_selection(
+    client: TestClient, tmp_path: Path
+) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    folder_id = client.post("/api/folders", json={"path": str(src)}).json()["id"]
+
+    r = client.put(
+        f"/api/folders/{folder_id}/sync",
+        json={
+            "source_type": "github",
+            "github": {
+                "repo": "https://github.com/example/repo",
+                "branches": [],
+                "all_branches": False,
+            },
+        },
+    )
+    assert r.status_code == 400
+
+
+def test_sync_reconfig_allowed_after_files_present(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """Once a source exists, the empty-folder check no longer applies — users
+    must be able to add/remove branches even after the first sync has populated
+    the folder."""
+    src = tmp_path / "src"
+    src.mkdir()
+    folder_id = client.post("/api/folders", json={"path": str(src)}).json()["id"]
+
+    body = {
+        "source_type": "github",
+        "github": {"repo": "https://x/r", "branches": ["main"], "auth_method": "ssh"},
+    }
+    assert client.put(f"/api/folders/{folder_id}/sync", json=body).status_code == 200
+
+    # Drop a file simulating a successful first sync.
+    (src / "branches").mkdir()
+    (src / "branches" / "main").mkdir()
+    (src / "branches" / "main" / "README.md").write_text("hi")
+
+    body["github"]["branches"] = ["main", "develop"]
+    r = client.put(f"/api/folders/{folder_id}/sync", json=body)
+    assert r.status_code == 200, r.text
+    assert r.json()["github"]["branches"] == ["main", "develop"]
+
+
+def test_sync_trigger_enqueues_job(client: TestClient, tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    folder_id = client.post("/api/folders", json={"path": str(src)}).json()["id"]
+
+    client.put(
+        f"/api/folders/{folder_id}/sync",
+        json={
+            "source_type": "github",
+            "github": {"repo": "https://x/r", "branches": ["main"], "auth_method": "ssh"},
+        },
+    )
+    r = client.post(f"/api/folders/{folder_id}/sync/trigger")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["folder_id"] == folder_id
+    assert isinstance(body["job_id"], int)
+
+    # Triggering twice should dedup to the same job (queued state).
+    r2 = client.post(f"/api/folders/{folder_id}/sync/trigger")
+    assert r2.status_code == 200
+    assert r2.json()["job_id"] == body["job_id"]
+
+
+def test_sync_trigger_without_source_returns_400(
+    client: TestClient, tmp_path: Path
+) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    folder_id = client.post("/api/folders", json={"path": str(src)}).json()["id"]
+    r = client.post(f"/api/folders/{folder_id}/sync/trigger")
+    assert r.status_code == 400
+
+
+def test_sync_delete_removes_source(client: TestClient, tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    folder_id = client.post("/api/folders", json={"path": str(src)}).json()["id"]
+    client.put(
+        f"/api/folders/{folder_id}/sync",
+        json={
+            "source_type": "github",
+            "github": {"repo": "https://x/r", "branches": ["main"], "auth_method": "ssh"},
+        },
+    )
+    assert client.delete(f"/api/folders/{folder_id}/sync").status_code == 204
+    assert client.get(f"/api/folders/{folder_id}/sync").json() is None
+
+
 def test_unauthenticated_request_returns_401(env: None, tmp_path: Path) -> None:
     """With no auth mode set, every API call needs an X-Forwarded-Email header."""
     from voitta_image_rag.main import create_app

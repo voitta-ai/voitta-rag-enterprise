@@ -59,7 +59,10 @@ class Settings(BaseSettings):
     # Indexing
     nearby_radius: int = 2
     max_file_bytes: int = 1024 * 1024 * 1024
-    ignore_patterns: str = ".git,node_modules,.DS_Store,__pycache__,.venv,*.tmp"
+    ignore_patterns: str = (
+        ".git,node_modules,.DS_Store,__pycache__,.venv,*.tmp,"
+        ".git-repo,.voitta_timestamps.json,.voitta_sync.lock"
+    )
 
     # PDF parsing (MinerU)
     pdf_pages_per_bucket: int = 20

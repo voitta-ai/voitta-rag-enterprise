@@ -60,6 +60,12 @@ export const api = {
         req("POST", `/api/folders/${folderId}/mkdir`, { path }),
     reindexFolder: (folderId, relDir = "") =>
         req("POST", `/api/folders/${folderId}/reindex`, { rel_dir: relDir || null }),
+    getSync: (folderId) => req("GET", `/api/folders/${folderId}/sync`),
+    putSync: (folderId, body) => req("PUT", `/api/folders/${folderId}/sync`, body),
+    deleteSync: (folderId) => req("DELETE", `/api/folders/${folderId}/sync`),
+    triggerSync: (folderId) => req("POST", `/api/folders/${folderId}/sync/trigger`),
+    listGitBranches: (folderId, body) =>
+        req("POST", `/api/folders/${folderId}/sync/branches`, body),
     recentJobs: () => req("GET", "/api/jobs/recent?limit=50"),
     retryJob: (id) => req("POST", `/api/jobs/${id}/retry`),
     retryAllFailed: () => req("POST", "/api/jobs/retry-failed"),

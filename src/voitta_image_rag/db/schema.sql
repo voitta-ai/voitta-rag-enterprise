@@ -97,6 +97,29 @@ CREATE TABLE IF NOT EXISTS cas_refs (
     PRIMARY KEY (cas_id, kind)               -- a SHA can validly be both a file and an image
 );
 
+-- Per-folder remote sync configuration. Currently only GitHub is supported;
+-- columns for other providers will be added as connectors land.
+CREATE TABLE IF NOT EXISTS folder_sync_sources (
+    folder_id          INTEGER PRIMARY KEY REFERENCES folders(id) ON DELETE CASCADE,
+    source_type        TEXT NOT NULL,                        -- e.g. 'github'
+    -- GitHub
+    gh_repo            TEXT,                                 -- HTTPS or git@ URL
+    gh_path            TEXT,                                 -- subfolder within the repo
+    gh_branches        TEXT,                                 -- JSON array, ignored when gh_all_branches=1
+    gh_all_branches    INTEGER NOT NULL DEFAULT 0,
+    gh_extended        INTEGER NOT NULL DEFAULT 0,           -- also mirror per-commit history
+    gh_auth_method     TEXT,                                 -- 'ssh' | 'token'
+    gh_username        TEXT,
+    gh_pat             TEXT,                                 -- personal access token
+    gh_token           TEXT,                                 -- SSH private key (PEM)
+    -- Status / bookkeeping
+    sync_status        TEXT NOT NULL DEFAULT 'idle',         -- 'idle' | 'syncing' | 'error'
+    sync_error         TEXT,
+    last_synced_at     INTEGER,
+    created_at         INTEGER NOT NULL,
+    updated_at         INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS jobs (
     id            INTEGER PRIMARY KEY,
     kind          TEXT NOT NULL,

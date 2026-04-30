@@ -384,6 +384,103 @@ async def run_embed_image(payload: dict) -> None:
         raise
 
 
+async def run_sync(payload: dict) -> None:
+    """Worker handler for ``sync`` jobs: pulls a folder's remote, mirrors files
+    onto disk, and records status on the ``folder_sync_sources`` row.
+
+    Side effects on disk drive the existing extract / delete pipeline through
+    the watcher — this handler does not enqueue extracts itself.
+    """
+    folder_id = int(payload["folder_id"])
+    with bind_context(folder_id=folder_id):
+        try:
+            await _run_sync_inner(folder_id)
+        except Exception:
+            logger.exception("sync failed")
+            _mark_sync_error(folder_id, _format_exception("sync failed"))
+            raise
+
+
+async def _run_sync_inner(folder_id: int) -> None:
+    from .sync import get_connector
+    from .sync.github import GitAuth, coerce_branches_field
+
+    with session_scope() as s:
+        folder = s.get(Folder, folder_id)
+        if folder is None:
+            logger.info("sync abort: folder %d gone", folder_id)
+            return
+        from ..db.models import FolderSyncSource
+
+        source = s.get(FolderSyncSource, folder_id)
+        if source is None:
+            raise RuntimeError(f"no sync source configured for folder {folder_id}")
+        folder_path = folder.path
+        source_type = source.source_type
+        # Snapshot every value we need so we can release the session before
+        # the (slow) git work.
+        cfg = {
+            "repo_url": source.gh_repo or "",
+            "subfolder": source.gh_path or "",
+            "branches": coerce_branches_field(source.gh_branches),
+            "all_branches": bool(source.gh_all_branches),
+            "extended": bool(source.gh_extended),
+            "auth": GitAuth(
+                method=source.gh_auth_method or "",
+                ssh_key=source.gh_token or "",
+                username=source.gh_username or "",
+                pat=source.gh_pat or "",
+            ),
+        }
+        source.sync_status = "syncing"
+        source.sync_error = None
+
+    logger.info("sync begin folder=%s type=%s", folder_path, source_type)
+    connector = get_connector(source_type)
+    if source_type != "github":  # pragma: no cover — defensive
+        raise NotImplementedError(source_type)
+
+    started = time.perf_counter()
+    try:
+        stats = await connector.sync(
+            folder_root=Path(folder_path),
+            **cfg,
+        )
+    except Exception:
+        with session_scope() as s2:
+            from ..db.models import FolderSyncSource
+
+            src = s2.get(FolderSyncSource, folder_id)
+            if src is not None:
+                src.sync_status = "error"
+        raise
+
+    elapsed = time.perf_counter() - started
+    logger.info(
+        "sync done folder=%s in %.1fs: %s", folder_path, elapsed, stats.as_dict()
+    )
+
+    with session_scope() as s3:
+        from ..db.models import FolderSyncSource
+
+        src = s3.get(FolderSyncSource, folder_id)
+        if src is not None:
+            src.sync_status = "error" if stats.errors else "idle"
+            src.sync_error = "; ".join(stats.errors) if stats.errors else None
+            src.last_synced_at = int(time.time())
+
+
+def _mark_sync_error(folder_id: int, message: str) -> None:
+    with session_scope() as s:
+        from ..db.models import FolderSyncSource
+
+        src = s.get(FolderSyncSource, folder_id)
+        if src is None:
+            return
+        src.sync_status = "error"
+        src.sync_error = message[:4000]
+
+
 async def run_delete_file(payload: dict) -> None:
     file_id = int(payload["file_id"])
     await asyncio.to_thread(_delete_file_sync, file_id)
@@ -707,4 +804,5 @@ HANDLERS = {
     "embed_text": run_embed_text,
     "embed_image": run_embed_image,
     "delete_file": run_delete_file,
+    "sync": run_sync,
 }

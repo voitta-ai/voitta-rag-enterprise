@@ -11,8 +11,7 @@ from sqlalchemy.orm import Session
 
 from ...config import get_settings
 from ...db.models import Chunk, File, Folder, Image
-from ...services import events
-from ...services import job_queue
+from ...services import events, job_queue
 from ...services.acl import (
     CurrentUser,
     grant_folder,

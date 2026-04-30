@@ -27,6 +27,7 @@
                     <button id="btn-new-subfolder" class="btn btn-secondary" disabled title="Create a subfolder inside the selected managed folder">📂 New subfolder</button>
                     <button id="btn-upload" class="btn btn-secondary" disabled title="Upload a file into the selected managed folder">⬆ Upload</button>
                     <button id="btn-reindex" class="btn btn-secondary" disabled title="Hard re-index every file under the selected folder or subfolder">↻ Reindex</button>
+                    <button id="btn-sync" class="btn btn-secondary" disabled title="Configure or run a remote sync (e.g. GitHub) for this folder">🔄 Sync</button>
                     <button id="btn-remove" class="btn btn-secondary" disabled title="Unregister the selected folder">🗑 Remove</button>
                 </div>
                 <input type="file" id="upload-input" hidden>
@@ -112,6 +113,64 @@
                 <div class="actions actions-right">
                     <button id="picker-pick" class="btn btn-primary">Add this folder</button>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: configure remote sync -->
+    <div id="sync-backdrop" class="modal-backdrop" hidden>
+        <div class="modal modal-wide">
+            <div class="modal-header">
+                <h3 id="sync-title">Configure sync</h3>
+                <button id="sync-close" class="btn-text">×</button>
+            </div>
+            <div class="modal-body">
+                <label>Source</label>
+                <select id="sync-type">
+                    <option value="github">GitHub / Git</option>
+                </select>
+
+                <div id="sync-form-github">
+                    <label>Repository URL</label>
+                    <input type="text" id="sync-gh-repo" placeholder="https://github.com/org/repo or git@github.com:org/repo.git">
+
+                    <label>Subfolder (optional)</label>
+                    <input type="text" id="sync-gh-path" placeholder="docs">
+
+                    <label>Authentication</label>
+                    <div class="radio-row">
+                        <label><input type="radio" name="sync-gh-auth" value="ssh" checked> SSH key</label>
+                        <label><input type="radio" name="sync-gh-auth" value="token"> Personal access token</label>
+                    </div>
+
+                    <div id="sync-gh-ssh">
+                        <label>SSH private key (PEM)</label>
+                        <textarea id="sync-gh-ssh-key" rows="4" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;…&#10;-----END OPENSSH PRIVATE KEY-----"></textarea>
+                    </div>
+                    <div id="sync-gh-token" hidden>
+                        <label>Username</label>
+                        <input type="text" id="sync-gh-username" placeholder="x-access-token or your GitHub username">
+                        <label>Token</label>
+                        <input type="password" id="sync-gh-pat" placeholder="ghp_…">
+                    </div>
+
+                    <div class="branches-row">
+                        <button type="button" id="sync-gh-load-branches" class="btn btn-secondary btn-sm">Load branches</button>
+                        <label><input type="checkbox" id="sync-gh-all-branches"> Sync all branches</label>
+                    </div>
+                    <label>Branches</label>
+                    <select id="sync-gh-branches" multiple size="6"></select>
+                    <p class="hint">Hold ⌘ / Ctrl to select multiple. Leave empty when "all branches" is on.</p>
+
+                    <label class="check-row"><input type="checkbox" id="sync-gh-extended"> Extended — also dump per-commit history under <code>commits/</code></label>
+                </div>
+
+                <div class="actions actions-right">
+                    <button id="sync-delete" class="btn btn-secondary" hidden>Remove sync</button>
+                    <button id="sync-save" class="btn btn-secondary">Save</button>
+                    <button id="sync-trigger" class="btn btn-primary">Sync now</button>
+                </div>
+                <p id="sync-status-line" class="hint" hidden></p>
             </div>
         </div>
     </div>

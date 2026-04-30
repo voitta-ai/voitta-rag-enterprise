@@ -138,6 +138,31 @@ class FileAcl(Base):
     )
 
 
+class FolderSyncSource(Base):
+    __tablename__ = "folder_sync_sources"
+
+    folder_id: Mapped[int] = mapped_column(
+        ForeignKey("folders.id", ondelete="CASCADE"), primary_key=True
+    )
+    source_type: Mapped[str]
+    # GitHub
+    gh_repo: Mapped[str | None] = mapped_column(default=None)
+    gh_path: Mapped[str | None] = mapped_column(default=None)
+    gh_branches: Mapped[str | None] = mapped_column(default=None)  # JSON array
+    gh_all_branches: Mapped[bool] = mapped_column(default=False)
+    gh_extended: Mapped[bool] = mapped_column(default=False)
+    gh_auth_method: Mapped[str | None] = mapped_column(default=None)
+    gh_username: Mapped[str | None] = mapped_column(default=None)
+    gh_pat: Mapped[str | None] = mapped_column(default=None)
+    gh_token: Mapped[str | None] = mapped_column(default=None)
+    # Status
+    sync_status: Mapped[str] = mapped_column(default="idle")
+    sync_error: Mapped[str | None] = mapped_column(default=None)
+    last_synced_at: Mapped[int | None] = mapped_column(default=None)
+    created_at: Mapped[int] = mapped_column(default=_now_s)
+    updated_at: Mapped[int] = mapped_column(default=_now_s, onupdate=_now_s)
+
+
 class Job(Base):
     __tablename__ = "jobs"
 
