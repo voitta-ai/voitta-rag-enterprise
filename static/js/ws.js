@@ -20,9 +20,16 @@ export function connect() {
     });
 
     socket.addEventListener("message", (e) => {
-        let event;
-        try { event = JSON.parse(e.data); } catch { return; }
-        handleEvent(event);
+        let frame;
+        try { frame = JSON.parse(e.data); } catch { return; }
+        // The server may send a single event or a batched frame
+        // ({type: "batch", events: [...]}) when many events accumulated
+        // since the last drain. Either way we route through handleEvent.
+        if (frame && frame.type === "batch" && Array.isArray(frame.events)) {
+            for (const ev of frame.events) handleEvent(ev);
+        } else {
+            handleEvent(frame);
+        }
     });
 
     socket.addEventListener("close", () => {

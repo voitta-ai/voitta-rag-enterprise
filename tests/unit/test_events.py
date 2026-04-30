@@ -10,6 +10,13 @@ import pytest
 from voitta_image_rag.services import events
 
 
+async def _drain_one(sub: events.Subscription, timeout: float = 1.0) -> dict:
+    await sub.wait(timeout=timeout)
+    items = sub.drain()
+    assert items, "no events delivered before timeout"
+    return items[0]
+
+
 def test_publish_with_no_loop_is_noop(env: None) -> None:
     events.publish("files", {"type": "x"})  # nothing installed; should not raise
 
@@ -21,7 +28,7 @@ async def test_subscribe_and_receive_event(env: None) -> None:
         async with events.subscribe(["files"]) as sub:
             assert events.topic_subscriber_count("files") == 1
             events.publish("files", {"type": "file.upserted", "file": {"id": 1}})
-            event = await asyncio.wait_for(sub.queue.get(), timeout=1.0)
+            event = await _drain_one(sub)
             assert event == {"type": "file.upserted", "file": {"id": 1}}
         assert events.topic_subscriber_count("files") == 0
     finally:
@@ -34,8 +41,8 @@ async def test_publish_to_other_topic_is_ignored(env: None) -> None:
     try:
         async with events.subscribe(["files"]) as sub:
             events.publish("jobs", {"type": "job.started"})
-            with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(sub.queue.get(), timeout=0.05)
+            assert await sub.wait(timeout=0.05) is False
+            assert sub.drain() == []
     finally:
         events.uninstall_loop()
 
@@ -46,8 +53,8 @@ async def test_multiple_subscribers_receive_same_event(env: None) -> None:
     try:
         async with events.subscribe(["jobs"]) as a, events.subscribe(["jobs"]) as b:
             events.publish("jobs", {"type": "job.started", "job_id": 7})
-            ea = await asyncio.wait_for(a.queue.get(), timeout=1.0)
-            eb = await asyncio.wait_for(b.queue.get(), timeout=1.0)
+            ea = await _drain_one(a)
+            eb = await _drain_one(b)
             assert ea == eb == {"type": "job.started", "job_id": 7}
     finally:
         events.uninstall_loop()
@@ -59,12 +66,71 @@ async def test_publish_from_other_thread(env: None) -> None:
     try:
         async with events.subscribe(["files"]) as sub:
             t = threading.Thread(
-                target=events.publish, args=("files", {"type": "file.upserted"})
+                target=events.publish,
+                args=("files", {"type": "file.upserted", "file": {"id": 9}}),
             )
             t.start()
             t.join()
-            event = await asyncio.wait_for(sub.queue.get(), timeout=1.0)
+            event = await _drain_one(sub)
             assert event["type"] == "file.upserted"
+    finally:
+        events.uninstall_loop()
+
+
+@pytest.mark.asyncio
+async def test_file_upserted_coalesces_per_file_id(env: None) -> None:
+    """30 file.upserted events for one file should drain as one entry —
+    only the latest snapshot matters to the UI."""
+    events.install_loop(asyncio.get_running_loop())
+    try:
+        async with events.subscribe(["files"]) as sub:
+            for i in range(30):
+                events.publish(
+                    "files",
+                    {
+                        "type": "file.upserted",
+                        "file": {"id": 1, "pending_embeds": 30 - i},
+                    },
+                )
+            # Let the loop drain the call_soon_threadsafe callbacks.
+            await sub.wait(timeout=1.0)
+            items = sub.drain()
+            assert len(items) == 1
+            assert items[0]["file"]["pending_embeds"] == 1  # latest wins
+            assert sub.stats["published"] == 30
+            assert sub.stats["delivered"] == 1
+    finally:
+        events.uninstall_loop()
+
+
+@pytest.mark.asyncio
+async def test_distinct_files_are_not_coalesced(env: None) -> None:
+    events.install_loop(asyncio.get_running_loop())
+    try:
+        async with events.subscribe(["files"]) as sub:
+            for fid in range(5):
+                events.publish(
+                    "files", {"type": "file.upserted", "file": {"id": fid}}
+                )
+            await sub.wait(timeout=1.0)
+            items = sub.drain()
+            assert {e["file"]["id"] for e in items} == {0, 1, 2, 3, 4}
+    finally:
+        events.uninstall_loop()
+
+
+@pytest.mark.asyncio
+async def test_discrete_events_appended_each_time(env: None) -> None:
+    """folder.added/removed/file.deleted are not snapshots — every publish
+    must be delivered."""
+    events.install_loop(asyncio.get_running_loop())
+    try:
+        async with events.subscribe(["files"]) as sub:
+            for i in range(3):
+                events.publish("files", {"type": "file.deleted", "file_id": i})
+            await sub.wait(timeout=1.0)
+            items = sub.drain()
+            assert len(items) == 3
     finally:
         events.uninstall_loop()
 

@@ -681,6 +681,7 @@ def _decrement_pending_embeds(file_id: int, round_token: int | None = None) -> N
     if round_token is not None:
         guard = " AND embed_round = :r"
         params["r"] = round_token
+    state_changed = False
     with session_scope() as s:
         res = s.execute(
             text(
@@ -710,7 +711,14 @@ def _decrement_pending_embeds(file_id: int, round_token: int | None = None) -> N
                 ),
                 {"id": file_id},
             )
-    _publish_file_upserted(file_id)
+            state_changed = True
+    # Only emit when the file's user-visible state actually changed.
+    # Mid-run pending_embeds decrements (e.g. 17 -> 16) are noise the UI
+    # neither displays nor needs — and at 24 workers each PDF can produce
+    # 50+ such decrements per file. Coalescing in events.py would already
+    # squash them, but skipping the publish entirely is cheaper.
+    if state_changed:
+        _publish_file_upserted(file_id)
 
 
 def _mark_file_error_for_image(image_id: int, message: str) -> None:

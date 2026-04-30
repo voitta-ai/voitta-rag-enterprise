@@ -26,13 +26,21 @@ help:
 install:
 	$(PYTHON) -m pip install -e ".[dev]"
 
+# --ws-ping-interval 30 / --ws-ping-timeout 90: under heavy indexing the
+# loop can momentarily get behind on sending pongs (24 workers all
+# publishing through call_soon_threadsafe + the WS pump batching). The
+# default 20s timeout was killing the connection on perfectly healthy
+# but busy servers. 90s is generous; if a real network problem hits,
+# the client's reconnect logic still kicks in within ~30s.
+UVICORN_FLAGS := --host 0.0.0.0 --port "$${VOITTA_PORT:-8000}" --ws-ping-interval 30 --ws-ping-timeout 90
+
 run:
 	@$(DOTENV) \
-	$(PYTHON) -m uvicorn voitta_image_rag.main:app --host 0.0.0.0 --port "$${VOITTA_PORT:-8000}"
+	$(PYTHON) -m uvicorn voitta_image_rag.main:app $(UVICORN_FLAGS)
 
 dev:
 	@$(DOTENV) \
-	$(PYTHON) -m uvicorn voitta_image_rag.main:app --host 0.0.0.0 --port "$${VOITTA_PORT:-8000}" --reload
+	$(PYTHON) -m uvicorn voitta_image_rag.main:app $(UVICORN_FLAGS) --reload
 
 mcp:
 	@$(DOTENV) \
