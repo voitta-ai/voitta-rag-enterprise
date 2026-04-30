@@ -169,3 +169,48 @@ def test_load_sidecar_invalid_json_returns_empty(tmp_path: Path) -> None:
 def test_load_sidecar_non_dict_returns_empty(tmp_path: Path) -> None:
     (tmp_path / ".voitta_sources.json").write_text('["a", "b"]')
     assert load_sidecar(tmp_path) == {}
+
+
+def test_load_sidecar_accepts_object_form_with_tab(tmp_path: Path) -> None:
+    (tmp_path / ".voitta_sources.json").write_text(
+        json.dumps(
+            {
+                "Specs/01-Overview.md": {
+                    "url": "https://docs.example/d/abc?tab=t.1",
+                    "tab": "Overview",
+                },
+                "plain.pdf": "https://example/plain",
+            }
+        )
+    )
+    sidecar = load_sidecar(tmp_path)
+    assert sidecar["Specs/01-Overview.md"].url == "https://docs.example/d/abc?tab=t.1"
+    assert sidecar["Specs/01-Overview.md"].tab == "Overview"
+    # Legacy string form still parses.
+    assert sidecar["plain.pdf"].url == "https://example/plain"
+    assert sidecar["plain.pdf"].tab is None
+
+
+def test_scan_persists_tab_field_from_sidecar(env: None, tmp_path: Path) -> None:
+    init_db()
+    src = tmp_path / "src"
+    _seed(src, {"Specs/01-Overview.md": "alpha"})
+    (src / ".voitta_sources.json").write_text(
+        json.dumps(
+            {
+                "Specs/01-Overview.md": {
+                    "url": "https://docs.example/d/abc?tab=t.1",
+                    "tab": "Overview",
+                }
+            }
+        )
+    )
+
+    with session_scope() as s:
+        folder = _create_folder(s, src)
+        scan_folder(s, folder, IgnoreMatcher([]), max_file_bytes=10**9)
+
+    with session_scope() as s:
+        f = s.query(File).filter_by(rel_path="Specs/01-Overview.md").one()
+        assert f.source_url == "https://docs.example/d/abc?tab=t.1"
+        assert f.tab == "Overview"

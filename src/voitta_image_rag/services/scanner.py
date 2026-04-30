@@ -28,8 +28,22 @@ class ScanResult:
     vanished: int
 
 
-def load_sidecar(folder_root: Path) -> dict[str, str]:
-    """Return the rel_path → URL mapping from ``.voitta_sources.json`` or {}."""
+@dataclass
+class SidecarEntry:
+    """Per-file metadata read from ``.voitta_sources.json``."""
+
+    url: str | None = None
+    tab: str | None = None
+
+
+def load_sidecar(folder_root: Path) -> dict[str, SidecarEntry]:
+    """Return the ``rel_path → SidecarEntry`` mapping from ``.voitta_sources.json``.
+
+    Two on-disk shapes are accepted so older sidecars keep working:
+
+    - ``{rel_path: "https://…"}`` — URL only (legacy)
+    - ``{rel_path: {"url": "https://…", "tab": "Overview"}}`` — extended
+    """
     sidecar = folder_root / SIDECAR_FILENAME
     if not sidecar.exists():
         return {}
@@ -40,7 +54,20 @@ def load_sidecar(folder_root: Path) -> dict[str, str]:
         return {}
     if not isinstance(data, dict):
         return {}
-    return {str(k): str(v) for k, v in data.items() if isinstance(v, str)}
+    out: dict[str, SidecarEntry] = {}
+    for k, v in data.items():
+        if not isinstance(k, str):
+            continue
+        if isinstance(v, str):
+            out[k] = SidecarEntry(url=v)
+        elif isinstance(v, dict):
+            url = v.get("url")
+            tab = v.get("tab")
+            out[k] = SidecarEntry(
+                url=str(url) if isinstance(url, str) else None,
+                tab=str(tab) if isinstance(tab, str) else None,
+            )
+    return out
 
 
 def scan_folder(
@@ -86,7 +113,9 @@ def scan_folder(
             continue
 
         seen.add(rel)
-        url = sidecar.get(rel)
+        entry = sidecar.get(rel)
+        url = entry.url if entry else None
+        tab = entry.tab if entry else None
 
         existing = session.execute(
             select(File).where(File.folder_id == folder.id, File.rel_path == rel)
@@ -101,6 +130,7 @@ def scan_folder(
                 last_seen_at=now,
                 state="pending",
                 source_url=url,
+                tab=tab,
             )
             session.add(new_file)
             session.flush()
@@ -119,6 +149,8 @@ def scan_folder(
             existing.mtime_ns = stat.st_mtime_ns
             if existing.source_url != url:
                 existing.source_url = url
+            if existing.tab != tab:
+                existing.tab = tab
             if existing.state == "deleted":
                 existing.state = "pending"
             if changed:

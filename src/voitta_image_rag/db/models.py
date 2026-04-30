@@ -64,6 +64,7 @@ class File(Base):
     pending_embeds: Mapped[int] = mapped_column(default=0)
     embed_round: Mapped[int] = mapped_column(default=0)
     source_url: Mapped[str | None] = mapped_column(default=None)
+    tab: Mapped[str | None] = mapped_column(default=None)
     error: Mapped[str | None] = mapped_column(default=None)
 
 
@@ -155,6 +156,12 @@ class FolderSyncSource(Base):
     gh_username: Mapped[str | None] = mapped_column(default=None)
     gh_pat: Mapped[str | None] = mapped_column(default=None)
     gh_token: Mapped[str | None] = mapped_column(default=None)
+    # Google Drive
+    gd_client_id: Mapped[str | None] = mapped_column(default=None)
+    gd_client_secret: Mapped[str | None] = mapped_column(default=None)
+    gd_refresh_token: Mapped[str | None] = mapped_column(default=None)
+    gd_service_account_json: Mapped[str | None] = mapped_column(default=None)
+    gd_folder_id: Mapped[str | None] = mapped_column(default=None)
     # Status
     sync_status: Mapped[str] = mapped_column(default="idle")
     sync_error: Mapped[str | None] = mapped_column(default=None)

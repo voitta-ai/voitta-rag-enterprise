@@ -25,6 +25,7 @@ class FileDetail(BaseModel):
     mtime_ns: int | None
     last_indexed_at: int | None
     source_url: str | None
+    tab: str | None
     file_cas_id: str | None
     pending_embeds: int
 
@@ -50,6 +51,7 @@ def _to_file_detail(f: File) -> FileDetail:
         mtime_ns=f.mtime_ns,
         last_indexed_at=f.last_indexed_at,
         source_url=f.source_url,
+        tab=f.tab,
         file_cas_id=f.file_cas_id,
         pending_embeds=f.pending_embeds,
     )

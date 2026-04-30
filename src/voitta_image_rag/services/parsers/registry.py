@@ -35,12 +35,14 @@ def build_default_registry() -> ParserRegistry:
     from .pptx_parser import PptxParser
     from .svg_parser import SvgParser
     from .text_parser import TextParser
+    from .xlsx_parser import XlsxParser
 
     r = ParserRegistry()
     r.register(TextParser())
     r.register(PdfParser())
     r.register(DocxParser())
     r.register(PptxParser())
+    r.register(XlsxParser())
     r.register(SvgParser())
     r.register(ImageFileParser())
     return r

@@ -154,6 +154,7 @@ class ChunkPoint:
     sparse: SparseVector
     nearby_image_ids: list[int]
     source_url: str | None
+    tab: str | None
     dense_model_version: str
     sparse_model_version: str
     allowed_users: list[int]
@@ -212,6 +213,7 @@ def replace_chunks_for_file(file_id: int, points: list[ChunkPoint]) -> None:
                         "text": p.text,
                         "nearby_image_ids": p.nearby_image_ids,
                         "source_url": p.source_url,
+                        "tab": p.tab,
                         "dense_model_version": p.dense_model_version,
                         "sparse_model_version": p.sparse_model_version,
                         "allowed_users": p.allowed_users,

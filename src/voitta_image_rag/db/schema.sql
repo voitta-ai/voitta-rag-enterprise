@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS files (
     pending_embeds  INTEGER NOT NULL DEFAULT 0,
     embed_round     INTEGER NOT NULL DEFAULT 0,
     source_url      TEXT,
+    tab             TEXT,                                 -- e.g. Google Docs tab name when the file is one tab of a multi-tab doc
     error           TEXT,
     UNIQUE (folder_id, rel_path)
 );
@@ -97,11 +98,11 @@ CREATE TABLE IF NOT EXISTS cas_refs (
     PRIMARY KEY (cas_id, kind)               -- a SHA can validly be both a file and an image
 );
 
--- Per-folder remote sync configuration. Currently only GitHub is supported;
--- columns for other providers will be added as connectors land.
+-- Per-folder remote sync configuration. Provider-specific columns are namespaced
+-- by prefix (gh_*, gd_*, …). Add new prefixes as connectors land.
 CREATE TABLE IF NOT EXISTS folder_sync_sources (
     folder_id          INTEGER PRIMARY KEY REFERENCES folders(id) ON DELETE CASCADE,
-    source_type        TEXT NOT NULL,                        -- e.g. 'github'
+    source_type        TEXT NOT NULL,                        -- 'github' | 'google_drive'
     -- GitHub
     gh_repo            TEXT,                                 -- HTTPS or git@ URL
     gh_path            TEXT,                                 -- subfolder within the repo
@@ -112,6 +113,12 @@ CREATE TABLE IF NOT EXISTS folder_sync_sources (
     gh_username        TEXT,
     gh_pat             TEXT,                                 -- personal access token
     gh_token           TEXT,                                 -- SSH private key (PEM)
+    -- Google Drive
+    gd_client_id              TEXT,                          -- OAuth2 client ID
+    gd_client_secret          TEXT,                          -- OAuth2 client secret
+    gd_refresh_token          TEXT,                          -- set by the OAuth callback, not the save endpoint
+    gd_service_account_json   TEXT,                          -- alternative auth (server-to-server)
+    gd_folder_id              TEXT,                          -- root Drive folder or shared-drive ID
     -- Status / bookkeeping
     sync_status        TEXT NOT NULL DEFAULT 'idle',         -- 'idle' | 'syncing' | 'error'
     sync_error         TEXT,

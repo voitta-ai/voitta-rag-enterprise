@@ -23,6 +23,11 @@ dependencies = [
     "python-multipart>=0.0.9",
     "mineru[all]>=2.0",
     "cairosvg>=2.7",
+    "openpyxl>=3.1",
+    "google-api-python-client>=2.140",
+    "google-auth>=2.34",
+    "google-auth-oauthlib>=1.2",
+    "httpx>=0.28",
 ]
 
 [project.optional-dependencies]

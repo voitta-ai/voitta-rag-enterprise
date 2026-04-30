@@ -301,6 +301,7 @@ def _file_event_payload(file: File) -> dict:
         "last_indexed_at": file.last_indexed_at,
         "pending_embeds": file.pending_embeds,
         "source_url": file.source_url,
+        "tab": file.tab,
     }
 
 
@@ -469,6 +470,7 @@ async def run_sync(payload: dict) -> None:
 async def _run_sync_inner(folder_id: int) -> None:
     from .sync import get_connector
     from .sync.github import GitAuth, coerce_branches_field
+    from .sync.google_drive import GoogleDriveAuth
 
     with session_scope() as s:
         folder = s.get(Folder, folder_id)
@@ -482,28 +484,42 @@ async def _run_sync_inner(folder_id: int) -> None:
             raise RuntimeError(f"no sync source configured for folder {folder_id}")
         folder_path = folder.path
         source_type = source.source_type
+
         # Snapshot every value we need so we can release the session before
-        # the (slow) git work.
-        cfg = {
-            "repo_url": source.gh_repo or "",
-            "subfolder": source.gh_path or "",
-            "branches": coerce_branches_field(source.gh_branches),
-            "all_branches": bool(source.gh_all_branches),
-            "extended": bool(source.gh_extended),
-            "auth": GitAuth(
-                method=source.gh_auth_method or "",
-                ssh_key=source.gh_token or "",
-                username=source.gh_username or "",
-                pat=source.gh_pat or "",
-            ),
-        }
+        # the (slow) network/disk work.
+        cfg: dict[str, object]
+        if source_type == "github":
+            cfg = {
+                "repo_url": source.gh_repo or "",
+                "subfolder": source.gh_path or "",
+                "branches": coerce_branches_field(source.gh_branches),
+                "all_branches": bool(source.gh_all_branches),
+                "extended": bool(source.gh_extended),
+                "auth": GitAuth(
+                    method=source.gh_auth_method or "",
+                    ssh_key=source.gh_token or "",
+                    username=source.gh_username or "",
+                    pat=source.gh_pat or "",
+                ),
+            }
+        elif source_type == "google_drive":
+            cfg = {
+                "drive_folder_id": source.gd_folder_id or "",
+                "auth": GoogleDriveAuth(
+                    client_id=source.gd_client_id or "",
+                    client_secret=source.gd_client_secret or "",
+                    refresh_token=source.gd_refresh_token or "",
+                    service_account_json=source.gd_service_account_json or "",
+                ),
+            }
+        else:
+            raise NotImplementedError(f"unknown source_type: {source_type!r}")
+
         source.sync_status = "syncing"
         source.sync_error = None
 
     logger.info("sync begin folder=%s type=%s", folder_path, source_type)
     connector = get_connector(source_type)
-    if source_type != "github":  # pragma: no cover — defensive
-        raise NotImplementedError(source_type)
 
     started = time.perf_counter()
     try:
@@ -656,6 +672,7 @@ def _embed_text_sync(file_id: int, round_token: int | None = None) -> None:
             folder_id = file.folder_id
             rel_path = file.rel_path
             source_url = file.source_url
+            tab = file.tab
             allowed_users = allowed_user_ids_for_file(s, file_id)
 
         text_emb = get_text_embedder()
@@ -681,6 +698,7 @@ def _embed_text_sync(file_id: int, round_token: int | None = None) -> None:
                     sparse=sparse,
                     nearby_image_ids=nearby,
                     source_url=source_url,
+                    tab=tab,
                     dense_model_version=settings.dense_version,
                     sparse_model_version=settings.sparse_version,
                     allowed_users=allowed_users,

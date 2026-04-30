@@ -1,15 +1,19 @@
 """Folder sync configuration + trigger endpoints.
 
-Currently only GitHub is supported; the request/response shapes leave room for
-other providers behind the ``source_type`` discriminator.
+Per-folder routes live under ``/folders/{folder_id}/sync``; the OAuth
+callback (which has to be at a fixed URL Google can return to) lives under
+``/sync/oauth/google/callback``.
 """
 
 from __future__ import annotations
 
+import base64
+import logging
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -22,9 +26,24 @@ from ...services.sync.github import (
     encode_branches_field,
     list_remote_branches,
 )
+from ...services.sync.google_drive import (
+    exchange_code_for_tokens as gd_exchange_code,
+)
+from ...services.sync.google_drive import (
+    get_auth_url as gd_get_auth_url,
+)
+from ...services.sync.google_drive import (
+    list_root_folders as gd_list_root_folders,
+)
 from ..deps import current_user, db_session
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/folders/{folder_id}/sync", tags=["sync"])
+
+# Separate router with no folder_id in the path — Google's OAuth callback
+# URL is registered once with the Google client and cannot be parameterised.
+oauth_router = APIRouter(prefix="/sync", tags=["sync"])
 
 
 class GithubSyncIn(BaseModel):
@@ -41,9 +60,19 @@ class GithubSyncIn(BaseModel):
     ssh_key: str = ""
 
 
+class GoogleDriveSyncIn(BaseModel):
+    """Payload for ``PUT /folders/{id}/sync`` when ``source_type == 'google_drive'``."""
+
+    client_id: str = ""
+    client_secret: str = ""
+    folder_id: str = ""  # Drive folder/Drive ID
+    service_account_json: str = ""
+
+
 class SyncSourceIn(BaseModel):
-    source_type: Literal["github"]
+    source_type: Literal["github", "google_drive"]
     github: GithubSyncIn | None = None
+    google_drive: GoogleDriveSyncIn | None = None
 
 
 class GithubSyncOut(BaseModel):
@@ -58,6 +87,14 @@ class GithubSyncOut(BaseModel):
     has_ssh_key: bool
 
 
+class GoogleDriveSyncOut(BaseModel):
+    client_id: str
+    folder_id: str
+    has_client_secret: bool
+    has_service_account: bool
+    connected: bool  # true once a refresh_token has been stored
+
+
 class SyncSourceOut(BaseModel):
     folder_id: int
     source_type: str
@@ -65,10 +102,12 @@ class SyncSourceOut(BaseModel):
     sync_error: str | None
     last_synced_at: int | None
     github: GithubSyncOut | None = None
+    google_drive: GoogleDriveSyncOut | None = None
 
 
 def _to_out(src: FolderSyncSource) -> SyncSourceOut:
     gh = None
+    gd = None
     if src.source_type == "github":
         gh = GithubSyncOut(
             repo=src.gh_repo or "",
@@ -81,6 +120,14 @@ def _to_out(src: FolderSyncSource) -> SyncSourceOut:
             has_pat=bool(src.gh_pat),
             has_ssh_key=bool(src.gh_token),
         )
+    elif src.source_type == "google_drive":
+        gd = GoogleDriveSyncOut(
+            client_id=src.gd_client_id or "",
+            folder_id=src.gd_folder_id or "",
+            has_client_secret=bool(src.gd_client_secret),
+            has_service_account=bool(src.gd_service_account_json),
+            connected=bool(src.gd_refresh_token),
+        )
     return SyncSourceOut(
         folder_id=src.folder_id,
         source_type=src.source_type,
@@ -88,6 +135,7 @@ def _to_out(src: FolderSyncSource) -> SyncSourceOut:
         sync_error=src.sync_error,
         last_synced_at=src.last_synced_at,
         github=gh,
+        google_drive=gd,
     )
 
 
@@ -157,43 +205,82 @@ def upsert_sync_source(
             "Sync can only be configured on empty folders",
         )
 
-    if body.source_type != "github":
+    if body.source_type == "github":
+        if body.github is None:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "Missing 'github' config for source_type='github'",
+            )
+        gh_cfg = body.github
+        if not gh_cfg.all_branches and not gh_cfg.branches:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "Either set all_branches=true or pick at least one branch",
+            )
+        if gh_cfg.auth_method not in ("", "ssh", "token"):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"Invalid auth_method: {gh_cfg.auth_method!r}",
+            )
+
+        src = existing or FolderSyncSource(folder_id=folder_id, source_type="github")
+        # Switching from a different source clears its credentials.
+        if existing is not None and existing.source_type != "github":
+            _clear_google_drive_fields(src)
+        src.source_type = "github"
+        src.gh_repo = gh_cfg.repo.strip()
+        src.gh_path = gh_cfg.path.strip("/")
+        src.gh_branches = encode_branches_field(gh_cfg.branches)
+        src.gh_all_branches = gh_cfg.all_branches
+        src.gh_extended = gh_cfg.extended
+        src.gh_auth_method = gh_cfg.auth_method or None
+        src.gh_username = gh_cfg.username or None
+        src.gh_pat = gh_cfg.pat or None
+        src.gh_token = gh_cfg.ssh_key or None
+
+    elif body.source_type == "google_drive":
+        if body.google_drive is None:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "Missing 'google_drive' config for source_type='google_drive'",
+            )
+        gd_cfg = body.google_drive
+        has_oauth_pair = bool(gd_cfg.client_id and gd_cfg.client_secret)
+        has_sa = bool(gd_cfg.service_account_json)
+        if not has_oauth_pair and not has_sa:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "Provide either OAuth client_id+client_secret or a service-account JSON",
+            )
+        if not gd_cfg.folder_id.strip():
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "folder_id is required (the Drive folder or shared-drive ID)",
+            )
+
+        src = existing or FolderSyncSource(
+            folder_id=folder_id, source_type="google_drive"
+        )
+        if existing is not None and existing.source_type != "google_drive":
+            _clear_github_fields(src)
+            # New source type → drop any stored refresh_token, it belongs to
+            # whatever client we were using before.
+            src.gd_refresh_token = None
+        src.source_type = "google_drive"
+        src.gd_client_id = gd_cfg.client_id.strip() or None
+        src.gd_client_secret = gd_cfg.client_secret or None
+        src.gd_folder_id = gd_cfg.folder_id.strip() or None
+        src.gd_service_account_json = gd_cfg.service_account_json or None
+        # Refresh-token field is set by the OAuth callback, never by save.
+
+    else:  # pragma: no cover — Pydantic Literal guards this
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             f"Unsupported source_type: {body.source_type!r}",
         )
-    if body.github is None:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            "Missing 'github' config for source_type='github'",
-        )
 
-    cfg = body.github
-    if not cfg.all_branches and not cfg.branches:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            "Either set all_branches=true or pick at least one branch",
-        )
-    if cfg.auth_method not in ("", "ssh", "token"):
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            f"Invalid auth_method: {cfg.auth_method!r}",
-        )
-
-    src = existing or FolderSyncSource(folder_id=folder_id, source_type="github")
-    src.source_type = "github"
-    src.gh_repo = cfg.repo.strip()
-    src.gh_path = cfg.path.strip("/")
-    src.gh_branches = encode_branches_field(cfg.branches)
-    src.gh_all_branches = cfg.all_branches
-    src.gh_extended = cfg.extended
-    src.gh_auth_method = cfg.auth_method or None
-    src.gh_username = cfg.username or None
-    src.gh_pat = cfg.pat or None
-    src.gh_token = cfg.ssh_key or None
     if existing is None:
         db.add(src)
-
     db.commit()
     db.refresh(src)
     if existing is None:
@@ -201,6 +288,26 @@ def upsert_sync_source(
         # update so the UI doesn't need to refetch the folder list.
         _publish_folder_changed(folder, has_sync_source=True)
     return _to_out(src)
+
+
+def _clear_github_fields(src: FolderSyncSource) -> None:
+    src.gh_repo = None
+    src.gh_path = None
+    src.gh_branches = None
+    src.gh_all_branches = False
+    src.gh_extended = False
+    src.gh_auth_method = None
+    src.gh_username = None
+    src.gh_pat = None
+    src.gh_token = None
+
+
+def _clear_google_drive_fields(src: FolderSyncSource) -> None:
+    src.gd_client_id = None
+    src.gd_client_secret = None
+    src.gd_refresh_token = None
+    src.gd_service_account_json = None
+    src.gd_folder_id = None
 
 
 def _publish_folder_changed(folder: Folder, *, has_sync_source: bool) -> None:
@@ -303,3 +410,157 @@ def list_branches(
             status.HTTP_400_BAD_REQUEST, f"git ls-remote failed: {e}"
         ) from e
     return BranchListOut(branches=branches)
+
+
+# ---------------------------------------------------------------------------
+# Google Drive helpers — OAuth init / callback + folder picker.
+#
+# The OAuth callback URL is registered once in the Google client and cannot
+# carry the folder_id. We pass the folder_id through OAuth state instead.
+# ---------------------------------------------------------------------------
+
+
+class GdAuthInitOut(BaseModel):
+    auth_url: str
+
+
+def _oauth_redirect_uri(request: Request) -> str:
+    """Mirror the user's actual base URL — works behind a reverse proxy
+    (uses the ``Forwarded`` / ``X-Forwarded-*`` headers FastAPI normalises
+    into ``request.base_url``).
+    """
+    base = str(request.base_url).rstrip("/")
+    return f"{base}/api/sync/oauth/google/callback"
+
+
+@router.post("/google-drive/auth", response_model=GdAuthInitOut)
+def gd_auth_init(
+    folder_id: int,
+    request: Request,
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(current_user),
+) -> GdAuthInitOut:
+    """Build the Google OAuth URL the UI should pop open in a new window.
+
+    ``state`` carries the folder id so the callback (which is folder-agnostic
+    in its URL) can find the right row.
+    """
+    _check_access(folder_id, db, user)
+    src = db.get(FolderSyncSource, folder_id)
+    if src is None or src.source_type != "google_drive":
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Configure Google Drive (client_id, client_secret) before connecting",
+        )
+    if not (src.gd_client_id and src.gd_client_secret):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Save client_id and client_secret before connecting",
+        )
+    state = base64.urlsafe_b64encode(str(folder_id).encode()).decode()
+    auth_url = gd_get_auth_url(
+        client_id=src.gd_client_id,
+        redirect_uri=_oauth_redirect_uri(request),
+        state=state,
+    )
+    return GdAuthInitOut(auth_url=auth_url)
+
+
+class GdFoldersOut(BaseModel):
+    folders: list[dict[str, str]]
+    shared_folders: list[dict[str, str]]
+    shared_drives: list[dict[str, str]]
+
+
+@router.get("/google-drive/folders", response_model=GdFoldersOut)
+async def gd_list_folders(
+    folder_id: int,
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(current_user),
+) -> GdFoldersOut:
+    """List Drive locations the user can pick as a sync root."""
+    _check_access(folder_id, db, user)
+    src = db.get(FolderSyncSource, folder_id)
+    if src is None or src.source_type != "google_drive":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No Google Drive source")
+    if not src.gd_refresh_token:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Google Drive not connected — click Connect first",
+        )
+    try:
+        data = await gd_list_root_folders(
+            src.gd_client_id or "",
+            src.gd_client_secret or "",
+            src.gd_refresh_token or "",
+        )
+    except Exception as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
+    return GdFoldersOut(**data)
+
+
+@oauth_router.get("/oauth/google/callback")
+async def gd_oauth_callback(
+    request: Request,
+    code: str = Query(...),
+    state: str = Query(...),
+) -> HTMLResponse:
+    """Finishes the Google OAuth dance: exchange code → store refresh_token."""
+    try:
+        folder_id = int(base64.urlsafe_b64decode(state.encode()).decode())
+    except Exception as e:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "Invalid state parameter"
+        ) from e
+
+    from ...db.database import session_scope
+
+    with session_scope() as s:
+        src = s.get(FolderSyncSource, folder_id)
+        if src is None or src.source_type != "google_drive":
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                "Google Drive source not found for this state",
+            )
+        client_id = src.gd_client_id or ""
+        client_secret = src.gd_client_secret or ""
+
+    try:
+        tokens = await gd_exchange_code(
+            client_id=client_id,
+            client_secret=client_secret,
+            code=code,
+            redirect_uri=_oauth_redirect_uri(request),
+        )
+    except Exception as e:
+        logger.exception("Google OAuth callback failed for folder %s", folder_id)
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
+
+    refresh_token = tokens.get("refresh_token")
+    if not refresh_token:
+        # ``prompt=consent`` is supposed to guarantee a refresh_token, but
+        # some Workspace policies still strip it. Surface a clear message.
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Google did not return a refresh_token. Revoke the app's access "
+            "in your Google Account and try again.",
+        )
+
+    with session_scope() as s:
+        src = s.get(FolderSyncSource, folder_id)
+        if src is not None:
+            src.gd_refresh_token = refresh_token
+
+    events.publish(
+        "folders",
+        {
+            "type": "folder.gd_connected",
+            "folder_id": folder_id,
+        },
+    )
+
+    # The popup self-closes; the opening tab listens on the events stream.
+    return HTMLResponse(
+        "<html><body><script>window.close()</script>"
+        "<p>Google Drive connected. You can close this tab.</p></body></html>"
+    )
