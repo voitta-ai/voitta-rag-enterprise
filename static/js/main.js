@@ -756,6 +756,7 @@ function openSyncModal() {
 
     // Reset to defaults; loadSyncSource() will fill from server if present.
     $("#sync-type").value = "github";
+    setSyncType("github");
     $("#sync-gh-repo").value = "";
     $("#sync-gh-path").value = "";
     setGhAuth("ssh");
@@ -765,8 +766,35 @@ function openSyncModal() {
     $("#sync-gh-all-branches").checked = false;
     $("#sync-gh-branches").innerHTML = "";
     $("#sync-gh-extended").checked = false;
+    $("#sync-gd-client-id").value = "";
+    $("#sync-gd-client-secret").value = "";
+    $("#sync-gd-client-secret").placeholder = "GOCSPX-…";
+    $("#sync-gd-folder-id").value = "";
+    $("#sync-gd-sa-json").value = "";
+    $("#sync-gd-sa-json").placeholder = '{"type":"service_account","client_email":"…","private_key":"…"}';
+    setGdConnState({ connected: false, hasClientSecret: false });
 
     loadSyncSource();
+}
+
+function setSyncType(t) {
+    $("#sync-form-github").hidden = t !== "github";
+    $("#sync-form-google_drive").hidden = t !== "google_drive";
+}
+
+function setGdConnState({ connected, hasClientSecret }) {
+    $("#sync-gd-conn-status").textContent = connected ? "Connected ✓" : "Not connected";
+    const connectBtn = $("#sync-gd-connect");
+    const pickBtn = $("#sync-gd-pick-folder");
+    // Connect needs client_id + (saved or just-typed) client_secret.
+    const clientId = $("#sync-gd-client-id").value.trim();
+    const secretAvailable = hasClientSecret || $("#sync-gd-client-secret").value.trim().length > 0;
+    connectBtn.disabled = !(clientId && secretAvailable);
+    connectBtn.title = connectBtn.disabled
+        ? "Save client_id and client_secret first"
+        : (connected ? "Re-connect (forces a fresh consent)" : "Connect");
+    pickBtn.disabled = !connected;
+    pickBtn.title = connected ? "Pick a Drive folder" : "Connect first";
 }
 
 function closeSyncModal() {
@@ -785,26 +813,37 @@ function setGhAuth(method) {
 async function loadSyncSource() {
     try {
         const src = await api.getSync(syncFolderId);
-        if (!src || !src.github) return;
-        const gh = src.github;
-        $("#sync-gh-repo").value = gh.repo || "";
-        $("#sync-gh-path").value = gh.path || "";
-        setGhAuth(gh.auth_method || "ssh");
-        $("#sync-gh-username").value = gh.username || "";
-        $("#sync-gh-pat").placeholder = gh.has_pat ? "(token saved — type to replace)" : "ghp_…";
-        $("#sync-gh-ssh-key").placeholder = gh.has_ssh_key ? "(SSH key saved — paste a new one to replace)" : "-----BEGIN OPENSSH PRIVATE KEY-----…";
-        $("#sync-gh-all-branches").checked = !!gh.all_branches;
-        $("#sync-gh-extended").checked = !!gh.extended;
-        // Pre-populate branches dropdown with the saved selection so the
-        // user sees what's currently configured even before hitting "Load".
-        const sel = $("#sync-gh-branches");
-        sel.innerHTML = "";
-        for (const b of gh.branches || []) {
-            const opt = document.createElement("option");
-            opt.value = b;
-            opt.textContent = b;
-            opt.selected = true;
-            sel.append(opt);
+        if (!src) return;
+        $("#sync-type").value = src.source_type;
+        setSyncType(src.source_type);
+        if (src.source_type === "github" && src.github) {
+            const gh = src.github;
+            $("#sync-gh-repo").value = gh.repo || "";
+            $("#sync-gh-path").value = gh.path || "";
+            setGhAuth(gh.auth_method || "ssh");
+            $("#sync-gh-username").value = gh.username || "";
+            $("#sync-gh-pat").placeholder = gh.has_pat ? "(token saved — type to replace)" : "ghp_…";
+            $("#sync-gh-ssh-key").placeholder = gh.has_ssh_key ? "(SSH key saved — paste a new one to replace)" : "-----BEGIN OPENSSH PRIVATE KEY-----…";
+            $("#sync-gh-all-branches").checked = !!gh.all_branches;
+            $("#sync-gh-extended").checked = !!gh.extended;
+            // Pre-populate branches dropdown with the saved selection so the
+            // user sees what's currently configured even before hitting "Load".
+            const sel = $("#sync-gh-branches");
+            sel.innerHTML = "";
+            for (const b of gh.branches || []) {
+                const opt = document.createElement("option");
+                opt.value = b;
+                opt.textContent = b;
+                opt.selected = true;
+                sel.append(opt);
+            }
+        } else if (src.source_type === "google_drive" && src.google_drive) {
+            const gd = src.google_drive;
+            $("#sync-gd-client-id").value = gd.client_id || "";
+            $("#sync-gd-folder-id").value = gd.folder_id || "";
+            $("#sync-gd-client-secret").placeholder = gd.has_client_secret ? "(saved — type to replace)" : "GOCSPX-…";
+            $("#sync-gd-sa-json").placeholder = gd.has_service_account ? "(service account JSON saved — paste a new one to replace)" : '{"type":"service_account","client_email":"…","private_key":"…"}';
+            setGdConnState({ connected: gd.connected, hasClientSecret: gd.has_client_secret });
         }
         $("#sync-delete").hidden = false;
         renderSyncStatus(src);
@@ -846,9 +885,39 @@ function ghFormConfig() {
     };
 }
 
+function gdFormConfig() {
+    return {
+        client_id: $("#sync-gd-client-id").value.trim(),
+        client_secret: $("#sync-gd-client-secret").value,  // not trimmed — preserve
+        folder_id: $("#sync-gd-folder-id").value.trim(),
+        service_account_json: $("#sync-gd-sa-json").value, // not trimmed — preserve
+    };
+}
+
+function syncBody() {
+    const t = $("#sync-type").value;
+    if (t === "github") return { source_type: "github", github: ghFormConfig() };
+    if (t === "google_drive") return { source_type: "google_drive", google_drive: gdFormConfig() };
+    throw new Error(`Unknown source_type: ${t}`);
+}
+
+$("#sync-type").addEventListener("change", () => setSyncType($("#sync-type").value));
+
 document.querySelectorAll('input[name="sync-gh-auth"]').forEach((el) => {
     el.addEventListener("change", () => setGhAuth(el.value));
 });
+
+// Re-evaluate Connect-button state when the user types in the GD inputs.
+$("#sync-gd-client-id").addEventListener("input", () =>
+    setGdConnState({
+        connected: $("#sync-gd-conn-status").textContent.startsWith("Connected"),
+        hasClientSecret: $("#sync-gd-client-secret").placeholder.startsWith("(saved"),
+    }));
+$("#sync-gd-client-secret").addEventListener("input", () =>
+    setGdConnState({
+        connected: $("#sync-gd-conn-status").textContent.startsWith("Connected"),
+        hasClientSecret: $("#sync-gd-client-secret").placeholder.startsWith("(saved"),
+    }));
 
 $("#sync-close").addEventListener("click", closeSyncModal);
 $("#sync-backdrop").addEventListener("click", (e) => {
@@ -894,14 +963,20 @@ $("#sync-gh-load-branches").addEventListener("click", async () => {
 });
 
 $("#sync-save").addEventListener("click", async () => {
-    const cfg = ghFormConfig();
     try {
-        const out = await api.putSync(syncFolderId, {
-            source_type: "github",
-            github: cfg,
-        });
+        const out = await api.putSync(syncFolderId, syncBody());
         $("#sync-delete").hidden = false;
         renderSyncStatus(out);
+        // Refresh the GD connect-button state: client_secret may now be
+        // server-side, so the placeholder switches to "(saved — type to replace)".
+        if (out.source_type === "google_drive" && out.google_drive) {
+            const gd = out.google_drive;
+            $("#sync-gd-client-secret").value = "";
+            $("#sync-gd-client-secret").placeholder = gd.has_client_secret
+                ? "(saved — type to replace)"
+                : "GOCSPX-…";
+            setGdConnState({ connected: gd.connected, hasClientSecret: gd.has_client_secret });
+        }
     } catch (err) {
         alert(err.message);
     }
@@ -912,8 +987,7 @@ $("#sync-trigger").addEventListener("click", async () => {
     try {
         const existing = await api.getSync(syncFolderId);
         if (!existing) {
-            const cfg = ghFormConfig();
-            await api.putSync(syncFolderId, { source_type: "github", github: cfg });
+            await api.putSync(syncFolderId, syncBody());
         }
         await api.triggerSync(syncFolderId);
         alert("Sync queued. Watch the Recent jobs panel for progress.");
@@ -922,6 +996,64 @@ $("#sync-trigger").addEventListener("click", async () => {
         alert(err.message);
     }
 });
+
+// Google Drive: launch the OAuth flow in a popup. The callback closes its
+// own tab and the server publishes folder.gd_connected; we re-load on
+// modal focus to catch the new state without needing a websocket subscription.
+$("#sync-gd-connect").addEventListener("click", async () => {
+    try {
+        // Save first so the server has client_id/client_secret to issue the
+        // auth URL with.
+        await api.putSync(syncFolderId, syncBody());
+        const { auth_url } = await api.gdAuthInit(syncFolderId);
+        const popup = window.open(auth_url, "voitta-gd-auth", "width=520,height=640");
+        if (!popup) {
+            alert("Popup blocked. Allow popups for this site and click Connect again.");
+            return;
+        }
+        // Poll until the popup closes, then refresh the source.
+        const t = setInterval(async () => {
+            if (popup.closed) {
+                clearInterval(t);
+                await loadSyncSource();
+            }
+        }, 500);
+    } catch (err) {
+        alert(err.message);
+    }
+});
+
+$("#sync-gd-pick-folder").addEventListener("click", async () => {
+    try {
+        const data = await api.gdListFolders(syncFolderId);
+        const id = await pickGdFolder(data);
+        if (id) $("#sync-gd-folder-id").value = id;
+    } catch (err) {
+        alert(err.message);
+    }
+});
+
+function pickGdFolder(data) {
+    // Lightweight prompt-based picker — one line per option, group-prefixed.
+    const all = [
+        ...data.folders.map((f) => ({ ...f, group: "My Drive" })),
+        ...data.shared_folders.map((f) => ({ ...f, group: "Shared with me" })),
+        ...data.shared_drives.map((f) => ({ ...f, group: "Shared drives" })),
+    ];
+    if (all.length === 0) {
+        alert("No Drive folders found.");
+        return null;
+    }
+    const labels = all.map((f, i) => `${i + 1}. [${f.group}] ${f.name}`).join("\n");
+    const ans = prompt(`Pick a folder by number:\n\n${labels}`);
+    if (!ans) return null;
+    const idx = parseInt(ans, 10) - 1;
+    if (Number.isNaN(idx) || idx < 0 || idx >= all.length) {
+        alert("Invalid selection.");
+        return null;
+    }
+    return all[idx].id;
+}
 
 $("#sync-delete").addEventListener("click", async () => {
     if (!confirm("Remove the sync configuration?\n\nFiles already on disk will not be deleted.")) return;

@@ -93,6 +93,10 @@ export const api = {
     triggerSync: (folderId) => req("POST", `/api/folders/${folderId}/sync/trigger`),
     listGitBranches: (folderId, body) =>
         req("POST", `/api/folders/${folderId}/sync/branches`, body),
+    gdAuthInit: (folderId) =>
+        req("POST", `/api/folders/${folderId}/sync/google-drive/auth`),
+    gdListFolders: (folderId) =>
+        req("GET", `/api/folders/${folderId}/sync/google-drive/folders`),
     recentJobs: () => req("GET", "/api/jobs/recent?limit=50"),
     retryJob: (id) => req("POST", `/api/jobs/${id}/retry`),
     retryAllFailed: () => req("POST", "/api/jobs/retry-failed"),

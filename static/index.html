@@ -140,6 +140,7 @@
                 <label>Source</label>
                 <select id="sync-type">
                     <option value="github">GitHub / Git</option>
+                    <option value="google_drive">Google Drive</option>
                 </select>
 
                 <div id="sync-form-github">
@@ -175,6 +176,39 @@
                     <p class="hint">Hold ⌘ / Ctrl to select multiple. Leave empty when "all branches" is on.</p>
 
                     <label class="check-row"><input type="checkbox" id="sync-gh-extended"> Extended — also dump per-commit history under <code>commits/</code></label>
+                </div>
+
+                <div id="sync-form-google_drive" hidden>
+                    <p class="hint">
+                        Create an OAuth client (type "Desktop app") in your Google Cloud project, paste
+                        its credentials below, save, then click Connect.
+                        Multi-tab Google Docs are rendered tab-by-tab as markdown so each tab is searchable on its own.
+                    </p>
+
+                    <label>OAuth client ID</label>
+                    <input type="text" id="sync-gd-client-id" placeholder="123…apps.googleusercontent.com">
+
+                    <label>OAuth client secret</label>
+                    <input type="password" id="sync-gd-client-secret" placeholder="GOCSPX-…">
+
+                    <label>Drive folder ID</label>
+                    <div class="branches-row">
+                        <input type="text" id="sync-gd-folder-id" placeholder="0AB…or shared-drive ID" style="flex:1;">
+                        <button type="button" id="sync-gd-pick-folder" class="btn btn-secondary btn-sm" disabled title="Connect first">Pick…</button>
+                    </div>
+                    <p class="hint">Paste a folder ID, or click Pick to choose from your Drive after connecting.</p>
+
+                    <details>
+                        <summary>Service account (alternative to OAuth)</summary>
+                        <label>Service account JSON</label>
+                        <textarea id="sync-gd-sa-json" rows="4" placeholder='{"type":"service_account","client_email":"…","private_key":"…"}'></textarea>
+                        <p class="hint">Leave empty to use OAuth. The folder must be shared with the service account's <code>client_email</code>.</p>
+                    </details>
+
+                    <div class="actions actions-right" style="margin-top:8px;">
+                        <button type="button" id="sync-gd-connect" class="btn btn-secondary btn-sm" disabled title="Save client_id and client_secret first">Connect</button>
+                        <span id="sync-gd-conn-status" class="hint" style="margin-left:auto;"></span>
+                    </div>
                 </div>
 
                 <div class="actions actions-right">
