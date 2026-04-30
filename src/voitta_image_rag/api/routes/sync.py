@@ -246,17 +246,23 @@ def upsert_sync_source(
             )
         gd_cfg = body.google_drive
         has_oauth_pair = bool(gd_cfg.client_id and gd_cfg.client_secret)
+        # ``has_client_secret`` is true when only the public client_id was
+        # re-sent for an existing row (the secret stays masked client-side
+        # and is only re-posted when the user types a new one).
+        existing_has_secret = bool(existing and existing.gd_client_secret)
+        has_oauth = bool(
+            gd_cfg.client_id and (gd_cfg.client_secret or existing_has_secret)
+        )
         has_sa = bool(gd_cfg.service_account_json)
-        if not has_oauth_pair and not has_sa:
+        if not has_oauth and not has_sa:
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST,
                 "Provide either OAuth client_id+client_secret or a service-account JSON",
             )
-        if not gd_cfg.folder_id.strip():
-            raise HTTPException(
-                status.HTTP_400_BAD_REQUEST,
-                "folder_id is required (the Drive folder or shared-drive ID)",
-            )
+        # folder_id intentionally NOT validated here. Picking it requires a
+        # connected OAuth account, which requires a saved client_id/secret —
+        # so the user has to Save with no folder_id first, Connect, then
+        # come back to fill the folder ID. The trigger endpoint enforces it.
 
         src = existing or FolderSyncSource(
             folder_id=folder_id, source_type="google_drive"
@@ -268,9 +274,14 @@ def upsert_sync_source(
             src.gd_refresh_token = None
         src.source_type = "google_drive"
         src.gd_client_id = gd_cfg.client_id.strip() or None
-        src.gd_client_secret = gd_cfg.client_secret or None
+        # Preserve the stored secret when the form re-posts an empty value —
+        # the input is masked, so a blank submission means "leave alone",
+        # not "clear it". Same for service_account_json.
+        if gd_cfg.client_secret:
+            src.gd_client_secret = gd_cfg.client_secret
+        if gd_cfg.service_account_json:
+            src.gd_service_account_json = gd_cfg.service_account_json
         src.gd_folder_id = gd_cfg.folder_id.strip() or None
-        src.gd_service_account_json = gd_cfg.service_account_json or None
         # Refresh-token field is set by the OAuth callback, never by save.
 
     else:  # pragma: no cover — Pydantic Literal guards this
@@ -361,6 +372,11 @@ def trigger_sync(
     if src is None:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST, "No sync source configured"
+        )
+    if src.source_type == "google_drive" and not (src.gd_folder_id or "").strip():
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Google Drive folder_id not set — paste a folder ID or click Pick",
         )
     job_id = job_queue.enqueue(
         db,
