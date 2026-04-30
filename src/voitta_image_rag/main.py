@@ -34,6 +34,41 @@ def _startup_scan() -> None:
             logger.info("scan %s: +%d ~%d -%d", f.path, r.added, r.updated, r.vanished)
 
 
+async def _warmup_embedders(settings: object) -> None:
+    """Force every real embedder model to load before any worker runs.
+
+    Skips when running with fake embedders (tests). Each load happens
+    under gpu_lock (see embedding/{text,image}.py); calling them in
+    sequence here means the lock is taken three times in series, no
+    contention with anything else (workers haven't started yet).
+    """
+    if getattr(settings, "use_fake_embedders", False):
+        return
+    from .services.embedding import (
+        get_image_embedder,
+        get_sparse_embedder,
+        get_text_embedder,
+    )
+
+    def _warm() -> None:
+        # Reading .dim triggers _ensure_loaded under gpu_lock for each.
+        try:
+            _ = get_text_embedder().dim
+        except Exception:
+            logger.exception("warmup: text embedder failed")
+        try:
+            _ = get_image_embedder().dim
+        except Exception:
+            logger.exception("warmup: image embedder failed")
+        try:
+            get_sparse_embedder()  # bm25 has no .dim; load via factory
+        except Exception:
+            logger.exception("warmup: sparse embedder failed")
+
+    await asyncio.to_thread(_warm)
+    logger.info("warmup: embedders loaded")
+
+
 def _seed_users() -> None:
     settings = get_settings()
     if settings.single_user:
@@ -118,6 +153,15 @@ def create_app() -> FastAPI:
             watcher.start()
             install_default(watcher)
             handlers = {**DEFAULT_HANDLERS, **INDEXING_HANDLERS}
+            # Pre-warm the embedders before any worker can claim a job.
+            # Lazy-loading them on first use means the load (CUDA weight
+            # transfer) can run on a request thread while the worker is
+            # mid-MinerU on another thread — two CUDA contexts in flight,
+            # glibc detects heap corruption ("malloc_consolidate: unaligned
+            # fastbin chunk"). Pre-warming under gpu_lock at startup means
+            # all later calls take the fast path.
+            await _warmup_embedders(settings)
+
             n_workers = settings.resolved_workers()
             logger.info(
                 "starting indexer pool with %d worker%s "

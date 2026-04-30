@@ -51,22 +51,36 @@ class E5TextEmbedder(TextEmbedder):
         self._model: Any | None = None
         self._lock = threading.Lock()
 
-    def _ensure_loaded(self) -> SentenceTransformer:
+    def _load_under_gpu_lock(self) -> SentenceTransformer:
+        """Load the model with ``gpu_lock`` held.
+
+        Loading transfers weights to CUDA. If another thread (e.g. a search
+        request hitting embed_query while the worker is mid-extract) does
+        this concurrently with someone else's CUDA work, two CUDA contexts
+        race and we've seen glibc heap corruption ("malloc_consolidate:
+        unaligned fastbin chunk detected"). Hold gpu_lock so model
+        initialization is single-threaded against every other GPU touch.
+        """
         if self._model is None:
             with self._lock:
                 if self._model is None:
                     from sentence_transformers import SentenceTransformer
 
                     logger.info("loading dense text model: %s", self.model_name)
-                    self._model = SentenceTransformer(self.model_name)
+                    with gpu_lock("e5.load"):
+                        self._model = SentenceTransformer(self.model_name)
         return self._model  # type: ignore[return-value]
+
+    # Backwards-compatible alias for callers (incl. warmup) that don't care
+    # about the lock detail.
+    _ensure_loaded = _load_under_gpu_lock
 
     @property
     def dim(self) -> int:
-        return int(self._ensure_loaded().get_sentence_embedding_dimension())
+        return int(self._load_under_gpu_lock().get_sentence_embedding_dimension())
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        model = self._ensure_loaded()
+        model = self._load_under_gpu_lock()
         prefixed = [f"passage: {t}" for t in texts]
         with gpu_lock("e5.embed_documents"):
             vecs = model.encode(
@@ -75,7 +89,7 @@ class E5TextEmbedder(TextEmbedder):
         return [v.tolist() for v in vecs]
 
     def embed_query(self, text: str) -> list[float]:
-        model = self._ensure_loaded()
+        model = self._load_under_gpu_lock()
         with gpu_lock("e5.embed_query"):
             vec = model.encode(
                 f"query: {text}", convert_to_numpy=True, normalize_embeddings=True

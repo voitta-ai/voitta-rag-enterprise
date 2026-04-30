@@ -42,16 +42,25 @@ class SiglipImageEmbedder(ImageEmbedder):
         self._lock = threading.Lock()
 
     def _ensure_loaded(self) -> tuple[Any, Any]:
+        """Load processor + model under ``gpu_lock``.
+
+        Loading transfers weights to CUDA. If a search-request thread hits
+        this while the indexer worker is mid-MinerU (also touching CUDA),
+        two CUDA contexts race and glibc malloc detects heap corruption.
+        Holding gpu_lock here keeps model initialization single-threaded
+        against every other GPU consumer.
+        """
         if self._model is None:
             with self._lock:
                 if self._model is None:
                     from transformers import AutoModel, AutoProcessor
 
                     logger.info("loading image model: %s", self.model_name)
-                    self._processor = AutoProcessor.from_pretrained(self.model_name)
-                    model = AutoModel.from_pretrained(self.model_name)
-                    model.eval()
-                    self._model = model
+                    with gpu_lock("siglip.load"):
+                        self._processor = AutoProcessor.from_pretrained(self.model_name)
+                        model = AutoModel.from_pretrained(self.model_name)
+                        model.eval()
+                        self._model = model
         return self._processor, self._model  # type: ignore[return-value]
 
     @property
