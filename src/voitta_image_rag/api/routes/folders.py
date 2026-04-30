@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from ...config import get_settings
 from ...db.models import Chunk, File, Folder, Image
 from ...services import events
+from ...services import job_queue
 from ...services.acl import (
     CurrentUser,
     grant_folder,
@@ -401,6 +402,90 @@ def list_folders(
         return [_to_folder_out(f) for f in rows]
     visible = set(visible_folder_ids(db, user.id))
     return [_to_folder_out(f) for f in rows if f.id in visible]
+
+
+class ReindexIn(BaseModel):
+    rel_dir: str | None = Field(
+        default=None,
+        description=(
+            "Optional path prefix relative to the folder root. None or empty "
+            "string reindexes the entire folder; otherwise reindex applies "
+            "recursively to every file under that subdirectory."
+        ),
+    )
+
+
+class ReindexOut(BaseModel):
+    folder_id: int
+    rel_dir: str
+    scheduled: int
+
+
+@router.post("/{folder_id}/reindex", response_model=ReindexOut)
+def reindex_folder(
+    folder_id: int,
+    body: ReindexIn,
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(current_user),
+) -> ReindexOut:
+    """Hard-reindex every file under a folder (or a subdirectory of it).
+
+    Bypasses the unchanged-SHA short-circuit in ``_run_extract_sync`` by
+    blanking ``file_cas_id`` before enqueuing — useful after the parser is
+    upgraded and the existing markdown is no longer the best representation.
+
+    The current files are kept, but their state is reset to ``pending`` so
+    the UI immediately reflects that work is in flight; ``_commit_indexing``
+    bumps ``embed_round`` and resets ``pending_embeds`` when extract runs.
+    """
+    folder = db.get(Folder, folder_id)
+    if folder is None or not user_can_see_folder(db, folder_id, user.id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Folder not found")
+
+    rel_dir = (body.rel_dir or "").strip().strip("/")
+    # Block path traversal — relative paths only, no ``..`` segments. Empty
+    # ``rel_dir`` is allowed and means "match the whole folder".
+    if rel_dir and any(p in ("..", "") for p in rel_dir.split("/")):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, f"Invalid rel_dir: {body.rel_dir!r}"
+        )
+
+    q = select(File).where(File.folder_id == folder_id, File.state != "deleted")
+    if rel_dir:
+        # SQLite LIKE is case-sensitive when the operand is BLOB-like; rel_path
+        # is TEXT, so a literal prefix works. We escape ``%``/``_`` in the
+        # caller-supplied dir name to keep the match exact.
+        like_prefix = (
+            rel_dir.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            + "/%"
+        )
+        q = q.where(File.rel_path.like(like_prefix, escape="\\"))
+
+    candidates = list(db.execute(q).scalars())
+    scheduled = 0
+    for f in candidates:
+        f.file_cas_id = None  # force re-extract regardless of SHA
+        f.state = "pending"
+        f.error = None
+        # We deliberately leave ``pending_embeds`` and ``embed_round`` alone;
+        # ``_commit_indexing`` bumps the round and resets the counter when the
+        # extract job runs, and any stale embeds short-circuit on round.
+        job_queue.enqueue(
+            db, "extract", {"file_id": f.id}, dedup_key=f"extract:{f.id}"
+        )
+        scheduled += 1
+    db.commit()
+
+    for f in candidates:
+        events.publish(
+            "files",
+            {
+                "type": "file.upserted",
+                "file": _to_file_out(f).model_dump(),
+            },
+        )
+
+    return ReindexOut(folder_id=folder_id, rel_dir=rel_dir, scheduled=scheduled)
 
 
 @router.delete("/{folder_id}", status_code=status.HTTP_204_NO_CONTENT)

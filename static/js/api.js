@@ -58,6 +58,8 @@ export const api = {
     },
     mkdir: (folderId, path) =>
         req("POST", `/api/folders/${folderId}/mkdir`, { path }),
+    reindexFolder: (folderId, relDir = "") =>
+        req("POST", `/api/folders/${folderId}/reindex`, { rel_dir: relDir || null }),
     recentJobs: () => req("GET", "/api/jobs/recent?limit=50"),
     retryJob: (id) => req("POST", `/api/jobs/${id}/retry`),
     retryAllFailed: () => req("POST", "/api/jobs/retry-failed"),

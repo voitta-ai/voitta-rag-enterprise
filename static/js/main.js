@@ -281,6 +281,7 @@ function updateToolbarState() {
 
     $("#btn-new-subfolder").disabled = !isManaged;
     $("#btn-upload").disabled = !isManaged;
+    $("#btn-reindex").disabled = !folder;
     $("#btn-remove").disabled = !isRoot;
 }
 
@@ -464,6 +465,39 @@ $("#upload-input").addEventListener("change", async (e) => {
         alert(err.message);
     } finally {
         e.target.value = "";
+    }
+});
+
+$("#btn-reindex").addEventListener("click", async () => {
+    if (!selectedFolderId) return;
+    const folder = folders.get().find((f) => f.id === selectedFolderId);
+    if (!folder) return;
+    const allFolderFiles = files.get().filter(
+        (x) => x.folder_id === folder.id && x.state !== "deleted",
+    );
+    const subtreeFiles = selectedRelDir
+        ? allFolderFiles.filter((f) => f.rel_path.startsWith(`${selectedRelDir}/`))
+        : allFolderFiles;
+    if (subtreeFiles.length === 0) {
+        alert("No files to reindex in this subtree.");
+        return;
+    }
+    const where = selectedRelDir
+        ? `${folder.display_name}/${selectedRelDir}`
+        : folder.display_name;
+    const ok = confirm(
+        `Hard re-index ${subtreeFiles.length} file(s) under "${where}"?\n\n` +
+        `Every file in this subtree will be re-parsed and re-embedded ` +
+        `from scratch — this can take a while and will keep workers busy.\n\n` +
+        `Existing chunks and image embeddings remain available until the ` +
+        `new ones are committed.`,
+    );
+    if (!ok) return;
+    try {
+        const r = await api.reindexFolder(selectedFolderId, selectedRelDir);
+        if (r.scheduled === 0) alert("No files were scheduled.");
+    } catch (err) {
+        alert(err.message);
     }
 });
 
