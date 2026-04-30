@@ -357,12 +357,18 @@ def _dump_commits(
     repo_dir: Path,
     branch: str,
     commits_dir: Path,
-    seen_shas: set[str],
+    seen_paths: set[Path],
 ) -> int:
     """When extended mode is on, walk ``git log`` for the given branch and
-    write one markdown file per *unique* commit (deduped via ``seen_shas``).
+    write one markdown file per *unique* commit (deduped via ``seen_paths``).
     Each file lists which branches contain that commit; we re-read existing
     files to merge the ``Branches`` row instead of overwriting.
+
+    We track *paths* rather than SHAs because the cleanup pass below has to
+    decide which on-disk files to keep. Comparing by ``sha[:7]`` against a
+    filename prefix breaks the moment git's auto-abbreviation picks more than
+    7 characters — which is the default for any non-trivially-sized repo —
+    and would delete every commit file we just wrote.
     """
     commits_dir.mkdir(parents=True, exist_ok=True)
     fmt = "%H%x09%h%x09%an%x09%ae%x09%aI%x09%s"
@@ -382,12 +388,12 @@ def _dump_commits(
         rel = f"{short_sha}-{_safe_name(subject) or 'commit'}.md"
         path = commits_dir / rel
 
-        if sha in seen_shas:
-            # Already written in this run by an earlier branch; just append
-            # this branch to the Branches row if missing.
+        if path in seen_paths:
+            # Already written in this run by an earlier branch — just merge
+            # this branch into the Branches row.
             _append_branch_to_commit_md(path, branch)
             continue
-        seen_shas.add(sha)
+        seen_paths.add(path)
 
         body = _format_commit_md(
             sha=sha,
@@ -543,7 +549,12 @@ class GitHubConnector:
         branches_dir.mkdir(parents=True, exist_ok=True)
         commits_dir = folder_root / "commits"
 
-        seen_shas: set[str] = set()
+        seen_commit_paths: set[Path] = set()
+        # Tracks whether every selected branch successfully produced its
+        # commit dump. If any branch's clone or git-log fails, we skip the
+        # commits-dir cleanup so we don't delete files that branch was
+        # supposed to keep alive.
+        all_commit_dumps_clean = True
         safe_selected = {_safe_name(b) for b in selected}
 
         for branch in selected:
@@ -568,6 +579,7 @@ class GitHubConnector:
                 msg = f"{branch}: {e}"
                 logger.exception("branch sync failed: %s", branch)
                 stats.errors.append(msg)
+                all_commit_dumps_clean = False
                 continue
 
             if extended:
@@ -576,12 +588,13 @@ class GitHubConnector:
                         repo_dir=branch_root / ".git-repo",
                         branch=branch,
                         commits_dir=commits_dir,
-                        seen_shas=seen_shas,
+                        seen_paths=seen_commit_paths,
                     )
                     stats.commits_written += n
                 except Exception as e:
                     logger.exception("commit dump failed: %s", branch)
                     stats.errors.append(f"{branch} (commits): {e}")
+                    all_commit_dumps_clean = False
 
         # Drop branch dirs that are no longer selected so the watcher emits
         # delete events for their files.
@@ -592,14 +605,19 @@ class GitHubConnector:
                     shutil.rmtree(child)
                     stats.branches_removed += 1
 
-        # Drop stale commit files when extended is on. When extended is off,
-        # we leave the dir alone so a user toggling extended off → on doesn't
-        # blow away history that's about to be regenerated anyway.
-        if extended and commits_dir.exists():
-            short_to_keep = {sha[:7] for sha in seen_shas}
+        # Drop stale commit files when extended is on AND every branch's
+        # commit dump succeeded. We compare on the full Path object — not on
+        # a 7-char SHA prefix — because git's %h is variable-length, so a
+        # prefix comparison would treat every freshly-written commit as
+        # "stale" the moment the abbrev grows past 7.
+        if extended and all_commit_dumps_clean and commits_dir.exists():
+            stale = 0
             for f in list(commits_dir.glob("*.md")):
-                if f.name.split("-", 1)[0] not in short_to_keep:
+                if f not in seen_commit_paths:
                     f.unlink(missing_ok=True)
+                    stale += 1
+            if stale:
+                logger.info("removed %d stale commit file(s)", stale)
 
         return stats
 
