@@ -27,6 +27,8 @@ class TextParser(BaseParser):
         ".css",
         ".py",
         ".js",
+        ".mjs",
+        ".cjs",
         ".jsx",
         ".ts",
         ".tsx",
