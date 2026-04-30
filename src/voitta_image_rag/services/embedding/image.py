@@ -9,6 +9,7 @@ import math
 import threading
 from typing import Any
 
+from ..gpu_lock import gpu_lock
 from .types import ImageEmbedder
 
 logger = logging.getLogger(__name__)
@@ -82,20 +83,20 @@ class SiglipImageEmbedder(ImageEmbedder):
         processor, model = self._ensure_loaded()
         img = PILImage.open(io.BytesIO(data)).convert("RGB")
         inputs = processor(images=[img], return_tensors="pt")
-        with torch.no_grad():
+        with gpu_lock("siglip.embed_image"), torch.no_grad():
             features = _as_tensor(model.get_image_features(**inputs))
-        features = features / features.norm(dim=-1, keepdim=True)
-        return features[0].cpu().tolist()
+            features = features / features.norm(dim=-1, keepdim=True)
+            return features[0].cpu().tolist()
 
     def embed_text(self, text: str) -> list[float]:
         import torch
 
         processor, model = self._ensure_loaded()
         inputs = processor(text=[text], return_tensors="pt", padding=True)
-        with torch.no_grad():
+        with gpu_lock("siglip.embed_text"), torch.no_grad():
             features = _as_tensor(model.get_text_features(**inputs))
-        features = features / features.norm(dim=-1, keepdim=True)
-        return features[0].cpu().tolist()
+            features = features / features.norm(dim=-1, keepdim=True)
+            return features[0].cpu().tolist()
 
 
 def _hash_to_vec(digest: bytes) -> list[float]:

@@ -9,12 +9,11 @@ markdown referencing them as ``![](images/<name>)`` — we lift those refs into
 
 Concurrency
 -----------
-The whole MinerU call is serialized behind ``_MINERU_LOCK`` so only one PDF
-parse runs at any given moment in this process. MinerU loads several heavy ML
-models (layout, OCR, formula, table) on first call and keeps them in
-module-level globals; running multiple parses concurrently would either OOM,
-duplicate the model weights, or thrash the GPU. Per project guidance, we rely
-on serialization rather than a separate model-server process.
+The whole MinerU call enters the process-wide GPU mutex (see
+``services.gpu_lock``). Every other GPU consumer — text and image embedders
+— enters the same mutex, so MinerU never competes with embedding for the
+device, and only one inference task runs at a time across the whole
+process.
 
 Bucketing
 ---------
@@ -31,7 +30,6 @@ import logging
 import mimetypes
 import re
 import tempfile
-import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,11 +38,11 @@ from typing import ClassVar
 import fitz  # PyMuPDF — used only to count/split pages, not to extract text.
 
 from ...config import get_settings
+from ..gpu_lock import gpu_lock
 from .base import BaseParser, ExtractedImage, ParserResult
 
 logger = logging.getLogger(__name__)
 
-_MINERU_LOCK = threading.Lock()
 _MINERU_GPU_LOGGED = False
 
 _IMG_REF_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
@@ -151,12 +149,12 @@ def _parse_bucket(
     page_start: int,
     page_end: int,
 ) -> _BucketResult:
-    """Run MinerU on a single PDF (or bucket) under ``_MINERU_LOCK``."""
+    """Run MinerU on a single PDF (or bucket) under the global GPU mutex."""
     out_root.mkdir(parents=True, exist_ok=True)
     pdf_name = bucket_path.stem
 
     started = time.perf_counter()
-    with _MINERU_LOCK:
+    with gpu_lock("mineru.parse"):
         _log_gpu_once()
         from mineru.cli.common import do_parse, read_fn  # imported lazily
 

@@ -8,6 +8,7 @@ import math
 import threading
 from typing import TYPE_CHECKING, Any
 
+from ..gpu_lock import gpu_lock
 from .types import TextEmbedder
 
 if TYPE_CHECKING:
@@ -67,12 +68,16 @@ class E5TextEmbedder(TextEmbedder):
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         model = self._ensure_loaded()
         prefixed = [f"passage: {t}" for t in texts]
-        vecs = model.encode(prefixed, convert_to_numpy=True, normalize_embeddings=True)
+        with gpu_lock("e5.embed_documents"):
+            vecs = model.encode(
+                prefixed, convert_to_numpy=True, normalize_embeddings=True
+            )
         return [v.tolist() for v in vecs]
 
     def embed_query(self, text: str) -> list[float]:
         model = self._ensure_loaded()
-        vec = model.encode(
-            f"query: {text}", convert_to_numpy=True, normalize_embeddings=True
-        )
+        with gpu_lock("e5.embed_query"):
+            vec = model.encode(
+                f"query: {text}", convert_to_numpy=True, normalize_embeddings=True
+            )
         return vec.tolist()
