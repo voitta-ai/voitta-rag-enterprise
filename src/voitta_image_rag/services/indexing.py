@@ -119,7 +119,13 @@ def _run_extract_inner(file_id: int) -> None:
     with _stage("find_parser"):
         parser = get_default_registry().find(abs_path)
     if parser is None:
-        _mark_error(file_id, f"no parser for {abs_path.suffix}")
+        # Not an indexer failure — just a file type we don't have a parser for
+        # (e.g. .svg, .mp4, binary blobs). Record it as ``unsupported`` so it
+        # doesn't pollute the error counters; reindex will retry if we add a
+        # parser for that extension later.
+        ext = abs_path.suffix or "(no ext)"
+        logger.info("no parser for %s — marking unsupported", ext)
+        _mark_state(file_id, state="unsupported", error=f"no parser for {ext}")
         return
     logger.info("parser=%s", parser.__class__.__name__)
 
@@ -730,6 +736,29 @@ def _nearby_image_ids(session, chunk_id: int) -> list[int]:
         .scalars()
         .all()
     ]
+
+
+def reconcile_unsupported_files() -> int:
+    """Migrate ``state='error'`` rows whose error is just "no parser for X"
+    into the new ``unsupported`` state. One-shot cleanup for DBs that were
+    written before the unsupported state existed; idempotent.
+    """
+    moved: list[int] = []
+    with session_scope() as s:
+        rows = list(
+            s.execute(
+                select(File).where(
+                    File.state == "error",
+                    File.error.like("no parser for%"),
+                )
+            ).scalars()
+        )
+        for f in rows:
+            f.state = "unsupported"
+            moved.append(f.id)
+    for fid in moved:
+        _publish_file_upserted(fid)
+    return len(moved)
 
 
 def reconcile_pending_embeds() -> int:

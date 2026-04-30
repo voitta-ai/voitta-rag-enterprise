@@ -244,14 +244,17 @@ def test_anchor_links_built_on_image_chunked_doc(env: None, tmp_path: Path) -> N
         assert s.query(ChunkImageLink).count() == 0
 
 
-def test_extract_unparseable_extension_marks_error(env: None, tmp_path: Path) -> None:
+def test_extract_unparseable_extension_marks_unsupported(
+    env: None, tmp_path: Path
+) -> None:
     init_db()
     file_id = _seed_file(tmp_path / "src", "weird.zzz", "anything")
     asyncio.run(_extract(file_id))
 
     with session_scope() as s:
         f = s.get(File, file_id)
-        assert f.state == "error"
+        # Files we don't have a parser for are not failures — they're skipped.
+        assert f.state == "unsupported"
         assert "no parser" in (f.error or "")
 
 

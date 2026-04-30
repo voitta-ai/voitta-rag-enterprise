@@ -60,13 +60,18 @@ def test_stats_basic_counts(client: TestClient, tmp_path: Path) -> None:
     assert s["files_total"] == 3
     assert s["files_indexed"] == 3
     assert s["files_error"] == 0
+    assert s["files_unsupported"] == 0
     assert s["files_pending"] == 0
     assert s["chunks_total"] >= 2  # at least one per text file
     assert s["images_total"] == 1
     assert s["images_unique"] == 1
     assert s["bytes_total"] > 0
-    assert s["by_extension"][".md"] == 2
-    assert s["by_extension"][".png"] == 1
+    md = s["by_extension"][".md"]
+    assert md["files"] == 2 and md["indexed"] == 2 and md["error"] == 0
+    assert md["chunks"] >= 2
+    png = s["by_extension"][".png"]
+    assert png["files"] == 1 and png["indexed"] == 1
+    assert png["chunks"] == 0  # standalone images produce no chunks
 
 
 def test_stats_unique_image_dedup(client: TestClient, tmp_path: Path) -> None:
@@ -76,6 +81,41 @@ def test_stats_unique_image_dedup(client: TestClient, tmp_path: Path) -> None:
     s = client.get(f"/api/folders/{fid}/stats").json()
     assert s["images_total"] == 2
     assert s["images_unique"] == 1
+
+
+def test_stats_unsupported_files_not_counted_as_error(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """Files we don't have a parser for land in ``unsupported`` and are
+    surfaced as such in the stats — never as ``error``."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.md").write_text("hello")
+    (src / "b.svg").write_text("<svg></svg>")
+    (src / "c.mp4").write_bytes(b"\x00\x00\x00\x18ftypmp42")
+    folder_id = client.post("/api/folders", json={"path": str(src)}).json()["id"]
+    init_db()
+    with session_scope() as s:
+        ids = [
+            f.id for f in s.execute(select(File).where(File.folder_id == folder_id)).scalars()
+        ]
+    for fid in ids:
+        asyncio.run(run_extract({"file_id": fid}))
+        # only the .md will produce embed jobs
+        with session_scope() as s:
+            f = s.get(File, fid)
+            if f and f.state == "extracted":
+                asyncio.run(run_embed_text({"file_id": fid}))
+
+    s = client.get(f"/api/folders/{folder_id}/stats").json()
+    assert s["files_total"] == 3
+    assert s["files_indexed"] == 1
+    assert s["files_error"] == 0  # critical: no parser is NOT an error
+    assert s["files_unsupported"] == 2
+    svg = s["by_extension"][".svg"]
+    assert svg["files"] == 1 and svg["unsupported"] == 1 and svg["error"] == 0
+    mp4 = s["by_extension"][".mp4"]
+    assert mp4["files"] == 1 and mp4["unsupported"] == 1 and mp4["error"] == 0
 
 
 def test_stats_unknown_folder_returns_404(client: TestClient) -> None:
@@ -92,6 +132,7 @@ def test_stats_empty_folder(client: TestClient, tmp_path: Path) -> None:
         "files_total": 0,
         "files_indexed": 0,
         "files_error": 0,
+        "files_unsupported": 0,
         "files_pending": 0,
         "chunks_total": 0,
         "images_total": 0,

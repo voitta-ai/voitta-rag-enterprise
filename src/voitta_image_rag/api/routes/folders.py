@@ -279,17 +279,27 @@ def mkdir(
     return MkdirOut(rel_path=str(rel))
 
 
+class ExtensionStats(BaseModel):
+    files: int = 0
+    indexed: int = 0
+    error: int = 0
+    unsupported: int = 0
+    pending: int = 0
+    chunks: int = 0
+
+
 class FolderStats(BaseModel):
     folder_id: int
     files_total: int
     files_indexed: int
     files_error: int
+    files_unsupported: int
     files_pending: int
     chunks_total: int
     images_total: int
     images_unique: int  # distinct image SHAs (Qdrant point count after dedup)
     bytes_total: int
-    by_extension: dict[str, int]  # ext (incl. dot, e.g. ".pdf") → file count
+    by_extension: dict[str, ExtensionStats]
 
 
 @router.get("/{folder_id}/stats", response_model=FolderStats)
@@ -310,24 +320,43 @@ def folder_stats(
     files_total = len(files)
     files_indexed = sum(1 for f in files if f.state == "indexed")
     files_error = sum(1 for f in files if f.state == "error")
+    files_unsupported = sum(1 for f in files if f.state == "unsupported")
     files_pending = sum(
-        1 for f in files if f.state not in ("indexed", "error", "deleted")
+        1
+        for f in files
+        if f.state not in ("indexed", "error", "unsupported", "deleted")
     )
     bytes_total = sum(f.size_bytes or 0 for f in files)
     file_ids = [f.id for f in files]
 
-    by_extension: dict[str, int] = {}
+    # Per-extension chunk counts: one COUNT-grouped-by query and a join-back
+    # in Python so we don't have to pull every chunk row.
+    chunks_by_file: dict[int, int] = {}
+    if file_ids:
+        chunks_by_file = dict(
+            db.execute(
+                select(Chunk.file_id, func.count(Chunk.id))
+                .where(Chunk.file_id.in_(file_ids))
+                .group_by(Chunk.file_id)
+            ).all()
+        )
+
+    by_extension: dict[str, ExtensionStats] = {}
     for f in files:
         ext = Path(f.rel_path).suffix.lower() or "(no ext)"
-        by_extension[ext] = by_extension.get(ext, 0) + 1
+        es = by_extension.setdefault(ext, ExtensionStats())
+        es.files += 1
+        if f.state == "indexed":
+            es.indexed += 1
+        elif f.state == "error":
+            es.error += 1
+        elif f.state == "unsupported":
+            es.unsupported += 1
+        else:
+            es.pending += 1
+        es.chunks += chunks_by_file.get(f.id, 0)
 
-    chunks_total = (
-        db.execute(
-            select(func.count(Chunk.id)).where(Chunk.file_id.in_(file_ids))
-        ).scalar_one()
-        if file_ids
-        else 0
-    )
+    chunks_total = sum(chunks_by_file.values())
     images_total = (
         db.execute(
             select(func.count(Image.id)).where(Image.file_id.in_(file_ids))
@@ -350,6 +379,7 @@ def folder_stats(
         files_total=files_total,
         files_indexed=files_indexed,
         files_error=files_error,
+        files_unsupported=files_unsupported,
         files_pending=files_pending,
         chunks_total=int(chunks_total),
         images_total=int(images_total),

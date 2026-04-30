@@ -284,6 +284,7 @@ input[type="text"], input[type="file"] {
 }
 .status-tag.pending { background: rgba(255, 149, 0, 0.15); color: var(--color-warning); }
 .status-tag.error { background: rgba(255, 59, 48, 0.15); color: var(--color-error); }
+.status-tag.unsupported,
 .status-tag.deleted,
 .status-tag.none {
     background: rgba(142, 142, 147, 0.18);
@@ -385,6 +386,14 @@ input[type="text"], input[type="file"] {
 }
 .stats-table tr:last-child td { border-bottom: none; }
 .stats-table .ext { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+
+/* Per-extension row coloring in the by-extension table.
+   Tints are subtle so the table still scans as a list, not a heatmap. */
+.stats-table tr.ext-error td      { color: var(--color-error); }
+.stats-table tr.ext-error .ext    { color: var(--color-error); }
+.stats-table tr.ext-unsupported td { color: var(--color-text-secondary); font-style: italic; }
+.stats-table tr.ext-pending td    { color: var(--color-warning); }
+.stats-table tr.ext-indexed td    { color: var(--color-text); }
 
 .file-rows, .job-rows {
     list-style: none;

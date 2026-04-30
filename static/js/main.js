@@ -45,15 +45,15 @@ jobs.subscribe(() => {
 function aggregateStatus(folderFiles) {
     if (folderFiles.length === 0) return "none";
     if (folderFiles.some((f) => f.state === "error")) return "error";
-    if (folderFiles.every((f) => f.state === "indexed")) return "indexed";
+    if (folderFiles.every((f) => f.state === "indexed" || f.state === "unsupported")) return "indexed";
     return "indexing";
 }
 
-// Collapse the indexer's internal substate vocabulary into three user-facing
-// labels. The full transitions (pending → extracting → extracted → embedding)
-// are mid-pipeline and not actionable for the user.
+// Collapse the indexer's internal substate vocabulary into a small set of
+// user-facing labels. ``unsupported`` is its own bucket so we can show it
+// differently from a real failure — and from a still-in-progress file.
 function userStateLabel(state) {
-    if (state === "indexed" || state === "error" || state === "deleted") return state;
+    if (state === "indexed" || state === "error" || state === "deleted" || state === "unsupported") return state;
     return "indexing";
 }
 
@@ -90,11 +90,12 @@ function buildTree(folderFiles, folderId) {
 
 function summariseSubtree(node) {
     /* Aggregates file totals across the subtree rooted at node. */
-    let total = 0, indexed = 0, errored = 0, pending = 0, embedding = 0;
+    let total = 0, indexed = 0, unsupported = 0, errored = 0, pending = 0, embedding = 0;
     function walk(n) {
         for (const f of n.files) {
             total++;
             if (f.state === "indexed") indexed++;
+            else if (f.state === "unsupported") unsupported++;
             else if (f.state === "error") errored++;
             else if (f.state === "extracted" || f.state === "embedding" || f.pending_embeds > 0) embedding++;
             else pending++;
@@ -105,11 +106,11 @@ function summariseSubtree(node) {
     let status = "none";
     if (total > 0) {
         if (errored > 0) status = "error";
-        else if (indexed === total) status = "indexed";
+        else if (indexed + unsupported === total) status = "indexed";
         else if (embedding > 0) status = "indexing";
         else status = "pending";
     }
-    return { total, indexed, errored, status };
+    return { total, indexed, unsupported, errored, status };
 }
 
 // ---------- Tree rendering ----------
@@ -340,13 +341,16 @@ function renderSidebar() {
     const total = subtreeFiles.length;
     const indexed = subtreeFiles.filter((x) => x.state === "indexed").length;
     const errors = subtreeFiles.filter((x) => x.state === "error").length;
+    const unsupported = subtreeFiles.filter((x) => x.state === "unsupported").length;
     const pending = subtreeFiles.filter(
-        (x) => x.state !== "indexed" && x.state !== "error",
+        (x) => x.state !== "indexed" && x.state !== "error" && x.state !== "unsupported",
     ).length;
     $("#kv-files").textContent = total;
     $("#kv-indexed").textContent = indexed;
     $("#kv-errors").textContent = errors;
     $("#kv-pending").textContent = pending;
+    const kvUnsupported = $("#kv-unsupported");
+    if (kvUnsupported) kvUnsupported.textContent = unsupported;
 
     // Folder-level stats from /api/folders/{id}/stats — independent of subdir.
     const s = statsCache && statsCache.folder_id === folder.id ? statsCache : null;
@@ -358,17 +362,47 @@ function renderSidebar() {
     const extTable = $("#ext-table");
     const extTbody = $("#ext-tbody");
     extTbody.innerHTML = "";
-    const exts = s ? Object.entries(s.by_extension).sort((a, b) => b[1] - a[1]) : [];
+    // Sort by file count desc; falls back to ext name for stable order.
+    const exts = s
+        ? Object.entries(s.by_extension).sort((a, b) => b[1].files - a[1].files || a[0].localeCompare(b[0]))
+        : [];
     extTable.hidden = exts.length === 0;
-    for (const [ext, count] of exts) {
+    for (const [ext, e] of exts) {
         const tr = document.createElement("tr");
+        // Row class drives color coding:
+        //   error      → any file under this ext failed
+        //   unsupported → every file is unsupported (no parser)
+        //   pending    → none indexed yet but work is moving
+        //   indexed    → at least some chunks landed
+        let rowClass = "";
+        const tooltipBits = [];
+        if (e.error > 0) {
+            rowClass = "ext-error";
+            tooltipBits.push(`${e.error} error`);
+        } else if (e.indexed === 0 && e.unsupported === e.files) {
+            rowClass = "ext-unsupported";
+            tooltipBits.push(`${e.unsupported} unsupported (no parser)`);
+        } else if (e.indexed === 0 && e.pending > 0) {
+            rowClass = "ext-pending";
+            tooltipBits.push(`${e.pending} pending`);
+        } else if (e.indexed > 0) {
+            rowClass = "ext-indexed";
+        }
+        if (e.indexed) tooltipBits.push(`${e.indexed} indexed`);
+        if (e.unsupported && rowClass !== "ext-unsupported") tooltipBits.push(`${e.unsupported} unsupported`);
+        if (e.pending && rowClass !== "ext-pending") tooltipBits.push(`${e.pending} pending`);
+        tr.className = rowClass;
+        tr.title = tooltipBits.join(" · ");
         const tdExt = document.createElement("td");
         tdExt.className = "ext";
         tdExt.textContent = ext;
-        const tdCount = document.createElement("td");
-        tdCount.className = "num";
-        tdCount.textContent = count;
-        tr.append(tdExt, tdCount);
+        const tdFiles = document.createElement("td");
+        tdFiles.className = "num";
+        tdFiles.textContent = e.files;
+        const tdChunks = document.createElement("td");
+        tdChunks.className = "num";
+        tdChunks.textContent = e.chunks;
+        tr.append(tdExt, tdFiles, tdChunks);
         extTbody.append(tr);
     }
 

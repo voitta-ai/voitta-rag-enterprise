@@ -77,6 +77,7 @@ def create_app() -> FastAPI:
             )
             from .services.indexing import (
                 reconcile_pending_embeds,
+                reconcile_unsupported_files,
             )
             from .services.watcher import (
                 from_settings_for_all_folders,
@@ -89,6 +90,12 @@ def create_app() -> FastAPI:
                 logger.warning(
                     "reconciled %d file(s) stuck in pending state at startup",
                     repaired,
+                )
+            moved = reconcile_unsupported_files()
+            if moved:
+                logger.info(
+                    "migrated %d file(s) from error -> unsupported (no-parser)",
+                    moved,
                 )
 
             watcher = from_settings_for_all_folders()
