@@ -738,6 +738,86 @@ def _nearby_image_ids(session, chunk_id: int) -> list[int]:
     ]
 
 
+def reconcile_abandoned_extracts() -> int:
+    """Reset files left in mid-pipeline state when their extract job died.
+
+    A worker that crashed during ``_run_extract_inner`` (uvicorn --reload,
+    OOM, ctrl-C) leaves the file row at ``state='extracted'`` or
+    ``state='embedding'`` with a previous round's ``pending_embeds`` value
+    that no longer matches any in-flight job — and ``_commit_indexing``
+    already ran (or never reached the embed enqueue), so neither the file
+    nor the queue knows that work is unfinished.
+
+    For every such row that has *no* live extract/embed job, we kick it
+    back to ``state='pending'``: the watcher's previously-emitted event for
+    this file is gone, but ``reclaim_abandoned_jobs`` ran first and may
+    have requeued the original extract; failing that, the next folder
+    scan will pick it up.
+
+    Files whose ``pending_embeds`` is already 0 are left to
+    :func:`reconcile_pending_embeds`, which handles the dual case of
+    "embeds finished, decrement was lost".
+    """
+    repaired_ids: list[int] = []
+    with session_scope() as s:
+        candidates = list(
+            s.execute(
+                select(File).where(
+                    File.state.in_(("extracted", "embedding")),
+                )
+            ).scalars()
+        )
+        if not candidates:
+            return 0
+        # Build set of file_ids referenced by any live (queued/running)
+        # extract or embed job — those don't need our help.
+        live_files: set[int] = set()
+        rows = s.execute(
+            select(Job).where(
+                Job.state.in_(("queued", "running")),
+                Job.kind.in_(("extract", "embed_text", "embed_image")),
+            )
+        ).scalars()
+        for j in rows:
+            try:
+                payload = json.loads(j.payload)
+            except (TypeError, ValueError):
+                continue
+            fid = payload.get("file_id")
+            if isinstance(fid, int):
+                live_files.add(fid)
+            elif "image_id" in payload:
+                row = s.execute(
+                    select(Image.file_id).where(
+                        Image.id == int(payload["image_id"])
+                    )
+                ).first()
+                if row is not None:
+                    live_files.add(row[0])
+
+        for f in candidates:
+            if f.id in live_files:
+                continue
+            logger.warning(
+                "reset abandoned extract: file_id=%d state=%s pending=%d",
+                f.id,
+                f.state,
+                f.pending_embeds,
+            )
+            f.state = "pending"
+            f.pending_embeds = 0
+            f.error = None
+            # Re-enqueue an extract job; reclaim_abandoned_jobs already ran
+            # so this won't dedup against the dead one.
+            job_queue.enqueue(
+                s, "extract", {"file_id": f.id}, dedup_key=f"extract:{f.id}"
+            )
+            repaired_ids.append(f.id)
+    for fid in repaired_ids:
+        _publish_file_upserted(fid)
+    return len(repaired_ids)
+
+
 def reconcile_unsupported_files() -> int:
     """Migrate ``state='error'`` rows whose error is just "no parser for X"
     into the new ``unsupported`` state. One-shot cleanup for DBs that were

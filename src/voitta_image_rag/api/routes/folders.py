@@ -6,7 +6,8 @@ import os
 import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File as FormFile, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
+from fastapi import File as FormFile
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session

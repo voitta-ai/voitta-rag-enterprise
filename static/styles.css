@@ -126,6 +126,32 @@ body {
     background: var(--color-border);
     margin: 0 4px;
 }
+.upload-progress {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+    min-width: 220px;
+}
+.upload-progress-label {
+    font-size: 11px;
+    color: var(--color-text-secondary);
+    white-space: nowrap;
+}
+.upload-progress-bar {
+    flex: 1;
+    height: 6px;
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: 3px;
+    overflow: hidden;
+}
+.upload-progress-fill {
+    height: 100%;
+    width: 0;
+    background: var(--color-accent);
+    transition: width 100ms linear;
+}
 .browser-layout {
     display: grid;
     grid-template-columns: 1fr 360px;

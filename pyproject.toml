@@ -69,6 +69,8 @@ extend-immutable-calls = [
     "fastapi.Query",
     "fastapi.Path",
     "fastapi.Body",
+    "fastapi.File",
+    "fastapi.Form",
 ]
 
 [tool.mypy]

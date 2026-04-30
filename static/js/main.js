@@ -547,12 +547,43 @@ $("#btn-upload").addEventListener("click", () => $("#upload-input").click());
 $("#upload-input").addEventListener("change", async (e) => {
     const selected = Array.from(e.target.files);
     if (!selected.length || !selectedFolderId) return;
+
+    const wrap = $("#upload-progress");
+    const fill = $("#upload-progress-fill");
+    const label = $("#upload-progress-label");
+    const totalBytes = selected.reduce((sum, f) => sum + (f.size || 0), 0);
+    wrap.hidden = false;
+    fill.style.width = "0%";
+    label.textContent = `Uploading ${selected.length} file(s)…`;
+
     try {
-        await api.upload(selectedFolderId, selected, selectedRelDir);
+        await api.upload(
+            selectedFolderId,
+            selected,
+            selectedRelDir,
+            ({ loaded, total, fraction }) => {
+                const pct = Math.round(fraction * 100);
+                fill.style.width = `${pct}%`;
+                if (total) {
+                    label.textContent =
+                        `Uploading ${selected.length} file(s) — ${pct}%`;
+                }
+            },
+        );
+        // Bytes are off the client; the server still has to write them and
+        // the watcher will fire indexing. Show a brief "saving" state so it
+        // doesn't look like the bar got stuck at 100%.
+        fill.style.width = "100%";
+        label.textContent = "Saving…";
+        // Give the watcher events ~600ms to flow back, then hide.
+        setTimeout(() => { wrap.hidden = true; }, 600);
     } catch (err) {
+        wrap.hidden = true;
         alert(err.message);
     } finally {
         e.target.value = "";
+        // discount unused vars
+        void totalBytes;
     }
 });
 

@@ -43,19 +43,45 @@ export const api = {
         const all = await Promise.all(fs.map(f => req("GET", `/api/folders/${f.id}/files`)));
         return all.flat();
     },
-    upload: async (folderId, files, relDir = "") => {
+    upload: async (folderId, files, relDir = "", onProgress = null) => {
+        // XMLHttpRequest because fetch doesn't expose upload progress
+        // events. ``onProgress({loaded, total, fraction})`` is called
+        // repeatedly while the FormData body is being sent; the server
+        // reads the upload before the response is built, so loaded == total
+        // means the bytes are off the client and the user is now waiting on
+        // server-side disk writes.
         const batch = Array.from(files);
         const form = new FormData();
         for (const file of batch) form.append("file", file);
         const query = relDir ? `?rel_dir=${encodeURIComponent(relDir)}` : "";
         const url = `/api/folders/${folderId}/upload${query}`;
-        const r = await fetch(url, {
-            method: "POST",
-            headers: { "X-Forwarded-Email": userEmail() },
-            body: form,
+        return await new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open("POST", url);
+            xhr.setRequestHeader("X-Forwarded-Email", userEmail());
+            xhr.responseType = "json";
+            if (onProgress) {
+                xhr.upload.addEventListener("progress", (e) => {
+                    if (!e.lengthComputable) return;
+                    onProgress({
+                        loaded: e.loaded,
+                        total: e.total,
+                        fraction: e.total ? e.loaded / e.total : 0,
+                    });
+                });
+            }
+            xhr.addEventListener("load", () => {
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    resolve(xhr.response);
+                } else {
+                    const detail = xhr.response?.detail || xhr.responseText || "";
+                    reject(new Error(`${xhr.status} upload: ${detail}`));
+                }
+            });
+            xhr.addEventListener("error", () => reject(new Error("upload network error")));
+            xhr.addEventListener("abort", () => reject(new Error("upload aborted")));
+            xhr.send(form);
         });
-        if (!r.ok) throw new Error(`${r.status} upload: ${await r.text()}`);
-        return r.json();
     },
     mkdir: (folderId, path) =>
         req("POST", `/api/folders/${folderId}/mkdir`, { path }),

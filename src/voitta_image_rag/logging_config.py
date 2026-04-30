@@ -85,6 +85,10 @@ def setup_logging(log_dir: Path, level: str | None = None) -> None:
     # HF model downloads use tqdm written directly to stderr; only this env
     # var (set before any HF import runs) makes them quiet.
     os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    # MinerU pulls in tqdm for layout/OCR/formula progress bars and writes
+    # them straight to stderr too; this env var disables every tqdm bar in
+    # the process (mineru, transformers, sentence-transformers, …).
+    os.environ.setdefault("TQDM_DISABLE", "1")
 
     config: dict[str, Any] = {
         "version": 1,
@@ -137,6 +141,34 @@ def setup_logging(log_dir: Path, level: str | None = None) -> None:
     }
     logging.config.dictConfig(config)
     _strip_console_handlers()
+    _redirect_loguru(log_dir)
+
+
+def _redirect_loguru(log_dir: Path) -> None:
+    """Point ``loguru`` (used by mineru) at our log dir instead of stderr.
+
+    loguru does not honour Python's ``logging`` config — it has its own
+    sink registry — so it must be reconfigured separately. We remove the
+    default stderr sink and add a single rotating file sink at WARNING.
+    Quietly no-ops if loguru isn't installed (e.g. running without mineru).
+    """
+    try:
+        from loguru import logger as loguru_logger
+    except ImportError:
+        return
+    try:
+        loguru_logger.remove()
+        loguru_logger.add(
+            str(log_dir / "mineru.log"),
+            level="WARNING",
+            rotation="10 MB",
+            retention=5,
+            enqueue=True,  # safe across worker threads
+        )
+    except Exception:
+        # loguru API differences across versions — never let logging
+        # config crash the process.
+        pass
 
 
 def _strip_console_handlers() -> None:

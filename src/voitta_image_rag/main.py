@@ -72,10 +72,12 @@ def create_app() -> FastAPI:
         _startup_scan()
 
         if not settings.disable_background:
+            from .services import job_queue
             from .services.indexing import (
                 HANDLERS as INDEXING_HANDLERS,
             )
             from .services.indexing import (
+                reconcile_abandoned_extracts,
                 reconcile_pending_embeds,
                 reconcile_unsupported_files,
             )
@@ -85,6 +87,20 @@ def create_app() -> FastAPI:
             )
             from .services.worker import DEFAULT_HANDLERS, WorkerPool
 
+            requeued, killed = job_queue.reclaim_abandoned_jobs()
+            if requeued or killed:
+                logger.warning(
+                    "abandoned-jobs reconcile: requeued=%d killed=%d",
+                    requeued,
+                    killed,
+                )
+            extracts_repaired = reconcile_abandoned_extracts()
+            if extracts_repaired:
+                logger.warning(
+                    "reset %d file(s) from extracted/embedding -> pending"
+                    " (extract job was abandoned)",
+                    extracts_repaired,
+                )
             repaired = reconcile_pending_embeds()
             if repaired:
                 logger.warning(

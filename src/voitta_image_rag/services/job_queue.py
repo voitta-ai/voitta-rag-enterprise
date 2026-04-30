@@ -74,6 +74,61 @@ def _find_inflight(session: Session, dedup_key: str) -> int | None:
     ).scalar_one_or_none()
 
 
+def reclaim_abandoned_jobs(*, max_attempts: int = 5) -> tuple[int, int]:
+    """Reset jobs left in ``running`` from a previous process.
+
+    A worker pool that dies mid-job (uvicorn --reload, OOM kill, ctrl-C)
+    leaves rows stuck at ``state='running'`` forever — ``claim_one`` only
+    picks ``queued`` rows, and there is no other code path that resurrects
+    them.
+
+    On startup we scan every ``running`` row:
+    * if its attempts count is below ``max_attempts``, push it back to
+      ``queued`` so a fresh worker can re-run it;
+    * if it has hit the cap, mark it ``error`` with a synthetic message so
+      the UI surfaces the dead job instead of hiding it.
+
+    Returns ``(requeued, killed)`` so the caller can log what happened.
+    """
+    requeued = 0
+    killed = 0
+    with session_scope() as s:
+        rows = list(
+            s.execute(
+                text(
+                    "SELECT id, attempts FROM jobs WHERE state='running'"
+                )
+            )
+        )
+        for jid, attempts in rows:
+            if attempts >= max_attempts:
+                s.execute(
+                    text(
+                        "UPDATE jobs SET state='error', error=:e, "
+                        "finished_at=:now WHERE id=:id"
+                    ),
+                    {
+                        "id": jid,
+                        "now": int(time.time()),
+                        "e": (
+                            f"abandoned in 'running' state after {attempts} "
+                            "attempts (worker pool died mid-job)"
+                        ),
+                    },
+                )
+                killed += 1
+            else:
+                s.execute(
+                    text(
+                        "UPDATE jobs SET state='queued', started_at=NULL "
+                        "WHERE id=:id"
+                    ),
+                    {"id": jid},
+                )
+                requeued += 1
+    return requeued, killed
+
+
 def claim_one() -> ClaimedJob | None:
     """Atomically claim the highest-priority queued job (if any)."""
     with session_scope() as session:
