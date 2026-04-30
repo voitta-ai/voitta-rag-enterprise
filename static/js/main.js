@@ -41,6 +41,14 @@ files.subscribe(() => {
 });
 jobs.subscribe(() => {
     renderJobs();
+    // The tree's per-subtree status reads jobs.get() to decide between
+    // "indexing" and "indexed" (see hasActiveWork in summariseSubtree). The
+    // backend publishes file.upserted *before* the worker writes mark_done,
+    // so when the last embed lands the file event arrives while the job is
+    // still 'running' — and a moment later the job goes to 'done' but
+    // nothing re-renders the tree. Re-render on jobs changes too so the
+    // status flips to green without needing a manual expand/collapse.
+    renderFolders(folders.get());
     // A job finishing usually means chunks/images counts moved.
     scheduleStatsRefresh();
 });
