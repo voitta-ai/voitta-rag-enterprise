@@ -88,6 +88,17 @@ function buildTree(folderFiles, folderId) {
     return root;
 }
 
+function hasActiveWork() {
+    /* True iff the worker pool has any queued / running jobs right now.
+       Used to distinguish "files actively being processed" from "files left
+       behind by some past run" — the latter shouldn't keep a folder pinned
+       to 'indexing' forever. */
+    for (const j of jobs.get()) {
+        if (j.state === "queued" || j.state === "running") return true;
+    }
+    return false;
+}
+
 function summariseSubtree(node) {
     /* Aggregates file totals across the subtree rooted at node. */
     let total = 0, indexed = 0, unsupported = 0, errored = 0, pending = 0, embedding = 0;
@@ -107,8 +118,11 @@ function summariseSubtree(node) {
     if (total > 0) {
         if (errored > 0) status = "error";
         else if (indexed + unsupported === total) status = "indexed";
-        else if (embedding > 0) status = "indexing";
-        else status = "pending";
+        else if (hasActiveWork() && (embedding > 0 || pending > 0)) status = "indexing";
+        // No active jobs but some files aren't terminal — they're stragglers,
+        // not work in flight. Reading 'indexing' here is a lie; treat the
+        // subtree as done so the UI matches the queue.
+        else status = "indexed";
     }
     return { total, indexed, unsupported, errored, status };
 }
