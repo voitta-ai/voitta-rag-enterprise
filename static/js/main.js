@@ -99,19 +99,42 @@ function buildTree(folderFiles, folderId) {
     return root;
 }
 
-function hasActiveWork() {
-    /* True iff the worker pool has any queued / running jobs right now.
-       Used to distinguish "files actively being processed" from "files left
-       behind by some past run" — the latter shouldn't keep a folder pinned
-       to 'indexing' forever. */
+function activeFolderIds() {
+    /* Map queued + running jobs back to folder ids so the per-row "indexing"
+       pill only lights up on folders with work actually in flight.
+       Previously the check was global ("any job running anywhere?") which
+       made every folder containing a stale non-terminal file (left behind
+       by a past abandoned job) flash to 'indexing' the moment another
+       folder's reindex started — the bug the user filed.
+
+       Job payload shapes (see services/job_queue.py + scanner / indexing):
+       - extract / embed_text / delete_file: {file_id}
+       - reindex_folder / sync:               {folder_id}
+       embed_image runs inline within extract, never queued separately. */
+    const fileFolder = new Map();
+    for (const f of files.get()) fileFolder.set(f.id, f.folder_id);
+    const out = new Set();
     for (const j of jobs.get()) {
-        if (j.state === "queued" || j.state === "running") return true;
+        if (j.state !== "queued" && j.state !== "running") continue;
+        const p = j.payload || {};
+        if (p.folder_id != null) {
+            out.add(p.folder_id);
+        } else if (p.file_id != null) {
+            const fid = fileFolder.get(p.file_id);
+            if (fid != null) out.add(fid);
+        }
     }
-    return false;
+    return out;
 }
 
-function summariseSubtree(node) {
-    /* Aggregates file totals across the subtree rooted at node. */
+function summariseSubtree(node, folderActive) {
+    /* Aggregates file totals across the subtree rooted at node.
+
+       ``folderActive`` is true when the queue currently has at least one
+       job touching this subtree's folder. We require BOTH that signal AND
+       a non-terminal file in the subtree to render 'indexing' — neither
+       alone is sufficient (queue empty → stragglers; folder active but all
+       this subtree's files are indexed → another subtree is the one moving). */
     let total = 0, indexed = 0, unsupported = 0, errored = 0, pending = 0, embedding = 0;
     function walk(n) {
         for (const f of n.files) {
@@ -129,10 +152,10 @@ function summariseSubtree(node) {
     if (total > 0) {
         if (errored > 0) status = "error";
         else if (indexed + unsupported === total) status = "indexed";
-        else if (hasActiveWork() && (embedding > 0 || pending > 0)) status = "indexing";
-        // No active jobs but some files aren't terminal — they're stragglers,
-        // not work in flight. Reading 'indexing' here is a lie; treat the
-        // subtree as done so the UI matches the queue.
+        else if (folderActive && (embedding > 0 || pending > 0)) status = "indexing";
+        // No active jobs for this folder but some files aren't terminal —
+        // they're stragglers, not work in flight. Reading 'indexing' here
+        // is a lie; treat the subtree as done so the UI matches the queue.
         else status = "indexed";
     }
     return { total, indexed, unsupported, errored, status };
@@ -198,6 +221,9 @@ function renderFolders(list) {
         return;
     }
     const allFiles = files.get();
+    // Compute the active-work set once per render — it's identical for
+    // every row so per-subtree recomputation would be wasted work.
+    const activeFolders = activeFolderIds();
     for (const folder of sorted) {
         const folderFiles = allFiles.filter((x) => x.folder_id === folder.id);
         const tree = buildTree(folderFiles, folder.id);
@@ -209,12 +235,13 @@ function renderFolders(list) {
             displayName: folder.display_name,
             depth: 0,
             isRoot: true,
+            folderActive: activeFolders.has(folder.id),
         });
     }
 }
 
-function renderTreeRow({ ul, folder, node, relDir, displayName, depth, isRoot }) {
-    const summary = summariseSubtree(node);
+function renderTreeRow({ ul, folder, node, relDir, displayName, depth, isRoot, folderActive }) {
+    const summary = summariseSubtree(node, !!folderActive);
     const key = nodeKey(folder.id, relDir);
     const hasChildren = node.dirs.size > 0 || node.files.length > 0;
     const isOpen = expandedNodes.has(key);
@@ -340,6 +367,7 @@ function renderTreeRow({ ul, folder, node, relDir, displayName, depth, isRoot })
                 displayName: name,
                 depth: depth + 1,
                 isRoot: false,
+                folderActive,
             });
         }
         // Then files.
