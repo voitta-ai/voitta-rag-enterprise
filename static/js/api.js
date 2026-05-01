@@ -1,17 +1,16 @@
-// REST helpers. Auth: every request carries X-Forwarded-Email so the
-// dev/multi-user backend resolves a user. The browser stores the email in
-// localStorage; default is "browser@localhost".
-
-const EMAIL_KEY = "voitta-image-rag.email";
-export function userEmail() {
-    return localStorage.getItem(EMAIL_KEY) || "browser@localhost";
-}
+// REST helpers. Identity comes from the signed session cookie set by the
+// Google login flow (Sign in with Google). When deployed behind a
+// reverse-proxy auth tier the proxy injects X-Forwarded-Email on the
+// server side — the browser must NEVER do that itself, otherwise logout
+// is a no-op (the header keeps re-asserting an identity).
 
 async function req(method, path, body) {
     const opts = {
         method,
+        // Same-origin cookies are the default for fetch, but state it
+        // explicitly so behaviour is obvious to anyone reading the code.
+        credentials: "same-origin",
         headers: {
-            "X-Forwarded-Email": userEmail(),
             "Accept": "application/json",
         },
     };
@@ -58,7 +57,7 @@ export const api = {
         return await new Promise((resolve, reject) => {
             const xhr = new XMLHttpRequest();
             xhr.open("POST", url);
-            xhr.setRequestHeader("X-Forwarded-Email", userEmail());
+            xhr.withCredentials = true;  // send the session cookie
             xhr.responseType = "json";
             if (onProgress) {
                 xhr.upload.addEventListener("progress", (e) => {
