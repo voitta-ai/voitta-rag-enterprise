@@ -90,6 +90,20 @@ class Settings(BaseSettings):
     dev_user: str | None = None
     users_file: Path = Path("users.txt")
 
+    # "Sign in with Google" — when both ``google_auth_client_id`` and
+    # ``google_auth_client_secret`` are set the API exposes
+    # ``/api/auth/login/google`` and the UI renders a sign-in button. The
+    # signed session cookie carries the email; ``current_user`` reads it.
+    # ``session_secret`` is used to sign the cookie. If unset, a stable random
+    # secret is generated and persisted under ``data_dir`` so existing logins
+    # survive restarts.
+    google_auth_client_id: str | None = None
+    google_auth_client_secret: str | None = None
+    session_secret: str | None = None
+    # Cookie lifetime for the signed session. 30 days is the same default the
+    # voitta-rag app uses; tune via env when stricter rotation is needed.
+    session_max_age_seconds: int = 60 * 60 * 24 * 30
+
     # Test/dev override: when true, the lifespan does not start the watcher
     # or the worker pool. Production leaves this false.
     disable_background: bool = False
@@ -124,6 +138,34 @@ class Settings(BaseSettings):
 
     def ignore_globs(self) -> list[str]:
         return [g.strip() for g in self.ignore_patterns.split(",") if g.strip()]
+
+    @property
+    def google_auth_enabled(self) -> bool:
+        return bool(self.google_auth_client_id and self.google_auth_client_secret)
+
+    def resolved_session_secret(self) -> str:
+        """Return the cookie-signing secret, generating + persisting one on
+        first use so existing logins survive a restart.
+
+        Generated once per install under ``data_dir/.session_secret``. Treat
+        the file like an env-var secret — anyone who can read it can mint
+        login cookies.
+        """
+        if self.session_secret:
+            return self.session_secret
+        path = self.data_dir / ".session_secret"
+        import contextlib
+        import secrets
+
+        if path.exists():
+            with contextlib.suppress(OSError):
+                return path.read_text().strip()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        secret = secrets.token_urlsafe(64)
+        path.write_text(secret)
+        with contextlib.suppress(OSError):
+            path.chmod(0o600)
+        return secret
 
 
 @lru_cache(maxsize=1)

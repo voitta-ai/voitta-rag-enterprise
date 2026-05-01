@@ -97,6 +97,9 @@ export const api = {
         req("POST", `/api/folders/${folderId}/sync/google-drive/auth`),
     gdListFolders: (folderId) =>
         req("GET", `/api/folders/${folderId}/sync/google-drive/folders`),
+    authConfig: () => req("GET", "/api/auth/config"),
+    me: () => req("GET", "/api/auth/me"),
+    logout: () => req("POST", "/api/auth/logout"),
     recentJobs: () => req("GET", "/api/jobs/recent?limit=50"),
     retryJob: (id) => req("POST", `/api/jobs/${id}/retry`),
     retryAllFailed: () => req("POST", "/api/jobs/retry-failed"),

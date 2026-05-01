@@ -45,17 +45,32 @@ class CurrentUser:
 def resolve_user_email(
     x_forwarded_email: str | None,
     x_user_name: str | None,
+    *,
+    session_email: str | None = None,
 ) -> str:
+    """Pick the email for this request.
+
+    Priority — first match wins:
+
+    1. ``VOITTA_SINGLE_USER`` → ``root@localhost`` (local dev)
+    2. ``VOITTA_DEV_USER`` → that email (local dev)
+    3. ``session_email`` (signed cookie set by Google login)
+    4. ``X-Forwarded-Email`` (reverse proxy auth) or ``X-User-Name`` (MCP)
+    5. raise 401
+
+    The session takes precedence over forwarded headers so an interactive
+    Google login overrides any header-based default if both are present.
+    """
     s = get_settings()
     if s.single_user:
         return ROOT_EMAIL
     if s.dev_user:
         return s.dev_user
-    email = x_forwarded_email or x_user_name
+    email = session_email or x_forwarded_email or x_user_name
     if not email:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="No authenticated user (set VOITTA_DEV_USER for local dev).",
+            detail="No authenticated user (sign in with Google or set VOITTA_DEV_USER for local dev).",
         )
     return email
 

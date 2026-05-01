@@ -50,3 +50,31 @@ def test_single_user_overrides_dev_user(env: None, monkeypatch: pytest.MonkeyPat
     monkeypatch.setenv("VOITTA_DEV_USER", "alice@example.com")
     _reset()
     assert resolve_user_email(None, None) == ROOT_EMAIL
+
+
+def test_session_email_used_when_no_other_signal(env: None) -> None:
+    assert (
+        resolve_user_email(None, None, session_email="dave@example.com")
+        == "dave@example.com"
+    )
+
+
+def test_session_email_takes_priority_over_proxy_header(env: None) -> None:
+    # An interactive Google login should win over a fallback header — the
+    # user explicitly authenticated, so honour their identity.
+    assert (
+        resolve_user_email(
+            "fallback@x.com", None, session_email="primary@example.com"
+        )
+        == "primary@example.com"
+    )
+
+
+def test_dev_user_overrides_session(env: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Dev shortcut must dominate everything else so local development
+    # doesn't drift to whatever cookie happens to be sitting in the browser.
+    monkeypatch.setenv("VOITTA_DEV_USER", "dev@example.com")
+    _reset()
+    assert (
+        resolve_user_email("a@x", None, session_email="b@x") == "dev@example.com"
+    )

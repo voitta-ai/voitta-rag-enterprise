@@ -191,6 +191,25 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="voitta-image-rag", version="0.1.0", lifespan=lifespan)
 
+    # Signed session cookie — used by the Google login flow to persist the
+    # authenticated email across requests. Kept to ``/`` so both REST routes
+    # and the SPA itself see it; ``same_site=lax`` lets the OAuth callback
+    # redirect carry it on the way back from Google.
+    from starlette.middleware.sessions import SessionMiddleware
+
+    settings = get_settings()
+    app.add_middleware(
+        SessionMiddleware,
+        secret_key=settings.resolved_session_secret(),
+        session_cookie="voitta_session",
+        max_age=settings.session_max_age_seconds,
+        same_site="lax",
+        # ``https_only`` only flips Secure on; behind Cloudflare/Caddy where
+        # the origin sees plain HTTP this would prevent the cookie from being
+        # set, so leave it False and let the proxy handle TLS.
+        https_only=False,
+    )
+
     @app.get("/healthz", tags=["health"])
     async def healthz() -> dict[str, bool]:
         return {"ok": True}

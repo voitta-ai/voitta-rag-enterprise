@@ -11,9 +11,27 @@
             <a href="/" class="logo">voitta-image-rag</a>
             <div class="header-actions">
                 <span id="conn-status" class="status-pill disconnected">disconnected</span>
+                <span id="user-pill" class="hint" hidden style="margin-left:8px;"></span>
+                <button id="btn-logout" class="btn btn-secondary btn-sm" hidden style="margin-left:6px;">Sign out</button>
             </div>
         </div>
     </header>
+
+    <!-- Login gate: shown when /api/auth/me returns 401 and Google login is configured. -->
+    <div id="login-gate" class="modal-backdrop" hidden style="background:rgba(0,0,0,0.85);">
+        <div class="modal" style="max-width:420px;text-align:center;">
+            <div class="modal-header"><h3>Sign in to voitta-image-rag</h3></div>
+            <div class="modal-body" style="padding:20px 24px 28px;">
+                <p class="hint" id="login-gate-hint">Sign in with your Google account to continue.</p>
+                <a id="login-gate-google" href="/api/auth/login/google" class="btn btn-primary" style="display:inline-block;margin-top:12px;text-decoration:none;">Sign in with Google</a>
+                <p id="login-gate-disabled" class="hint" hidden style="margin-top:14px;">
+                    Google login is not configured on this server.
+                    Set <code>VOITTA_GOOGLE_AUTH_CLIENT_ID</code> and <code>VOITTA_GOOGLE_AUTH_CLIENT_SECRET</code>
+                    (and either <code>VOITTA_DEV_USER</code> or a reverse-proxy <code>X-Forwarded-Email</code> header) to access the app.
+                </p>
+            </div>
+        </div>
+    </div>
 
     <main class="app-main">
         <div class="browser-container">

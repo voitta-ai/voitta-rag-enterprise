@@ -1149,9 +1149,48 @@ $("#sync-delete").addEventListener("click", async () => {
     }
 });
 
+// ----- Auth gate -----
+
+async function ensureAuthenticated() {
+    // Returns true when the user is signed in (or auth is bypassed via
+    // VOITTA_SINGLE_USER / VOITTA_DEV_USER / forwarded headers); false when
+    // we rendered the login gate and the rest of bootstrap should bail.
+    try {
+        const me = await api.me();
+        $("#user-pill").textContent = me.email;
+        $("#user-pill").hidden = false;
+        $("#btn-logout").hidden = false;
+        $("#login-gate").hidden = true;
+        return true;
+    } catch (err) {
+        if (!String(err.message || "").startsWith("401")) {
+            console.error("auth/me failed", err);
+            return true; // not an auth issue — let the app try to load
+        }
+    }
+    // 401: render the gate. Hide the Sign-in button if the server has no
+    // Google client configured; the help text tells the operator how to fix.
+    let cfg;
+    try { cfg = await api.authConfig(); } catch { cfg = { google_enabled: false }; }
+    if (!cfg.google_enabled) {
+        $("#login-gate-google").hidden = true;
+        $("#login-gate-disabled").hidden = false;
+    }
+    $("#login-gate").hidden = false;
+    return false;
+}
+
+$("#btn-logout").addEventListener("click", async () => {
+    try { await api.logout(); } catch (err) { console.warn("logout failed", err); }
+    // Hard reload so any in-memory state (folders, files, ws connection) is
+    // dropped and the gate re-renders cleanly.
+    window.location.reload();
+});
+
 // ----- Bootstrap -----
 
 async function bootstrap() {
+    if (!(await ensureAuthenticated())) return;
     try {
         rootInfo = await api.root();
         const hint = $("#root-hint");
