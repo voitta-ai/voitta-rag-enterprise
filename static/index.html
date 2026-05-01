@@ -71,6 +71,16 @@
 
             <div class="browser-layout">
                 <section class="folder-list-container">
+                    <!-- Column headers. Stay pinned at the top of the
+                         container; only the <ul> below scrolls. -->
+                    <div class="tree-head" role="row">
+                        <span>Name</span>
+                        <span class="num">Files</span>
+                        <span class="num">Indexed</span>
+                        <span>Status</span>
+                        <span class="center" title="Include in MCP search">Search</span>
+                        <span class="center" title="Share with everyone">Share</span>
+                    </div>
                     <ul id="folder-list" class="tree"></ul>
                 </section>
 

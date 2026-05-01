@@ -57,6 +57,11 @@ body {
     color: var(--color-text-primary);
     font: 13px/1.4 var(--font);
     -webkit-font-smoothing: antialiased;
+    /* Vertical flex so the main pane fills exactly the remaining viewport
+       under the sticky header — lets the folder list scroll internally
+       instead of pushing the page below the fold. */
+    display: flex;
+    flex-direction: column;
 }
 
 /* ---------- Header ---------- */
@@ -104,11 +109,28 @@ body {
 /* ---------- Layout ---------- */
 
 .app-main {
+    /* Fill the height left by the sticky app header so children can claim
+       their share of the viewport with min-height:0 + flex:1. Without
+       min-height:0 a flex child refuses to shrink below its intrinsic
+       content size and the grid below would force the whole page to scroll. */
+    width: 100%;
     max-width: 1600px;
     margin: 0 auto;
     padding: var(--lg);
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    /* Box-sizing safety: padding shouldn't make us overflow. */
+    box-sizing: border-box;
 }
-.browser-container { display: flex; flex-direction: column; gap: var(--md); }
+.browser-container {
+    display: flex;
+    flex-direction: column;
+    gap: var(--md);
+    flex: 1;
+    min-height: 0;
+}
 .toolbar {
     display: flex;
     gap: var(--sm);
@@ -156,7 +178,9 @@ body {
     display: grid;
     grid-template-columns: 1fr 360px;
     gap: var(--lg);
-    align-items: start;
+    align-items: stretch;
+    flex: 1;
+    min-height: 0;
 }
 
 /* ---------- Buttons ---------- */
@@ -215,20 +239,77 @@ input[type="text"], input[type="file"] {
 
 /* ---------- Folder list ---------- */
 
+/* Container fills its grid cell vertically and turns into a flex column
+   so the head row pins to the top while the <ul> below scrolls. */
 .folder-list-container {
     background: var(--color-bg-elevated);
     border: 1px solid var(--color-border-light);
     border-radius: var(--radius-lg);
     overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
 }
 
-.tree { list-style: none; margin: 0; padding: 0; }
+/* One source of truth for the column layout — every row (head + body)
+   uses this so header text aligns with cell content. Switch columns are
+   locked to a fixed width to keep alignment predictable. */
+:root {
+    /* name · files · indexed · status · search · share */
+    --tree-cols: 1fr 56px 64px 100px 56px 56px;
+    --tree-gap: 10px;
+    --tree-pad-x: 16px;
+}
+/* Depth indentation lives as padding-left on the .name-cell (see main.js).
+   That keeps chevron + glyph + label moving together as a unit while the
+   metadata columns to the right stay aligned with the column header. */
+.tree-row .name-cell {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    overflow: hidden;
+    min-width: 0;
+}
+
+.tree-head {
+    display: grid;
+    grid-template-columns: var(--tree-cols);
+    gap: var(--tree-gap);
+    padding: 8px var(--tree-pad-x);
+    background: var(--color-bg);
+    border-bottom: 1px solid var(--color-border);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+    color: var(--color-text-secondary);
+    flex-shrink: 0;
+    /* The ul is a separate scroll container, so this row doesn't need
+       position:sticky — but keep a subtle shadow when content scrolls
+       under it for visual continuity. */
+    position: relative;
+    z-index: 1;
+}
+.tree-head .num { text-align: right; }
+.tree-head .center { text-align: center; }
+
+.tree {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    /* Hide horizontal scroll-bars on tight viewports — the toggle column
+       widths are fixed, so there's no horizontal overflow to expose. */
+    overflow-x: hidden;
+}
 .tree-row {
     display: grid;
-    grid-template-columns: auto auto 1fr 60px 70px 110px auto auto;
+    grid-template-columns: var(--tree-cols);
     align-items: center;
-    gap: 10px;
-    padding: 5px 16px;
+    gap: var(--tree-gap);
+    padding: 5px var(--tree-pad-x);
     border-bottom: 1px solid var(--color-border-light);
     cursor: pointer;
     transition: background var(--t);
@@ -376,7 +457,9 @@ input[type="text"], input[type="file"] {
 .tree-row.selected .chevron { color: #fff; }
 .tree-row.selected .glyph { color: #fff; }
 
-.tree-row .indent { display: inline-block; }
+/* Legacy indent span — unused since depth moved to label padding-left.
+   Kept hidden in case any cached JS still emits it. */
+.tree-row .indent { display: none; }
 .tree-row .chevron {
     width: 14px;
     text-align: center;
@@ -456,6 +539,11 @@ input[type="text"], input[type="file"] {
     display: flex;
     flex-direction: column;
     gap: var(--md);
+    /* Match the folder-list pattern: the sidebar is a grid cell with
+       height already fixed by the layout above, so it just needs to scroll
+       internally when its sections (extension table, kv-grid) overflow. */
+    min-height: 0;
+    overflow-y: auto;
 }
 .sidebar-section {
     background: var(--color-bg-elevated);

@@ -232,10 +232,13 @@ function renderTreeRow({ ul, folder, node, relDir, displayName, depth, isRoot })
         (sharedReadonly ? " shared-readonly" : "");
     li.dataset.key = key;
 
-    const indent = document.createElement("span");
-    indent.className = "indent";
-    indent.style.width = `${depth * 16}px`;
-    li.append(indent);
+    // chevron + glyph + label live in one grid cell so they indent as a
+    // single unit. Depth-based padding goes on the cell, not on chevron
+    // or label — that way the metadata columns to the right stay aligned
+    // with the column header regardless of nesting depth.
+    const nameCell = document.createElement("span");
+    nameCell.className = "name-cell";
+    if (depth > 0) nameCell.style.paddingLeft = `${depth * 14}px`;
 
     const chevron = document.createElement("span");
     chevron.className = "chevron" + (isOpen ? " open" : "") + (hasChildren ? "" : " leaf");
@@ -246,7 +249,7 @@ function renderTreeRow({ ul, folder, node, relDir, displayName, depth, isRoot })
         if (isOpen) expandedNodes.delete(key); else expandedNodes.add(key);
         renderFolders(folders.get());
     });
-    li.append(chevron);
+    nameCell.append(chevron);
 
     const label = document.createElement("span");
     label.className = "label";
@@ -256,7 +259,8 @@ function renderTreeRow({ ul, folder, node, relDir, displayName, depth, isRoot })
     const text = document.createElement("span");
     text.textContent = displayName;
     label.append(glyph, text);
-    li.append(label);
+    nameCell.append(label);
+    li.append(nameCell);
 
     const fileCount = document.createElement("span");
     fileCount.className = "num";
@@ -350,15 +354,14 @@ function renderFileRow(ul, folder, file, depth) {
     li.className = "tree-row file";
     li.dataset.fileId = file.id;
 
-    const indent = document.createElement("span");
-    indent.className = "indent";
-    indent.style.width = `${depth * 16}px`;
-    li.append(indent);
+    const nameCell = document.createElement("span");
+    nameCell.className = "name-cell";
+    if (depth > 0) nameCell.style.paddingLeft = `${depth * 14}px`;
 
     const chevron = document.createElement("span");
     chevron.className = "chevron leaf";
     chevron.textContent = "·";
-    li.append(chevron);
+    nameCell.append(chevron);
 
     const label = document.createElement("span");
     label.className = "label";
@@ -370,7 +373,8 @@ function renderFileRow(ul, folder, file, depth) {
     text.textContent = basename;
     label.append(glyph, text);
     label.title = file.rel_path;
-    li.append(label);
+    nameCell.append(label);
+    li.append(nameCell);
 
     const blank1 = document.createElement("span");
     const blank2 = document.createElement("span");
