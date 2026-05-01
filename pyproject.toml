@@ -28,6 +28,7 @@ dependencies = [
     "google-auth>=2.34",
     "google-auth-oauthlib>=1.2",
     "httpx>=0.28",
+    "itsdangerous>=2.2",
 ]
 
 [project.optional-dependencies]
