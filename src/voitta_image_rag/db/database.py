@@ -87,12 +87,28 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
             "ALTER TABLE folder_sync_sources ADD COLUMN gd_refresh_token TEXT",
             "ALTER TABLE folder_sync_sources ADD COLUMN gd_service_account_json TEXT",
             "ALTER TABLE folder_sync_sources ADD COLUMN gd_folder_id TEXT",
+            "ALTER TABLE folders ADD COLUMN owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL",
+            "ALTER TABLE folders ADD COLUMN shared INTEGER NOT NULL DEFAULT 0",
         ):
             try:
                 cur.execute(stmt)
             except sqlite3.OperationalError as e:
                 if "duplicate column" not in str(e).lower():
                     raise
+
+        # Backfill ownership for legacy folders. Pick the lowest user_id from
+        # folder_acl (deterministic across restarts) when no owner is set.
+        # Folders with no folder_acl rows at all stay NULL — they're already
+        # invisible to everyone in multi-user mode.
+        cur.execute(
+            """
+            UPDATE folders
+               SET owner_id = (
+                   SELECT MIN(user_id) FROM folder_acl WHERE folder_id = folders.id
+               )
+             WHERE owner_id IS NULL
+            """
+        )
     finally:
         cur.close()
 

@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from ...db.models import File, Folder, FolderSyncSource
 from ...services import events, job_queue
-from ...services.acl import CurrentUser, user_can_see_folder
+from ...services.acl import CurrentUser, is_folder_owner, user_can_see_folder
 from ...services.sync.github import (
     GitAuth,
     coerce_branches_field,
@@ -157,9 +157,28 @@ def _to_out(src: FolderSyncSource) -> SyncSourceOut:
 def _check_access(
     folder_id: int, db: Session, user: CurrentUser
 ) -> Folder:
+    """Read-level access check — for read-only endpoints (GET sync source)."""
     folder = db.get(Folder, folder_id)
     if folder is None or not user_can_see_folder(db, folder_id, user.id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Folder not found")
+    return folder
+
+
+def _check_owner(
+    folder_id: int, db: Session, user: CurrentUser
+) -> Folder:
+    """Owner-level access check — for any sync mutation.
+
+    Sync configuration touches credentials, scheduling, and disk content;
+    a read-only viewer of a shared folder must not be able to retrigger
+    syncs or rotate auth.
+    """
+    folder = _check_access(folder_id, db, user)
+    if not is_folder_owner(db, folder_id, user.id):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Only the folder owner can configure sync.",
+        )
     return folder
 
 
@@ -211,7 +230,7 @@ def upsert_sync_source(
     source is always allowed — adding/removing branches, switching extended on
     or off, rotating credentials, etc. The next sync will reconcile contents.
     """
-    folder = _check_access(folder_id, db, user)
+    folder = _check_owner(folder_id, db, user)
     existing = db.get(FolderSyncSource, folder_id)
 
     if existing is None and _folder_has_real_files(db, folder_id, Path(folder.path)):
@@ -362,7 +381,7 @@ def delete_sync_source(
     db: Session = Depends(db_session),
     user: CurrentUser = Depends(current_user),
 ) -> None:
-    folder = _check_access(folder_id, db, user)
+    folder = _check_owner(folder_id, db, user)
     src = db.get(FolderSyncSource, folder_id)
     if src is None:
         return
@@ -383,7 +402,7 @@ def trigger_sync(
     user: CurrentUser = Depends(current_user),
 ) -> SyncTriggerOut:
     """Enqueue a sync job. Dedup'd per folder so spam-clicking is harmless."""
-    _check_access(folder_id, db, user)
+    _check_owner(folder_id, db, user)
     src = db.get(FolderSyncSource, folder_id)
     if src is None:
         raise HTTPException(
@@ -428,7 +447,7 @@ def list_branches(
     Auth is taken from the request body (the user is mid-form and the row
     might not have been saved yet).
     """
-    _check_access(folder_id, db, user)
+    _check_owner(folder_id, db, user)
     auth = GitAuth(
         method=body.auth_method or "",
         ssh_key=body.ssh_key,
@@ -488,7 +507,7 @@ def gd_auth_init(
     ``state`` carries the folder id so the callback (which is folder-agnostic
     in its URL) can find the right row.
     """
-    _check_access(folder_id, db, user)
+    _check_owner(folder_id, db, user)
     src = db.get(FolderSyncSource, folder_id)
     if src is None or src.source_type != "google_drive":
         raise HTTPException(
@@ -522,7 +541,7 @@ async def gd_list_folders(
     user: CurrentUser = Depends(current_user),
 ) -> GdFoldersOut:
     """List Drive locations the user can pick as a sync root."""
-    _check_access(folder_id, db, user)
+    _check_owner(folder_id, db, user)
     src = db.get(FolderSyncSource, folder_id)
     if src is None or src.source_type != "google_drive":
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No Google Drive source")

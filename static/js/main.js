@@ -140,6 +140,50 @@ function summariseSubtree(node) {
 
 // ---------- Tree rendering ----------
 
+// Build a small iOS-style toggle switch. ``onChange(nextChecked)`` runs in
+// response to the underlying input firing — we stop propagation so clicking
+// the switch doesn't also select the folder row.
+function buildSwitch({ checked, disabled, title, onChange }) {
+    const wrap = document.createElement("label");
+    wrap.className = "folder-switch";
+    wrap.title = title || "";
+    wrap.addEventListener("click", (e) => e.stopPropagation());
+
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = !!checked;
+    input.disabled = !!disabled;
+    input.addEventListener("change", () => onChange(input.checked));
+
+    const track = document.createElement("span");
+    track.className = "track";
+
+    wrap.append(input, track);
+    return wrap;
+}
+
+async function toggleFolderActive(folder, active) {
+    try {
+        const updated = await api.setFolderActive(folder.id, active);
+        const next = folders.get().map((f) => (f.id === folder.id ? updated : f));
+        folders.set(next);
+    } catch (err) {
+        alert(err.message);
+        renderFolders(folders.get()); // restore the original visual state
+    }
+}
+
+async function toggleFolderShare(folder, shared) {
+    try {
+        const updated = await api.setFolderShare(folder.id, shared);
+        const next = folders.get().map((f) => (f.id === folder.id ? updated : f));
+        folders.set(next);
+    } catch (err) {
+        alert(err.message);
+        renderFolders(folders.get());
+    }
+}
+
 function renderFolders(list) {
     const ul = $("#folder-list");
     ul.innerHTML = "";
@@ -177,8 +221,15 @@ function renderTreeRow({ ul, folder, node, relDir, displayName, depth, isRoot })
     const isSelected = folder.id === selectedFolderId && relDir === selectedRelDir;
     const canHaveChildren = isRoot || true; // dir nodes always
 
+    // Shared-readonly = someone else's shared folder. We render it with an
+    // accent strip so the user doesn't confuse it with their own folders.
+    const sharedReadonly = isRoot && folder.shared && !folder.owned;
+
     const li = document.createElement("li");
-    li.className = `tree-row ${isRoot ? "folder-root" : "dir"}` + (isSelected ? " selected" : "");
+    li.className =
+        `tree-row ${isRoot ? "folder-root" : "dir"}` +
+        (isSelected ? " selected" : "") +
+        (sharedReadonly ? " shared-readonly" : "");
     li.dataset.key = key;
 
     const indent = document.createElement("span");
@@ -223,6 +274,51 @@ function renderTreeRow({ ul, folder, node, relDir, displayName, depth, isRoot })
     tag.className = `status-tag ${summary.status}`;
     tag.textContent = summary.status;
     li.append(tag);
+
+    if (isRoot) {
+        // Per-user MCP-search toggle. Available on every visible folder
+        // (including shared ones the user doesn't own — it's their personal
+        // preference, not a folder-level mutation).
+        li.append(
+            buildSwitch({
+                title: folder.active
+                    ? "MCP search includes this folder. Click to exclude."
+                    : "MCP search excludes this folder. Click to include.",
+                checked: folder.active,
+                disabled: false,
+                onChange: (next) => toggleFolderActive(folder, next),
+            }),
+        );
+        // Owner-only Share toggle. We still render the cell (so the grid
+        // stays aligned) but with a hidden / disabled switch for non-owners.
+        if (folder.owned) {
+            li.append(
+                buildSwitch({
+                    title: folder.shared
+                        ? "Folder is shared with everyone. Click to unshare."
+                        : "Folder is private. Click to share with everyone.",
+                    checked: folder.shared,
+                    disabled: false,
+                    onChange: (next) => toggleFolderShare(folder, next),
+                    iconBefore: "↗",
+                }),
+            );
+        } else {
+            // Filler so the grid columns line up across rows.
+            const spacer = document.createElement("span");
+            spacer.className = "folder-switch";
+            spacer.style.visibility = "hidden";
+            li.append(spacer);
+        }
+    } else {
+        // Non-root rows still have to fill the grid; otherwise the row
+        // collapses to fewer columns and looks misaligned next to roots.
+        for (let i = 0; i < 2; i++) {
+            const spacer = document.createElement("span");
+            spacer.style.visibility = "hidden";
+            li.append(spacer);
+        }
+    }
 
 
     li.addEventListener("click", () => selectNode(folder.id, relDir));
@@ -304,16 +400,21 @@ function updateToolbarState() {
     const folder = folders.get().find((f) => f.id === selectedFolderId);
     const isManaged = !!(folder && folder.managed);
     const isRoot = !!folder && selectedRelDir === "";
+    // Read-only = a shared folder owned by someone else. Owner-only mutations
+    // (upload, mkdir, reindex, sync, remove) are disabled; viewers can still
+    // expand the tree and read files.
+    const isOwned = !!(folder && folder.owned);
+    const readOnly = !!folder && !isOwned;
 
-    $("#btn-new-subfolder").disabled = !isManaged;
-    $("#btn-upload").disabled = !isManaged;
-    $("#btn-reindex").disabled = !folder;
+    $("#btn-new-subfolder").disabled = !isManaged || readOnly;
+    $("#btn-upload").disabled = !isManaged || readOnly;
+    $("#btn-reindex").disabled = !folder || readOnly;
     // Sync button: only at the folder root on managed folders. Hidden when
     // the folder is non-empty AND has no sync source — sync can't be
     // configured on an existing folder of files. When a sync source already
     // exists, the same button reads "Config" (re-opens the same modal).
     const syncBtn = $("#btn-sync");
-    if (!(isManaged && isRoot)) {
+    if (!(isManaged && isRoot) || readOnly) {
         syncBtn.hidden = true;
         syncBtn.disabled = true;
     } else {
@@ -337,7 +438,7 @@ function updateToolbarState() {
                 : "Configure a remote sync (e.g. GitHub) for this empty folder";
         }
     }
-    $("#btn-remove").disabled = !isRoot;
+    $("#btn-remove").disabled = !isRoot || readOnly;
 }
 
 async function createSubfolder() {

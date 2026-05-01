@@ -17,8 +17,11 @@ from ...db.models import Chunk, File, Folder, FolderSyncSource, Image
 from ...services import events, job_queue
 from ...services.acl import (
     CurrentUser,
+    folder_active_for_user,
     grant_folder,
+    is_folder_owner,
     revoke_folder,
+    set_folder_active,
     user_can_see_folder,
     visible_folder_ids,
 )
@@ -53,6 +56,12 @@ class FolderOut(BaseModel):
     managed: bool
     created_at: int
     has_sync_source: bool = False
+    # Ownership / sharing — see services/acl.py docstring.
+    owner_id: int | None = None
+    owned: bool = False  # True if the calling user owns this folder
+    shared: bool = False  # True if owner has flipped the shared switch on
+    # Per-user MCP-search opt-out (default-on, missing row = True).
+    active: bool = True
 
 
 class RootInfo(BaseModel):
@@ -72,7 +81,13 @@ class FileOut(BaseModel):
     source_url: str | None
 
 
-def _to_folder_out(f: Folder, *, has_sync_source: bool = False) -> FolderOut:
+def _to_folder_out(
+    f: Folder,
+    *,
+    has_sync_source: bool = False,
+    owned: bool = False,
+    active: bool = True,
+) -> FolderOut:
     return FolderOut(
         id=f.id,
         path=f.path,
@@ -82,7 +97,31 @@ def _to_folder_out(f: Folder, *, has_sync_source: bool = False) -> FolderOut:
         managed=f.managed,
         created_at=f.created_at,
         has_sync_source=has_sync_source,
+        owner_id=f.owner_id,
+        owned=owned,
+        shared=bool(f.shared),
+        active=active,
     )
+
+
+def _require_owner(
+    db: Session, folder_id: int, user: CurrentUser
+) -> Folder:
+    """Authorize an owner-only mutation.
+
+    Visible-but-not-owner gets a 403 so the SPA can render the right
+    "read-only" message; folder-not-found / folder-not-visible get a 404
+    so the existence of someone else's folder isn't probeable.
+    """
+    folder = db.get(Folder, folder_id)
+    if folder is None or not user_can_see_folder(db, folder_id, user.id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Folder not found")
+    if not is_folder_owner(db, folder_id, user.id):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Only the folder owner can perform this action.",
+        )
+    return folder
 
 
 def _resolve_managed(name: str) -> Path:
@@ -165,6 +204,7 @@ def create_folder(
         display_name=body.display_name or abs_path.name or str(abs_path),
         source_type="filesystem",
         managed=managed,
+        owner_id=user.id,
     )
     db.add(folder)
     db.flush()
@@ -172,7 +212,7 @@ def create_folder(
     scan_folder(db, folder)
     db.commit()
     watch_folder_in_default(folder)
-    out = _to_folder_out(folder)
+    out = _to_folder_out(folder, owned=True, active=True)
     events.publish("folders", {"type": "folder.added", "folder": out.model_dump()})
     return out
 
@@ -234,9 +274,7 @@ async def upload_file(
     External (non-managed) folders are read-only via the API by design — write
     files there with your usual tooling and the watcher will catch the change.
     """
-    folder = db.get(Folder, folder_id)
-    if folder is None or not user_can_see_folder(db, folder_id, user.id):
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Folder not found")
+    folder = _require_owner(db, folder_id, user)
     if not folder.managed:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
@@ -311,9 +349,7 @@ def mkdir(
     the empty directory (no file events), so the directory exists on disk
     but no DB rows are created.
     """
-    folder = db.get(Folder, folder_id)
-    if folder is None or not user_can_see_folder(db, folder_id, user.id):
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Folder not found")
+    folder = _require_owner(db, folder_id, user)
     if not folder.managed:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
@@ -485,9 +521,7 @@ def grant(
     db: Session = Depends(db_session),
     user: CurrentUser = Depends(current_user),
 ) -> None:
-    folder = db.get(Folder, folder_id)
-    if folder is None or not user_can_see_folder(db, folder_id, user.id):
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Folder not found")
+    _require_owner(db, folder_id, user)
     grant_folder(db, folder_id, body.user_id)
     db.commit()
 
@@ -499,11 +533,82 @@ def revoke(
     db: Session = Depends(db_session),
     user: CurrentUser = Depends(current_user),
 ) -> None:
+    _require_owner(db, folder_id, user)
+    revoke_folder(db, folder_id, body.user_id)
+    db.commit()
+
+
+class ShareIn(BaseModel):
+    shared: bool
+
+
+class ActiveIn(BaseModel):
+    active: bool
+
+
+@router.patch("/{folder_id}/share", response_model=FolderOut)
+def set_share(
+    folder_id: int,
+    body: ShareIn,
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(current_user),
+) -> FolderOut:
+    """Owner-only toggle: when ``shared=true`` every signed-in user sees the
+    folder in their listing (read-only for non-owners). Default off.
+    """
+    folder = _require_owner(db, folder_id, user)
+    folder.shared = bool(body.shared)
+    db.commit()
+    db.refresh(folder)
+    has_sync = (
+        db.execute(
+            select(FolderSyncSource.folder_id).where(
+                FolderSyncSource.folder_id == folder_id
+            )
+        ).first()
+        is not None
+    )
+    out = _to_folder_out(
+        folder,
+        has_sync_source=has_sync,
+        owned=True,
+        active=folder_active_for_user(db, folder_id, user.id),
+    )
+    # Push so other connected SPAs see the new sharing state without polling.
+    events.publish("folders", {"type": "folder.upserted", "folder": out.model_dump()})
+    return out
+
+
+@router.patch("/{folder_id}/active", response_model=FolderOut)
+def set_active_endpoint(
+    folder_id: int,
+    body: ActiveIn,
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(current_user),
+) -> FolderOut:
+    """Per-user toggle: when ``active=false`` this folder is excluded from
+    the user's MCP search calls. Visible to anyone who can see the folder
+    (including read-only viewers of a shared folder).
+    """
     folder = db.get(Folder, folder_id)
     if folder is None or not user_can_see_folder(db, folder_id, user.id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Folder not found")
-    revoke_folder(db, folder_id, body.user_id)
+    set_folder_active(db, folder_id, user.id, bool(body.active))
     db.commit()
+    has_sync = (
+        db.execute(
+            select(FolderSyncSource.folder_id).where(
+                FolderSyncSource.folder_id == folder_id
+            )
+        ).first()
+        is not None
+    )
+    return _to_folder_out(
+        folder,
+        has_sync_source=has_sync,
+        owned=is_folder_owner(db, folder_id, user.id),
+        active=bool(body.active),
+    )
 
 
 @router.get("", response_model=list[FolderOut])
@@ -516,10 +621,23 @@ def list_folders(
         fid for (fid,) in db.execute(select(FolderSyncSource.folder_id)).all()
     }
     if get_settings().single_user:
-        return [_to_folder_out(f, has_sync_source=f.id in sync_ids) for f in rows]
+        return [
+            _to_folder_out(
+                f,
+                has_sync_source=f.id in sync_ids,
+                owned=True,
+                active=folder_active_for_user(db, f.id, user.id),
+            )
+            for f in rows
+        ]
     visible = set(visible_folder_ids(db, user.id))
     return [
-        _to_folder_out(f, has_sync_source=f.id in sync_ids)
+        _to_folder_out(
+            f,
+            has_sync_source=f.id in sync_ids,
+            owned=is_folder_owner(db, f.id, user.id),
+            active=folder_active_for_user(db, f.id, user.id),
+        )
         for f in rows
         if f.id in visible
     ]
@@ -565,9 +683,7 @@ def reindex_folder(
     the duration of the running extract, with the browser timing out and
     the user seeing nothing happen.
     """
-    folder = db.get(Folder, folder_id)
-    if folder is None or not user_can_see_folder(db, folder_id, user.id):
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Folder not found")
+    _require_owner(db, folder_id, user)
 
     rel_dir = (body.rel_dir or "").strip().strip("/")
     # Block path traversal — relative paths only, no ``..`` segments. Empty
@@ -609,9 +725,7 @@ def delete_folder(
     db: Session = Depends(db_session),
     user: CurrentUser = Depends(current_user),
 ) -> None:
-    folder = db.get(Folder, folder_id)
-    if folder is None or not user_can_see_folder(db, folder_id, user.id):
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Folder not found")
+    folder = _require_owner(db, folder_id, user)
     db.delete(folder)
     db.commit()
     unwatch_folder_in_default(folder_id)

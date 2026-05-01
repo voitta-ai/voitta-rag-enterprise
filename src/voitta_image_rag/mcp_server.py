@@ -38,7 +38,12 @@ from .cas import store as cas_store
 from .config import get_settings
 from .db.database import init_db, session_scope
 from .db.models import Chunk, ChunkImageLink, File, Folder, Image
-from .services.acl import ROOT_EMAIL, get_or_create_user, visible_folder_ids
+from .services.acl import (
+    ROOT_EMAIL,
+    get_or_create_user,
+    mcp_visible_folder_ids,
+    visible_folder_ids,
+)
 from .services.embedding import (
     get_image_embedder,
     get_sparse_embedder,
@@ -108,6 +113,12 @@ class FolderInfo(BaseModel):
     source_type: str
     files_total: int
     files_indexed: int
+    # True when this folder is currently included in the caller's MCP search
+    # (i.e. they haven't toggled it off in Settings). Always True in single-
+    # user / dev-user modes.
+    active: bool = True
+    # True when the folder is shared globally (owner toggled the switch).
+    shared: bool = False
 
 
 class FileInfo(BaseModel):
@@ -148,19 +159,28 @@ class ImageInfo(BaseModel):
 
 @mcp.tool()
 def list_indexed_folders() -> list[FolderInfo]:
-    """List the folders visible to the calling user, with file-count breakdown."""
+    """List the folders visible to the calling user, with file-count breakdown.
+
+    Returns every visible folder (owned, granted, shared). The ``active``
+    flag tells the caller which ones are currently in their MCP search
+    rotation — they remain listed even when toggled off so the LLM can
+    suggest re-enabling.
+    """
     settings = get_settings()
     user_id = _resolved_user_id()
     show_all = settings.single_user
     with session_scope() as s:
-        visible = (
-            set(visible_folder_ids(s, user_id))
-            if user_id is not None and not show_all
-            else set()
-        )
+        if show_all or user_id is None:
+            visible_ids: set[int] = {
+                f.id for f in s.execute(select(Folder)).scalars()
+            }
+            active_ids = visible_ids
+        else:
+            visible_ids = set(visible_folder_ids(s, user_id))
+            active_ids = set(mcp_visible_folder_ids(s, user_id))
         out: list[FolderInfo] = []
         for f in s.execute(select(Folder).order_by(Folder.id)).scalars():
-            if not show_all and user_id is not None and f.id not in visible:
+            if f.id not in visible_ids:
                 continue
             total = (
                 s.execute(
@@ -178,9 +198,27 @@ def list_indexed_folders() -> list[FolderInfo]:
                     source_type=f.source_type,
                     files_total=len(total),
                     files_indexed=len(indexed),
+                    active=f.id in active_ids,
+                    shared=bool(f.shared),
                 )
             )
         return out
+
+
+def _mcp_search_folder_filter(
+    s, user_id: int | None, requested: list[int] | None
+) -> list[int] | None:
+    """Same shape as the REST helper but uses ``mcp_visible_folder_ids`` so
+    the user's per-folder ``active`` toggle is enforced."""
+    if get_settings().single_user or user_id is None:
+        return requested
+    active = set(mcp_visible_folder_ids(s, user_id))
+    if not active:
+        return [-1]
+    if requested is None:
+        return sorted(active)
+    intersect = [fid for fid in requested if fid in active]
+    return intersect or [-1]
 
 
 @mcp.tool()
@@ -198,12 +236,14 @@ def search(
     limit = max(1, min(limit, 100))
     text_emb = get_text_embedder()
     sparse_emb = get_sparse_embedder()
+    user_id = _resolved_user_id()
+    with session_scope() as s:
+        effective = _mcp_search_folder_filter(s, user_id, folder_ids)
     hits = vs_search_chunks(
         dense=text_emb.embed_query(query),
         sparse=sparse_emb.embed_query(query),
         limit=limit,
-        folder_ids=folder_ids,
-        allowed_user_id=_resolved_user_id(),
+        folder_ids=effective,
     )
     return [_chunk_from_hit(h) for h in hits]
 
@@ -217,11 +257,13 @@ def search_images(
     """Cross-modal text→image search via the image embedder's text encoder."""
     limit = max(1, min(limit, 100))
     image_emb = get_image_embedder()
+    user_id = _resolved_user_id()
+    with session_scope() as s:
+        effective = _mcp_search_folder_filter(s, user_id, folder_ids)
     hits = vs_search_images(
         vector=image_emb.embed_text(query),
         limit=limit,
-        folder_ids=folder_ids,
-        allowed_user_id=_resolved_user_id(),
+        folder_ids=effective,
     )
     return [_image_from_hit(h) for h in hits]
 

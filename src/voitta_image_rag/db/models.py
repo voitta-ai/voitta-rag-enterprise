@@ -45,6 +45,10 @@ class Folder(Base):
     source_config: Mapped[str | None] = mapped_column(default=None)
     enabled: Mapped[bool] = mapped_column(default=True)
     managed: Mapped[bool] = mapped_column(default=False)
+    owner_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), default=None
+    )
+    shared: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[int] = mapped_column(default=_now_s)
 
 
@@ -126,6 +130,22 @@ class FolderAcl(Base):
     user_id: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
     )
+
+
+class FolderUserSettings(Base):
+    """Per-user, per-folder MCP-search opt-out. ``active=False`` excludes
+    this folder from the user's MCP search queries. Missing row = active.
+    """
+
+    __tablename__ = "folder_user_settings"
+
+    folder_id: Mapped[int] = mapped_column(
+        ForeignKey("folders.id", ondelete="CASCADE"), primary_key=True
+    )
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    active: Mapped[bool] = mapped_column(default=True)
 
 
 class FileAcl(Base):

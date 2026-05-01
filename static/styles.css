@@ -225,7 +225,7 @@ input[type="text"], input[type="file"] {
 .tree { list-style: none; margin: 0; padding: 0; }
 .tree-row {
     display: grid;
-    grid-template-columns: auto auto 1fr 60px 70px 110px;
+    grid-template-columns: auto auto 1fr 60px 70px 110px auto auto;
     align-items: center;
     gap: 10px;
     padding: 5px 16px;
@@ -233,6 +233,71 @@ input[type="text"], input[type="file"] {
     cursor: pointer;
     transition: background var(--t);
     user-select: none;
+}
+/* Read-only shared folders (someone else owns them) get a left-edge accent
+   so they stand out from your own. The accent persists even when selected. */
+.tree-row.folder-root.shared-readonly {
+    border-left: 3px solid var(--color-accent);
+    padding-left: 13px;
+    background: linear-gradient(
+        to right,
+        color-mix(in srgb, var(--color-accent) 6%, transparent),
+        transparent 40%
+    );
+}
+.tree-row.folder-root.shared-readonly.selected {
+    background: var(--color-accent);
+}
+
+/* Compact iOS-style toggle switch used for the per-folder Active and Share
+   flags. Built around an unstyled checkbox so screen readers and keyboard
+   navigation work for free. */
+.folder-switch {
+    position: relative;
+    display: inline-block;
+    width: 32px;
+    height: 18px;
+    flex-shrink: 0;
+}
+.folder-switch input {
+    position: absolute;
+    opacity: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    cursor: pointer;
+}
+.folder-switch .track {
+    position: absolute;
+    inset: 0;
+    background: var(--color-text-tertiary);
+    border-radius: 9px;
+    transition: background var(--t);
+    pointer-events: none;
+}
+.folder-switch .track::before {
+    content: "";
+    position: absolute;
+    left: 2px;
+    top: 2px;
+    width: 14px;
+    height: 14px;
+    background: #fff;
+    border-radius: 50%;
+    transition: transform 120ms ease;
+}
+.folder-switch input:checked + .track {
+    background: var(--color-accent);
+}
+.folder-switch input:checked + .track::before {
+    transform: translateX(14px);
+}
+.folder-switch input:disabled + .track {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+.folder-switch input:disabled {
+    cursor: not-allowed;
 }
 .tree-row:last-child { border-bottom: none; }
 .tree-row:hover { background: var(--color-bg-hover); }

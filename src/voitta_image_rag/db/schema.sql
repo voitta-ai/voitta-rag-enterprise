@@ -17,6 +17,14 @@ CREATE TABLE IF NOT EXISTS folders (
     source_config TEXT,
     enabled       INTEGER NOT NULL DEFAULT 1,
     managed       INTEGER NOT NULL DEFAULT 0,  -- 1 if created under VOITTA_ROOT_PATH; sync connectors require managed=1
+    -- The user who registered the folder. They alone can rename, delete,
+    -- toggle ``shared``, configure sync, reindex, upload, grant, revoke.
+    -- NULL on legacy rows registered before ownership existed; the migration
+    -- backfills from any folder_acl row.
+    owner_id      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    -- When 1, every signed-in user sees this folder (read-only) regardless
+    -- of folder_acl. Owner-toggleable.
+    shared        INTEGER NOT NULL DEFAULT 0,
     created_at    INTEGER NOT NULL
 );
 
@@ -89,6 +97,20 @@ CREATE TABLE IF NOT EXISTS folder_acl (
     user_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     PRIMARY KEY (folder_id, user_id)
 );
+
+-- Per-user, per-folder MCP-search opt-out. ``active=0`` means the folder
+-- is hidden from this user's MCP search calls (and the SPA renders the
+-- toggle off, but the folder is still visible/expandable). Default-on is
+-- represented by the absence of a row, so brand-new folders / brand-new
+-- users automatically include everything.
+CREATE TABLE IF NOT EXISTS folder_user_settings (
+    folder_id INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+    user_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    active    INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (folder_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_folder_user_settings_user
+    ON folder_user_settings(user_id);
 
 CREATE TABLE IF NOT EXISTS cas_refs (
     cas_id          TEXT NOT NULL,

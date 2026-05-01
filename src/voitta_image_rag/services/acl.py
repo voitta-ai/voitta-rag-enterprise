@@ -8,14 +8,28 @@ Modes (see ARCHITECTURE.md §9):
   set by Google OAuth; MCP identity comes from the verified ``Authorization:
   Bearer vk_…`` token. No header-based fallbacks.
 
-Authorisation model (v1):
+Authorisation model (v2):
 
-- ``folder_acl`` is canonical: a user can see a folder iff there's a
-  ``(folder_id, user_id)`` row.
-- ``file_acl`` exists for future per-file overrides; v1 leaves it empty.
-- A user can see a *file* iff they can see its folder.
-- Indexers stamp ``allowed_users`` on every Qdrant chunk point at index time;
-  changes to ACLs after indexing require re-indexing the file (deferred).
+A folder has *one owner* (``folders.owner_id``) and an optional set of
+explicit grants (``folder_acl``). It can also be marked ``shared=true``,
+which makes it visible to every signed-in user.
+
+Visibility (who sees the folder in their listing / can read its files):
+
+    visible(user) = owned(user) | granted(user) | {f for f in folders if f.shared}
+
+Mutation (delete, rename, share-toggle, sync configure, reindex, upload,
+mkdir, grant, revoke): owner only.
+
+MCP search visibility further intersects with the user's per-folder
+``active`` flag (``folder_user_settings.active``); default-on means
+"missing row = active". This lets a user mute folders they can see but
+don't want polluting LLM search results.
+
+Indexers still stamp ``allowed_users`` on every Qdrant chunk point at
+index time, but the runtime search filter has moved to ``folder_id`` (built
+from ``visible_folder_ids``) — that way shared-folder visibility doesn't
+require re-indexing.
 """
 
 from __future__ import annotations
@@ -29,7 +43,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
-from ..db.models import File, FolderAcl, User
+from ..db.models import File, FolderAcl, FolderUserSettings, User
 from ..db.models import Folder as _Folder
 
 logger = logging.getLogger(__name__)
@@ -111,17 +125,68 @@ def folder_user_ids(session: Session, folder_id: int) -> list[int]:
 
 
 def visible_folder_ids(session: Session, user_id: int) -> list[int]:
-    return [
+    """Folders the user can see.
+
+    Union of three sources:
+
+    - **Owned** (``folders.owner_id == user_id``) — folders this user
+      registered. Always visible to the owner.
+    - **Granted** (``folder_acl(folder_id, user_id)``) — folders explicitly
+      shared with this user via the grant API.
+    - **Shared globally** (``folders.shared = 1``) — folders the owner
+      flipped to public; visible to everyone (read-only for non-owners).
+    """
+    owned = {
+        f.id
+        for f in session.execute(
+            select(_Folder).where(_Folder.owner_id == user_id)
+        ).scalars()
+    }
+    granted = {
         row.folder_id
         for row in session.execute(
             select(FolderAcl).where(FolderAcl.user_id == user_id)
         ).scalars()
-    ]
+    }
+    shared = {
+        f.id
+        for f in session.execute(
+            select(_Folder).where(_Folder.shared.is_(True))
+        ).scalars()
+    }
+    return sorted(owned | granted | shared)
+
+
+def mcp_visible_folder_ids(session: Session, user_id: int) -> list[int]:
+    """Visible folders minus the user's MCP-search opt-outs.
+
+    A row in ``folder_user_settings`` with ``active=0`` excludes the
+    folder from this user's MCP queries; missing row = active. Used by
+    the MCP server, not by the SPA.
+    """
+    base = visible_folder_ids(session, user_id)
+    if not base:
+        return []
+    inactive = {
+        row.folder_id
+        for row in session.execute(
+            select(FolderUserSettings).where(
+                FolderUserSettings.user_id == user_id,
+                FolderUserSettings.active.is_(False),
+            )
+        ).scalars()
+    }
+    return [fid for fid in base if fid not in inactive]
 
 
 def user_can_see_folder(session: Session, folder_id: int, user_id: int) -> bool:
     if get_settings().single_user:
         return session.get(_Folder, folder_id) is not None
+    folder = session.get(_Folder, folder_id)
+    if folder is None:
+        return False
+    if folder.owner_id == user_id or folder.shared:
+        return True
     return (
         session.execute(
             select(FolderAcl).where(
@@ -130,6 +195,81 @@ def user_can_see_folder(session: Session, folder_id: int, user_id: int) -> bool:
         ).scalar_one_or_none()
         is not None
     )
+
+
+def is_folder_owner(session: Session, folder_id: int, user_id: int) -> bool:
+    """True if ``user_id`` is the registered owner of ``folder_id``.
+
+    Single-user mode always returns True so the local-dev shortcut keeps
+    working without a real owner relationship.
+    """
+    if get_settings().single_user:
+        return session.get(_Folder, folder_id) is not None
+    folder = session.get(_Folder, folder_id)
+    if folder is None:
+        return False
+    return folder.owner_id == user_id
+
+
+def set_folder_active(
+    session: Session, folder_id: int, user_id: int, active: bool
+) -> None:
+    """Upsert the user's per-folder ``active`` flag.
+
+    Avoids leaving a row in the default state by deleting when ``active``
+    flips back to True (default-on means "no row needed"). Reduces table
+    size when most users default-on most folders.
+    """
+    row = session.execute(
+        select(FolderUserSettings).where(
+            FolderUserSettings.folder_id == folder_id,
+            FolderUserSettings.user_id == user_id,
+        )
+    ).scalar_one_or_none()
+    if active:
+        if row is not None:
+            session.delete(row)
+        return
+    if row is None:
+        session.add(
+            FolderUserSettings(folder_id=folder_id, user_id=user_id, active=False)
+        )
+    else:
+        row.active = False
+
+
+def folder_user_id_email(session: Session, user_id: int) -> str | None:
+    """Resolve user_id → email; ``None`` if the row no longer exists."""
+    user = session.get(User, user_id)
+    return user.email if user else None
+
+
+def folder_active_for_user(session: Session, folder_id: int, user_id: int) -> bool:
+    """Default-on lookup: missing row = active."""
+    row = session.execute(
+        select(FolderUserSettings).where(
+            FolderUserSettings.folder_id == folder_id,
+            FolderUserSettings.user_id == user_id,
+        )
+    ).scalar_one_or_none()
+    return True if row is None else bool(row.active)
+
+
+def active_folder_ids(session: Session, user_id: int, folder_ids: list[int]) -> set[int]:
+    """Subset of ``folder_ids`` for which the user has not opted out."""
+    if not folder_ids:
+        return set()
+    inactive = {
+        row.folder_id
+        for row in session.execute(
+            select(FolderUserSettings).where(
+                FolderUserSettings.user_id == user_id,
+                FolderUserSettings.folder_id.in_(folder_ids),
+                FolderUserSettings.active.is_(False),
+            )
+        ).scalars()
+    }
+    return {fid for fid in folder_ids if fid not in inactive}
 
 
 def user_can_see_file(session: Session, file_id: int, user_id: int) -> bool:
