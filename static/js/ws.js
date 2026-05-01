@@ -1,6 +1,6 @@
 // WebSocket connection manager with backoff reconnect.
 
-import { connStatus, folders, files, jobs } from "./store.js";
+import { connStatus, folders, files, jobs, reindexProgress } from "./store.js";
 
 const MAX_BACKOFF_MS = 30_000;
 const TOPICS = ["folders", "files", "jobs", "stats"];
@@ -64,6 +64,26 @@ function handleEvent(event) {
         case "folder.removed":
             folders.update((list) => list.filter(f => f.id !== event.folder_id));
             files.update((list) => list.filter(f => f.folder_id !== event.folder_id));
+            return;
+        case "folder.reindex_progress":
+            // Backend emits these in batches during a reindex job's
+            // wipe / queue phases. Stash on the reindexProgress store so
+            // the folder card can render a "Wiping… 600/1969" pill.
+            // ``phase === "done"`` means the folder is no longer in the
+            // wipe path — reset the entry so the pill disappears.
+            reindexProgress.update((map) => {
+                const next = new Map(map);
+                if (event.phase === "done") {
+                    next.delete(event.folder_id);
+                } else {
+                    next.set(event.folder_id, {
+                        phase: event.phase,
+                        done: event.done,
+                        total: event.total,
+                    });
+                }
+                return next;
+            });
             return;
         case "file.upserted": {
             const f = event.file;

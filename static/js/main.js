@@ -1,7 +1,7 @@
 // SPA entry point. Folder-list driven, with a selection-aware sidebar.
 
 import { api } from "./api.js";
-import { connStatus, files, folders, jobs } from "./store.js";
+import { connStatus, files, folders, jobs, reindexProgress } from "./store.js";
 import { connect } from "./ws.js";
 
 const $ = (sel) => document.querySelector(sel);
@@ -38,6 +38,14 @@ files.subscribe(() => {
     // empty, which is computed from the files store — re-evaluate on change.
     updateToolbarState();
     scheduleStatsRefresh();
+});
+reindexProgress.subscribe(() => {
+    // Progress events arrive at ~5/s during a wipe — re-render the
+    // sidebar (which is the only place the badge lives) and the folder
+    // list (so the row's status pill can flip if we ever surface it
+    // there too). Cheap: both renders are O(folder count).
+    renderSidebar();
+    renderFolders(folders.get());
 });
 jobs.subscribe(() => {
     renderJobs();
@@ -565,6 +573,26 @@ function renderSidebar() {
         healthBadge.hidden = false;
     } else {
         healthBadge.hidden = true;
+    }
+
+    // Live reindex pill — only present while the worker is in the wipe /
+    // queue phase of a reindex_folder job for this folder. The backend
+    // publishes folder.reindex_progress at ~5/s (one per 200-file chunk).
+    // Once the job finishes, ws.js drops the entry and the badge hides.
+    const reindexBadge = $("#folder-reindex-badge");
+    const progress = reindexProgress.get().get(folder.id);
+    if (progress) {
+        const verb = progress.phase === "cancelling" ? "Cancelling stale jobs"
+            : progress.phase === "wiping" ? "Wiping"
+            : progress.phase === "queueing" ? "Queueing fresh extracts"
+            : progress.phase;
+        reindexBadge.textContent = `↻ ${verb} — ${progress.done}/${progress.total}`;
+        // Hide the "Reindex needed" warning while we're actively reindexing
+        // so the two pills don't shout at each other.
+        healthBadge.hidden = true;
+        reindexBadge.hidden = false;
+    } else {
+        reindexBadge.hidden = true;
     }
 
     const extTable = $("#ext-table");

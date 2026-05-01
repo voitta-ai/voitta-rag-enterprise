@@ -584,25 +584,74 @@ async def run_reindex_folder(payload: dict) -> None:
         return
     with bind_context(folder_id=folder_id):
         logger.info("reindex begin: %d file(s)", len(file_ids))
-        await asyncio.to_thread(_run_reindex_sync, file_ids)
+        await asyncio.to_thread(_run_reindex_sync, folder_id, file_ids)
         logger.info("reindex done: %d file(s)", len(file_ids))
 
 
-def _run_reindex_sync(file_ids: list[int]) -> None:
-    """Synchronous body of run_reindex_folder. Runs in the worker thread."""
-    # Cancel any queued extract jobs for these files. Without this, a
-    # queued extract from before reindex would run on the now-wiped file
-    # using stale assumptions about what's there. With dedup_key our
-    # follow-up enqueue would return the OLD job id and never schedule a
-    # fresh one — so we cancel first, then enqueue fresh.
+# Wipe progress is broadcast via WebSocket so the SPA can show a live
+# "Wiping… 600/1969" pill on the folder card. Batched in chunks of 200 so
+# we publish on the order of 10 events for a 2k-file folder, not one per
+# file.
+_REINDEX_PROGRESS_CHUNK = 200
+
+
+def _publish_reindex_progress(
+    folder_id: int | None,
+    *,
+    phase: str,
+    done: int,
+    total: int,
+) -> None:
+    if folder_id is None:
+        return
+    events.publish(
+        "folders",
+        {
+            "type": "folder.reindex_progress",
+            "folder_id": folder_id,
+            "phase": phase,  # "cancelling" | "wiping" | "queueing" | "done"
+            "done": done,
+            "total": total,
+        },
+    )
+
+
+def _run_reindex_sync(folder_id: int | None, file_ids: list[int]) -> None:
+    """Synchronous body of run_reindex_folder. Runs in the worker thread.
+
+    Performs three batched phases (each emits a progress event):
+
+    1. **cancelling** — flip queued extract jobs to ``done(superseded)``
+       so a pre-reindex enqueue can't fire on a half-wiped file.
+    2. **wiping** — bulk-delete every chunk + image row + Qdrant point
+       across the target file_ids in just a few round-trips, regardless
+       of how many files are involved.
+    3. **queueing** — flip every file row back to ``pending`` and enqueue
+       a fresh extract.
+
+    Old code did all three per-file in a Python loop (1969 iterations →
+    6 minutes for the user's git-test folder). This version uses bulk SQL
+    DELETE + folder-scope Qdrant deletes, taking each phase from O(N)
+    round-trips down to O(1).
+    """
+    from sqlalchemy import delete as sa_delete
+
+    from ..cas import store as cas_store
+    from . import vector_store
+
+    total = len(file_ids)
+
+    # ---- Phase 1: cancelling stale extracts ---------------------------------
     cancelled = 0
     with session_scope() as s:
-        for fid in file_ids:
+        # One query per ~200 file_ids — SQLite has a default 999-parameter
+        # limit, so chunked IN is the safest portable shape.
+        for chunk in _chunked(file_ids, _REINDEX_PROGRESS_CHUNK):
             q = s.execute(
                 select(Job).where(
                     Job.state == "queued",
                     Job.kind == "extract",
-                    Job.dedup_key == f"extract:{fid}",
+                    Job.dedup_key.in_([f"extract:{fid}" for fid in chunk]),
                 )
             ).scalars()
             for j in q:
@@ -612,32 +661,92 @@ def _run_reindex_sync(file_ids: list[int]) -> None:
                 cancelled += 1
     if cancelled:
         logger.info("reindex: cancelled %d stale extract job(s)", cancelled)
+    _publish_reindex_progress(folder_id, phase="cancelling", done=total, total=total)
 
-    # Wipe + reset + enqueue, one file at a time. wipe_file_data's
-    # _EXTRACT_LOCK is uncontended here — we're the only extract worker
-    # and we're not running an extract right now.
-    upserts: list[int] = []
-    for fid in file_ids:
-        try:
-            wipe_file_data(fid)
-        except Exception:
-            logger.exception("reindex: wipe failed for file_id=%d", fid)
-            continue
-        with session_scope() as s:
-            f = s.get(File, fid)
-            if f is None:
-                continue
-            f.file_cas_id = None
-            f.state = "pending"
-            f.error = None
-            f.pending_embeds = 0
-            job_queue.enqueue(
-                s, "extract", {"file_id": fid}, dedup_key=f"extract:{fid}"
+    # ---- Phase 2: wiping (the slow phase, now bulk) -------------------------
+    _publish_reindex_progress(folder_id, phase="wiping", done=0, total=total)
+
+    # 2a. CAS decrefs need per-row context (each chunk + image references
+    # one SHA), so we still touch every row — but in batches with one
+    # transaction per batch, not one per file. The decref is a SQLite-only
+    # bookkeeping update so it's cheap.
+    with _EXTRACT_LOCK:
+        wiped = 0
+        for chunk in _chunked(file_ids, _REINDEX_PROGRESS_CHUNK):
+            with session_scope() as s:
+                # Decref CAS for every image whose file is being wiped.
+                rows = s.execute(
+                    select(Image.image_cas_id, Image.file_id).where(
+                        Image.file_id.in_(chunk)
+                    )
+                ).all()
+                for sha, _fid in rows:
+                    cas_store.decref(s, cas_store.KIND_IMAGE, sha)
+                # And for the file blob itself.
+                file_shas = s.execute(
+                    select(File.file_cas_id).where(
+                        File.id.in_(chunk),
+                        File.file_cas_id.is_not(None),
+                    )
+                ).all()
+                for (sha,) in file_shas:
+                    cas_store.decref(s, cas_store.KIND_FILE, sha)
+                # Bulk row deletes. ChunkImageLink is CASCADEd from both
+                # parents, so this is the only DELETE needed for it too.
+                s.execute(sa_delete(Image).where(Image.file_id.in_(chunk)))
+                s.execute(sa_delete(Chunk).where(Chunk.file_id.in_(chunk)))
+            wiped += len(chunk)
+            _publish_reindex_progress(
+                folder_id, phase="wiping", done=wiped, total=total
             )
-            upserts.append(fid)
+
+        # 2b. One Qdrant call per collection, scoped by folder_id (chunks)
+        # or by file_ids set (images, which can be CAS-shared with files
+        # in *other* folders).
+        if folder_id is not None:
+            vector_store.delete_chunks_for_folder(folder_id)
+        else:
+            # Defensive: caller didn't pass a folder_id (shouldn't happen
+            # for the normal reindex path, but leave a fallback).
+            for fid in file_ids:
+                vector_store.delete_chunks_for_file(fid)
+        deleted_image_points = vector_store.remove_files_from_image_points(file_ids)
+        if deleted_image_points:
+            logger.info(
+                "reindex: removed %d image point(s) from Qdrant",
+                deleted_image_points,
+            )
+
+    # ---- Phase 3: queueing fresh extracts -----------------------------------
+    _publish_reindex_progress(folder_id, phase="queueing", done=0, total=total)
+    upserts: list[int] = []
+    queued = 0
+    for chunk in _chunked(file_ids, _REINDEX_PROGRESS_CHUNK):
+        with session_scope() as s:
+            files = s.execute(select(File).where(File.id.in_(chunk))).scalars().all()
+            for f in files:
+                f.file_cas_id = None
+                f.state = "pending"
+                f.error = None
+                f.pending_embeds = 0
+                job_queue.enqueue(
+                    s, "extract", {"file_id": f.id}, dedup_key=f"extract:{f.id}"
+                )
+                upserts.append(f.id)
+        queued += len(chunk)
+        _publish_reindex_progress(
+            folder_id, phase="queueing", done=queued, total=total
+        )
 
     for fid in upserts:
         _publish_file_upserted(fid)
+    _publish_reindex_progress(folder_id, phase="done", done=total, total=total)
+
+
+def _chunked(seq: list[int], size: int):
+    """Yield successive ``size``-length slices of ``seq``."""
+    for i in range(0, len(seq), size):
+        yield seq[i : i + size]
 
 
 def _embed_text_sync(file_id: int, round_token: int | None = None) -> None:

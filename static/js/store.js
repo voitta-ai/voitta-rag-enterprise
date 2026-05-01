@@ -26,3 +26,6 @@ export const folders = createStore([]);   // [{id, path, display_name, ...}]
 export const files = createStore([]);     // [{id, folder_id, rel_path, state, ...}]
 export const jobs = createStore([]);      // [{id, kind, state, ...}]
 export const connStatus = createStore("disconnected");
+// folder_id → { phase, done, total } while a reindex_folder job is mid-wipe.
+// Empty map means "no folder is currently in a reindex wipe phase".
+export const reindexProgress = createStore(new Map());

@@ -383,6 +383,83 @@ def delete_chunks_for_file(file_id: int) -> None:
     run_on_qdrant(_do)
 
 
+def delete_chunks_for_folder(folder_id: int) -> None:
+    """Drop every chunk point that belongs to ``folder_id``.
+
+    Used by ``reindex_folder`` to wipe an entire folder's chunk index in a
+    single Qdrant round-trip instead of N (one per file). Folder-scope
+    reindex was the slow path that motivated this — N=2000 individual
+    filter-deletes took 6 minutes vs ~50 ms here.
+    """
+
+    def _do() -> None:
+        client = get_client()
+        if not client.collection_exists(CHUNKS):
+            return
+        client.delete(
+            CHUNKS,
+            points_selector=qm.FilterSelector(
+                filter=qm.Filter(
+                    must=[
+                        qm.FieldCondition(
+                            key="folder_id", match=qm.MatchValue(value=folder_id)
+                        )
+                    ]
+                )
+            ),
+        )
+
+    run_on_qdrant(_do)
+
+
+def remove_files_from_image_points(file_ids: list[int]) -> int:
+    """Bulk version of ``remove_file_from_image_points``.
+
+    Image points are CAS-deduped and shared across files (their ``file_ids``
+    payload is a list), so we can't just filter-delete by folder_id like
+    chunks. Instead we scroll points whose ``file_ids`` intersects the
+    target set, edit each payload in memory, and either re-upsert the
+    trimmed ``file_ids`` or delete the point if no references remain.
+
+    Returns the number of points that ended up fully deleted (for stats).
+    Does ONE scroll over the matching subset and one Qdrant call per
+    affected point, vs the old code's per-file scroll+update loop.
+    """
+    if not file_ids:
+        return 0
+    target = set(file_ids)
+
+    def _do() -> int:
+        client = get_client()
+        if not client.collection_exists(IMAGES):
+            return 0
+        # ``MatchAny`` on an array field matches points whose array contains
+        # at least one of the listed values — exactly what we want.
+        res, _ = client.scroll(
+            IMAGES,
+            scroll_filter=qm.Filter(
+                must=[qm.FieldCondition(key="file_ids", match=qm.MatchAny(any=list(target)))]
+            ),
+            limit=100_000,
+            with_payload=True,
+        )
+        deleted = 0
+        to_delete: list[int] = []
+        for p in res:
+            payload = dict(p.payload or {})
+            remaining = [fid for fid in (payload.get("file_ids") or []) if fid not in target]
+            if remaining:
+                client.set_payload(IMAGES, payload={"file_ids": remaining}, points=[p.id])
+            else:
+                to_delete.append(p.id)
+        if to_delete:
+            client.delete(IMAGES, points_selector=qm.PointIdsList(points=to_delete))
+            deleted = len(to_delete)
+        return deleted
+
+    return run_on_qdrant(_do)
+
+
 @dataclass
 class SearchHit:
     id: int
