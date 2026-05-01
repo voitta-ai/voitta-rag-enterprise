@@ -81,6 +81,14 @@ class Settings(BaseSettings):
     pdf_pages_per_bucket: int = 20
     pdf_parse_method: str = "auto"  # MinerU parse_method: auto|txt|ocr
     pdf_lang: str = "en"
+    # Per-bucket wall-clock budget. MinerU has been observed to wedge in
+    # native code on certain PDFs (no GPU activity, no progress logs) — the
+    # parent has no way to interrupt that since CPython can't deliver
+    # signals into a blocked C thread. We isolate every parse in a long-
+    # lived subprocess and kill -9 it when this timeout fires; the offending
+    # file is parked as ``state='error'`` and the queue keeps moving.
+    # 600s = 10 minutes is generous for a 20-page bucket on a single GPU.
+    pdf_parse_timeout_s: int = 600
     # Test override: when true, the PDF parser returns a deterministic stub
     # without invoking MinerU. Used by the test suite to keep runs fast.
     use_fake_pdf_parser: bool = False

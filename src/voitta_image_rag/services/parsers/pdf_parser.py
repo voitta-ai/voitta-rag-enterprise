@@ -25,11 +25,16 @@ length of the prior buckets' markdown plus the ``\\n\\n`` joiner.
 
 from __future__ import annotations
 
+import contextlib
 import io
+import json
 import logging
 import mimetypes
 import re
+import subprocess
+import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -149,32 +154,28 @@ def _parse_bucket(
     page_start: int,
     page_end: int,
 ) -> _BucketResult:
-    """Run MinerU on a single PDF (or bucket) under the global GPU mutex."""
+    """Run MinerU on a single PDF (or bucket) under the global GPU mutex.
+
+    The parse runs in a long-lived MinerU subprocess (see ``_MineruDaemon``)
+    so we can hard-kill it on timeout. The parent thread holds ``gpu_lock``
+    for the entire subprocess call so the embedders in this process don't
+    contend with the subprocess for the GPU — same serialisation guarantee
+    we used to get from running MinerU in-process.
+    """
     out_root.mkdir(parents=True, exist_ok=True)
     pdf_name = bucket_path.stem
+    timeout_s = get_settings().pdf_parse_timeout_s
 
     started = time.perf_counter()
     with gpu_lock("mineru.parse"):
         _log_gpu_once()
-        from mineru.cli.common import do_parse, read_fn  # imported lazily
-
-        pdf_bytes = read_fn(bucket_path)
-        do_parse(
-            output_dir=str(out_root),
-            pdf_file_names=[pdf_name],
-            pdf_bytes_list=[pdf_bytes],
-            p_lang_list=[lang],
-            backend="pipeline",
-            parse_method=method,
-            formula_enable=True,
-            table_enable=True,
-            f_draw_layout_bbox=False,
-            f_draw_span_bbox=False,
-            f_dump_md=True,
-            f_dump_middle_json=False,
-            f_dump_model_output=False,
-            f_dump_orig_pdf=False,
-            f_dump_content_list=False,
+        _mineru_daemon().parse(
+            bucket_path=bucket_path,
+            out_root=out_root,
+            method=method,
+            lang=lang,
+            pdf_name=pdf_name,
+            timeout_s=timeout_s,
         )
     elapsed = time.perf_counter() - started
 
@@ -288,6 +289,189 @@ def _dimensions(data: bytes) -> tuple[int | None, int | None]:
             return img.size
     except Exception:
         return (None, None)
+
+
+# ---------------------------------------------------------------------------
+# MinerU subprocess daemon
+# ---------------------------------------------------------------------------
+
+
+class _MineruDaemon:
+    """Persistent MinerU subprocess. Talks JSON over stdio.
+
+    Why this exists: see ``_mineru_subprocess`` module docstring. tl;dr —
+    MinerU has been observed to hang inside native code on certain PDFs;
+    Python signals can't unwedge a blocked C thread, so we isolate the
+    parse in a subprocess and SIGKILL it on timeout.
+
+    Concurrency contract: ``_lock`` serialises every parse so we never
+    interleave two requests on the same stdio. Together with the parent's
+    ``gpu_lock``, this guarantees a single MinerU call at a time.
+
+    Lifecycle: lazy-spawn on first ``parse``; respawn after a kill or any
+    exit. The first request after a respawn pays MinerU's model-load cost
+    (~5s); subsequent requests reuse the warm process.
+    """
+
+    def __init__(self) -> None:
+        self._proc: subprocess.Popen[str] | None = None
+        self._stderr_thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+
+    def _spawn(self) -> None:
+        # Use the same Python that's running the parent so the subprocess
+        # picks up our installed venv (MinerU and torch live there).
+        self._proc = subprocess.Popen(
+            [sys.executable, "-m", "voitta_image_rag.services.parsers._mineru_subprocess"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=1,  # line-buffered — we round-trip one JSON line per request
+            text=True,
+        )
+        # MinerU's progress bars and torch CUDA messages go to stderr. Drain
+        # the pipe on a background thread so a chatty parse doesn't fill the
+        # pipe buffer and deadlock; surface each line to our logger so the
+        # operator can see what the subprocess is doing.
+        self._stderr_thread = threading.Thread(
+            target=self._drain_stderr,
+            args=(self._proc.stderr,),
+            daemon=True,
+            name="mineru-stderr",
+        )
+        self._stderr_thread.start()
+        logger.info("MinerU daemon spawned: pid=%d", self._proc.pid)
+
+    @staticmethod
+    def _drain_stderr(stream) -> None:
+        try:
+            for line in stream:
+                line = line.rstrip()
+                if line:
+                    logger.info("[mineru] %s", line)
+        except Exception:
+            logger.exception("MinerU stderr drainer crashed")
+
+    def _ensure_alive(self) -> None:
+        if self._proc is not None and self._proc.poll() is None:
+            return
+        if self._proc is not None:
+            logger.warning(
+                "MinerU daemon exited (rc=%s); respawning", self._proc.returncode
+            )
+        self._spawn()
+
+    def _kill(self, reason: str) -> None:
+        proc = self._proc
+        if proc is None:
+            return
+        logger.error("killing MinerU daemon pid=%d: %s", proc.pid, reason)
+        with contextlib.suppress(OSError):
+            proc.kill()
+        # Reap the zombie so the next ``poll()`` reports it as dead.
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=5)
+
+    def parse(
+        self,
+        *,
+        bucket_path: Path,
+        out_root: Path,
+        method: str,
+        lang: str,
+        pdf_name: str,
+        timeout_s: int,
+    ) -> None:
+        with self._lock:
+            self._ensure_alive()
+            assert self._proc is not None
+            request = (
+                json.dumps(
+                    {
+                        "bucket_path": str(bucket_path),
+                        "out_root": str(out_root),
+                        "method": method,
+                        "lang": lang,
+                        "pdf_name": pdf_name,
+                    }
+                )
+                + "\n"
+            )
+            try:
+                self._proc.stdin.write(request)  # type: ignore[union-attr]
+                self._proc.stdin.flush()  # type: ignore[union-attr]
+            except (BrokenPipeError, OSError) as e:
+                # Subprocess died between ensure_alive and write. Respawn
+                # and surface as a transient error so the job can be retried.
+                self._kill("broken pipe before request")
+                raise RuntimeError(f"MinerU daemon broken pipe: {e}") from e
+
+            # Watchdog: if no response in `timeout_s` we kill the subprocess.
+            # Killing closes our stdout pipe, which unblocks the readline()
+            # below with an empty string — that's how the timeout is
+            # delivered to the calling thread.
+            done = threading.Event()
+
+            def _watchdog() -> None:
+                if not done.wait(timeout_s):
+                    self._kill(f"watchdog: no response in {timeout_s}s")
+
+            wt = threading.Thread(target=_watchdog, daemon=True, name="mineru-watchdog")
+            wt.start()
+
+            try:
+                resp_line = self._proc.stdout.readline()  # type: ignore[union-attr]
+            finally:
+                done.set()
+
+            if not resp_line:
+                # Either watchdog killed it or the process crashed on its own.
+                # Treat both as a timeout from the caller's perspective —
+                # they get a TimeoutError, the file is parked as 'error' in
+                # the indexer, and the queue moves on.
+                raise TimeoutError(
+                    f"MinerU parse exceeded {timeout_s}s on {bucket_path.name}"
+                )
+
+            try:
+                resp = json.loads(resp_line)
+            except json.JSONDecodeError as e:
+                self._kill("malformed response")
+                raise RuntimeError(
+                    f"MinerU daemon returned non-JSON: {resp_line[:200]!r}"
+                ) from e
+
+            if resp.get("status") != "ok":
+                detail = resp.get("detail") or "unknown error"
+                # Pass the subprocess traceback through to our log; the
+                # exception itself stays terse so it fits in the file.error
+                # column without a wall of stack.
+                if "traceback" in resp:
+                    logger.error("MinerU subprocess error:\n%s", resp["traceback"])
+                raise RuntimeError(f"MinerU error: {detail}")
+
+
+_DAEMON: _MineruDaemon | None = None
+_DAEMON_LOCK = threading.Lock()
+
+
+def _mineru_daemon() -> _MineruDaemon:
+    """Return the process-wide daemon, spawning the wrapper class on first call."""
+    global _DAEMON
+    if _DAEMON is None:
+        with _DAEMON_LOCK:
+            if _DAEMON is None:
+                _DAEMON = _MineruDaemon()
+    return _DAEMON
+
+
+def reset_mineru_daemon_for_tests() -> None:
+    """Tear down any running daemon. Used by the test suite to swap in a stub."""
+    global _DAEMON
+    with _DAEMON_LOCK:
+        if _DAEMON is not None:
+            _DAEMON._kill("reset_for_tests")
+        _DAEMON = None
 
 
 def _log_gpu_once() -> None:
