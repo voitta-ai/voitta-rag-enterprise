@@ -249,6 +249,74 @@ input[type="text"], input[type="file"] {
     background: var(--color-accent);
 }
 
+/* "Sign in with Google" button — matches Google's Identity Branding
+   guidelines (https://developers.google.com/identity/branding-guidelines):
+   white surface, 1px #dadce0 border, four-colour G mark, Roboto-style
+   label. We render a real <a>, not an iframe widget, because we just need
+   to send the user to /api/auth/login/google — no client-side SDK. */
+.gsi-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    margin-top: 16px;
+    padding: 0 16px;
+    height: 40px;
+    min-width: 220px;
+    background: #ffffff;
+    border: 1px solid #dadce0;
+    border-radius: 4px;
+    color: #1f1f1f;
+    font-family: "Google Sans", "Roboto", -apple-system, BlinkMacSystemFont,
+        "Segoe UI", Helvetica, Arial, sans-serif;
+    font-size: 14px;
+    font-weight: 500;
+    letter-spacing: 0.25px;
+    text-decoration: none;
+    cursor: pointer;
+    transition: box-shadow 120ms ease, background 120ms ease;
+    /* Subtle Material-style elevation that lifts on hover. */
+    box-shadow: 0 1px 2px rgba(60, 64, 67, 0.06),
+                0 1px 3px 1px rgba(60, 64, 67, 0.04);
+}
+.gsi-button:hover {
+    background: #f8faff;
+    box-shadow: 0 1px 2px rgba(60, 64, 67, 0.10),
+                0 2px 6px 2px rgba(60, 64, 67, 0.08);
+}
+.gsi-button:active {
+    background: #f1f3f4;
+    box-shadow: 0 1px 1px rgba(60, 64, 67, 0.10);
+}
+.gsi-button:focus-visible {
+    outline: 2px solid #4285F4;
+    outline-offset: 2px;
+}
+.gsi-button-icon {
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+    width: 18px;
+    height: 18px;
+}
+.gsi-button-label {
+    line-height: 1;
+}
+/* Dark theme: invert to the Google "filled blue" variant — same brand
+   guidelines, white G on a #131314 surface with reduced opacity. */
+[data-theme="dark"] .gsi-button {
+    background: #131314;
+    border-color: #8e918f;
+    color: #e3e3e3;
+}
+[data-theme="dark"] .gsi-button:hover {
+    background: #1a1b1d;
+    border-color: #ffffff;
+}
+[data-theme="dark"] .gsi-button:active {
+    background: #232427;
+}
+
 /* Compact iOS-style toggle switch used for the per-folder Active and Share
    flags. Built around an unstyled checkbox so screen readers and keyboard
    navigation work for free. */
