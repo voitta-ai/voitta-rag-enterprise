@@ -59,7 +59,7 @@ def main() -> int:
     elif settings.dev_user:
         print(f"  auth             : dev-user ({settings.dev_user})")
     else:
-        print("  auth             : multi-user (X-Forwarded-Email / X-User-Name)")
+        print("  auth             : multi-user (Google login for SPA, Bearer vk_… for MCP)")
 
     _section("Filesystem")
     for label, path in [
@@ -133,6 +133,33 @@ def main() -> int:
             except Exception as e:
                 _fail(f"{label}: {e}")
                 failures += 1
+
+    _section("Index health")
+    try:
+        from voitta_image_rag.db.database import init_db, session_scope
+        from voitta_image_rag.services.reconcile import all_folder_health
+
+        init_db()
+        with session_scope() as s:
+            healths = all_folder_health(s)
+        if not healths:
+            _warn("no folders registered yet")
+        else:
+            for h in healths:
+                line = (
+                    f"folder {h.folder_id} {h.display_name!r}: "
+                    f"{h.indexed_files} indexed in DB / {h.qdrant_chunk_points} points in Qdrant"
+                )
+                if h.status == "out_of_sync":
+                    _fail(f"{line} — Reindex needed")
+                    failures += 1
+                elif h.status == "empty":
+                    _warn(f"{line} (no indexed files yet)")
+                else:
+                    _ok(line)
+    except Exception as e:
+        _fail(f"index-health check failed: {e}")
+        failures += 1
 
     _section("Auth seed")
     if settings.single_user:

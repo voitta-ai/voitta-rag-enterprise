@@ -338,6 +338,21 @@ class ExtensionStats(BaseModel):
     chunks: int = 0
 
 
+class IndexHealth(BaseModel):
+    """Cross-store sanity check: SQLite says these files are indexed, does
+    Qdrant agree?
+
+    ``status`` values:
+    - ``"ok"``      — Qdrant has chunk points for this folder
+    - ``"empty"``   — nothing indexed yet (no expectation either way)
+    - ``"out_of_sync"`` — SQLite says indexed, Qdrant has 0 points; needs
+                        Reindex to repopulate the vector store
+    """
+
+    status: str
+    qdrant_chunk_points: int
+
+
 class FolderStats(BaseModel):
     folder_id: int
     files_total: int
@@ -356,6 +371,7 @@ class FolderStats(BaseModel):
     images_unique: int  # distinct image SHAs (Qdrant point count after dedup)
     bytes_total: int
     by_extension: dict[str, ExtensionStats]
+    index_health: IndexHealth
 
 
 @router.get("/{folder_id}/stats", response_model=FolderStats)
@@ -434,6 +450,10 @@ def folder_stats(
         else 0
     )
 
+    from ...services.reconcile import folder_health
+
+    health = folder_health(db, folder)
+
     return FolderStats(
         folder_id=folder_id,
         files_total=files_total,
@@ -447,6 +467,10 @@ def folder_stats(
         images_unique=int(images_unique),
         bytes_total=bytes_total,
         by_extension=by_extension,
+        index_health=IndexHealth(
+            status=health.status,
+            qdrant_chunk_points=health.qdrant_chunk_points,
+        ),
     )
 
 

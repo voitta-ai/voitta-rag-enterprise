@@ -420,6 +420,20 @@ function renderSidebar() {
     $("#kv-images").textContent = s ? s.images_total : "…";
     $("#kv-images-unique").textContent = s ? s.images_unique : "…";
 
+    // Vector-store sanity badge: SQLite says these files are indexed but
+    // Qdrant has 0 chunk points. Surfaced here (rather than as a search-time
+    // surprise) because the user lives in this panel.
+    const healthBadge = $("#folder-health-badge");
+    if (s && s.index_health && s.index_health.status === "out_of_sync") {
+        healthBadge.textContent = "⚠ Reindex needed";
+        healthBadge.title =
+            `${indexed} file(s) indexed in DB but ${s.index_health.qdrant_chunk_points} ` +
+            `chunk points in vector store. Click Reindex to repopulate.`;
+        healthBadge.hidden = false;
+    } else {
+        healthBadge.hidden = true;
+    }
+
     const extTable = $("#ext-table");
     const extTbody = $("#ext-tbody");
     extTbody.innerHTML = "";

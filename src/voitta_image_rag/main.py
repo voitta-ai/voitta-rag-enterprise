@@ -149,6 +149,20 @@ def create_app() -> FastAPI:
                     moved,
                 )
 
+            # Index health: warn if any folder has files marked indexed in
+            # SQLite but no chunk points in Qdrant (the Qdrant store was
+            # wiped or moved). The user has to Reindex to repopulate; we
+            # surface it on startup so they don't discover it via empty
+            # search results an hour later.
+            try:
+                from .db.database import session_scope as _ss
+                from .services.reconcile import log_startup_warnings
+
+                with _ss() as _s:
+                    log_startup_warnings(_s)
+            except Exception:  # pragma: no cover — never fail boot for this
+                logger.exception("index-health check failed at startup")
+
             watcher = from_settings_for_all_folders()
             watcher.start()
             install_default(watcher)

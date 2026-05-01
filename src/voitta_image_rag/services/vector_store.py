@@ -142,6 +142,35 @@ def _collection_exists(client: QdrantClient, name: str) -> bool:
         return False
 
 
+def count_points_for_folder(collection: str, folder_id: int) -> int:
+    """Return the number of points in ``collection`` whose payload's
+    ``folder_id`` matches. Used by the reconcile health check.
+
+    Returns 0 when the collection doesn't exist (fresh deployment, never
+    embedded). Approximate counting is fine — we use it to flag big
+    SQLite-vs-Qdrant gaps, not for exact bookkeeping.
+    """
+
+    def _do() -> int:
+        client = get_client()
+        if not _collection_exists(client, collection):
+            return 0
+        result = client.count(
+            collection,
+            count_filter=qm.Filter(
+                must=[
+                    qm.FieldCondition(
+                        key="folder_id", match=qm.MatchValue(value=folder_id)
+                    )
+                ]
+            ),
+            exact=False,
+        )
+        return int(result.count)
+
+    return run_on_qdrant(_do)
+
+
 @dataclass
 class ChunkPoint:
     chunk_id: int

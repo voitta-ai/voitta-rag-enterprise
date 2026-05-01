@@ -161,6 +161,7 @@ def test_stats_empty_folder(client: TestClient, tmp_path: Path) -> None:
         "files_unsupported": 0,
         "files_in_progress": 0,
         "files_pending": 0,
+        "index_health": {"status": "empty", "qdrant_chunk_points": 0},
         "chunks_total": 0,
         "images_total": 0,
         "images_unique": 0,
