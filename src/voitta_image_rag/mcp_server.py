@@ -1,9 +1,23 @@
 """MCP server.
 
 Exposes the same data the HTTP API does, but as MCP tools that an LLM agent
-can call. ACL identity comes from the ``X-User-Name`` header (set by Voitta
-Desktop or the ``mcp inspector`` CLI). When ``VOITTA_SINGLE_USER=true`` or
-``VOITTA_DEV_USER`` is set, the configured user wins regardless of the header.
+can call.
+
+Authentication
+--------------
+Clients authenticate with a personal API key minted from the SPA's Settings
+panel and presented as ``Authorization: Bearer vk_…``. The middleware
+resolves that token to a user, sets the resolved email on a ContextVar that
+every tool reads through ``_resolved_user_id``, and bumps ``last_used_at``.
+A request with a missing or invalid bearer is rejected with 401.
+
+The ``VOITTA_SINGLE_USER`` and ``VOITTA_DEV_USER`` env modes still bypass
+authentication: those are local-dev shortcuts and the bearer requirement
+would only get in the way. In production neither is set, so every MCP call
+must carry a valid bearer.
+
+The legacy ``X-User-Name`` header — which any client could self-assert — is
+no longer trusted.
 
 Run standalone::
 
@@ -21,6 +35,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from .cas import store as cas_store
 from .config import get_settings
@@ -50,7 +65,16 @@ mcp = FastMCP("voitta-image-rag")
 
 
 def _resolved_user() -> str:
-    """Mirror the HTTP ACL resolver. Three modes per ARCHITECTURE.md §9."""
+    """Mirror the HTTP ACL resolver.
+
+    Priority — first match wins:
+
+    1. ``VOITTA_SINGLE_USER`` → ``root@localhost`` (local dev)
+    2. ``VOITTA_DEV_USER`` → that email (local dev)
+    3. ContextVar set by ``BearerAuthMiddleware`` from a verified API key
+    4. ``"anonymous"`` (only reachable via direct in-process tool calls;
+       network requests get rejected by the middleware before reaching here)
+    """
     s = get_settings()
     if s.single_user:
         return ROOT_EMAIL
@@ -397,17 +421,84 @@ def _nearby_image_ids(session, chunk_id: int) -> list[int]:
 
 
 # ---------------------------------------------------------------------------
-# Middleware: read X-User-Name header into the ContextVar before each tool call
+# Middleware: resolve the caller via Authorization: Bearer vk_… and stash
+# their email on the ContextVar before any tool runs.
 # ---------------------------------------------------------------------------
 
 
-class UserHeaderMiddleware(BaseHTTPMiddleware):
+class BearerAuthMiddleware(BaseHTTPMiddleware):
+    """Require a valid API-key bearer token on every MCP request.
+
+    Bypassed when ``VOITTA_SINGLE_USER`` or ``VOITTA_DEV_USER`` is set — the
+    server is in local-dev mode and we trust whatever the env says. In
+    production, neither is set, so every request must carry a known token.
+
+    The legacy ``X-User-Name`` header is intentionally NOT consulted: it was
+    self-asserted (any client could send any value), which is fine for a
+    desktop app on localhost but unsafe across a network.
+    """
+
     async def dispatch(self, request: Request, call_next):
-        token = _current_user.set(request.headers.get("X-User-Name"))
+        s = get_settings()
+        if s.single_user or s.dev_user:
+            # Local-dev modes: identity comes from env, not from the wire.
+            ctx_token = _current_user.set(None)
+            try:
+                return await call_next(request)
+            finally:
+                _current_user.reset(ctx_token)
+
+        bearer = _extract_bearer(request)
+        if not bearer:
+            return _unauthorized("Missing Authorization: Bearer token")
+
+        # Imported lazily to avoid a circular import at module load time
+        # (auth routes depend on db.models which may not yet be ready).
+        from .api.routes.auth import verify_token
+
+        with session_scope() as db:
+            key = verify_token(db, bearer)
+            if key is None:
+                return _unauthorized("Invalid or revoked API key")
+            # Materialise the email while the row is still attached.
+            from .db.models import User as _User
+
+            user = db.get(_User, key.user_id)
+            email = user.email if user else None
+            db.commit()
+
+        if not email:
+            # Defensive: orphaned key (user row gone). Treat as 401.
+            return _unauthorized("Token does not map to a known user")
+
+        ctx_token = _current_user.set(email)
         try:
             return await call_next(request)
         finally:
-            _current_user.reset(token)
+            _current_user.reset(ctx_token)
+
+
+def _extract_bearer(request: Request) -> str | None:
+    raw = request.headers.get("authorization") or request.headers.get("Authorization")
+    if not raw:
+        return None
+    # RFC 6750 — case-insensitive scheme, single space separator.
+    parts = raw.split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+    return parts[1].strip() or None
+
+
+def _unauthorized(detail: str) -> JSONResponse:
+    return JSONResponse(
+        {"error": "unauthorized", "detail": detail},
+        status_code=401,
+        headers={"WWW-Authenticate": 'Bearer realm="voitta-image-rag"'},
+    )
+
+
+# Backwards-compat alias for any external importer pinned to the old name.
+UserHeaderMiddleware = BearerAuthMiddleware
 
 
 # ---------------------------------------------------------------------------
@@ -425,7 +516,7 @@ def build_app(transport: str = "streamable-http", path: str | None = None):
     """
     init_db()
     app = mcp.http_app(transport=transport, stateless_http=True, path=path)
-    app.add_middleware(UserHeaderMiddleware)
+    app.add_middleware(BearerAuthMiddleware)
     return app
 
 

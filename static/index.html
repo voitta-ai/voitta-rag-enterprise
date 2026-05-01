@@ -267,9 +267,17 @@
                     <p style="margin:0 0 6px;font-weight:600;">Copy this token now — you won't see it again.</p>
                     <code id="key-reveal-token" style="display:block;word-break:break-all;background:#fff;border:1px solid #ffd479;border-radius:4px;padding:6px 8px;font-size:12px;"></code>
                     <div class="actions actions-right" style="margin-top:8px;">
-                        <button type="button" id="key-reveal-copy" class="btn btn-secondary btn-sm">Copy</button>
+                        <button type="button" id="key-reveal-copy" class="btn btn-secondary btn-sm">Copy token</button>
                         <button type="button" id="key-reveal-dismiss" class="btn btn-secondary btn-sm">I've saved it</button>
                     </div>
+
+                    <details style="margin-top:10px;">
+                        <summary style="cursor:pointer;font-weight:600;">Use it from Claude / Claude Desktop</summary>
+                        <p class="hint" style="margin:8px 0 4px;">Paste this into your <code>claude_desktop_config.json</code>:</p>
+                        <pre id="key-reveal-claude" style="background:#fff;border:1px solid #ffd479;border-radius:4px;padding:8px;font-size:11px;overflow-x:auto;white-space:pre;margin:0;"></pre>
+                        <p class="hint" style="margin:8px 0 4px;">Or with the Claude Code CLI:</p>
+                        <pre id="key-reveal-cli" style="background:#fff;border:1px solid #ffd479;border-radius:4px;padding:8px;font-size:11px;overflow-x:auto;white-space:pre;margin:0;"></pre>
+                    </details>
                 </div>
 
                 <table id="keys-table" style="width:100%;border-collapse:collapse;font-size:13px;">

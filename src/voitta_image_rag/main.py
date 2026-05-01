@@ -219,25 +219,33 @@ def create_app() -> FastAPI:
 
     # MCP under /mcp on the same port. We splice the routes (rather than
     # ``app.mount``) so the canonical URL is /mcp with no trailing-slash
-    # redirect. Middleware on the inner app does not run for spliced routes;
-    # the X-User-Name → ContextVar bridge is re-applied at the FastAPI level.
+    # redirect. Middleware on the inner app does not run for spliced routes,
+    # so we re-apply the bearer-auth bridge at the FastAPI level — but only
+    # for ``/mcp`` paths, since the SPA's API uses session cookies.
     from starlette.middleware.base import BaseHTTPMiddleware
 
-    from .mcp_server import _current_user
+    from .mcp_server import BearerAuthMiddleware
 
-    class _McpUserHeader(BaseHTTPMiddleware):
+    class _McpAuthBridge(BaseHTTPMiddleware):
+        """Run BearerAuthMiddleware only for /mcp paths.
+
+        We can't simply ``add_middleware(BearerAuthMiddleware)`` because that
+        would also intercept the SPA / REST routes which authenticate via a
+        session cookie, not a bearer.
+        """
+
+        def __init__(self, app):
+            super().__init__(app)
+            self._bearer = BearerAuthMiddleware(app)
+
         async def dispatch(self, request, call_next):
             if not request.url.path.startswith("/mcp"):
                 return await call_next(request)
-            token = _current_user.set(request.headers.get("X-User-Name"))
-            try:
-                return await call_next(request)
-            finally:
-                _current_user.reset(token)
+            return await self._bearer.dispatch(request, call_next)
 
     for route in mcp_app.router.routes:
         app.router.routes.append(route)
-    app.add_middleware(_McpUserHeader)
+    app.add_middleware(_McpAuthBridge)
 
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

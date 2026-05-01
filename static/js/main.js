@@ -1270,6 +1270,21 @@ $("#key-create").addEventListener("click", async () => {
     }
     $("#key-name").value = "";
     $("#key-reveal-token").textContent = created.token;
+    // Build copy-paste snippets pinned to the current origin so the user can
+    // wire up Claude / Claude Desktop without assembling URLs by hand.
+    const mcpUrl = `${window.location.origin}/mcp`;
+    const claudeDesktop = JSON.stringify({
+        mcpServers: {
+            "voitta-image-rag": {
+                type: "http",
+                url: mcpUrl,
+                headers: { Authorization: `Bearer ${created.token}` },
+            },
+        },
+    }, null, 2);
+    const cli = `claude mcp add --transport http voitta-image-rag ${mcpUrl} \\\n  --header "Authorization: Bearer ${created.token}"`;
+    $("#key-reveal-claude").textContent = claudeDesktop;
+    $("#key-reveal-cli").textContent = cli;
     $("#key-reveal").hidden = false;
     await refreshKeys();
 });
