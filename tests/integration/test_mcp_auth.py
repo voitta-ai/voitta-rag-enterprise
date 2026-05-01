@@ -8,18 +8,24 @@ so we cover them once each to catch wiring regressions.
 from __future__ import annotations
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from voitta_image_rag.config import reset_settings_cache
 
+from ..conftest import auth_as
 
-def _create_key(client: TestClient, email: str) -> str:
-    """Mint a key for ``email`` via the REST API and return its plaintext token."""
-    r = client.post(
-        "/api/auth/keys",
-        json={"name": "mcp-test"},
-        headers={"X-Forwarded-Email": email},
-    )
+
+def _create_key(app: FastAPI, client: TestClient, email: str) -> str:
+    """Mint a key for ``email`` via the REST API and return the plaintext token.
+
+    Uses an already-open client because FastMCP's session manager refuses to
+    be (re-)started — entering the TestClient context twice on the same app
+    raises ``RuntimeError: StreamableHTTPSessionManager .run() can only be
+    called once per instance``.
+    """
+    auth_as(app, email)
+    r = client.post("/api/auth/keys", json={"name": "mcp-test"})
     assert r.status_code == 200, r.text
     return r.json()["token"]
 
@@ -56,8 +62,9 @@ def test_mcp_rejects_bogus_bearer(env: None) -> None:
 
 
 def test_mcp_rejects_wrong_scheme(env: None) -> None:
-    with TestClient(_unified_app()) as client:
-        token = _create_key(client, "alice@x")
+    app = _unified_app()
+    with TestClient(app) as client:
+        token = _create_key(app, client, "alice@x")
         r = client.post(
             "/mcp",
             json={"jsonrpc": "2.0", "method": "ping"},
@@ -78,8 +85,9 @@ def test_mcp_rejects_x_user_name_alone(env: None) -> None:
 
 
 def test_mcp_accepts_valid_bearer_and_bumps_last_used(env: None) -> None:
-    with TestClient(_unified_app()) as client:
-        token = _create_key(client, "alice@x")
+    app = _unified_app()
+    with TestClient(app) as client:
+        token = _create_key(app, client, "alice@x")
         # We don't care about the MCP body's reply here, only that auth lets
         # the request through. Ping isn't a registered method, so we expect
         # an MCP-layer error (-32601, etc.) but NOT the middleware's 401.
@@ -95,12 +103,9 @@ def test_mcp_accepts_valid_bearer_and_bumps_last_used(env: None) -> None:
         )
         assert r.status_code != 401, r.text
 
-    # Second request to confirm the token still verifies after the first
-    # call's ``last_used_at`` write committed.
-    with TestClient(_unified_app()) as client:
-        keys = client.get(
-            "/api/auth/keys", headers={"X-Forwarded-Email": "alice@x"}
-        ).json()
+        # Confirm last_used_at was bumped — read back as alice via the override.
+        auth_as(app, "alice@x")
+        keys = client.get("/api/auth/keys").json()
         assert keys[0]["last_used_at"] is not None
 
 
@@ -166,9 +171,9 @@ def test_standalone_mcp_app_also_requires_bearer(env: None) -> None:
 
 def test_api_routes_are_not_intercepted_by_mcp_auth(env: None) -> None:
     """The bearer middleware only applies under /mcp; the SPA still
-    authenticates via X-Forwarded-Email / session cookie."""
-    with TestClient(_unified_app()) as client:
-        r = client.get(
-            "/api/auth/me", headers={"X-Forwarded-Email": "alice@x"}
-        )
+    authenticates via the session cookie / dev-user shortcut."""
+    app = _unified_app()
+    auth_as(app, "alice@x")
+    with TestClient(app) as client:
+        r = client.get("/api/auth/me")
         assert r.status_code == 200, r.text

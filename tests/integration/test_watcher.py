@@ -175,13 +175,12 @@ def test_post_folder_registers_with_running_watcher(
 
     from voitta_image_rag.main import create_app
 
+    from ..conftest import auth_as
+
     app = create_app()
+    auth_as(app, "alice@x.com")
     with TestClient(app) as client:
-        r = client.post(
-            "/api/folders",
-            json={"path": str(src)},
-            headers={"X-Forwarded-Email": "alice@x.com"},
-        )
+        r = client.post("/api/folders", json={"path": str(src)})
         assert r.status_code == 201
         (src / "fresh.txt").write_text("hi")
         jobs = _wait_until(lambda: _extract_jobs() if _extract_jobs() else None, timeout=4.0)

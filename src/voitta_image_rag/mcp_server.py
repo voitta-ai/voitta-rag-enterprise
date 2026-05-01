@@ -16,9 +16,6 @@ authentication: those are local-dev shortcuts and the bearer requirement
 would only get in the way. In production neither is set, so every MCP call
 must carry a valid bearer.
 
-The legacy ``X-User-Name`` header — which any client could self-assert — is
-no longer trusted.
-
 Run standalone::
 
     python -m voitta_image_rag.mcp_server
@@ -432,10 +429,6 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
     Bypassed when ``VOITTA_SINGLE_USER`` or ``VOITTA_DEV_USER`` is set — the
     server is in local-dev mode and we trust whatever the env says. In
     production, neither is set, so every request must carry a known token.
-
-    The legacy ``X-User-Name`` header is intentionally NOT consulted: it was
-    self-asserted (any client could send any value), which is fine for a
-    desktop app on localhost but unsafe across a network.
     """
 
     async def dispatch(self, request: Request, call_next):

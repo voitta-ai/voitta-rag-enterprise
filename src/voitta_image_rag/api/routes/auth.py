@@ -87,28 +87,28 @@ class MeOut(BaseModel):
 
 @router.get("/me", response_model=MeOut)
 def me(
-    request: Request,
     db: Session = Depends(db_session),
+    user: CurrentUser = Depends(current_user),
 ) -> MeOut:
-    s = get_settings()
-    email = None
-    if s.single_user:
-        from ...services.acl import ROOT_EMAIL
+    """Return the signed-in user.
 
-        email = ROOT_EMAIL
-    elif s.dev_user:
-        email = s.dev_user
-    else:
-        email = request.session.get("user_email")
-        if not email:
-            email = request.headers.get("x-forwarded-email") or request.headers.get(
-                "x-user-name"
-            )
-    if not email:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Not signed in")
-    user = get_or_create_user(db, email)
-    db.commit()
-    return MeOut(id=user.id, email=user.email, display_name=user.display_name)
+    Identity resolution lives in ``current_user``: env-based dev shortcuts
+    win, otherwise the signed session cookie. A missing/invalid identity
+    becomes a 401 from ``current_user`` so the SPA can render its login
+    gate.
+
+    We re-fetch the User row here (rather than read straight off
+    ``CurrentUser``) so we can surface ``display_name``, which the dataclass
+    doesn't carry.
+    """
+    from ...db.models import User as _User
+
+    row = db.get(_User, user.id)
+    return MeOut(
+        id=user.id,
+        email=user.email,
+        display_name=row.display_name if row else None,
+    )
 
 
 # ---------------------------------------------------------------------------

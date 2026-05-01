@@ -10,20 +10,20 @@ from sqlalchemy import select
 from voitta_image_rag.db.database import session_scope
 from voitta_image_rag.db.models import ApiKey
 
+from ..conftest import auth_as
 
-def _client():
+
+def _app():
     from voitta_image_rag.main import create_app
 
-    return TestClient(create_app())
+    return create_app()
 
 
 def test_create_returns_token_once_and_stores_only_hash(env: None) -> None:
-    with _client() as client:
-        r = client.post(
-            "/api/auth/keys",
-            json={"name": "macbook"},
-            headers={"X-Forwarded-Email": "alice@x"},
-        )
+    app = _app()
+    auth_as(app, "alice@x")
+    with TestClient(app) as client:
+        r = client.post("/api/auth/keys", json={"name": "macbook"})
     assert r.status_code == 200, r.text
     data = r.json()
     token = data["token"]
@@ -43,19 +43,15 @@ def test_create_returns_token_once_and_stores_only_hash(env: None) -> None:
 
 
 def test_list_filters_by_user_and_excludes_hash(env: None) -> None:
-    with _client() as client:
-        client.post(
-            "/api/auth/keys",
-            json={"name": "alice-key"},
-            headers={"X-Forwarded-Email": "alice@x"},
-        )
-        client.post(
-            "/api/auth/keys",
-            json={"name": "bob-key"},
-            headers={"X-Forwarded-Email": "bob@x"},
-        )
+    app = _app()
+    with TestClient(app) as client:
+        auth_as(app, "alice@x")
+        client.post("/api/auth/keys", json={"name": "alice-key"})
+        auth_as(app, "bob@x")
+        client.post("/api/auth/keys", json={"name": "bob-key"})
 
-        r = client.get("/api/auth/keys", headers={"X-Forwarded-Email": "alice@x"})
+        auth_as(app, "alice@x")
+        r = client.get("/api/auth/keys")
         assert r.status_code == 200
         keys = r.json()
         assert len(keys) == 1
@@ -66,33 +62,25 @@ def test_list_filters_by_user_and_excludes_hash(env: None) -> None:
 
 
 def test_delete_only_owner_can_delete(env: None) -> None:
-    with _client() as client:
-        created = client.post(
-            "/api/auth/keys",
-            json={"name": "alice-key"},
-            headers={"X-Forwarded-Email": "alice@x"},
-        ).json()
+    app = _app()
+    with TestClient(app) as client:
+        auth_as(app, "alice@x")
+        created = client.post("/api/auth/keys", json={"name": "alice-key"}).json()
         key_id = created["id"]
 
         # Bob is not the owner — must look indistinguishable from "not found"
         # so the existence of someone else's key isn't probeable.
-        r = client.delete(
-            f"/api/auth/keys/{key_id}",
-            headers={"X-Forwarded-Email": "bob@x"},
-        )
+        auth_as(app, "bob@x")
+        r = client.delete(f"/api/auth/keys/{key_id}")
         assert r.status_code == 404
 
         # Owner deletes successfully.
-        r = client.delete(
-            f"/api/auth/keys/{key_id}",
-            headers={"X-Forwarded-Email": "alice@x"},
-        )
+        auth_as(app, "alice@x")
+        r = client.delete(f"/api/auth/keys/{key_id}")
         assert r.status_code == 204
 
         # Gone for good.
-        listing = client.get(
-            "/api/auth/keys", headers={"X-Forwarded-Email": "alice@x"}
-        ).json()
+        listing = client.get("/api/auth/keys").json()
         assert listing == []
 
 
@@ -101,12 +89,10 @@ def test_verify_token_round_trip_bumps_last_used_at(env: None) -> None:
     verify advances ``last_used_at`` so the UI can show usage."""
     from voitta_image_rag.api.routes.auth import verify_token
 
-    with _client() as client:
-        token = client.post(
-            "/api/auth/keys",
-            json={"name": "k"},
-            headers={"X-Forwarded-Email": "alice@x"},
-        ).json()["token"]
+    app = _app()
+    auth_as(app, "alice@x")
+    with TestClient(app) as client:
+        token = client.post("/api/auth/keys", json={"name": "k"}).json()["token"]
 
     with session_scope() as s:
         row = verify_token(s, token)
@@ -121,10 +107,16 @@ def test_verify_token_round_trip_bumps_last_used_at(env: None) -> None:
 
 
 def test_create_validates_name(env: None) -> None:
-    with _client() as client:
-        r = client.post(
-            "/api/auth/keys",
-            json={"name": ""},
-            headers={"X-Forwarded-Email": "alice@x"},
-        )
+    app = _app()
+    auth_as(app, "alice@x")
+    with TestClient(app) as client:
+        r = client.post("/api/auth/keys", json={"name": ""})
         assert r.status_code == 422  # Pydantic min_length
+
+
+def test_unauthenticated_request_is_401(env: None) -> None:
+    """No session, no env shortcut → 401 from /api/auth/keys."""
+    app = _app()  # no auth_as override
+    with TestClient(app) as client:
+        r = client.get("/api/auth/keys")
+        assert r.status_code == 401

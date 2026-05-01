@@ -491,12 +491,20 @@ def test_sync_delete_removes_source(client: TestClient, tmp_path: Path) -> None:
 
 
 def test_unauthenticated_request_returns_401(env: None, tmp_path: Path) -> None:
-    """With no auth mode set, every API call needs an X-Forwarded-Email header."""
+    """With no auth mode set, every API call needs a Google session."""
     from voitta_image_rag.main import create_app
+
+    from ..conftest import auth_as
 
     app = create_app()
     with TestClient(app) as anon:
         r = anon.get("/api/folders")
         assert r.status_code == 401
-        r = anon.get("/api/folders", headers={"X-Forwarded-Email": "alice@x.com"})
+
+    # Once a session is in place (auth_as overrides the dependency to mimic
+    # the post-OAuth state), the same endpoint becomes 200.
+    app2 = create_app()
+    auth_as(app2, "alice@x.com")
+    with TestClient(app2) as client:
+        r = client.get("/api/folders")
         assert r.status_code == 200

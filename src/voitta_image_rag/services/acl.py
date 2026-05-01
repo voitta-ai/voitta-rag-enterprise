@@ -4,8 +4,9 @@ Modes (see ARCHITECTURE.md §9):
 
 - ``VOITTA_SINGLE_USER=true`` → every request maps to ``root@localhost``.
 - ``VOITTA_DEV_USER=<email>`` → every request maps to that email.
-- multi-user (default) → email comes from ``X-Forwarded-Email`` (proxy) or
-  ``X-User-Name`` (MCP). Missing → 401.
+- multi-user (default) → REST identity comes from the signed session cookie
+  set by Google OAuth; MCP identity comes from the verified ``Authorization:
+  Bearer vk_…`` token. No header-based fallbacks.
 
 Authorisation model (v1):
 
@@ -42,12 +43,7 @@ class CurrentUser:
     email: str
 
 
-def resolve_user_email(
-    x_forwarded_email: str | None,
-    x_user_name: str | None,
-    *,
-    session_email: str | None = None,
-) -> str:
+def resolve_user_email(session_email: str | None = None) -> str:
     """Pick the email for this request.
 
     Priority — first match wins:
@@ -55,24 +51,24 @@ def resolve_user_email(
     1. ``VOITTA_SINGLE_USER`` → ``root@localhost`` (local dev)
     2. ``VOITTA_DEV_USER`` → that email (local dev)
     3. ``session_email`` (signed cookie set by Google login)
-    4. ``X-Forwarded-Email`` (reverse proxy auth) or ``X-User-Name`` (MCP)
-    5. raise 401
+    4. raise 401
 
-    The session takes precedence over forwarded headers so an interactive
-    Google login overrides any header-based default if both are present.
+    Self-asserted headers (``X-Forwarded-Email``, ``X-User-Name``) used to be
+    accepted; they're not anymore. Web requests authenticate via the session
+    cookie, MCP requests via ``Authorization: Bearer`` (handled in
+    ``mcp_server.BearerAuthMiddleware``, not here).
     """
     s = get_settings()
     if s.single_user:
         return ROOT_EMAIL
     if s.dev_user:
         return s.dev_user
-    email = session_email or x_forwarded_email or x_user_name
-    if not email:
+    if not session_email:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="No authenticated user (sign in with Google or set VOITTA_DEV_USER for local dev).",
+            detail="Not signed in. Sign in with Google, or set VOITTA_DEV_USER for local dev.",
         )
-    return email
+    return session_email
 
 
 def get_or_create_user(session: Session, email: str) -> User:

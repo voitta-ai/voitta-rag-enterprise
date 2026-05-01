@@ -61,3 +61,32 @@ def app(auth_env: None) -> FastAPI:
 def client(app: FastAPI) -> Iterator[TestClient]:
     with TestClient(app) as c:
         yield c
+
+
+def auth_as(app: FastAPI, email: str) -> int:
+    """Make subsequent ``TestClient(app)`` calls act as ``email``.
+
+    Wires up a ``current_user`` dependency override that bypasses session
+    cookies and just returns the requested user (creating them if missing).
+    Returns the user's id for assertions.
+
+    The override sticks until the app is rebuilt (the ``env`` fixture's
+    teardown wipes module state, so each test starts clean). Call this
+    again with a different email to switch identities mid-test.
+
+    Background: production code rejects unauthenticated REST calls with
+    401 now that header-based identity is gone. Going through the real
+    OAuth flow in tests is too heavy, so we patch the dependency directly.
+    This is the standard FastAPI testing pattern.
+    """
+    from voitta_image_rag.api.deps import current_user
+    from voitta_image_rag.db.database import session_scope
+    from voitta_image_rag.services.acl import CurrentUser, get_or_create_user
+
+    with session_scope() as s:
+        user = get_or_create_user(s, email)
+        s.commit()
+        uid, mail = user.id, user.email
+
+    app.dependency_overrides[current_user] = lambda: CurrentUser(id=uid, email=mail)
+    return uid
