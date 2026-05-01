@@ -170,6 +170,20 @@ class FolderSyncSource(Base):
     updated_at: Mapped[int] = mapped_column(default=_now_s, onupdate=_now_s)
 
 
+class ApiKey(Base):
+    __tablename__ = "api_keys"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE")
+    )
+    name: Mapped[str]
+    prefix: Mapped[str]
+    key_hash: Mapped[str]
+    created_at: Mapped[int] = mapped_column(default=_now_s)
+    last_used_at: Mapped[int | None] = mapped_column(default=None)
+
+
 class Job(Base):
     __tablename__ = "jobs"
 

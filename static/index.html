@@ -11,7 +11,7 @@
             <a href="/" class="logo">voitta-image-rag</a>
             <div class="header-actions">
                 <span id="conn-status" class="status-pill disconnected">disconnected</span>
-                <span id="user-pill" class="hint" hidden style="margin-left:8px;"></span>
+                <button id="user-pill" class="btn-text hint" hidden style="margin-left:8px;cursor:pointer;background:none;border:none;text-decoration:underline;" title="Open settings"></button>
                 <button id="btn-logout" class="btn btn-secondary btn-sm" hidden style="margin-left:6px;">Sign out</button>
             </div>
         </div>
@@ -239,6 +239,52 @@
                     <button id="sync-trigger" class="btn btn-primary">Sync now</button>
                 </div>
                 <p id="sync-status-line" class="hint" hidden></p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: user settings (currently just API keys). -->
+    <div id="settings-backdrop" class="modal-backdrop" hidden>
+        <div class="modal modal-wide">
+            <div class="modal-header">
+                <h3>Settings</h3>
+                <button id="settings-close" class="btn-text">×</button>
+            </div>
+            <div class="modal-body">
+                <h4 style="margin-top:0;">API keys</h4>
+                <p class="hint">
+                    Personal access tokens for programmatic use (MCP, scripting).
+                    Each key is shown <strong>once at creation</strong> — copy it then; you cannot retrieve it later.
+                </p>
+
+                <div class="branches-row" style="margin:8px 0 12px;">
+                    <input type="text" id="key-name" placeholder="What's this key for? e.g. macbook-mcp" maxlength="80" style="flex:1;">
+                    <button type="button" id="key-create" class="btn btn-primary btn-sm">Create key</button>
+                </div>
+
+                <!-- Reveal banner: only visible immediately after creating a key. -->
+                <div id="key-reveal" hidden style="border:1px solid #ffd479;background:#fff7e0;color:#5a3a00;padding:10px 12px;border-radius:4px;margin-bottom:12px;">
+                    <p style="margin:0 0 6px;font-weight:600;">Copy this token now — you won't see it again.</p>
+                    <code id="key-reveal-token" style="display:block;word-break:break-all;background:#fff;border:1px solid #ffd479;border-radius:4px;padding:6px 8px;font-size:12px;"></code>
+                    <div class="actions actions-right" style="margin-top:8px;">
+                        <button type="button" id="key-reveal-copy" class="btn btn-secondary btn-sm">Copy</button>
+                        <button type="button" id="key-reveal-dismiss" class="btn btn-secondary btn-sm">I've saved it</button>
+                    </div>
+                </div>
+
+                <table id="keys-table" style="width:100%;border-collapse:collapse;font-size:13px;">
+                    <thead>
+                        <tr style="text-align:left;border-bottom:1px solid var(--border, #ddd);">
+                            <th style="padding:6px 8px;">Name</th>
+                            <th style="padding:6px 8px;">Prefix</th>
+                            <th style="padding:6px 8px;">Created</th>
+                            <th style="padding:6px 8px;">Last used</th>
+                            <th style="padding:6px 8px;"></th>
+                        </tr>
+                    </thead>
+                    <tbody id="keys-tbody"></tbody>
+                </table>
+                <p id="keys-empty" class="hint" hidden>No keys yet. Create one above.</p>
             </div>
         </div>
     </div>

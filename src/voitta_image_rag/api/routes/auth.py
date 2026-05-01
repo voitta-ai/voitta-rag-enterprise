@@ -13,20 +13,24 @@ not folder-scoped, mirroring the Drive-sync OAuth flow:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import secrets
+import time
 from typing import Any
 from urllib.parse import urlencode
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ...config import get_settings
-from ...services.acl import get_or_create_user
-from ..deps import db_session
+from ...db.models import ApiKey
+from ...services.acl import CurrentUser, get_or_create_user
+from ..deps import current_user, db_session
 
 logger = logging.getLogger(__name__)
 
@@ -254,3 +258,142 @@ def _self_closing_html(message: str) -> HTMLResponse:
         "<html><body><script>window.close()</script>"
         f"<p>{message}</p></body></html>"
     )
+
+
+# ---------------------------------------------------------------------------
+# Personal API keys
+#
+# Token format: ``vk_<43 url-safe base64 chars>`` → ~256 bits of entropy.
+# The full token is shown to the user exactly once at creation time. We
+# persist only its SHA-256 hash plus a short prefix for UI display.
+# ---------------------------------------------------------------------------
+
+KEY_TOKEN_PREFIX = "vk_"
+KEY_DISPLAY_PREFIX_CHARS = 10  # "vk_" + 7 random chars — enough to disambiguate
+MAX_KEY_NAME_LEN = 80
+
+
+def _hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def mint_token() -> tuple[str, str, str]:
+    """Generate a fresh API key.
+
+    Returns ``(token, prefix, key_hash)``. ``token`` is the only ever
+    plaintext copy — call sites must surface it to the user immediately
+    and must never log it.
+    """
+    body = secrets.token_urlsafe(32)
+    token = f"{KEY_TOKEN_PREFIX}{body}"
+    prefix = token[:KEY_DISPLAY_PREFIX_CHARS]
+    return token, prefix, _hash_token(token)
+
+
+def verify_token(db: Session, token: str) -> ApiKey | None:
+    """Look up an API key by its plaintext token; bump ``last_used_at``.
+
+    Returns the ``ApiKey`` row when the token matches, ``None`` otherwise.
+    Exposed at module level so the upcoming MCP auth flow can import it
+    without depending on this whole router. The caller commits.
+    """
+    if not token or not token.startswith(KEY_TOKEN_PREFIX):
+        return None
+    key = db.execute(
+        select(ApiKey).where(ApiKey.key_hash == _hash_token(token))
+    ).scalar_one_or_none()
+    if key is None:
+        return None
+    key.last_used_at = int(time.time())
+    return key
+
+
+class ApiKeyOut(BaseModel):
+    id: int
+    name: str
+    prefix: str
+    created_at: int
+    last_used_at: int | None
+
+
+class ApiKeyCreatedOut(ApiKeyOut):
+    """Returned on POST — includes the plaintext ``token`` exactly once."""
+
+    token: str
+
+
+class ApiKeyCreateIn(BaseModel):
+    name: str = Field(..., min_length=1, max_length=MAX_KEY_NAME_LEN)
+
+
+def _to_out(k: ApiKey) -> ApiKeyOut:
+    return ApiKeyOut(
+        id=k.id,
+        name=k.name,
+        prefix=k.prefix,
+        created_at=k.created_at,
+        last_used_at=k.last_used_at,
+    )
+
+
+@router.get("/keys", response_model=list[ApiKeyOut])
+def list_keys(
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(current_user),
+) -> list[ApiKeyOut]:
+    """Return the signed-in user's keys, newest first."""
+    rows = (
+        db.execute(
+            select(ApiKey)
+            .where(ApiKey.user_id == user.id)
+            .order_by(ApiKey.created_at.desc(), ApiKey.id.desc())
+        )
+        .scalars()
+        .all()
+    )
+    return [_to_out(k) for k in rows]
+
+
+@router.post("/keys", response_model=ApiKeyCreatedOut)
+def create_key(
+    body: ApiKeyCreateIn,
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(current_user),
+) -> ApiKeyCreatedOut:
+    """Mint a new key. The plaintext ``token`` is in the response and will
+    never be returned again — the UI must show a "copy now" callout.
+    """
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "Key name cannot be blank"
+        )
+    token, prefix, key_hash = mint_token()
+    row = ApiKey(
+        user_id=user.id,
+        name=name,
+        prefix=prefix,
+        key_hash=key_hash,
+        created_at=int(time.time()),
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    logger.info("api_key.create user=%s id=%d name=%r", user.email, row.id, name)
+    return ApiKeyCreatedOut(**_to_out(row).model_dump(), token=token)
+
+
+@router.delete("/keys/{key_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_key(
+    key_id: int,
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(current_user),
+) -> None:
+    row = db.get(ApiKey, key_id)
+    if row is None or row.user_id != user.id:
+        # Same response for "not yours" and "not found" — don't leak
+        # whether a key id belongs to a different user.
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Key not found")
+    db.delete(row)
+    db.commit()
+    logger.info("api_key.delete user=%s id=%d", user.email, key_id)

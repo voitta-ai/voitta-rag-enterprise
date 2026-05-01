@@ -127,6 +127,21 @@ CREATE TABLE IF NOT EXISTS folder_sync_sources (
     updated_at         INTEGER NOT NULL
 );
 
+-- Personal API keys minted from the Settings panel. The token's plaintext
+-- is shown to the user exactly once at creation; only the SHA-256 hash is
+-- stored, plus a short prefix for UI display ("vk_abc1…"). MCP auth will
+-- look up by hash and bump last_used_at on every accepted call.
+CREATE TABLE IF NOT EXISTS api_keys (
+    id             INTEGER PRIMARY KEY,
+    user_id        INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name           TEXT NOT NULL,                       -- user-facing label
+    prefix         TEXT NOT NULL,                       -- first chars of the token, e.g. "vk_abc123"
+    key_hash       TEXT NOT NULL UNIQUE,                -- sha256 hex of the full token
+    created_at     INTEGER NOT NULL,
+    last_used_at   INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id);
+
 CREATE TABLE IF NOT EXISTS jobs (
     id            INTEGER PRIMARY KEY,
     kind          TEXT NOT NULL,
