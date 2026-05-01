@@ -77,7 +77,15 @@ class E5TextEmbedder(TextEmbedder):
 
     @property
     def dim(self) -> int:
-        return int(self._load_under_gpu_lock().get_sentence_embedding_dimension())
+        # ``get_embedding_dimension`` is the post-3.x name; the old
+        # ``get_sentence_embedding_dimension`` still works but emits a
+        # FutureWarning. We pin ST >= 3.2 in pyproject; the 3.2 line still
+        # only had the old name, so fall back to it on older installs.
+        model = self._load_under_gpu_lock()
+        getter = getattr(
+            model, "get_embedding_dimension", model.get_sentence_embedding_dimension
+        )
+        return int(getter())
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         model = self._load_under_gpu_lock()
