@@ -72,9 +72,36 @@ class Settings(BaseSettings):
     # Indexing
     nearby_radius: int = 2
     max_file_bytes: int = 1024 * 1024 * 1024
+    # Glob-style patterns matched against any path component. Anything
+    # matching is skipped by the watcher, scanner, and the Google Drive
+    # connector's enumeration step. Three rough buckets of defaults:
+    #
+    # 1. Repo / VCS clutter (.git, node_modules, .venv, …) — never
+    #    interesting on its own; .git-repo is our internal mirror dir.
+    # 2. Voitta sidecars + tempfiles.
+    # 3. Media + archive + binary blobs — large, unparseable. Indexing
+    #    them costs disk + Qdrant points without yielding RAG content
+    #    (audio/video transcripts and PDFs go through their own parsers,
+    #    not via passthrough text). On the GD path, skipping at enumerate
+    #    time also saves the egress for big mp4s.
     ignore_patterns: str = (
         ".git,node_modules,.DS_Store,__pycache__,.venv,*.tmp,"
-        ".git-repo,.voitta_timestamps.json,.voitta_sync.lock"
+        ".git-repo,.voitta_timestamps.json,.voitta_sync.lock,"
+        # audio
+        "*.mp3,*.m4a,*.wav,*.flac,*.ogg,*.aac,*.opus,*.wma,"
+        # video
+        "*.mp4,*.mov,*.avi,*.mkv,*.webm,*.wmv,*.flv,*.m4v,*.mpeg,*.mpg,"
+        # archives / compressed blobs
+        "*.zip,*.tar,*.tar.gz,*.tgz,*.tar.bz2,*.tbz2,*.tar.xz,*.txz,"
+        "*.gz,*.bz2,*.xz,*.7z,*.rar,*.lz4,*.zst,"
+        # disk images / installers
+        "*.iso,*.dmg,*.img,*.pkg,*.deb,*.rpm,*.exe,*.msi,*.apk,*.ipa,"
+        # binaries / shared libraries (executable formats vary by platform;
+        # globs catch the common build artefacts)
+        "*.dll,*.so,*.dylib,*.a,*.o,*.obj,*.class,*.pyc,*.pyo,*.wasm,"
+        # heavy ML weights / datasets — useless to chunk as text
+        "*.bin,*.safetensors,*.ckpt,*.pth,*.pt,*.onnx,*.h5,*.parquet,"
+        "*.arrow,*.feather"
     )
 
     # PDF parsing (MinerU)

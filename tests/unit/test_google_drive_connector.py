@@ -370,7 +370,7 @@ async def test_unsupported_native_type_is_skipped(
             },
             {
                 "id": "f1",
-                "name": "kept.bin",
+                "name": "kept.dat",
                 "mimeType": "application/octet-stream",
                 "size": "3",
                 "modifiedTime": "2026-01-01T00:00:00Z",
@@ -395,7 +395,7 @@ async def test_unsupported_native_type_is_skipped(
         drive_folders=[{"id": "ROOT", "name": "Root"}],
     )
     root = (tmp_path / "root").resolve()
-    assert (root / "Root" / "kept.bin").exists()
+    assert (root / "Root" / "kept.dat").exists()
     # The form should not have produced any local file.
     assert not list(root.rglob("Survey*"))
 
@@ -408,7 +408,7 @@ async def test_mirror_deletes_locals_not_on_remote(
         "ROOT": [
             {
                 "id": "f1",
-                "name": "kept.bin",
+                "name": "kept.dat",
                 "mimeType": "application/octet-stream",
                 "size": "3",
                 "modifiedTime": "2026-01-01T00:00:00Z",
@@ -438,7 +438,129 @@ async def test_mirror_deletes_locals_not_on_remote(
     )
     assert stats.files_removed == 1
     assert not stale.exists()
-    assert (root / "Root" / "kept.bin").exists()
+    assert (root / "Root" / "kept.dat").exists()
+
+
+@pytest.mark.asyncio
+async def test_ignored_extensions_are_skipped_before_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Media + archive blobs should never be requested from Drive — the
+    matcher fires before the download producer runs. Catches a regression
+    where adding new globs to ``VOITTA_IGNORE_PATTERNS`` would still pull
+    bytes over the wire because the connector applied the rule too late."""
+    listings = {
+        "ROOT": [
+            {
+                "id": "vid1",
+                "name": "demo.mp4",  # ignored by *.mp4
+                "mimeType": "video/mp4",
+                "size": "999999",
+                "modifiedTime": "2026-01-01T00:00:00Z",
+                "md5Checksum": "x",
+            },
+            {
+                "id": "zip1",
+                "name": "logs.tar.gz",  # ignored by *.tar.gz
+                "mimeType": "application/gzip",
+                "size": "999999",
+                "modifiedTime": "2026-01-01T00:00:00Z",
+                "md5Checksum": "y",
+            },
+            {
+                "id": "kept",
+                "name": "notes.txt",  # not ignored
+                "mimeType": "text/plain",
+                "size": "5",
+                "modifiedTime": "2026-01-01T00:00:00Z",
+                "md5Checksum": "z",
+            },
+        ]
+    }
+    # Crucially: no download_payloads for the ignored ids. If the
+    # connector tried to fetch them, _FakeFiles.get_media would KeyError.
+    drive = _FakeDrive(
+        _FakeFiles(
+            listings,
+            export_payloads={},
+            download_payloads={"kept": b"hello"},
+        )
+    )
+    connector = GoogleDriveConnector()
+    _patch_services(connector, drive, _FakeDocs({}), monkeypatch)
+
+    stats = await connector.sync(
+        folder_root=tmp_path / "root",
+        auth=_make_auth(),
+        drive_folders=[{"id": "ROOT", "name": "Root"}],
+    )
+    assert stats.errors == []
+    assert stats.files_skipped == 2
+    root = (tmp_path / "root").resolve()
+    assert (root / "Root" / "notes.txt").read_bytes() == b"hello"
+    assert not (root / "Root" / "demo.mp4").exists()
+    assert not (root / "Root" / "logs.tar.gz").exists()
+
+
+@pytest.mark.asyncio
+async def test_ignored_subfolder_is_not_recursed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A subfolder named ``node_modules`` (or any other directory glob in
+    ``ignore_patterns``) is skipped entirely — not enumerated, not
+    descended into. Saves a recursive Drive listing on giant unhelpful
+    trees."""
+    listings = {
+        "ROOT": [
+            {
+                "id": "nm",
+                "name": "node_modules",  # matches the default ignore set
+                "mimeType": NATIVE_FOLDER,
+                "modifiedTime": "2026-01-01T00:00:00Z",
+            },
+            {
+                "id": "kept",
+                "name": "README.txt",
+                "mimeType": "text/plain",
+                "size": "5",
+                "modifiedTime": "2026-01-01T00:00:00Z",
+                "md5Checksum": "x",
+            },
+        ],
+        # node_modules wouldn't normally be queried; if the test fails it
+        # WILL be queried, so put a real-looking child here so we can
+        # detect leakage if the recursion happened anyway.
+        "nm": [
+            {
+                "id": "leaked",
+                "name": "should-not-appear.txt",
+                "mimeType": "text/plain",
+                "size": "5",
+                "modifiedTime": "2026-01-01T00:00:00Z",
+                "md5Checksum": "y",
+            },
+        ],
+    }
+    drive = _FakeDrive(
+        _FakeFiles(
+            listings,
+            export_payloads={},
+            download_payloads={"kept": b"hello", "leaked": b"WRONG"},
+        )
+    )
+    connector = GoogleDriveConnector()
+    _patch_services(connector, drive, _FakeDocs({}), monkeypatch)
+
+    await connector.sync(
+        folder_root=tmp_path / "root",
+        auth=_make_auth(),
+        drive_folders=[{"id": "ROOT", "name": "Root"}],
+    )
+    root = (tmp_path / "root").resolve()
+    assert (root / "Root" / "README.txt").exists()
+    # No node_modules dir, no leaked file anywhere under root.
+    assert not list(root.rglob("node_modules"))
+    assert not list(root.rglob("should-not-appear.txt"))
 
 
 @pytest.mark.asyncio
@@ -450,7 +572,7 @@ async def test_multiple_folders_each_get_own_subdirectory(
         "A": [
             {
                 "id": "a1",
-                "name": "shared.bin",
+                "name": "shared.dat",
                 "mimeType": "application/octet-stream",
                 "size": "3",
                 "modifiedTime": "2026-01-01T00:00:00Z",
@@ -461,7 +583,7 @@ async def test_multiple_folders_each_get_own_subdirectory(
             # Same filename in a different Drive folder — must NOT collide.
             {
                 "id": "b1",
-                "name": "shared.bin",
+                "name": "shared.dat",
                 "mimeType": "application/octet-stream",
                 "size": "3",
                 "modifiedTime": "2026-01-01T00:00:00Z",
@@ -489,8 +611,8 @@ async def test_multiple_folders_each_get_own_subdirectory(
     )
     assert stats.errors == []
     root = (tmp_path / "root").resolve()
-    assert (root / "Project Alpha" / "shared.bin").read_bytes() == b"AAA"
-    assert (root / "Project Beta" / "shared.bin").read_bytes() == b"BBB"
+    assert (root / "Project Alpha" / "shared.dat").read_bytes() == b"AAA"
+    assert (root / "Project Beta" / "shared.dat").read_bytes() == b"BBB"
 
 
 def test_coerce_folders_field_handles_legacy_and_new_shapes() -> None:

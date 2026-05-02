@@ -84,11 +84,19 @@ def test_stats_unsupported_files_not_counted_as_error(
     client: TestClient, tmp_path: Path
 ) -> None:
     """Files we don't have a parser for land in ``unsupported`` and are
-    surfaced as such in the stats — never as ``error``."""
+    surfaced as such in the stats — never as ``error``.
+
+    Uses ``.weird`` and ``.zzz`` as stand-ins for "no-parser" extensions
+    so the assertion exercises the unsupported-state path. Earlier
+    versions used ``.mp4`` here, but mp4 is now in the default
+    ``ignore_patterns`` set and gets filtered before the file row is
+    even created — that's correct behaviour but it's the wrong knob to
+    test the no-parser path with.
+    """
     src = tmp_path / "src"
     src.mkdir()
     (src / "a.md").write_text("hello")
-    (src / "c.mp4").write_bytes(b"\x00\x00\x00\x18ftypmp42")
+    (src / "c.weird").write_bytes(b"\x00\x00\x00\x18ftypmp42")
     (src / "d.zzz").write_bytes(b"unknown blob")
     folder_id = client.post("/api/folders", json={"path": str(src)}).json()["id"]
     init_db()
@@ -104,8 +112,8 @@ def test_stats_unsupported_files_not_counted_as_error(
     assert s["files_indexed"] == 1
     assert s["files_error"] == 0  # critical: no parser is NOT an error
     assert s["files_unsupported"] == 2
-    mp4 = s["by_extension"][".mp4"]
-    assert mp4["files"] == 1 and mp4["unsupported"] == 1 and mp4["error"] == 0
+    weird = s["by_extension"][".weird"]
+    assert weird["files"] == 1 and weird["unsupported"] == 1 and weird["error"] == 0
     zzz = s["by_extension"][".zzz"]
     assert zzz["files"] == 1 and zzz["unsupported"] == 1 and zzz["error"] == 0
 

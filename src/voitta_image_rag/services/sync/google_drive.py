@@ -175,6 +175,7 @@ class GoogleDriveSyncStats:
     files_added: int = 0
     files_updated: int = 0
     files_removed: int = 0
+    files_skipped: int = 0  # matched VOITTA_IGNORE_PATTERNS at enumerate time
     tabs_written: int = 0
     errors: list[str] = field(default_factory=list)
 
@@ -183,6 +184,7 @@ class GoogleDriveSyncStats:
             "files_added": self.files_added,
             "files_updated": self.files_updated,
             "files_removed": self.files_removed,
+            "files_skipped": self.files_skipped,
             "tabs_written": self.tabs_written,
             "errors": self.errors,
         }
@@ -512,6 +514,14 @@ class GoogleDriveConnector:
         access_token = self._sync_access_token(auth) if auth.refresh_token else None
         drive, docs = self._build_services(auth, access_token)
 
+        # Same ignore matcher the watcher uses, so policy is consistent
+        # whether files arrive over Drive or via local fs. Matching here
+        # also avoids the egress cost of downloading bytes we'd then
+        # immediately ignore (a single mp4 can be hundreds of MB).
+        from ..ignore import from_settings as _ignore_from_settings
+
+        ignore = _ignore_from_settings()
+
         stats = GoogleDriveSyncStats()
         entries: list[_RemoteEntry] = []
         # Each picked Drive folder is mirrored under its own subdirectory so
@@ -532,7 +542,7 @@ class GoogleDriveConnector:
                 n += 1
             used_dirs.add(unique)
             try:
-                self._enumerate(drive, docs, folder_id, unique, entries, stats)
+                self._enumerate(drive, docs, folder_id, unique, entries, stats, ignore)
             except Exception as e:
                 logger.exception("Drive enumeration failed for %s", folder_id)
                 stats.errors.append(f"list {display or folder_id}: {e}")
@@ -603,6 +613,7 @@ class GoogleDriveConnector:
         rel_prefix: str,
         out: list[_RemoteEntry],
         stats: GoogleDriveSyncStats,
+        ignore: Any,  # IgnoreMatcher
     ) -> None:
         page_token: str | None = None
         while True:
@@ -622,7 +633,7 @@ class GoogleDriveConnector:
                 .execute()
             )
             for item in resp.get("files", []):
-                self._process_item(drive, docs, item, rel_prefix, out, stats)
+                self._process_item(drive, docs, item, rel_prefix, out, stats, ignore)
             page_token = resp.get("nextPageToken")
             if not page_token:
                 break
@@ -635,13 +646,32 @@ class GoogleDriveConnector:
         rel_prefix: str,
         out: list[_RemoteEntry],
         stats: GoogleDriveSyncStats,
+        ignore: Any,  # IgnoreMatcher
     ) -> None:
         name = item["name"]
         mime = item["mimeType"]
         rel_here = f"{rel_prefix}/{name}" if rel_prefix else name
 
+        # Apply VOITTA_IGNORE_PATTERNS BEFORE we recurse / produce. The
+        # matcher walks ancestors too, so a file inside an ignored
+        # directory (e.g. ``node_modules``) is skipped without ever
+        # listing the contents. For binary blobs (mp4, zip, …) it stops
+        # us downloading hundreds of MB just to ignore them on disk.
+        # Native Google docs/sheets/slides stay un-ignored — they're
+        # rendered to .md / .xlsx / .pptx which the parsers handle.
+        skippable = mime not in (NATIVE_FOLDER, NATIVE_DOC) and mime not in EXPORT_MAP
+        if skippable and ignore.matches(rel_here):
+            logger.debug("skipping ignored file: %s", rel_here)
+            stats.files_skipped += 1
+            return
+
         if mime == NATIVE_FOLDER:
-            self._enumerate(drive, docs, item["id"], rel_here, out, stats)
+            # Don't recurse into folders whose name matches an ignore
+            # glob (`.git`, `node_modules`, `__pycache__`).
+            if ignore.matches(rel_here):
+                logger.debug("skipping ignored folder: %s", rel_here)
+                return
+            self._enumerate(drive, docs, item["id"], rel_here, out, stats, ignore)
             return
 
         if mime == NATIVE_DOC:
