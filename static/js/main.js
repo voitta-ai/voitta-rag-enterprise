@@ -1365,20 +1365,47 @@ function openGdPicker(data) {
         for (const f of items) {
             const row = document.createElement("label");
             row.className = "check-row";
-            row.style.cssText = "display:flex;gap:8px;align-items:center;padding:2px 0;";
+            row.style.cssText = "display:flex;gap:8px;align-items:flex-start;padding:4px 0;";
             const cb = document.createElement("input");
             cb.type = "checkbox";
             cb.dataset.id = f.id;
             cb.dataset.name = f.name;
             cb.checked = preselected.has(f.id);
-            const span = document.createElement("span");
-            span.textContent = f.name;
-            row.append(cb, span);
+            cb.style.marginTop = "3px";  // line up with the first text row
+            const text = document.createElement("span");
+            text.style.cssText = "display:flex;flex-direction:column;gap:1px;line-height:1.3;";
+            const title = document.createElement("span");
+            title.textContent = f.name;
+            text.append(title);
+            const subtitle = gdSubtitle(f);
+            if (subtitle) {
+                const sub = document.createElement("span");
+                sub.style.cssText = "font-size:11px;color:var(--color-text-secondary);";
+                sub.textContent = subtitle;
+                text.append(sub);
+            }
+            row.append(cb, text);
             list.append(row);
         }
     }
     refreshGdPickAllState();
     $("#gd-pick-backdrop").hidden = false;
+}
+
+/* Build the dim subtitle line under each picker row.
+
+   Eight folders all called "Meet Recordings" only become useful once you
+   can see whose they are; this is also where we surface stale-folder
+   age (`modifiedTime` on a Meet Recordings folder = the date of the last
+   recording dropped in). Drive returns ISO timestamps; we render the
+   date portion only because seconds add visual noise without information.
+*/
+function gdSubtitle(f) {
+    const parts = [];
+    if (f.owner_email) parts.push(f.owner_email);
+    if (f.shared_at) parts.push(`shared ${f.shared_at.slice(0, 10)}`);
+    if (f.modified_at) parts.push(`modified ${f.modified_at.slice(0, 10)}`);
+    return parts.join(" · ");
 }
 
 function refreshGdPickAllState() {

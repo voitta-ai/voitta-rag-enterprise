@@ -531,10 +531,26 @@ def gd_auth_init(
     return GdAuthInitOut(auth_url=auth_url)
 
 
+class GdDrivePickEntry(BaseModel):
+    """One row in the Drive folder picker.
+
+    ``owner_*`` and the timestamps are populated for ``folders`` /
+    ``shared_folders`` (per-user folders have one owner) and left empty
+    for ``shared_drives`` (no per-drive owner concept).
+    """
+
+    id: str
+    name: str
+    owner_email: str = ""
+    owner_name: str = ""
+    shared_at: str = ""  # ISO8601 from Drive's ``sharedWithMeTime``
+    modified_at: str = ""  # ISO8601 from Drive's ``modifiedTime``
+
+
 class GdFoldersOut(BaseModel):
-    folders: list[dict[str, str]]
-    shared_folders: list[dict[str, str]]
-    shared_drives: list[dict[str, str]]
+    folders: list[GdDrivePickEntry]
+    shared_folders: list[GdDrivePickEntry]
+    shared_drives: list[GdDrivePickEntry]
 
 
 @router.get("/google-drive/folders", response_model=GdFoldersOut)

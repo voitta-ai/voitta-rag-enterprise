@@ -141,9 +141,66 @@ def test_endpoint_accepts_sa_only(env: None, tmp_path: Path) -> None:
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["folders"] == []  # SA path skips My Drive
-        assert body["shared_folders"] == [{"id": "abc", "name": "Shared"}]
+        # GdDrivePickEntry adds owner_* and date fields with empty defaults
+        # when the underlying call doesn't supply them — assert on the
+        # required fields rather than full equality.
+        assert len(body["shared_folders"]) == 1
+        assert body["shared_folders"][0]["id"] == "abc"
+        assert body["shared_folders"][0]["name"] == "Shared"
         # The route forwarded the saved SA JSON to the listing function.
         assert called["sa_json"] == json.loads('"{\\"client_email\\":\\"x@y\\",\\"private_key\\":\\"…\\"}"')
+
+
+def test_endpoint_surfaces_owner_and_dates(env: None, tmp_path: Path) -> None:
+    """Owner email + sharedWithMeTime + modifiedTime flow through the route
+    untouched — the picker depends on them to disambiguate same-named
+    folders (every team's "Meet Recordings" is somebody else's drive)."""
+    app = _app()
+    auth_as(app, "alice@x")
+    src = tmp_path / "drive"
+    src.mkdir()
+    with TestClient(app) as client:
+        fid = client.post("/api/folders", json={"path": str(src)}).json()["id"]
+        client.put(
+            f"/api/folders/{fid}/sync",
+            json={
+                "source_type": "google_drive",
+                "google_drive": {
+                    "client_id": "",
+                    "client_secret": "",
+                    "service_account_json": '{"client_email":"sa@x","private_key":"…"}',
+                    "folders": [],
+                },
+            },
+        )
+
+        async def fake_list(**_kwargs):
+            return {
+                "folders": [],
+                "shared_folders": [
+                    {
+                        "id": "abc",
+                        "name": "Meet Recordings",
+                        "owner_email": "alice@agnitio.ai",
+                        "owner_name": "Alice",
+                        "shared_at": "2026-04-30T12:00:00Z",
+                        "modified_at": "2026-05-01T00:00:00Z",
+                    }
+                ],
+                "shared_drives": [],
+            }
+
+        from voitta_image_rag.api.routes import sync as sync_route
+
+        with patch.object(sync_route, "gd_list_root_folders", fake_list):
+            r = client.get(f"/api/folders/{fid}/sync/google-drive/folders")
+
+    assert r.status_code == 200, r.text
+    item = r.json()["shared_folders"][0]
+    assert item["owner_email"] == "alice@agnitio.ai"
+    assert item["owner_name"] == "Alice"
+    assert item["shared_at"].startswith("2026-04-30")
+    assert item["modified_at"].startswith("2026-05-01")
 
 
 def test_endpoint_still_400s_with_no_creds(env: None, tmp_path: Path) -> None:

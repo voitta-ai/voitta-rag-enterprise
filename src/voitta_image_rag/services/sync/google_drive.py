@@ -309,10 +309,16 @@ async def _list_drive_locations(
     """
     headers = {"Authorization": f"Bearer {access_token}"}
     base = "https://www.googleapis.com/drive/v3/files"
-    common = {"fields": "files(id,name)", "pageSize": "100", "orderBy": "name"}
+    # Owner / shared-time / modified-time are returned only when explicitly
+    # requested via ``fields``. We ask for all three so the picker can show
+    # who the recording belongs to (eight folders all named "Meet Recordings"
+    # are nine different people's personal recordings — without owner email
+    # the list is unusable).
+    files_fields = "files(id,name,owners(displayName,emailAddress),sharedWithMeTime,modifiedTime)"
+    common = {"fields": files_fields, "pageSize": "100", "orderBy": "name"}
 
     async with httpx.AsyncClient() as client:
-        my_files: list[dict[str, str]] = []
+        my_files_raw: list[dict] = []
         if has_my_drive:
             my = await client.get(
                 base,
@@ -327,10 +333,7 @@ async def _list_drive_locations(
             )
             if my.status_code != 200:
                 raise RuntimeError(f"Drive list (My Drive) failed: {my.text[:300]}")
-            my_files = [
-                {"id": f["id"], "name": f["name"]}
-                for f in my.json().get("files", [])
-            ]
+            my_files_raw = my.json().get("files", [])
         shared = await client.get(
             base,
             headers=headers,
@@ -353,15 +356,35 @@ async def _list_drive_locations(
             raise RuntimeError(f"Drive list (drives) failed: {drives.text[:300]}")
 
     return {
-        "folders": my_files,
+        "folders": [_folder_summary(f) for f in my_files_raw],
         "shared_folders": [
-            {"id": f["id"], "name": f["name"]}
-            for f in shared.json().get("files", [])
+            _folder_summary(f) for f in shared.json().get("files", [])
         ],
         "shared_drives": [
+            # Shared Drives don't have owners; surface name + id only.
             {"id": d["id"], "name": d["name"]}
             for d in drives.json().get("drives", [])
         ],
+    }
+
+
+def _folder_summary(f: dict) -> dict[str, str]:
+    """Flatten a Drive ``files`` entry to the picker's wire shape.
+
+    Pulls the first owner's email/display_name out of the ``owners`` list
+    (Drive returns it as a list; for personal folders there's exactly one
+    owner). Empty strings stand in for missing fields so the front-end
+    doesn't have to null-check every cell.
+    """
+    owners = f.get("owners") or []
+    owner = owners[0] if owners else {}
+    return {
+        "id": f["id"],
+        "name": f["name"],
+        "owner_email": owner.get("emailAddress") or "",
+        "owner_name": owner.get("displayName") or "",
+        "shared_at": f.get("sharedWithMeTime") or "",
+        "modified_at": f.get("modifiedTime") or "",
     }
 
 
