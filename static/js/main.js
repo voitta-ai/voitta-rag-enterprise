@@ -1017,6 +1017,10 @@ function openSyncModal() {
     $("#sync-gd-sa-json").placeholder = '{"type":"service_account","client_email":"…","private_key":"…"}';
     setGdAuthMode("oauth");
     setGdConnState({ connected: false, hasClientSecret: false });
+    // Auto-sync defaults: off, 6h. loadSyncSource overrides from the row.
+    $("#sync-auto-enabled").checked = false;
+    $("#sync-auto-hours").value = "6";
+    $("#sync-auto-hours").disabled = true;
 
     loadSyncSource();
 }
@@ -1203,6 +1207,11 @@ async function loadSyncSource() {
             setGdAuthMode(saOnly ? "sa" : "oauth");
             setGdConnState({ connected: gd.connected, hasClientSecret: gd.has_client_secret });
         }
+        // Auto-sync schedule (common to both source types).
+        $("#sync-auto-enabled").checked = !!src.auto_sync_enabled;
+        const hrs = Math.max(1, Math.min(24, Number(src.auto_sync_hours) || 6));
+        $("#sync-auto-hours").value = String(hrs);
+        $("#sync-auto-hours").disabled = !src.auto_sync_enabled;
         $("#sync-delete").hidden = false;
         renderSyncStatus(src);
     } catch (err) {
@@ -1268,12 +1277,42 @@ function gdFormConfig() {
 
 function syncBody() {
     const t = $("#sync-type").value;
-    if (t === "github") return { source_type: "github", github: ghFormConfig() };
-    if (t === "google_drive") return { source_type: "google_drive", google_drive: gdFormConfig() };
+    // Auto-sync settings live alongside source_type — same payload for
+    // both github and google_drive so the backend doesn't need source-
+    // specific scheduling code.
+    const autoEnabled = $("#sync-auto-enabled").checked;
+    const autoHours = Math.max(1, Math.min(24, Number($("#sync-auto-hours").value) || 6));
+    const base = { auto_sync_enabled: autoEnabled, auto_sync_hours: autoHours };
+    if (t === "github") return { ...base, source_type: "github", github: ghFormConfig() };
+    if (t === "google_drive") return { ...base, source_type: "google_drive", google_drive: gdFormConfig() };
     throw new Error(`Unknown source_type: ${t}`);
 }
 
 $("#sync-type").addEventListener("change", () => setSyncType($("#sync-type").value));
+
+// Populate the auto-sync hours dropdown once on script load. Bounded
+// 1-24 — the in-process scheduler is hour-grained; wider intervals
+// belong to a real cron, finer would burn Drive quota uselessly since
+// the watcher already picks up newly-arrived files once they land on
+// disk.
+(() => {
+    const sel = $("#sync-auto-hours");
+    if (!sel || sel.options.length > 0) return;
+    for (let h = 1; h <= 24; h++) {
+        const opt = document.createElement("option");
+        opt.value = String(h);
+        opt.textContent = String(h);
+        sel.append(opt);
+    }
+    sel.value = "6";
+})();
+
+// Toggle disables the dropdown so a configured-but-disabled row keeps
+// its hours setting visible (instead of resetting to default the next
+// time the user re-enables it).
+$("#sync-auto-enabled").addEventListener("change", () => {
+    $("#sync-auto-hours").disabled = !$("#sync-auto-enabled").checked;
+});
 
 document.querySelectorAll('input[name="sync-gh-auth"]').forEach((el) => {
     el.addEventListener("change", () => setGhAuth(el.value));

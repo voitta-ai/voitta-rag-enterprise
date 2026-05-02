@@ -145,6 +145,12 @@ CREATE TABLE IF NOT EXISTS folder_sync_sources (
     sync_status        TEXT NOT NULL DEFAULT 'idle',         -- 'idle' | 'syncing' | 'error'
     sync_error         TEXT,
     last_synced_at     INTEGER,
+    -- Periodic auto-sync. When ``auto_sync_enabled=1``, the in-process
+    -- scheduler enqueues a sync job whenever ``last_synced_at`` is older
+    -- than ``auto_sync_hours`` (1-24). Manually triggered syncs still work
+    -- alongside this — both feed the same dedup'd queue.
+    auto_sync_enabled  INTEGER NOT NULL DEFAULT 0,
+    auto_sync_hours    INTEGER NOT NULL DEFAULT 6,
     created_at         INTEGER NOT NULL,
     updated_at         INTEGER NOT NULL
 );

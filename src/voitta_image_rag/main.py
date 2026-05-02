@@ -188,11 +188,32 @@ def create_app() -> FastAPI:
             app.state.watcher = watcher
             app.state.workers = workers
 
+            # Auto-sync scheduler: ticks once a minute, enqueues a sync
+            # job for any folder_sync_sources row whose auto_sync_hours
+            # interval has lapsed since last_synced_at. Same dedup key as
+            # the manual /sync/trigger endpoint, so a still-running sync
+            # is coalesced.
+            from .services import scheduler as auto_sync_scheduler
+
+            app.state.scheduler_task = asyncio.create_task(
+                auto_sync_scheduler.run_forever()
+            )
+
         # Run the mounted MCP app's lifespan as well.
         async with mcp_app.router.lifespan_context(mcp_app):
             try:
                 yield
             finally:
+                if hasattr(app.state, "scheduler_task"):
+                    app.state.scheduler_task.cancel()
+                    # Awaiting the cancelled task lets it run its own
+                    # CancelledError handler; we swallow whatever bubbles
+                    # out (CancelledError on success, anything else means
+                    # the loop body raised right before cancel).
+                    import contextlib
+
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await app.state.scheduler_task
                 if hasattr(app.state, "workers"):
                     await app.state.workers.stop()
                 if hasattr(app.state, "watcher"):

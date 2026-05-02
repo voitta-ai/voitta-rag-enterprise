@@ -87,6 +87,8 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
             "ALTER TABLE folder_sync_sources ADD COLUMN gd_refresh_token TEXT",
             "ALTER TABLE folder_sync_sources ADD COLUMN gd_service_account_json TEXT",
             "ALTER TABLE folder_sync_sources ADD COLUMN gd_folder_id TEXT",
+            "ALTER TABLE folder_sync_sources ADD COLUMN auto_sync_enabled INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE folder_sync_sources ADD COLUMN auto_sync_hours INTEGER NOT NULL DEFAULT 6",
             "ALTER TABLE folders ADD COLUMN owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL",
             "ALTER TABLE folders ADD COLUMN shared INTEGER NOT NULL DEFAULT 0",
         ):

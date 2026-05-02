@@ -86,6 +86,12 @@ class SyncSourceIn(BaseModel):
     source_type: Literal["github", "google_drive"]
     github: GithubSyncIn | None = None
     google_drive: GoogleDriveSyncIn | None = None
+    # Periodic auto-sync. ``auto_sync_hours`` is bounded to 1-24 by the
+    # scheduler — wider intervals belong to a real cron, not this in-process
+    # loop. Both fields are common to all source types so they live on the
+    # outer envelope, not inside ``github`` / ``google_drive``.
+    auto_sync_enabled: bool = False
+    auto_sync_hours: int = Field(default=6, ge=1, le=24)
 
 
 class GithubSyncOut(BaseModel):
@@ -114,6 +120,8 @@ class SyncSourceOut(BaseModel):
     sync_status: str
     sync_error: str | None
     last_synced_at: int | None
+    auto_sync_enabled: bool
+    auto_sync_hours: int
     github: GithubSyncOut | None = None
     google_drive: GoogleDriveSyncOut | None = None
 
@@ -149,6 +157,8 @@ def _to_out(src: FolderSyncSource) -> SyncSourceOut:
         sync_status=src.sync_status,
         sync_error=src.sync_error,
         last_synced_at=src.last_synced_at,
+        auto_sync_enabled=bool(src.auto_sync_enabled),
+        auto_sync_hours=int(src.auto_sync_hours),
         github=gh,
         google_drive=gd,
     )
@@ -327,6 +337,10 @@ def upsert_sync_source(
             status.HTTP_400_BAD_REQUEST,
             f"Unsupported source_type: {body.source_type!r}",
         )
+
+    # Auto-sync settings apply regardless of source type.
+    src.auto_sync_enabled = bool(body.auto_sync_enabled)
+    src.auto_sync_hours = int(body.auto_sync_hours)
 
     if existing is None:
         db.add(src)

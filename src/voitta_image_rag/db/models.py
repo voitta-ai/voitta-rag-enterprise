@@ -186,6 +186,9 @@ class FolderSyncSource(Base):
     sync_status: Mapped[str] = mapped_column(default="idle")
     sync_error: Mapped[str | None] = mapped_column(default=None)
     last_synced_at: Mapped[int | None] = mapped_column(default=None)
+    # Periodic auto-sync (driven by services.scheduler).
+    auto_sync_enabled: Mapped[bool] = mapped_column(default=False)
+    auto_sync_hours: Mapped[int] = mapped_column(default=6)
     created_at: Mapped[int] = mapped_column(default=_now_s)
     updated_at: Mapped[int] = mapped_column(default=_now_s, onupdate=_now_s)
 

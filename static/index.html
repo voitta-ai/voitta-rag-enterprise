@@ -296,6 +296,19 @@
                     <p class="hint" id="sync-gd-folders-hint">Each picked folder syncs into its own subdirectory under this folder.</p>
                 </div>
 
+                <!-- Auto-sync schedule. Common to all source types. The
+                     in-process scheduler ticks every minute, so a 1h
+                     interval fires within ~60s of the schedule. Wider
+                     than 24h belongs to a real cron, not this loop. -->
+                <div class="sync-auto-row" style="margin-top:14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                    <label class="check-row" style="margin:0;">
+                        <input type="checkbox" id="sync-auto-enabled">
+                        Auto-sync every
+                    </label>
+                    <select id="sync-auto-hours" disabled></select>
+                    <span class="hint">hour(s). Re-runs the sync on a schedule; only new or changed files are downloaded and re-indexed.</span>
+                </div>
+
                 <div class="actions actions-right">
                     <button id="sync-delete" class="btn btn-secondary" hidden>Remove sync</button>
                     <button id="sync-save" class="btn btn-secondary">Save</button>
