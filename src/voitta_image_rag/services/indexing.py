@@ -523,6 +523,34 @@ async def _run_sync_inner(folder_id: int) -> None:
     logger.info("sync begin folder=%s type=%s", folder_path, source_type)
     connector = get_connector(source_type)
 
+    # Bridge the connector's progress callback into the WS event stream so
+    # the SPA can show a live "Syncing — listing 1/3" / "Syncing — 47/200"
+    # pill. Sync runs on a worker thread (via ``asyncio.to_thread`` inside
+    # ``GoogleDriveConnector.sync``) but ``events.publish`` is thread-safe
+    # — it round-trips through ``run_coroutine_threadsafe`` if the asyncio
+    # loop has been wired in. Connectors that don't accept ``progress_cb``
+    # (currently just GitHub) silently drop the kwarg via the **cfg dict.
+    def _on_progress(phase: str, done: int, total: int) -> None:
+        events.publish(
+            "folders",
+            {
+                "type": "folder.sync_progress",
+                "folder_id": folder_id,
+                "phase": phase,
+                "done": done,
+                "total": total,
+            },
+        )
+
+    if source_type == "google_drive":
+        cfg["progress_cb"] = _on_progress
+
+    # Initial event from the worker side, before the connector starts —
+    # gives the SPA something to render the moment the sync job runs,
+    # rather than waiting for the connector to issue its first progress
+    # call (which can be seconds later if Drive auth is slow).
+    _on_progress("queued", 0, 0)
+
     started = time.perf_counter()
     try:
         stats = await connector.sync(
@@ -536,6 +564,8 @@ async def _run_sync_inner(folder_id: int) -> None:
             src = s2.get(FolderSyncSource, folder_id)
             if src is not None:
                 src.sync_status = "error"
+        # Final event so the SPA's badge clears even on failure.
+        _on_progress("done", 0, 0)
         raise
 
     elapsed = time.perf_counter() - started
@@ -551,6 +581,11 @@ async def _run_sync_inner(folder_id: int) -> None:
             src.sync_status = "error" if stats.errors else "idle"
             src.sync_error = "; ".join(stats.errors) if stats.errors else None
             src.last_synced_at = int(time.time())
+
+    # Final clear-the-badge event. The GD connector already emits "done"
+    # on success, but other connectors may not — this guarantees the SPA
+    # drops the sync pill no matter which connector ran.
+    _on_progress("done", 0, 0)
 
 
 def _mark_sync_error(folder_id: int, message: str) -> None:

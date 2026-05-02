@@ -615,6 +615,102 @@ async def test_multiple_folders_each_get_own_subdirectory(
     assert (root / "Project Beta" / "shared.dat").read_bytes() == b"BBB"
 
 
+@pytest.mark.asyncio
+async def test_progress_callback_fires_through_phases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The connector should walk the SPA's expected phase machine —
+    connecting → listing → downloading → cleaning → done — and report a
+    monotonically increasing ``done`` per phase. The user-facing badge
+    depends on this ordering to render the right verb at each stage."""
+    listings = {
+        "ROOT": [
+            {
+                "id": f"f{i}",
+                "name": f"f{i}.txt",
+                "mimeType": "text/plain",
+                "size": "5",
+                "modifiedTime": "2026-01-01T00:00:00Z",
+                "md5Checksum": str(i),
+            }
+            for i in range(3)
+        ]
+    }
+    drive = _FakeDrive(
+        _FakeFiles(
+            listings,
+            export_payloads={},
+            download_payloads={f"f{i}": b"hello" for i in range(3)},
+        )
+    )
+    connector = GoogleDriveConnector()
+    _patch_services(connector, drive, _FakeDocs({}), monkeypatch)
+
+    captured: list[tuple[str, int, int]] = []
+
+    def _cb(phase: str, done: int, total: int) -> None:
+        captured.append((phase, done, total))
+
+    await connector.sync(
+        folder_root=tmp_path / "root",
+        auth=_make_auth(),
+        drive_folders=[{"id": "ROOT", "name": "Root"}],
+        progress_cb=_cb,
+    )
+
+    phases = [p for (p, _, _) in captured]
+    # Required phases land in order, with at least one ``done`` to clear
+    # the SPA badge.
+    for phase in ("connecting", "listing", "downloading", "cleaning", "done"):
+        assert phase in phases, f"missing phase {phase!r} in {phases}"
+    assert phases.index("connecting") < phases.index("listing")
+    assert phases.index("listing") < phases.index("downloading")
+    assert phases.index("downloading") < phases.index("cleaning")
+    assert phases.index("cleaning") < phases.index("done")
+
+    # Downloading reports each file (3 here, below the throttle) — the
+    # final downloading event matches total.
+    download_evts = [(d, t) for (p, d, t) in captured if p == "downloading"]
+    assert download_evts[-1] == (3, 3)
+
+
+@pytest.mark.asyncio
+async def test_progress_callback_failures_dont_break_sync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A flaky observer mustn't crash the sync. Files still land on disk
+    even when every progress call raises."""
+    listings = {
+        "ROOT": [
+            {
+                "id": "f1",
+                "name": "note.txt",
+                "mimeType": "text/plain",
+                "size": "5",
+                "modifiedTime": "2026-01-01T00:00:00Z",
+                "md5Checksum": "x",
+            }
+        ]
+    }
+    drive = _FakeDrive(
+        _FakeFiles(listings, export_payloads={}, download_payloads={"f1": b"hello"})
+    )
+    connector = GoogleDriveConnector()
+    _patch_services(connector, drive, _FakeDocs({}), monkeypatch)
+
+    def _bad(phase, done, total):
+        raise RuntimeError(f"observer broke on {phase}")
+
+    stats = await connector.sync(
+        folder_root=tmp_path / "root",
+        auth=_make_auth(),
+        drive_folders=[{"id": "ROOT", "name": "Root"}],
+        progress_cb=_bad,
+    )
+    assert stats.errors == []
+    assert (tmp_path / "root" / "Root" / "note.txt").read_bytes() == b"hello"
+
+
 def test_coerce_folders_field_handles_legacy_and_new_shapes() -> None:
     from voitta_image_rag.services.sync.google_drive import (
         coerce_folders_field,

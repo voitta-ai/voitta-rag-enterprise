@@ -29,3 +29,8 @@ export const connStatus = createStore("disconnected");
 // folder_id → { phase, done, total } while a reindex_folder job is mid-wipe.
 // Empty map means "no folder is currently in a reindex wipe phase".
 export const reindexProgress = createStore(new Map());
+// Same shape, separate map: live progress for sync jobs (Drive listing,
+// downloading, cleanup phases). Kept distinct from reindexProgress so the
+// two can coexist on the same folder card without overwriting each other
+// (e.g. user triggers sync, watcher fires reindex on extracted files).
+export const syncProgress = createStore(new Map());

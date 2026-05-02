@@ -1,6 +1,6 @@
 // WebSocket connection manager with backoff reconnect.
 
-import { connStatus, folders, files, jobs, reindexProgress } from "./store.js";
+import { connStatus, folders, files, jobs, reindexProgress, syncProgress } from "./store.js";
 
 const MAX_BACKOFF_MS = 30_000;
 const TOPICS = ["folders", "files", "jobs", "stats"];
@@ -64,6 +64,26 @@ function handleEvent(event) {
         case "folder.removed":
             folders.update((list) => list.filter(f => f.id !== event.folder_id));
             files.update((list) => list.filter(f => f.folder_id !== event.folder_id));
+            return;
+        case "folder.sync_progress":
+            // Backend connector + worker emit these during the listing /
+            // downloading / cleaning phases of a sync job. Same shape as
+            // reindex_progress; kept on a separate store so they don't
+            // overwrite each other (a folder can be syncing AND mid-reindex
+            // — they're independent phases).
+            syncProgress.update((map) => {
+                const next = new Map(map);
+                if (event.phase === "done") {
+                    next.delete(event.folder_id);
+                } else {
+                    next.set(event.folder_id, {
+                        phase: event.phase,
+                        done: event.done,
+                        total: event.total,
+                    });
+                }
+                return next;
+            });
             return;
         case "folder.reindex_progress":
             // Backend emits these in batches during a reindex job's

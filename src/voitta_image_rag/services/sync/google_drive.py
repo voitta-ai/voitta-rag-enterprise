@@ -434,7 +434,17 @@ class GoogleDriveConnector:
         folder_root: Path,
         auth: GoogleDriveAuth,
         drive_folders: list[dict[str, str]],
+        progress_cb: Callable[[str, int, int], None] | None = None,
     ) -> GoogleDriveSyncStats:
+        """Mirror Drive content into ``folder_root``.
+
+        ``progress_cb(phase, done, total)`` — optional. Called from the
+        worker thread at every phase boundary and per-file during the
+        download phase. Phases: ``"connecting"`` → ``"listing"`` →
+        ``"downloading"`` → ``"cleaning"`` → ``"done"``. The caller
+        wraps this into ``folder.sync_progress`` events; see
+        ``indexing._run_sync_inner``.
+        """
         if not auth.configured:
             raise RuntimeError(
                 "Google Drive not connected. Open the folder's sync settings "
@@ -452,6 +462,7 @@ class GoogleDriveConnector:
             self._sync_sync,
             folder_root=folder_root,
             auth=auth,
+            progress_cb=progress_cb,
             drive_folders=drive_folders,
         )
 
@@ -510,7 +521,20 @@ class GoogleDriveConnector:
         folder_root: Path,
         auth: GoogleDriveAuth,
         drive_folders: list[dict[str, str]],
+        progress_cb: Callable[[str, int, int], None] | None = None,
     ) -> GoogleDriveSyncStats:
+        # Wrap so call sites can fire-and-forget without a None check.
+        # Swallow exceptions inside the callback — a flaky observer must
+        # never break the sync itself.
+        def _emit(phase: str, done: int = 0, total: int = 0) -> None:
+            if progress_cb is None:
+                return
+            try:
+                progress_cb(phase, done, total)
+            except Exception:
+                logger.exception("sync progress callback raised")
+
+        _emit("connecting")
         access_token = self._sync_access_token(auth) if auth.refresh_token else None
         drive, docs = self._build_services(auth, access_token)
 
@@ -530,7 +554,9 @@ class GoogleDriveConnector:
         # the picker UI), with a stable fallback when it's missing — rare
         # legacy single-folder rows where only the ID was stored.
         used_dirs: set[str] = set()
-        for folder in drive_folders:
+        n_drive_folders = len(drive_folders)
+        _emit("listing", 0, n_drive_folders)
+        for idx, folder in enumerate(drive_folders, start=1):
             folder_id = folder["id"]
             display = folder.get("name") or ""
             base = _safe_folder_name(display) if display else f"drive-{folder_id[:8]}"
@@ -546,35 +572,51 @@ class GoogleDriveConnector:
             except Exception as e:
                 logger.exception("Drive enumeration failed for %s", folder_id)
                 stats.errors.append(f"list {display or folder_id}: {e}")
+            # Emit after each top-level folder so a multi-folder sync flips
+            # through "1/3", "2/3", "3/3" — useful when listing a Shared
+            # Drive can take a minute.
+            _emit("listing", idx, n_drive_folders)
 
         if stats.errors and not entries:
             # Every selected folder failed to enumerate — bail before we
             # delete every local file as "not on remote".
+            _emit("done")
             return stats
 
         expected_paths: set[str] = {e.rel_path for e in entries}
         sidecar: dict[str, dict[str, str]] = {}
 
-        for entry in entries:
+        total_entries = len(entries)
+        # Emit at the start of downloading so the SPA can flip to the
+        # downloading-phase wording even before the first file lands.
+        # Throttle the per-file emit cadence to avoid drowning the WS
+        # channel on huge folders — once per file is fine for hundreds,
+        # but at 5k+ entries the noise adds up.
+        emit_every = max(1, total_entries // 100)
+        _emit("downloading", 0, total_entries)
+        for i, entry in enumerate(entries, start=1):
             local = folder_root / entry.rel_path
             local.parent.mkdir(parents=True, exist_ok=True)
             if self._is_unchanged(local, entry):
                 self._record_sidecar(sidecar, entry)
-                continue
-            existed_before = local.exists()
-            try:
-                entry.producer(local)
-            except Exception as e:
-                logger.exception("Drive download failed: %s", entry.rel_path)
-                stats.errors.append(f"{entry.rel_path}: {e}")
-                continue
-            if local.exists() and local.stat().st_size > 0:
-                if existed_before:
-                    stats.files_updated += 1
+            else:
+                existed_before = local.exists()
+                try:
+                    entry.producer(local)
+                except Exception as e:
+                    logger.exception("Drive download failed: %s", entry.rel_path)
+                    stats.errors.append(f"{entry.rel_path}: {e}")
                 else:
-                    stats.files_added += 1
-            self._record_sidecar(sidecar, entry)
+                    if local.exists() and local.stat().st_size > 0:
+                        if existed_before:
+                            stats.files_updated += 1
+                        else:
+                            stats.files_added += 1
+                    self._record_sidecar(sidecar, entry)
+            if i == total_entries or i % emit_every == 0:
+                _emit("downloading", i, total_entries)
 
+        _emit("cleaning", 0, 0)
         # Drop locals not on remote (skip our own sidecars).
         keep = {".voitta_sources.json", ".voitta_timestamps.json"}
         for path in list(folder_root.rglob("*")):
@@ -601,6 +643,7 @@ class GoogleDriveConnector:
             json.dumps(sidecar, indent=2, sort_keys=True)
         )
 
+        _emit("done", total_entries, total_entries)
         return stats
 
     # -- enumeration --------------------------------------------------------

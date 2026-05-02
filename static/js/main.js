@@ -1,7 +1,7 @@
 // SPA entry point. Folder-list driven, with a selection-aware sidebar.
 
 import { api } from "./api.js";
-import { connStatus, files, folders, jobs, reindexProgress } from "./store.js";
+import { connStatus, files, folders, jobs, reindexProgress, syncProgress } from "./store.js";
 import { connect } from "./ws.js";
 
 const $ = (sel) => document.querySelector(sel);
@@ -44,6 +44,11 @@ reindexProgress.subscribe(() => {
     // sidebar (which is the only place the badge lives) and the folder
     // list (so the row's status pill can flip if we ever surface it
     // there too). Cheap: both renders are O(folder count).
+    renderSidebar();
+    renderFolders(folders.get());
+});
+syncProgress.subscribe(() => {
+    // Same cadence as reindex; identical re-render strategy.
     renderSidebar();
     renderFolders(folders.get());
 });
@@ -593,6 +598,40 @@ function renderSidebar() {
         reindexBadge.hidden = false;
     } else {
         reindexBadge.hidden = true;
+    }
+
+    // Live sync pill — connector + worker emit folder.sync_progress as
+    // the auth → list → download → clean phases run. Without this badge
+    // the user sees "Status: none" for the entire initial sync (the
+    // file-state-derived status pill can only count files that already
+    // exist on disk, and the disk is empty until downloading lands).
+    const syncBadge = $("#folder-sync-badge");
+    const syncP = syncProgress.get().get(folder.id);
+    if (syncP) {
+        const phase = syncP.phase;
+        let label;
+        if (phase === "queued") {
+            label = "↓ Queued";
+        } else if (phase === "connecting") {
+            label = "↓ Connecting to Drive";
+        } else if (phase === "listing") {
+            // total here = number of picked Drive folders being enumerated.
+            label = syncP.total > 0
+                ? `↓ Listing — ${syncP.done}/${syncP.total} folders`
+                : "↓ Listing";
+        } else if (phase === "downloading") {
+            label = syncP.total > 0
+                ? `↓ Downloading — ${syncP.done}/${syncP.total}`
+                : "↓ Downloading";
+        } else if (phase === "cleaning") {
+            label = "↓ Cleaning up";
+        } else {
+            label = `↓ ${phase}`;
+        }
+        syncBadge.textContent = label;
+        syncBadge.hidden = false;
+    } else {
+        syncBadge.hidden = true;
     }
 
     const extTable = $("#ext-table");
