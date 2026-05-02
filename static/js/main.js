@@ -992,12 +992,21 @@ function setGdAuthMode(mode) {
     // In SA mode, surface the typed-folder-id input as the only path and
     // keep the Pick button visible-but-disabled with a clear hint.
     const pickBtn = $("#sync-gd-pick-folder");
+    const idInput = $("#sync-gd-add-folder-id");
     if (gdAuthMode === "sa") {
-        pickBtn.disabled = true;
-        pickBtn.title = "Pick browser is OAuth-only — paste folder IDs in service-account mode";
-        $("#sync-gd-folders-hint").textContent =
-            "Paste a Drive folder ID, press Enter to add. Each folder must be shared with the service account's client_email. Each folder syncs into its own subdirectory under this folder.";
+        // Hide Pick entirely — it's not a viable path here, and a disabled
+        // button next to a working input is confusing. Promote the
+        // folder-id input as the primary entry point.
+        pickBtn.hidden = true;
+        idInput.placeholder = "Paste a folder ID and press Enter";
+        $("#sync-gd-folders-hint").innerHTML =
+            "Paste each Drive folder's ID and press Enter. Find it in the Drive URL: " +
+            "<code>https://drive.google.com/drive/folders/<strong>&lt;ID&gt;</strong></code>. " +
+            "<strong>Each folder must be shared with the service account's <code>client_email</code></strong> " +
+            "(Viewer is enough). Each folder syncs into its own subdirectory under this folder.";
     } else {
+        pickBtn.hidden = false;
+        idInput.placeholder = "Or paste a folder ID and press Enter";
         // The OAuth pane controls Pick-button enablement via setGdConnState
         // — call it with whatever connection state we currently know.
         const connected = $("#sync-gd-conn-status").textContent.startsWith("Connected");
