@@ -135,6 +135,13 @@ def _patch_services(
     monkeypatch.setattr(
         connector, "_build_docs_for_thread", lambda *a, **k: docs
     )
+    # The download pool builds its own ``drive`` Resource per worker
+    # thread (same per-thread pattern as docs.get) — return the fake
+    # here so producers reach the test ``_FakeFiles`` instead of trying
+    # to mint real credentials.
+    monkeypatch.setattr(
+        connector, "_build_drive_for_thread", lambda *a, **k: drive
+    )
     monkeypatch.setattr(
         connector, "_sync_access_token", lambda *a, **k: "fake-token"
     )
@@ -508,6 +515,68 @@ async def test_ignored_extensions_are_skipped_before_download(
     assert (root / "Root" / "notes.txt").read_bytes() == b"hello"
     assert not (root / "Root" / "demo.mp4").exists()
     assert not (root / "Root" / "logs.tar.gz").exists()
+
+
+@pytest.mark.asyncio
+async def test_extensionless_recording_is_skipped_by_mime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Drive Meet recordings sometimes have no extension and titles like
+    ``Recording 2026-04-12`` — the filename ignore globs can't see them,
+    but Drive still tags them ``video/mp4``. The MIME blocklist must
+    catch these before the download producer runs (otherwise a 200MB
+    recording lands on disk for every team meeting)."""
+    listings = {
+        "ROOT": [
+            {
+                "id": "rec1",
+                "name": "Recording 2026-04-12",  # no extension!
+                "mimeType": "video/mp4",
+                "size": "200000000",
+                "modifiedTime": "2026-04-12T00:00:00Z",
+                "md5Checksum": "v",
+            },
+            {
+                "id": "voice1",
+                "name": "voicememo-9347",  # no extension, audio
+                "mimeType": "audio/mpeg",
+                "size": "5000000",
+                "modifiedTime": "2026-04-12T00:00:00Z",
+                "md5Checksum": "a",
+            },
+            {
+                "id": "kept",
+                "name": "notes.txt",
+                "mimeType": "text/plain",
+                "size": "5",
+                "modifiedTime": "2026-04-12T00:00:00Z",
+                "md5Checksum": "n",
+            },
+        ]
+    }
+    drive = _FakeDrive(
+        _FakeFiles(
+            listings,
+            export_payloads={},
+            # No payload for the recordings — _FakeFiles.get_media would
+            # KeyError if the connector tried to download them.
+            download_payloads={"kept": b"hello"},
+        )
+    )
+    connector = GoogleDriveConnector()
+    _patch_services(connector, drive, _FakeDocs({}), monkeypatch)
+
+    stats = await connector.sync(
+        folder_root=tmp_path / "root",
+        auth=_make_auth(),
+        drive_folders=[{"id": "ROOT", "name": "Root"}],
+    )
+    assert stats.errors == []
+    assert stats.files_skipped == 2
+    root = (tmp_path / "root").resolve()
+    assert (root / "Root" / "notes.txt").read_bytes() == b"hello"
+    assert not (root / "Root" / "Recording 2026-04-12").exists()
+    assert not (root / "Root" / "voicememo-9347").exists()
 
 
 @pytest.mark.asyncio

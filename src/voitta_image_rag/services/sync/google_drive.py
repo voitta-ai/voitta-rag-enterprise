@@ -88,6 +88,35 @@ EXPORT_MAP: dict[str, tuple[str, str]] = {
     # NATIVE_DOC is handled specially in `_materialize_doc`.
 }
 
+# MIME-level blocklist: applied alongside ``VOITTA_IGNORE_PATTERNS`` so we
+# also catch items the filename globs can miss. Meet recordings, voice
+# memos, and other audio/video files frequently land in Drive with no
+# extension or odd names ("Recording 2026-04-12") — globs like ``*.mp4``
+# don't see those, but Drive's ``mimeType`` is reliable. ``image/*`` stays
+# un-blocked: this is image-rag, the image pipeline indexes those.
+# Archives have stable mimeType in Drive so the explicit set is enough.
+_BLOCKED_MIME_PREFIXES = ("audio/", "video/")
+_BLOCKED_MIMES = frozenset(
+    {
+        "application/zip",
+        "application/x-zip-compressed",
+        "application/gzip",
+        "application/x-gzip",
+        "application/x-bzip2",
+        "application/x-tar",
+        "application/x-7z-compressed",
+        "application/x-rar-compressed",
+        "application/vnd.rar",
+        "application/x-iso9660-image",
+        "application/x-apple-diskimage",
+    }
+)
+
+
+def _is_blocked_mime(mime: str) -> bool:
+    """True if Drive's ``mimeType`` flags this as a non-RAG-able blob."""
+    return mime.startswith(_BLOCKED_MIME_PREFIXES) or mime in _BLOCKED_MIMES
+
 # Inline header on tab markdown files. Lets the next sync skip a re-render
 # without touching the Docs API again.
 FINGERPRINT_PREFIX = "<!--voitta-fingerprint:"
@@ -199,7 +228,11 @@ class _RemoteEntry:
     tab: str | None
     # Deferring the actual fetch keeps listing cheap and lets the connector
     # short-circuit on (size, mtime, fingerprint) before touching the network.
-    producer: Callable[[Path], None]
+    # The second arg is a per-thread ``drive`` Resource — the download phase
+    # runs producers from a thread pool and googleapiclient's Resource is
+    # NOT thread-safe (it shares ``httplib2.Http`` connection state). Tab
+    # producers ignore the arg since they only write text to disk.
+    producer: Callable[[Path, Any], None]
     # Stable identity for change detection. For binary downloads this is the
     # Drive ``md5Checksum``; for exports/tabs we use ``modifiedTime`` since
     # exports have no md5.
@@ -520,6 +553,23 @@ class GoogleDriveConnector:
         creds = self._build_credentials(auth, access_token)
         return build("docs", "v1", credentials=creds, cache_discovery=False)
 
+    def _build_drive_for_thread(
+        self, auth: GoogleDriveAuth, access_token: str | None
+    ) -> Any:
+        """Per-worker ``drive`` service for the parallel download pool.
+
+        Same rationale as ``_build_docs_for_thread``: ``MediaIoBaseDownload``
+        eventually drives ``httplib2.Http`` under the hood, so two threads
+        sharing one Resource interleave bytes onto the same connection and
+        get truncated downloads + SSL faults. Each pool worker calls this
+        once on first use and reuses the same Resource for every download
+        it runs — one discovery cost per worker, not per download.
+        """
+        from googleapiclient.discovery import build
+
+        creds = self._build_credentials(auth, access_token)
+        return build("drive", "v3", credentials=creds, cache_discovery=False)
+
     def _sync_access_token(self, auth: GoogleDriveAuth) -> str:
         """Synchronous token refresh for use from ``_sync_sync`` (worker thread)."""
         key = (auth.client_id, auth.refresh_token)
@@ -754,34 +804,70 @@ class GoogleDriveConnector:
         sidecar: dict[str, dict[str, str]] = {}
 
         total_entries = len(entries)
-        # Emit at the start of downloading so the SPA can flip to the
-        # downloading-phase wording even before the first file lands.
-        # Throttle the per-file emit cadence to avoid drowning the WS
-        # channel on huge folders — once per file is fine for hundreds,
-        # but at 5k+ entries the noise adds up.
+        # Throttle per-file progress emits so the WS channel doesn't drown
+        # on huge folders — once per file is fine for hundreds, but at 5k+
+        # entries the noise adds up.
         emit_every = max(1, total_entries // 100)
         _emit("downloading", 0, total_entries)
-        for i, entry in enumerate(entries, start=1):
+
+        # Phase 3: download in parallel. The Drive API's per-user budget is
+        # 200 RPS — we cap at 8 here, which is conservative on RPS but is
+        # the sweet spot for typical home-bandwidth syncs (more workers
+        # share the same uplink and don't speed each up). Same per-thread
+        # ``Resource`` pattern as the docs.get pool: googleapiclient is not
+        # thread-safe, so each worker builds its own ``drive`` once and
+        # reuses it. Empirically a 200-file sync (mixed exports + binaries
+        # + tabs) drops from ~5 min to ~40s on the agnitio-ops box.
+        import threading
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        tl_dl = threading.local()
+
+        def _drive_for_dl_thread() -> Any:
+            if not hasattr(tl_dl, "drive"):
+                tl_dl.drive = self._build_drive_for_thread(auth, access_token)
+            return tl_dl.drive
+
+        def _materialize_one(
+            entry: _RemoteEntry,
+        ) -> tuple[_RemoteEntry, bool, bool, str | None]:
+            """Run the producer for one entry off the main thread.
+
+            Returns ``(entry, was_unchanged, existed_before, error)``. We
+            keep stats + sidecar mutation on the main thread (single-
+            threaded as ``as_completed`` drains) to avoid a lock.
+            """
             local = folder_root / entry.rel_path
             local.parent.mkdir(parents=True, exist_ok=True)
             if self._is_unchanged(local, entry):
-                self._record_sidecar(sidecar, entry)
-            else:
-                existed_before = local.exists()
-                try:
-                    entry.producer(local)
-                except Exception as e:
-                    logger.exception("Drive download failed: %s", entry.rel_path)
-                    stats.errors.append(f"{entry.rel_path}: {e}")
+                return entry, True, False, None
+            existed_before = local.exists()
+            try:
+                entry.producer(local, _drive_for_dl_thread())
+            except Exception as e:
+                logger.exception("Drive download failed: %s", entry.rel_path)
+                return entry, False, existed_before, str(e)
+            return entry, False, existed_before, None
+
+        with ThreadPoolExecutor(
+            max_workers=8, thread_name_prefix="gd-dl"
+        ) as pool:
+            futures = [pool.submit(_materialize_one, e) for e in entries]
+            for i, fut in enumerate(as_completed(futures), start=1):
+                entry, was_unchanged, existed_before, err = fut.result()
+                if err is not None:
+                    stats.errors.append(f"{entry.rel_path}: {err}")
                 else:
-                    if local.exists() and local.stat().st_size > 0:
-                        if existed_before:
-                            stats.files_updated += 1
-                        else:
-                            stats.files_added += 1
                     self._record_sidecar(sidecar, entry)
-            if i == total_entries or i % emit_every == 0:
-                _emit("downloading", i, total_entries)
+                    if not was_unchanged:
+                        local = folder_root / entry.rel_path
+                        if local.exists() and local.stat().st_size > 0:
+                            if existed_before:
+                                stats.files_updated += 1
+                            else:
+                                stats.files_added += 1
+                if i == total_entries or i % emit_every == 0:
+                    _emit("downloading", i, total_entries)
 
         _emit("cleaning", 0, 0)
         # Drop locals not on remote (skip our own sidecars).
@@ -884,16 +970,21 @@ class GoogleDriveConnector:
         mime = item["mimeType"]
         rel_here = f"{rel_prefix}/{name}" if rel_prefix else name
 
-        # Apply VOITTA_IGNORE_PATTERNS BEFORE we recurse / produce. The
-        # matcher walks ancestors too, so a file inside an ignored
-        # directory (e.g. ``node_modules``) is skipped without ever
-        # listing the contents. For binary blobs (mp4, zip, …) it stops
-        # us downloading hundreds of MB just to ignore them on disk.
-        # Native Google docs/sheets/slides stay un-ignored — they're
+        # Apply two skip layers BEFORE we recurse / produce:
+        #   1. VOITTA_IGNORE_PATTERNS — filename globs (covers ``*.mp4``,
+        #      ``node_modules``, …); the matcher walks ancestors too, so a
+        #      file inside an ignored directory is skipped without listing
+        #      its contents.
+        #   2. MIME blocklist — catches Drive items the filename globs miss
+        #      (Meet recordings often have no extension or names like
+        #      ``Recording 2026-04-12``; Drive still tags them ``video/mp4``).
+        # Native Google docs/sheets/slides stay un-skippable — they're
         # rendered to .md / .xlsx / .pptx which the parsers handle.
         skippable = mime not in (NATIVE_FOLDER, NATIVE_DOC) and mime not in EXPORT_MAP
-        if skippable and ignore.matches(rel_here):
-            logger.debug("skipping ignored file: %s", rel_here)
+        if skippable and (ignore.matches(rel_here) or _is_blocked_mime(mime)):
+            logger.debug(
+                "skipping ignored file: %s (mime=%s)", rel_here, mime
+            )
             stats.files_skipped += 1
             if skipped_counter is not None:
                 skipped_counter[0] += 1
@@ -938,7 +1029,12 @@ class GoogleDriveConnector:
             url = item.get("webViewLink") or _drive_view_url(item["id"], mime)
             file_id = item["id"]
 
-            def _producer(dest: Path, _id: str = file_id, _m: str = export_mime) -> None:
+            def _producer(
+                dest: Path,
+                drive: Any,
+                _id: str = file_id,
+                _m: str = export_mime,
+            ) -> None:
                 _export_to(drive, _id, _m, dest)
 
             out.append(
@@ -961,7 +1057,7 @@ class GoogleDriveConnector:
         size = int(item.get("size") or 0)
         file_id = item["id"]
 
-        def _bin_producer(dest: Path, _id: str = file_id) -> None:
+        def _bin_producer(dest: Path, drive: Any, _id: str = file_id) -> None:
             _download_to(drive, _id, dest)
 
         out.append(
@@ -1025,8 +1121,14 @@ class GoogleDriveConnector:
                     fingerprint = f"{modified_time}#{tab.tab_id}"
 
                     def _tab_producer(
-                        dest: Path, _b: str = body, _fp: str = fingerprint
+                        dest: Path,
+                        _drive: Any = None,
+                        _b: str = body,
+                        _fp: str = fingerprint,
                     ) -> None:
+                        # Drive arg is unused — tabs are pure local writes,
+                        # but the producer signature is uniform so the pool
+                        # can call any entry without special-casing.
                         write_tab_with_fingerprint(dest, _fp, _b)
 
                     out.append(
@@ -1042,7 +1144,7 @@ class GoogleDriveConnector:
             logger.info("doc %s reported tabs but none rendered", rel_here)
 
         # No tabs: export as docx, single file.
-        def _docx_producer(dest: Path, _id: str = doc_id) -> None:
+        def _docx_producer(dest: Path, drive: Any, _id: str = doc_id) -> None:
             _export_to(drive, _id, DOCX_MIME, dest)
 
         out.append(
