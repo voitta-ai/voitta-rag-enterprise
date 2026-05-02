@@ -944,9 +944,11 @@ function openSyncModal() {
     $("#sync-gd-client-id").value = "";
     $("#sync-gd-client-secret").value = "";
     $("#sync-gd-client-secret").placeholder = "GOCSPX-…";
+    $("#sync-gd-add-folder-id").value = "";
     setGdFolders([]);
     $("#sync-gd-sa-json").value = "";
     $("#sync-gd-sa-json").placeholder = '{"type":"service_account","client_email":"…","private_key":"…"}';
+    setGdAuthMode("oauth");
     setGdConnState({ connected: false, hasClientSecret: false });
 
     loadSyncSource();
@@ -967,6 +969,44 @@ function setSyncType(t) {
 // form on every set. Keeps the rendered list and the form-config call in
 // sync without parsing the DOM at submit time.
 let gdFolders = [];
+
+// Which credential pane is showing — drives both the rendered inputs and
+// what gets serialised in gdFormConfig. The two flows have meaningfully
+// different gotchas (OAuth needs Connect + redirect URI; SA needs
+// folder-shared-with-client_email), so we render exactly one set of
+// fields and persist the mode the user actually used.
+let gdAuthMode = "oauth"; // "oauth" | "sa"
+
+function setGdAuthMode(mode) {
+    gdAuthMode = mode === "sa" ? "sa" : "oauth";
+    const oauthTab = $("#sync-gd-tab-oauth");
+    const saTab = $("#sync-gd-tab-sa");
+    oauthTab.classList.toggle("active", gdAuthMode === "oauth");
+    oauthTab.setAttribute("aria-selected", gdAuthMode === "oauth" ? "true" : "false");
+    saTab.classList.toggle("active", gdAuthMode === "sa");
+    saTab.setAttribute("aria-selected", gdAuthMode === "sa" ? "true" : "false");
+    $("#sync-gd-pane-oauth").hidden = gdAuthMode !== "oauth";
+    $("#sync-gd-pane-sa").hidden = gdAuthMode !== "sa";
+
+    // Pick browser only works in OAuth mode (it needs gd_refresh_token).
+    // In SA mode, surface the typed-folder-id input as the only path and
+    // keep the Pick button visible-but-disabled with a clear hint.
+    const pickBtn = $("#sync-gd-pick-folder");
+    if (gdAuthMode === "sa") {
+        pickBtn.disabled = true;
+        pickBtn.title = "Pick browser is OAuth-only — paste folder IDs in service-account mode";
+        $("#sync-gd-folders-hint").textContent =
+            "Paste a Drive folder ID, press Enter to add. Each folder must be shared with the service account's client_email. Each folder syncs into its own subdirectory under this folder.";
+    } else {
+        // The OAuth pane controls Pick-button enablement via setGdConnState
+        // — call it with whatever connection state we currently know.
+        const connected = $("#sync-gd-conn-status").textContent.startsWith("Connected");
+        const hasClientSecret = $("#sync-gd-client-secret").placeholder.startsWith("(saved");
+        setGdConnState({ connected, hasClientSecret });
+        $("#sync-gd-folders-hint").textContent =
+            "Each picked folder syncs into its own subdirectory under this folder.";
+    }
+}
 
 function setGdFolders(folders) {
     gdFolders = (folders || []).map((f) => ({ id: String(f.id || ""), name: String(f.name || "") }));
@@ -995,9 +1035,31 @@ function setGdConnState({ connected, hasClientSecret }) {
     connectBtn.title = connectBtn.disabled
         ? "Save client_id and client_secret first"
         : (connected ? "Re-connect (forces a fresh consent)" : "Connect");
-    pickBtn.disabled = !connected;
-    pickBtn.title = connected ? "Pick a Drive folder" : "Connect first";
+    // Pick is OAuth-only — leave the SA-mode disabled state alone.
+    if (gdAuthMode === "oauth") {
+        pickBtn.disabled = !connected;
+        pickBtn.title = connected ? "Pick a Drive folder" : "Connect first";
+    }
 }
+
+$("#sync-gd-tab-oauth").addEventListener("click", () => setGdAuthMode("oauth"));
+$("#sync-gd-tab-sa").addEventListener("click", () => setGdAuthMode("sa"));
+
+// Manual folder-ID add — Enter accepts, ignores duplicates and empties.
+// Folder names aren't known here (no Drive lookup in SA mode); the
+// rendered list falls back to showing the bare ID, which is fine.
+$("#sync-gd-add-folder-id").addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    const id = $("#sync-gd-add-folder-id").value.trim();
+    if (!id) return;
+    if (gdFolders.some((f) => f.id === id)) {
+        $("#sync-gd-add-folder-id").value = "";
+        return;
+    }
+    setGdFolders([...gdFolders, { id, name: "" }]);
+    $("#sync-gd-add-folder-id").value = "";
+});
 
 function closeSyncModal() {
     $("#sync-backdrop").hidden = true;
@@ -1045,6 +1107,14 @@ async function loadSyncSource() {
             setGdFolders(gd.folders || []);
             $("#sync-gd-client-secret").placeholder = gd.has_client_secret ? "(saved — type to replace)" : "GOCSPX-…";
             $("#sync-gd-sa-json").placeholder = gd.has_service_account ? "(service account JSON saved — paste a new one to replace)" : '{"type":"service_account","client_email":"…","private_key":"…"}';
+            // Pick the right tab. If the saved config has a service-account
+            // key (and only that), surface SA mode; otherwise default to
+            // OAuth — that's the more common path and the one the redirect-
+            // URI hint is most useful for. Setting the mode AFTER
+            // populating the inputs so setGdConnState reads the right
+            // placeholders.
+            const saOnly = gd.has_service_account && !gd.has_client_secret;
+            setGdAuthMode(saOnly ? "sa" : "oauth");
             setGdConnState({ connected: gd.connected, hasClientSecret: gd.has_client_secret });
         }
         $("#sync-delete").hidden = false;
@@ -1088,11 +1158,25 @@ function ghFormConfig() {
 }
 
 function gdFormConfig() {
+    // Only send credentials for the active mode. The inactive pane's
+    // inputs may still hold leftover text the user typed before switching
+    // tabs — sending both would let the back end pick whichever path it
+    // prefers, which would be confusing. Empty strings are safe: the
+    // back-end PUT validator preserves stored secrets when blank values
+    // arrive (so "saved" placeholders aren't wiped on every save).
+    if (gdAuthMode === "sa") {
+        return {
+            client_id: "",
+            client_secret: "",
+            folders: gdFolders,
+            service_account_json: $("#sync-gd-sa-json").value,
+        };
+    }
     return {
         client_id: $("#sync-gd-client-id").value.trim(),
-        client_secret: $("#sync-gd-client-secret").value,  // not trimmed — preserve
+        client_secret: $("#sync-gd-client-secret").value,
         folders: gdFolders,
-        service_account_json: $("#sync-gd-sa-json").value, // not trimmed — preserve
+        service_account_json: "",
     };
 }
 

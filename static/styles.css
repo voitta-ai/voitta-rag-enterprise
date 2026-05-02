@@ -398,6 +398,41 @@ input[type="text"], input[type="file"] {
     background: #232427;
 }
 
+/* Segmented tabs (e.g. Google Drive auth-mode picker). Two-button row
+   styled like an iOS segmented control: the active segment gets the
+   accent fill, hover dims the inactive side. Picked over a select-box
+   because the choices change which fields render below — visible options
+   make that consequence obvious without a dropdown click. */
+.seg-tabs {
+    display: inline-flex;
+    margin: 6px 0 12px;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    background: var(--color-bg);
+    padding: 2px;
+    gap: 2px;
+}
+.seg-tab {
+    padding: 6px 14px;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--color-text-secondary);
+    background: transparent;
+    border: none;
+    border-radius: calc(var(--radius-md) - 2px);
+    cursor: pointer;
+    transition: background var(--t), color var(--t);
+}
+.seg-tab:hover:not(.active) {
+    background: var(--color-bg-hover);
+    color: var(--color-text-primary);
+}
+.seg-tab.active {
+    background: var(--color-accent);
+    color: #fff;
+}
+
 /* Compact iOS-style toggle switch used for the per-folder Active and Share
    flags. Built around an unstyled checkbox so screen readers and keyboard
    navigation work for free. */

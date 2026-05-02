@@ -281,12 +281,15 @@ def upsert_sync_source(
         gd_cfg = body.google_drive
         # ``has_client_secret`` is true when only the public client_id was
         # re-sent for an existing row (the secret stays masked client-side
-        # and is only re-posted when the user types a new one).
+        # and is only re-posted when the user types a new one). Same idea
+        # applies to the service-account JSON: a re-save without retyping
+        # the SA blob shouldn't lose the existing one.
         existing_has_secret = bool(existing and existing.gd_client_secret)
+        existing_has_sa = bool(existing and existing.gd_service_account_json)
         has_oauth = bool(
             gd_cfg.client_id and (gd_cfg.client_secret or existing_has_secret)
         )
-        has_sa = bool(gd_cfg.service_account_json)
+        has_sa = bool(gd_cfg.service_account_json or existing_has_sa)
         if not has_oauth and not has_sa:
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST,

@@ -220,40 +220,79 @@
                 </div>
 
                 <div id="sync-form-google_drive" hidden>
-                    <p class="hint">
-                        <strong>Setup:</strong> in Google Cloud Console, create an OAuth client of type
-                        <strong>"Web application"</strong> and add this exact URL to its
-                        <em>Authorized redirect URIs</em>:
-                        <code id="sync-gd-redirect-hint">…loading…</code>.
-                        Then paste its credentials below, click <strong>Save</strong>, then <strong>Connect</strong>.
-                        <br>Multi-tab Google Docs are rendered tab-by-tab as markdown so each tab is searchable on its own.
+                    <p class="hint" style="margin:0 0 6px;">
+                        Multi-tab Google Docs are rendered tab-by-tab as markdown so each tab is searchable on its own.
                     </p>
 
-                    <label>OAuth client ID</label>
-                    <input type="text" id="sync-gd-client-id" placeholder="123…apps.googleusercontent.com">
-
-                    <label>OAuth client secret</label>
-                    <input type="password" id="sync-gd-client-secret" placeholder="GOCSPX-…">
-
-                    <div class="actions actions-right" style="margin-top:8px;">
-                        <button type="button" id="sync-gd-connect" class="btn btn-secondary btn-sm" disabled title="Save client_id and client_secret first">Connect</button>
-                        <span id="sync-gd-conn-status" class="hint" style="margin-left:auto;"></span>
+                    <!-- Auth-mode tabs. The two flows have different Google
+                         Cloud setup requirements (Web client vs service
+                         account), different folder-discovery options
+                         (Pick browser vs paste-the-id), and different
+                         sharing implications (signed-in user's view vs
+                         shared-with-SA), so we render only one set of
+                         inputs at a time. The shared "Drive folders" block
+                         lives below and applies to whichever mode is
+                         active. -->
+                    <div class="seg-tabs" role="tablist">
+                        <button type="button" id="sync-gd-tab-oauth"
+                            class="seg-tab active" role="tab" aria-selected="true">
+                            Sign in with Google
+                        </button>
+                        <button type="button" id="sync-gd-tab-sa"
+                            class="seg-tab" role="tab" aria-selected="false">
+                            Service account
+                        </button>
                     </div>
 
+                    <!-- OAuth pane -->
+                    <div id="sync-gd-pane-oauth" class="sync-gd-pane">
+                        <p class="hint">
+                            <strong>Setup:</strong> in Google Cloud Console, create an OAuth
+                            client of type <strong>"Web application"</strong> and add this exact URL
+                            to its <em>Authorized redirect URIs</em>:
+                            <code id="sync-gd-redirect-hint">…loading…</code>.
+                            Then paste its credentials below, click <strong>Save</strong>,
+                            then <strong>Connect</strong>.
+                        </p>
+                        <label>OAuth client ID</label>
+                        <input type="text" id="sync-gd-client-id" placeholder="123…apps.googleusercontent.com">
+
+                        <label>OAuth client secret</label>
+                        <input type="password" id="sync-gd-client-secret" placeholder="GOCSPX-…">
+
+                        <div class="actions actions-right" style="margin-top:8px;">
+                            <button type="button" id="sync-gd-connect" class="btn btn-secondary btn-sm" disabled title="Save client_id and client_secret first">Connect</button>
+                            <span id="sync-gd-conn-status" class="hint" style="margin-left:auto;"></span>
+                        </div>
+                    </div>
+
+                    <!-- Service-account pane -->
+                    <div id="sync-gd-pane-sa" class="sync-gd-pane" hidden>
+                        <p class="hint">
+                            <strong>Setup:</strong> in Google Cloud Console, create a
+                            <strong>Service account</strong> with Drive read access, generate a
+                            JSON key, and paste the entire file below.
+                            <strong>Share each Drive folder with the service account's
+                            <code>client_email</code></strong> (Viewer is enough) — service
+                            accounts only see what's been explicitly shared with them.
+                        </p>
+                        <label>Service account JSON</label>
+                        <textarea id="sync-gd-sa-json" rows="6" placeholder='{"type":"service_account","client_email":"…","private_key":"…"}'></textarea>
+                    </div>
+
+                    <!-- Shared folder selector — applies to whichever auth
+                         mode is active. The Pick button only works in OAuth
+                         mode (the API needs a refresh_token to list a real
+                         user's drive); in SA mode the user types the
+                         folder ID directly and we surface a hint. -->
                     <label>Drive folders</label>
                     <div class="branches-row">
                         <button type="button" id="sync-gd-pick-folder" class="btn btn-secondary btn-sm" disabled title="Connect first">Pick folders…</button>
+                        <input type="text" id="sync-gd-add-folder-id" placeholder="Or paste a folder ID and press Enter" style="flex:1;">
                         <span id="sync-gd-folder-count" class="hint">none selected</span>
                     </div>
                     <ul id="sync-gd-folders-list" style="margin:6px 0 0;padding-left:18px;font-size:13px;color:var(--muted, #666);"></ul>
-                    <p class="hint">Each picked folder syncs into its own subdirectory under this folder.</p>
-
-                    <details>
-                        <summary>Service account (alternative to OAuth — no Connect step needed)</summary>
-                        <label>Service account JSON</label>
-                        <textarea id="sync-gd-sa-json" rows="4" placeholder='{"type":"service_account","client_email":"…","private_key":"…"}'></textarea>
-                        <p class="hint">Leave empty to use OAuth. The folder must be shared with the service account's <code>client_email</code>.</p>
-                    </details>
+                    <p class="hint" id="sync-gd-folders-hint">Each picked folder syncs into its own subdirectory under this folder.</p>
                 </div>
 
                 <div class="actions actions-right">
