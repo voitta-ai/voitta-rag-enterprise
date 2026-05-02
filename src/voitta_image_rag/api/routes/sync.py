@@ -543,21 +543,31 @@ async def gd_list_folders(
     db: Session = Depends(db_session),
     user: CurrentUser = Depends(current_user),
 ) -> GdFoldersOut:
-    """List Drive locations the user can pick as a sync root."""
+    """List Drive locations the user can pick as a sync root.
+
+    Works for both auth modes. With OAuth we use the stored refresh_token.
+    With a service account we mint a short-lived access token from the
+    saved JSON key — the SA only sees folders explicitly shared with its
+    ``client_email``, plus any Shared Drives it's a member of, but those
+    populate the same picker UI.
+    """
     _check_owner(folder_id, db, user)
     src = db.get(FolderSyncSource, folder_id)
     if src is None or src.source_type != "google_drive":
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No Google Drive source")
-    if not src.gd_refresh_token:
+    has_oauth = bool(src.gd_refresh_token)
+    has_sa = bool(src.gd_service_account_json)
+    if not has_oauth and not has_sa:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            "Google Drive not connected — click Connect first",
+            "Connect via OAuth or save a service-account JSON before listing folders",
         )
     try:
         data = await gd_list_root_folders(
-            src.gd_client_id or "",
-            src.gd_client_secret or "",
-            src.gd_refresh_token or "",
+            client_id=src.gd_client_id or "",
+            client_secret=src.gd_client_secret or "",
+            refresh_token=src.gd_refresh_token or "",
+            service_account_json=src.gd_service_account_json or "",
         )
     except Exception as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e

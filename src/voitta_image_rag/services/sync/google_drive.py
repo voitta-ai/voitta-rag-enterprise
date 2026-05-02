@@ -247,28 +247,90 @@ async def exchange_code_for_tokens(
 
 
 async def list_root_folders(
-    client_id: str, client_secret: str, refresh_token: str
+    *,
+    client_id: str = "",
+    client_secret: str = "",
+    refresh_token: str = "",
+    service_account_json: str = "",
 ) -> dict[str, list[dict[str, str]]]:
-    """List Drive locations the user can pick as a sync root."""
-    access_token = await _refresh_access_token(client_id, client_secret, refresh_token)
+    """List Drive locations the user can pick as a sync root.
+
+    Supports both auth modes. With OAuth you get the user's My Drive,
+    Shared with me, and Shared Drives. With a service account you get
+    Shared with me + Shared Drives only — service accounts have no human
+    "My Drive" so that bucket comes back empty (which is correct, not an
+    error). Either way the front-end picker renders the same three
+    sections.
+    """
+    if refresh_token:
+        access_token = await _refresh_access_token(
+            client_id, client_secret, refresh_token
+        )
+    elif service_account_json:
+        # google-auth's refresh() is sync + does network I/O; punt off the
+        # event loop so we don't block other requests.
+        access_token = await asyncio.to_thread(
+            _service_account_access_token, service_account_json
+        )
+    else:
+        raise RuntimeError(
+            "Cannot list folders: no OAuth refresh_token and no service-account JSON"
+        )
+
+    return await _list_drive_locations(access_token, has_my_drive=bool(refresh_token))
+
+
+def _service_account_access_token(sa_json: str) -> str:
+    """Mint a short-lived OAuth2 access token from a service-account key.
+
+    Uses ``google.oauth2.service_account`` + a ``google.auth.transport``
+    request — same library the connector already imports for ``_build_services``,
+    just used here to produce a raw bearer token we can hand to httpx.
+    """
+    import google.auth.transport.requests as ga_req
+    from google.oauth2.service_account import Credentials
+
+    creds = Credentials.from_service_account_info(
+        json.loads(sa_json), scopes=GOOGLE_SCOPES.split()
+    )
+    creds.refresh(ga_req.Request())
+    return creds.token
+
+
+async def _list_drive_locations(
+    access_token: str, *, has_my_drive: bool
+) -> dict[str, list[dict[str, str]]]:
+    """Run the three Drive enumeration calls behind a bearer token.
+
+    ``has_my_drive`` short-circuits the My Drive query for service-account
+    auth — the API would happily return zero files there, but skipping the
+    call saves a round-trip and avoids surprising the operator with an
+    empty section in the picker.
+    """
     headers = {"Authorization": f"Bearer {access_token}"}
     base = "https://www.googleapis.com/drive/v3/files"
     common = {"fields": "files(id,name)", "pageSize": "100", "orderBy": "name"}
 
     async with httpx.AsyncClient() as client:
-        my = await client.get(
-            base,
-            headers=headers,
-            params={
-                **common,
-                "q": (
-                    "'root' in parents and mimeType='application/vnd.google-apps.folder' "
-                    "and trashed=false"
-                ),
-            },
-        )
-        if my.status_code != 200:
-            raise RuntimeError(f"Drive list (My Drive) failed: {my.text[:300]}")
+        my_files: list[dict[str, str]] = []
+        if has_my_drive:
+            my = await client.get(
+                base,
+                headers=headers,
+                params={
+                    **common,
+                    "q": (
+                        "'root' in parents and mimeType='application/vnd.google-apps.folder' "
+                        "and trashed=false"
+                    ),
+                },
+            )
+            if my.status_code != 200:
+                raise RuntimeError(f"Drive list (My Drive) failed: {my.text[:300]}")
+            my_files = [
+                {"id": f["id"], "name": f["name"]}
+                for f in my.json().get("files", [])
+            ]
         shared = await client.get(
             base,
             headers=headers,
@@ -290,13 +352,16 @@ async def list_root_folders(
         if drives.status_code != 200:
             raise RuntimeError(f"Drive list (drives) failed: {drives.text[:300]}")
 
-    def _ids(payload: dict, key: str) -> list[dict[str, str]]:
-        return [{"id": f["id"], "name": f["name"]} for f in payload.get(key, [])]
-
     return {
-        "folders": _ids(my.json(), "files"),
-        "shared_folders": _ids(shared.json(), "files"),
-        "shared_drives": _ids(drives.json(), "drives"),
+        "folders": my_files,
+        "shared_folders": [
+            {"id": f["id"], "name": f["name"]}
+            for f in shared.json().get("files", [])
+        ],
+        "shared_drives": [
+            {"id": d["id"], "name": d["name"]}
+            for d in drives.json().get("drives", [])
+        ],
     }
 
 

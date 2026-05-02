@@ -994,16 +994,26 @@ function setGdAuthMode(mode) {
     const pickBtn = $("#sync-gd-pick-folder");
     const idInput = $("#sync-gd-add-folder-id");
     if (gdAuthMode === "sa") {
-        // Hide Pick entirely — it's not a viable path here, and a disabled
-        // button next to a working input is confusing. Promote the
-        // folder-id input as the primary entry point.
-        pickBtn.hidden = true;
-        idInput.placeholder = "Paste a folder ID and press Enter";
+        // Pick works in SA mode too — the backend mints an SA access token
+        // and lists everything shared with the SA's client_email plus any
+        // Shared Drives it's a member of. We still need a saved SA JSON
+        // before the API call will succeed.
+        const hasSaSaved = $("#sync-gd-sa-json").placeholder.startsWith(
+            "(service account JSON saved",
+        );
+        const hasSaTyped = $("#sync-gd-sa-json").value.trim().length > 0;
+        const saReady = hasSaSaved || hasSaTyped;
+        pickBtn.hidden = false;
+        pickBtn.disabled = !saReady;
+        pickBtn.title = saReady
+            ? "Pick a folder shared with the service account"
+            : "Save a service-account JSON first";
+        idInput.placeholder = "Or paste a folder ID and press Enter";
         $("#sync-gd-folders-hint").innerHTML =
-            "Paste each Drive folder's ID and press Enter. Find it in the Drive URL: " +
-            "<code>https://drive.google.com/drive/folders/<strong>&lt;ID&gt;</strong></code>. " +
-            "<strong>Each folder must be shared with the service account's <code>client_email</code></strong> " +
-            "(Viewer is enough). Each folder syncs into its own subdirectory under this folder.";
+            "Pick from folders shared with the service account, or paste a Drive " +
+            "folder ID directly. <strong>The service account only sees folders explicitly " +
+            "shared with its <code>client_email</code></strong> (Viewer is enough). Each " +
+            "folder syncs into its own subdirectory under this folder.";
     } else {
         pickBtn.hidden = false;
         idInput.placeholder = "Or paste a folder ID and press Enter";
