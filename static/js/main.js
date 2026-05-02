@@ -639,6 +639,14 @@ function renderSidebar() {
             label = parts.length
                 ? `↓ Listing — ${parts.join(" · ")}`
                 : "↓ Listing";
+        } else if (phase === "fetching_docs") {
+            // Parallel docs.get pass — one round-trip per Google Doc to
+            // discover its tabs. Big speed win over the old serial path,
+            // but still meaningful work; surface the counter so the user
+            // sees progress while ~250 doc fetches run in parallel.
+            label = syncP.total > 0
+                ? `↓ Fetching docs — ${syncP.done}/${syncP.total}`
+                : "↓ Fetching docs";
         } else if (phase === "downloading") {
             label = syncP.total > 0
                 ? `↓ Downloading — ${syncP.done}/${syncP.total}`
