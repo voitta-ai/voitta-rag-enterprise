@@ -1272,14 +1272,27 @@ $("#sync-save").addEventListener("click", async () => {
         const out = await api.putSync(syncFolderId, syncBody());
         $("#sync-delete").hidden = false;
         renderSyncStatus(out);
-        // Refresh the GD connect-button state: client_secret may now be
-        // server-side, so the placeholder switches to "(saved — type to replace)".
+        // Refresh credential placeholders: typed-in secrets are now stored
+        // server-side, so we wipe the inputs (so a re-save doesn't re-send
+        // them) and flip the placeholders to the "(saved — type to replace)"
+        // wording. Same dance for both OAuth and SA panes — the user sees
+        // "I just saved, the field is blank now" + "(saved — paste again to
+        // replace)" instead of being unsure whether their paste persisted.
         if (out.source_type === "google_drive" && out.google_drive) {
             const gd = out.google_drive;
             $("#sync-gd-client-secret").value = "";
             $("#sync-gd-client-secret").placeholder = gd.has_client_secret
                 ? "(saved — type to replace)"
                 : "GOCSPX-…";
+            $("#sync-gd-sa-json").value = "";
+            $("#sync-gd-sa-json").placeholder = gd.has_service_account
+                ? "(service account JSON saved — paste a new one to replace)"
+                : '{"type":"service_account","client_email":"…","private_key":"…"}';
+            // Folders the server now considers persisted — adopt them as
+            // the canonical state so a subsequent Sync-now goes through
+            // exactly what was saved (and we surface server-side renames
+            // / dedupes in the next render).
+            setGdFolders(gd.folders || []);
             setGdConnState({ connected: gd.connected, hasClientSecret: gd.has_client_secret });
         }
     } catch (err) {
@@ -1288,12 +1301,13 @@ $("#sync-save").addEventListener("click", async () => {
 });
 
 $("#sync-trigger").addEventListener("click", async () => {
-    // Save first if there's no source yet, otherwise the trigger will 400.
+    // Always save first. Previously we only saved when no row existed,
+    // which meant edits made after the initial save (toggling extended,
+    // adding more folders to a Google Drive sync, …) were lost — the
+    // trigger fired against the old config. Saving every time gives the
+    // user the obvious "Sync now = sync what I see in this form" semantic.
     try {
-        const existing = await api.getSync(syncFolderId);
-        if (!existing) {
-            await api.putSync(syncFolderId, syncBody());
-        }
+        await api.putSync(syncFolderId, syncBody());
         await api.triggerSync(syncFolderId);
         alert("Sync queued. Watch the Recent jobs panel for progress.");
         closeSyncModal();
