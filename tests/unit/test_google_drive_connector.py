@@ -646,10 +646,10 @@ async def test_progress_callback_fires_through_phases(
     connector = GoogleDriveConnector()
     _patch_services(connector, drive, _FakeDocs({}), monkeypatch)
 
-    captured: list[tuple[str, int, int]] = []
+    captured: list[tuple[str, int, int, dict | None]] = []
 
-    def _cb(phase: str, done: int, total: int) -> None:
-        captured.append((phase, done, total))
+    def _cb(phase: str, done: int, total: int, detail: dict | None) -> None:
+        captured.append((phase, done, total, detail))
 
     await connector.sync(
         folder_root=tmp_path / "root",
@@ -658,7 +658,7 @@ async def test_progress_callback_fires_through_phases(
         progress_cb=_cb,
     )
 
-    phases = [p for (p, _, _) in captured]
+    phases = [p for (p, _, _, _) in captured]
     # Required phases land in order, with at least one ``done`` to clear
     # the SPA badge.
     for phase in ("connecting", "listing", "downloading", "cleaning", "done"):
@@ -670,8 +670,24 @@ async def test_progress_callback_fires_through_phases(
 
     # Downloading reports each file (3 here, below the throttle) — the
     # final downloading event matches total.
-    download_evts = [(d, t) for (p, d, t) in captured if p == "downloading"]
+    download_evts = [
+        (d, t) for (p, d, t, _) in captured if p == "downloading"
+    ]
     assert download_evts[-1] == (3, 3)
+
+    # Listing emits include the rich ``detail`` breadcrumb the SPA needs
+    # to animate the badge: current folder name + running items_seen
+    # count. Without these the pill freezes on long enumerations.
+    listing_details = [
+        d for (p, _, _, d) in captured if p == "listing" and d is not None
+    ]
+    assert listing_details, "listing phase must emit detail dicts"
+    assert listing_details[-1]["folders_done"] == 1
+    assert listing_details[-1]["folders_total"] == 1
+    assert listing_details[-1]["current_folder"] == "Root"
+    # items_seen tracks across the listing — final value matches the
+    # number of entries the connector queued for download.
+    assert listing_details[-1]["items_seen"] == 3
 
 
 @pytest.mark.asyncio
@@ -698,7 +714,7 @@ async def test_progress_callback_failures_dont_break_sync(
     connector = GoogleDriveConnector()
     _patch_services(connector, drive, _FakeDocs({}), monkeypatch)
 
-    def _bad(phase, done, total):
+    def _bad(phase, done, total, detail):
         raise RuntimeError(f"observer broke on {phase}")
 
     stats = await connector.sync(

@@ -434,14 +434,19 @@ class GoogleDriveConnector:
         folder_root: Path,
         auth: GoogleDriveAuth,
         drive_folders: list[dict[str, str]],
-        progress_cb: Callable[[str, int, int], None] | None = None,
+        progress_cb: Callable[[str, int, int, dict[str, Any] | None], None]
+        | None = None,
     ) -> GoogleDriveSyncStats:
         """Mirror Drive content into ``folder_root``.
 
-        ``progress_cb(phase, done, total)`` — optional. Called from the
-        worker thread at every phase boundary and per-file during the
-        download phase. Phases: ``"connecting"`` → ``"listing"`` →
-        ``"downloading"`` → ``"cleaning"`` → ``"done"``. The caller
+        ``progress_cb(phase, done, total, detail)`` — optional. Called
+        from the worker thread at every phase boundary, per Drive API
+        page during listing, and per-file during downloading. Phases:
+        ``"connecting"`` → ``"listing"`` → ``"downloading"`` →
+        ``"cleaning"`` → ``"done"``. ``detail`` carries phase-specific
+        breadcrumbs (``current_folder``, ``folders_done``,
+        ``items_seen``) that the SPA renders in the badge so the user
+        sees movement during the long ``listing`` phase. The caller
         wraps this into ``folder.sync_progress`` events; see
         ``indexing._run_sync_inner``.
         """
@@ -521,16 +526,22 @@ class GoogleDriveConnector:
         folder_root: Path,
         auth: GoogleDriveAuth,
         drive_folders: list[dict[str, str]],
-        progress_cb: Callable[[str, int, int], None] | None = None,
+        progress_cb: Callable[[str, int, int, dict[str, Any] | None], None]
+        | None = None,
     ) -> GoogleDriveSyncStats:
         # Wrap so call sites can fire-and-forget without a None check.
         # Swallow exceptions inside the callback — a flaky observer must
         # never break the sync itself.
-        def _emit(phase: str, done: int = 0, total: int = 0) -> None:
+        def _emit(
+            phase: str,
+            done: int = 0,
+            total: int = 0,
+            detail: dict[str, Any] | None = None,
+        ) -> None:
             if progress_cb is None:
                 return
             try:
-                progress_cb(phase, done, total)
+                progress_cb(phase, done, total, detail)
             except Exception:
                 logger.exception("sync progress callback raised")
 
@@ -555,7 +566,49 @@ class GoogleDriveConnector:
         # legacy single-folder rows where only the ID was stored.
         used_dirs: set[str] = set()
         n_drive_folders = len(drive_folders)
-        _emit("listing", 0, n_drive_folders)
+
+        # Build a per-folder "tick" callback the recursive enumerator can
+        # call after every Drive API page. Without this, big folders with
+        # thousands of items show a frozen "Listing — 3/11 folders" pill
+        # for 30+ seconds; with it, the badge flips through items_seen as
+        # pages arrive (every 1000 items, plus once per subfolder
+        # boundary). Items_seen is `len(entries)` + the count of items
+        # that were skipped via ignore-pattern matching.
+        skipped_during_listing = [0]  # boxed counter so closures can mutate
+
+        def _make_listing_tick(
+            idx: int, display: str
+        ) -> Callable[[], None]:
+            def _tick() -> None:
+                _emit(
+                    "listing",
+                    len(entries),
+                    0,  # total items unknown until listing completes
+                    {
+                        "folders_done": idx - 1,
+                        "folders_total": n_drive_folders,
+                        "current_folder": display or "(unnamed)",
+                        "items_seen": len(entries),
+                        "items_skipped": skipped_during_listing[0],
+                    },
+                )
+
+            return _tick
+
+        # Initial event so the SPA flips to "Listing — 0/11" before the
+        # first Drive call returns (which can take a few seconds).
+        _emit(
+            "listing",
+            0,
+            0,
+            {
+                "folders_done": 0,
+                "folders_total": n_drive_folders,
+                "current_folder": "",
+                "items_seen": 0,
+                "items_skipped": 0,
+            },
+        )
         for idx, folder in enumerate(drive_folders, start=1):
             folder_id = folder["id"]
             display = folder.get("name") or ""
@@ -567,15 +620,32 @@ class GoogleDriveConnector:
                 unique = f"{base}-{n}"
                 n += 1
             used_dirs.add(unique)
+            tick = _make_listing_tick(idx, display)
+            tick()  # entering this folder — flips current_folder in the badge
             try:
-                self._enumerate(drive, docs, folder_id, unique, entries, stats, ignore)
+                self._enumerate(
+                    drive, docs, folder_id, unique, entries, stats, ignore,
+                    on_page=tick,
+                    skipped_counter=skipped_during_listing,
+                )
             except Exception as e:
                 logger.exception("Drive enumeration failed for %s", folder_id)
                 stats.errors.append(f"list {display or folder_id}: {e}")
             # Emit after each top-level folder so a multi-folder sync flips
             # through "1/3", "2/3", "3/3" — useful when listing a Shared
             # Drive can take a minute.
-            _emit("listing", idx, n_drive_folders)
+            _emit(
+                "listing",
+                len(entries),
+                0,
+                {
+                    "folders_done": idx,
+                    "folders_total": n_drive_folders,
+                    "current_folder": display or "(unnamed)",
+                    "items_seen": len(entries),
+                    "items_skipped": skipped_during_listing[0],
+                },
+            )
 
         if stats.errors and not entries:
             # Every selected folder failed to enumerate — bail before we
@@ -657,7 +727,18 @@ class GoogleDriveConnector:
         out: list[_RemoteEntry],
         stats: GoogleDriveSyncStats,
         ignore: Any,  # IgnoreMatcher
+        on_page: Callable[[], None] | None = None,
+        skipped_counter: list[int] | None = None,
     ) -> None:
+        """Recursive Drive listing.
+
+        ``on_page`` fires after every Drive API page is fully processed
+        — the caller can use that as a "tick" to update the sync progress
+        badge so users see movement during long enumerations rather than
+        a frozen "Listing — 3/11" pill. ``skipped_counter[0]`` is bumped
+        for every ignore-pattern match so the badge can show
+        items_skipped alongside items_seen.
+        """
         page_token: str | None = None
         while True:
             resp = (
@@ -676,7 +757,13 @@ class GoogleDriveConnector:
                 .execute()
             )
             for item in resp.get("files", []):
-                self._process_item(drive, docs, item, rel_prefix, out, stats, ignore)
+                self._process_item(
+                    drive, docs, item, rel_prefix, out, stats, ignore,
+                    on_page=on_page,
+                    skipped_counter=skipped_counter,
+                )
+            if on_page is not None:
+                on_page()
             page_token = resp.get("nextPageToken")
             if not page_token:
                 break
@@ -690,6 +777,8 @@ class GoogleDriveConnector:
         out: list[_RemoteEntry],
         stats: GoogleDriveSyncStats,
         ignore: Any,  # IgnoreMatcher
+        on_page: Callable[[], None] | None = None,
+        skipped_counter: list[int] | None = None,
     ) -> None:
         name = item["name"]
         mime = item["mimeType"]
@@ -706,6 +795,8 @@ class GoogleDriveConnector:
         if skippable and ignore.matches(rel_here):
             logger.debug("skipping ignored file: %s", rel_here)
             stats.files_skipped += 1
+            if skipped_counter is not None:
+                skipped_counter[0] += 1
             return
 
         if mime == NATIVE_FOLDER:
@@ -714,7 +805,11 @@ class GoogleDriveConnector:
             if ignore.matches(rel_here):
                 logger.debug("skipping ignored folder: %s", rel_here)
                 return
-            self._enumerate(drive, docs, item["id"], rel_here, out, stats, ignore)
+            self._enumerate(
+                drive, docs, item["id"], rel_here, out, stats, ignore,
+                on_page=on_page,
+                skipped_counter=skipped_counter,
+            )
             return
 
         if mime == NATIVE_DOC:

@@ -609,15 +609,35 @@ function renderSidebar() {
     const syncP = syncProgress.get().get(folder.id);
     if (syncP) {
         const phase = syncP.phase;
+        const d = syncP.detail || {};
         let label;
         if (phase === "queued") {
             label = "↓ Queued";
         } else if (phase === "connecting") {
             label = "↓ Connecting to Drive";
         } else if (phase === "listing") {
-            // total here = number of picked Drive folders being enumerated.
-            label = syncP.total > 0
-                ? `↓ Listing — ${syncP.done}/${syncP.total} folders`
+            // Use the rich ``detail`` payload so the badge animates as
+            // each Drive API page lands — without it the listing pill
+            // sits motionless for tens of seconds on big folders. We
+            // surface three things: which top-level folder we're on
+            // (most useful single signal), running count of items seen,
+            // and a side-of-the-bar items-skipped count when the ignore
+            // matcher is dropping a lot of stuff.
+            const parts = [];
+            if (d.folders_total) {
+                parts.push(`folder ${d.folders_done || 0}/${d.folders_total}`);
+            }
+            if (d.current_folder) {
+                parts.push(`'${d.current_folder}'`);
+            }
+            if (typeof d.items_seen === "number") {
+                parts.push(`${d.items_seen.toLocaleString()} items`);
+            }
+            if (d.items_skipped) {
+                parts.push(`${d.items_skipped.toLocaleString()} skipped`);
+            }
+            label = parts.length
+                ? `↓ Listing — ${parts.join(" · ")}`
                 : "↓ Listing";
         } else if (phase === "downloading") {
             label = syncP.total > 0

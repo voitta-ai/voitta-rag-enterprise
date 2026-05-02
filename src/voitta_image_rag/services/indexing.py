@@ -530,17 +530,22 @@ async def _run_sync_inner(folder_id: int) -> None:
     # — it round-trips through ``run_coroutine_threadsafe`` if the asyncio
     # loop has been wired in. Connectors that don't accept ``progress_cb``
     # (currently just GitHub) silently drop the kwarg via the **cfg dict.
-    def _on_progress(phase: str, done: int, total: int) -> None:
-        events.publish(
-            "folders",
-            {
-                "type": "folder.sync_progress",
-                "folder_id": folder_id,
-                "phase": phase,
-                "done": done,
-                "total": total,
-            },
-        )
+    def _on_progress(
+        phase: str,
+        done: int,
+        total: int,
+        detail: dict | None = None,
+    ) -> None:
+        event = {
+            "type": "folder.sync_progress",
+            "folder_id": folder_id,
+            "phase": phase,
+            "done": done,
+            "total": total,
+        }
+        if detail:
+            event["detail"] = detail
+        events.publish("folders", event)
 
     if source_type == "google_drive":
         cfg["progress_cb"] = _on_progress
@@ -565,7 +570,7 @@ async def _run_sync_inner(folder_id: int) -> None:
             if src is not None:
                 src.sync_status = "error"
         # Final event so the SPA's badge clears even on failure.
-        _on_progress("done", 0, 0)
+        _on_progress("done", 0, 0, None)
         raise
 
     elapsed = time.perf_counter() - started
@@ -585,7 +590,7 @@ async def _run_sync_inner(folder_id: int) -> None:
     # Final clear-the-badge event. The GD connector already emits "done"
     # on success, but other connectors may not — this guarantees the SPA
     # drops the sync pill no matter which connector ran.
-    _on_progress("done", 0, 0)
+    _on_progress("done", 0, 0, None)
 
 
 def _mark_sync_error(folder_id: int, message: str) -> None:

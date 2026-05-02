@@ -70,7 +70,9 @@ function handleEvent(event) {
             // downloading / cleaning phases of a sync job. Same shape as
             // reindex_progress; kept on a separate store so they don't
             // overwrite each other (a folder can be syncing AND mid-reindex
-            // — they're independent phases).
+            // — they're independent phases). ``detail`` carries phase-
+            // specific breadcrumbs (current_folder, items_seen) the badge
+            // renders for movement during long enumerations.
             syncProgress.update((map) => {
                 const next = new Map(map);
                 if (event.phase === "done") {
@@ -80,6 +82,7 @@ function handleEvent(event) {
                         phase: event.phase,
                         done: event.done,
                         total: event.total,
+                        detail: event.detail || null,
                     });
                 }
                 return next;
