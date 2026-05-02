@@ -1206,26 +1206,55 @@ class GoogleDriveConnector:
 # ---------------------------------------------------------------------------
 
 
-def _export_to(drive: Any, file_id: str, export_mime: str, dest: Path) -> None:
+def _atomic_stream_download(downloader_factory: Any, dest: Path) -> None:
+    """Stream a Drive download into ``dest`` atomically.
+
+    Writes through a sibling ``.part`` tempfile and ``os.replace``s onto
+    the final path on success. Without this, the file appears truncated
+    the instant ``dest.open("wb")`` runs and grows as chunks arrive — the
+    watcher sees that as a modify event and can queue an extract that
+    runs against a half-written xlsx (the "Bad magic number for file
+    header" failure we hit during hourly auto-syncs once parallel
+    downloads landed and many writes were in-flight at once).
+
+    ``os.replace`` is atomic on POSIX so the watcher sees one event for
+    the complete file. On Windows it's atomic when no reader has the
+    target open; the watcher does not, so we're safe there too.
+    """
+    import os
+
     from googleapiclient.http import MediaIoBaseDownload
 
-    request = drive.files().export_media(fileId=file_id, mimeType=export_mime)
-    with dest.open("wb") as f:
-        downloader = MediaIoBaseDownload(f, request)
-        done = False
-        while not done:
-            _, done = downloader.next_chunk()
+    tmp = dest.with_name(dest.name + ".part")
+    try:
+        with tmp.open("wb") as f:
+            request = downloader_factory()
+            downloader = MediaIoBaseDownload(f, request)
+            done = False
+            while not done:
+                _, done = downloader.next_chunk()
+        os.replace(tmp, dest)
+    except Exception:
+        # Leave no half-written ``.part`` on disk if the network blew up
+        # mid-stream. ``missing_ok=True`` handles the case where the open
+        # itself failed before the file was even created.
+        with suppress(OSError):
+            tmp.unlink(missing_ok=True)
+        raise
+
+
+def _export_to(drive: Any, file_id: str, export_mime: str, dest: Path) -> None:
+    _atomic_stream_download(
+        lambda: drive.files().export_media(fileId=file_id, mimeType=export_mime),
+        dest,
+    )
 
 
 def _download_to(drive: Any, file_id: str, dest: Path) -> None:
-    from googleapiclient.http import MediaIoBaseDownload
-
-    request = drive.files().get_media(fileId=file_id, supportsAllDrives=True)
-    with dest.open("wb") as f:
-        downloader = MediaIoBaseDownload(f, request)
-        done = False
-        while not done:
-            _, done = downloader.next_chunk()
+    _atomic_stream_download(
+        lambda: drive.files().get_media(fileId=file_id, supportsAllDrives=True),
+        dest,
+    )
 
 
 def write_tab_with_fingerprint(dest: Path, fingerprint: str, body: str) -> None:
@@ -1234,9 +1263,24 @@ def write_tab_with_fingerprint(dest: Path, fingerprint: str, body: str) -> None:
     ``GoogleDriveConnector._is_unchanged`` reads the first line back to
     skip re-rendering tabs whose Docs ``modifiedTime + tabId`` haven't
     moved since the previous sync.
+
+    Same atomic-write pattern as ``_atomic_stream_download``: stream into
+    a ``.part`` sibling, ``os.replace`` onto the final path. The race
+    window for a Markdown blob is much narrower than a multi-megabyte
+    Drive download, but parallel tab writes can still cross paths with
+    the watcher debounce, so we use the same primitive everywhere.
     """
+    import os
+
     header = f"{FINGERPRINT_PREFIX}{fingerprint}{FINGERPRINT_SUFFIX}\n"
-    dest.write_text(header + body, encoding="utf-8")
+    tmp = dest.with_name(dest.name + ".part")
+    try:
+        tmp.write_text(header + body, encoding="utf-8")
+        os.replace(tmp, dest)
+    except Exception:
+        with suppress(OSError):
+            tmp.unlink(missing_ok=True)
+        raise
 
 
 def _drive_view_url(file_id: str, mime: str) -> str:

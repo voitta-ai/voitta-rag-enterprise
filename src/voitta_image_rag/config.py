@@ -85,7 +85,7 @@ class Settings(BaseSettings):
     #    not via passthrough text). On the GD path, skipping at enumerate
     #    time also saves the egress for big mp4s.
     ignore_patterns: str = (
-        ".git,node_modules,.DS_Store,__pycache__,.venv,*.tmp,"
+        ".git,node_modules,.DS_Store,__pycache__,.venv,*.tmp,*.part,"
         ".git-repo,.voitta_timestamps.json,.voitta_sync.lock,"
         # audio
         "*.mp3,*.m4a,*.wav,*.flac,*.ogg,*.aac,*.opus,*.wma,"
