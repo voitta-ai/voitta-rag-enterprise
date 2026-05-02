@@ -127,6 +127,14 @@ def _patch_services(
     monkeypatch.setattr(
         connector, "_build_services", lambda *a, **k: (drive, docs)
     )
+    # The parallel docs.get pool builds its own ``docs`` Resource per
+    # worker thread (production code uses per-thread credentials to dodge
+    # googleapiclient's thread-unsafety) — the tests need to return the
+    # fake from this hook too, otherwise the pool path tries to mint real
+    # credentials and falls back to docx export every time.
+    monkeypatch.setattr(
+        connector, "_build_docs_for_thread", lambda *a, **k: docs
+    )
     monkeypatch.setattr(
         connector, "_sync_access_token", lambda *a, **k: "fake-token"
     )

@@ -473,26 +473,52 @@ class GoogleDriveConnector:
 
     # -- service plumbing ---------------------------------------------------
 
-    def _build_services(
+    def _build_credentials(
         self, auth: GoogleDriveAuth, access_token: str | None
-    ) -> tuple[Any, Any]:
-        """Return ``(drive, docs)`` googleapiclient services."""
-        from googleapiclient.discovery import build
+    ) -> Any:
+        """Construct the right ``Credentials`` object for the active auth mode.
 
+        Pulled out so workers in the parallel docs.get pool can mint their
+        own ``Resource`` instances without re-importing OAuth/SA libraries
+        per thread. ``googleapiclient.Resource`` is NOT thread-safe — the
+        underlying ``httplib2.Http`` caches connection state and concurrent
+        requests interleave with Drive timeouts and SSL faults. We give
+        each worker its own pair of services in ``_build_docs_for_thread``.
+        """
         if access_token is not None:
             from google.oauth2.credentials import Credentials
 
-            creds = Credentials(token=access_token)
-        else:
-            from google.oauth2.service_account import Credentials as SACredentials
+            return Credentials(token=access_token)
+        from google.oauth2.service_account import Credentials as SACredentials
 
-            info = json.loads(auth.service_account_json)
-            creds = SACredentials.from_service_account_info(
-                info, scopes=GOOGLE_SCOPES.split()
-            )
+        info = json.loads(auth.service_account_json)
+        return SACredentials.from_service_account_info(
+            info, scopes=GOOGLE_SCOPES.split()
+        )
+
+    def _build_services(
+        self, auth: GoogleDriveAuth, access_token: str | None
+    ) -> tuple[Any, Any]:
+        """Return ``(drive, docs)`` googleapiclient services for the main thread."""
+        from googleapiclient.discovery import build
+
+        creds = self._build_credentials(auth, access_token)
         drive = build("drive", "v3", credentials=creds, cache_discovery=False)
         docs = build("docs", "v1", credentials=creds, cache_discovery=False)
         return drive, docs
+
+    def _build_docs_for_thread(
+        self, auth: GoogleDriveAuth, access_token: str | None
+    ) -> Any:
+        """Per-worker ``docs`` service. Each call builds a fresh
+        ``Resource`` (and therefore a fresh ``httplib2.Http``) so the
+        thread pool that drives parallel ``documents.get`` calls doesn't
+        share connection state — which is exactly what triggers Drive's
+        timeout / SSL-error responses when concurrency goes above 1."""
+        from googleapiclient.discovery import build
+
+        creds = self._build_credentials(auth, access_token)
+        return build("docs", "v1", credentials=creds, cache_discovery=False)
 
     def _sync_access_token(self, auth: GoogleDriveAuth) -> str:
         """Synchronous token refresh for use from ``_sync_sync`` (worker thread)."""
@@ -656,11 +682,17 @@ class GoogleDriveConnector:
 
         # Phase 2: fan out the docs.get calls accumulated during listing.
         # Each one is independent so they're embarrassingly parallel; we
-        # cap concurrency at 8 to stay well under Drive's default per-user
-        # rate limits (the published soft limit is 10 RPS sustained,
-        # bursts are tolerated). Empirically this drops listing time on a
-        # 250-doc Meet Recordings tree from ~80s to ~10s.
+        # cap concurrency at 4 to stay well under Drive's default per-user
+        # rate limits (10 RPS sustained, bursts tolerated). googleapiclient's
+        # Resource is NOT thread-safe — ``_thread_local_docs`` gives each
+        # worker its own service so concurrent requests don't share an
+        # httplib2.Http and trip Drive's timeout / SSL-error responses.
+        # Empirically this drops listing time on a 250-doc Meet Recordings
+        # tree from ~80s to ~10s with zero timeout fallbacks.
         if pending_docs:
+            import threading
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
             n_docs = len(pending_docs)
             _emit(
                 "fetching_docs",
@@ -668,16 +700,30 @@ class GoogleDriveConnector:
                 n_docs,
                 {"items_seen": len(entries)},
             )
-            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            tl = threading.local()
+
+            def _docs_for_this_thread() -> Any:
+                # Build at most one ``docs`` Resource per worker thread,
+                # reuse for every task that thread runs. Costs one
+                # discovery call per worker (~50ms) instead of one per
+                # task (~50ms x N), AND keeps each worker's connection
+                # isolated from the others.
+                if not hasattr(tl, "docs"):
+                    tl.docs = self._build_docs_for_thread(auth, access_token)
+                return tl.docs
+
+            def _materialize_one(item: dict, rel_here: str):
+                return self._materialize_doc(
+                    drive, _docs_for_this_thread(), item, rel_here
+                )
 
             doc_emit_every = max(1, n_docs // 50)
             with ThreadPoolExecutor(
-                max_workers=8, thread_name_prefix="gd-docs"
+                max_workers=4, thread_name_prefix="gd-docs"
             ) as pool:
                 futures = {
-                    pool.submit(
-                        self._materialize_doc, drive, docs, item, rel_here
-                    ): rel_here
+                    pool.submit(_materialize_one, item, rel_here): rel_here
                     for (item, rel_here) in pending_docs
                 }
                 for completed, fut in enumerate(as_completed(futures), start=1):
