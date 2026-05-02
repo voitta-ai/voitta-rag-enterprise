@@ -1209,23 +1209,36 @@ class GoogleDriveConnector:
 def _atomic_stream_download(downloader_factory: Any, dest: Path) -> None:
     """Stream a Drive download into ``dest`` atomically.
 
-    Writes through a sibling ``.part`` tempfile and ``os.replace``s onto
-    the final path on success. Without this, the file appears truncated
-    the instant ``dest.open("wb")`` runs and grows as chunks arrive — the
-    watcher sees that as a modify event and can queue an extract that
-    runs against a half-written xlsx (the "Bad magic number for file
-    header" failure we hit during hourly auto-syncs once parallel
-    downloads landed and many writes were in-flight at once).
+    Writes through a sibling ``.part-<uuid>`` tempfile and ``os.replace``s
+    onto the final path on success. Without this, the file appears
+    truncated the instant ``dest.open("wb")`` runs and grows as chunks
+    arrive — the watcher sees that as a modify event and can queue an
+    extract that runs against a half-written xlsx (the "Bad magic
+    number for file header" failure we hit during hourly auto-syncs
+    once parallel downloads landed and many writes were in-flight at
+    once).
+
+    The per-call uuid suffix matters because the same final path can
+    legitimately be written by two parallel producers — the user's
+    picked Drive folders can overlap (same file reachable through
+    multiple parents, or one picked folder nested inside another, or
+    a Shared Drive root + a folder inside it both picked). Without a
+    unique suffix, both writers race on ``foo.xlsx.part``: the first
+    succeeds, the second's ``os.replace`` finds the source missing and
+    blows up. With a unique suffix every writer has its own tempfile;
+    last-replace-wins on the destination, which is fine — both writers
+    fetched the same Drive object so the bytes are identical.
 
     ``os.replace`` is atomic on POSIX so the watcher sees one event for
     the complete file. On Windows it's atomic when no reader has the
     target open; the watcher does not, so we're safe there too.
     """
     import os
+    import uuid
 
     from googleapiclient.http import MediaIoBaseDownload
 
-    tmp = dest.with_name(dest.name + ".part")
+    tmp = dest.with_name(f"{dest.name}.part-{uuid.uuid4().hex[:8]}")
     try:
         with tmp.open("wb") as f:
             request = downloader_factory()
@@ -1264,16 +1277,16 @@ def write_tab_with_fingerprint(dest: Path, fingerprint: str, body: str) -> None:
     skip re-rendering tabs whose Docs ``modifiedTime + tabId`` haven't
     moved since the previous sync.
 
-    Same atomic-write pattern as ``_atomic_stream_download``: stream into
-    a ``.part`` sibling, ``os.replace`` onto the final path. The race
-    window for a Markdown blob is much narrower than a multi-megabyte
-    Drive download, but parallel tab writes can still cross paths with
-    the watcher debounce, so we use the same primitive everywhere.
+    Same atomic-write pattern as ``_atomic_stream_download``, including
+    the per-call uuid suffix to avoid two parallel writers colliding on
+    the same ``.part`` path when the same tab is reachable through
+    overlapping picked folders.
     """
     import os
+    import uuid
 
     header = f"{FINGERPRINT_PREFIX}{fingerprint}{FINGERPRINT_SUFFIX}\n"
-    tmp = dest.with_name(dest.name + ".part")
+    tmp = dest.with_name(f"{dest.name}.part-{uuid.uuid4().hex[:8]}")
     try:
         tmp.write_text(header + body, encoding="utf-8")
         os.replace(tmp, dest)
