@@ -39,5 +39,5 @@ we'll discuss alternatives.
 
 ## Reporting security issues
 
-Don't open a public issue for security bugs. Email **security@voitta.ai**
+Don't open a public issue for security bugs. Email **support@voitta.ai**
 with the details and we'll respond within 72 hours.
