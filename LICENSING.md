@@ -25,7 +25,7 @@ obligations — typically because they need to embed it in a proprietary
 product, or run a modified hosted version without publishing modifications —
 a separate commercial license is available.
 
-Contact: **licensing@voitta.ai**
+Contact: **support@voitta.ai**
 
 We sell commercial licenses on per-deployment, per-seat, and OEM terms. We
 also offer:

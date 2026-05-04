@@ -99,6 +99,6 @@ All eight implementation stages are complete. 200+ tests; CI runs lint + tests o
 `voitta-image-rag` is dual-licensed:
 
 - **[AGPL-3.0-or-later](./LICENSE)** for open-source use, self-hosting, and contributions.
-- **Commercial license** for embedding in proprietary products or running modified hosted versions without AGPL §13 obligations — contact **licensing@voitta.ai**.
+- **Commercial license** for embedding in proprietary products or running modified hosted versions without AGPL §13 obligations — contact **support@voitta.ai**.
 
 See [LICENSING.md](./LICENSING.md) for details. Contributors must sign the [CLA](./CONTRIBUTING.md#contributor-license-agreement).
