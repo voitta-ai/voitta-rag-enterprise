@@ -95,3 +95,12 @@ All settings carry the `VOITTA_` env-var prefix. See [.env.example](./.env.examp
 ## Status
 
 All eight implementation stages are complete. 200+ tests; CI runs lint + tests on every PR.
+
+## License
+
+`voitta-image-rag` is dual-licensed:
+
+- **[AGPL-3.0-or-later](./LICENSE)** for open-source use, self-hosting, and contributions.
+- **Commercial license** for embedding in proprietary products or running modified hosted versions without AGPL §13 obligations — contact **licensing@voitta.ai**.
+
+See [LICENSING.md](./LICENSING.md) for details. Contributors must sign the [CLA](./CONTRIBUTING.md#contributor-license-agreement).

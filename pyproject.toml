@@ -3,6 +3,8 @@ name = "voitta-image-rag"
 version = "0.1.0"
 description = "Filesystem-driven RAG with first-class image support."
 readme = "README.md"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",

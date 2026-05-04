@@ -843,3 +843,14 @@ input[type="text"], input[type="file"] {
 }
 .picker-list li.dir::before { content: "▸"; color: var(--color-accent); }
 .picker-list li.file::before { content: "·"; }
+
+.agpl-footer {
+    padding: var(--md);
+    text-align: center;
+    font-size: 12px;
+    color: var(--color-text-tertiary);
+    border-top: 1px solid var(--color-border-light);
+    margin-top: var(--lg);
+}
+.agpl-footer a { color: var(--color-text-secondary); text-decoration: none; }
+.agpl-footer a:hover { color: var(--color-accent); }
