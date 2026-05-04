@@ -2,8 +2,6 @@
 
 Filesystem-driven RAG with first-class image support, content-addressable extraction, real-time websocket UI, and a pluggable sync layer.
 
-**Design docs:** [ARCHITECTURE.md](./ARCHITECTURE.md) · [IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md)
-
 ## TL;DR
 
 - Register a folder. The watcher picks up changes; a job queue extracts text + images into a content-addressable store on disk; embeddings land in Qdrant.
