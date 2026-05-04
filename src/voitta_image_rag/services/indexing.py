@@ -257,13 +257,32 @@ def _resolve_path(file_id: int) -> Path | None:
 
 
 def _short_circuit_unchanged(file_id: int, new_sha: str, mtime_ns: int) -> bool:
+    healed = False
     with session_scope() as s:
         file = s.get(File, file_id)
         if file is None or file.file_cas_id != new_sha:
             return False
         file.mtime_ns = mtime_ns
         file.last_seen_at = int(time.time())
-        return True
+        # Heal stale non-terminal states. If a previous extract was orphaned
+        # (uvicorn --reload, OOM) the file row may sit in `pending`/`extracted`/
+        # `embedding` even though the CAS sha matches what's already on disk
+        # *and* on Qdrant. Without this, the file ends up stuck: extract is
+        # re-enqueued, hits this skip, returns — and the queue empties with
+        # the row still non-terminal, so the UI shows "indexing" forever.
+        #
+        # If pending_embeds > 0 we don't short-circuit at all: embed work was
+        # lost mid-flight, so let the caller fall through to a full re-extract
+        # which rewrites CAS/chunks/images and re-enqueues embeds.
+        if file.state in ("pending", "extracted", "embedding"):
+            if file.pending_embeds > 0:
+                return False
+            file.state = "indexed"
+            file.error = None
+            healed = True
+    if healed:
+        _publish_file_upserted(file_id)
+    return True
 
 
 def _mark_state(file_id: int, *, state: str, error: str | None = None) -> None:
@@ -1151,6 +1170,24 @@ def reconcile_abandoned_extracts() -> int:
 
         for f in candidates:
             if f.id in live_files:
+                continue
+            # Fast path: pending_embeds=0 with a CAS row means the prior run
+            # already wrote text/chunks/images and the corresponding Qdrant
+            # points (the decrement just got lost on the way out). Snap to
+            # indexed instead of cycling through pending + a no-op extract
+            # that would short-circuit on unchanged sha and leave the file
+            # stuck in pending. Mirrors `reconcile_pending_embeds`'s logic
+            # for the pending_embeds>0 dual case.
+            if f.pending_embeds == 0 and f.file_cas_id is not None:
+                logger.warning(
+                    "reconcile: file_id=%d was stuck (state=%s pending=0) "
+                    "— forcing indexed",
+                    f.id,
+                    f.state,
+                )
+                f.state = "indexed"
+                f.error = None
+                repaired_ids.append(f.id)
                 continue
             logger.warning(
                 "reset abandoned extract: file_id=%d state=%s pending=%d",
