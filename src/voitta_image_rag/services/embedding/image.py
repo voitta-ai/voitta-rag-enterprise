@@ -86,12 +86,18 @@ class SiglipImageEmbedder(ImageEmbedder):
         return self._dim
 
     def embed_image(self, data: bytes) -> list[float]:
+        import numpy as np
         import torch
         from PIL import Image as PILImage
 
         processor, model = self._ensure_loaded()
         img = PILImage.open(io.BytesIO(data)).convert("RGB")
-        inputs = processor(images=[img], return_tensors="pt")
+        # Hand the processor an explicit (H, W, 3) ndarray + channels_last so it
+        # never has to guess the channel axis. SiglipImageProcessor's heuristic
+        # picks the wrong axis on images where H or W equals 3 (e.g. tiny inline
+        # spacers in docx), treating them as 1-channel and crashing in normalize().
+        arr = np.asarray(img, dtype=np.uint8)
+        inputs = processor(images=[arr], return_tensors="pt", input_data_format="channels_last")
         with gpu_lock("siglip.embed_image"), torch.no_grad():
             features = _as_tensor(model.get_image_features(**inputs))
             features = features / features.norm(dim=-1, keepdim=True)
