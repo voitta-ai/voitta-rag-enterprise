@@ -80,7 +80,7 @@ make lint
 
 ## Configuration
 
-All settings carry the `VOITTA_` env-var prefix. See [.env.example](./.env.example) for the full list and [ARCHITECTURE.md §11](./ARCHITECTURE.md#11-configuration) for semantics. The most useful for local dev:
+All settings carry the `VOITTA_` env-var prefix. See [.env.example](./.env.example) for the full list. The most useful for local dev:
 
 | Var                          | Purpose                                                       |
 |------------------------------|---------------------------------------------------------------|
