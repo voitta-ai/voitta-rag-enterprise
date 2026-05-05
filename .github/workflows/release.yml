@@ -1,0 +1,71 @@
+# Build and push the runtime container image to GHCR on tag.
+#
+# Triggered only by `v*` tags so we never produce noisy `latest` flips on
+# every commit. Customers pin a specific tag (`v0.1.0`) when deploying;
+# `latest` exists for casual eval only.
+#
+# Image: ghcr.io/voitta-ai/voitta-rag-enterprise
+#
+# Visibility note: the package is private by default on first push. An org
+# admin must flip it to public once on github.com → Packages → Settings →
+# Change visibility. Subsequent pushes inherit that setting.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish (e.g. v0.1.0). Must already exist."
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/voitta-ai/voitta-rag-enterprise
+          # On a tag push: emit `<tag>` and `latest`. workflow_dispatch
+          # uses the inputs.tag we checked out above and the same rules.
+          tags: |
+            type=ref,event=tag
+            type=raw,value=latest
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
