@@ -29,11 +29,11 @@ VOITTA_USE_FAKE_EMBEDDERS=true VOITTA_DEV_USER=you@localhost make dev
 Then in another terminal:
 
 ```bash
-# Register a folder
+# Register a folder (created under $VOITTA_ROOT_PATH/<name>)
 curl -X POST http://localhost:8000/api/folders \
   -H 'Content-Type: application/json' \
   -H 'X-Forwarded-Email: you@localhost' \
-  -d '{"path": "/path/to/some/folder"}'
+  -d '{"name": "project-x"}'
 
 # Drop a file into that folder — the watcher picks it up automatically.
 # Within seconds /api/files/<id> reports state=indexed.

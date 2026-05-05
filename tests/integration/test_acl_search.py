@@ -58,7 +58,7 @@ def _seed_authed(
             p.write_text(content)
         else:
             p.write_bytes(content)
-    r = client.post("/api/folders", json={"path": str(root)})
+    r = client.post("/api/folders", json={"name": root.name})
     assert r.status_code == 201, r.text
     fid = r.json()["id"]
     init_db()
@@ -75,7 +75,7 @@ def test_register_grants_creator(env: None, tmp_path: Path) -> None:
     with TestClient(app) as client:
         src = tmp_path / "src"
         src.mkdir()
-        client.post("/api/folders", json={"path": str(src)})
+        client.post("/api/folders", json={"name": "src"})
 
     with session_scope() as s:
         alice = s.execute(select(User).where(User.email == "alice@x")).scalar_one()

@@ -629,8 +629,6 @@ input[type="text"], input[type="file"] {
     padding: 2px 8px;
     border-radius: var(--radius-full);
 }
-.badge-managed { background: rgba(0, 113, 227, 0.15); color: var(--color-accent); }
-
 .kv-grid {
     display: grid;
     grid-template-columns: 90px 1fr;

@@ -31,7 +31,7 @@ def _seed_and_extract(client: TestClient, root: Path, files: dict[str, bytes | s
             p.write_text(content)
         else:
             p.write_bytes(content)
-    folder_id = client.post("/api/folders", json={"path": str(root)}).json()["id"]
+    folder_id = client.post("/api/folders", json={"name": root.name}).json()["id"]
     with session_scope() as s:
         ids = [f.id for f in s.execute(select(File).where(File.folder_id == folder_id)).scalars()]
     for fid in ids:
@@ -51,7 +51,7 @@ def test_get_file_text_pre_extraction_returns_409(client: TestClient, tmp_path: 
     src = tmp_path / "src"
     src.mkdir()
     (src / "doc.md").write_text("hi")
-    folder_id = client.post("/api/folders", json={"path": str(src)}).json()["id"]
+    folder_id = client.post("/api/folders", json={"name": src.name}).json()["id"]
     fid = client.get(f"/api/folders/{folder_id}/files").json()[0]["id"]
     # Skipping run_extract — file is still 'pending'.
     assert client.get(f"/api/files/{fid}/text").status_code == 409

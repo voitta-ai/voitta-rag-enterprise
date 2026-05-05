@@ -97,7 +97,7 @@ def test_endpoint_accepts_sa_only(env: None, tmp_path: Path) -> None:
 
     with TestClient(app) as client:
         # Register a folder + save an SA-only GD config.
-        r = client.post("/api/folders", json={"path": str(src)})
+        r = client.post("/api/folders", json={"name": src.name})
         assert r.status_code == 201
         fid = r.json()["id"]
         r = client.put(
@@ -160,7 +160,7 @@ def test_endpoint_surfaces_owner_and_dates(env: None, tmp_path: Path) -> None:
     src = tmp_path / "drive"
     src.mkdir()
     with TestClient(app) as client:
-        fid = client.post("/api/folders", json={"path": str(src)}).json()["id"]
+        fid = client.post("/api/folders", json={"name": src.name}).json()["id"]
         client.put(
             f"/api/folders/{fid}/sync",
             json={
@@ -212,7 +212,7 @@ def test_endpoint_still_400s_with_no_creds(env: None, tmp_path: Path) -> None:
     src.mkdir()
 
     with TestClient(app) as client:
-        fid = client.post("/api/folders", json={"path": str(src)}).json()["id"]
+        fid = client.post("/api/folders", json={"name": src.name}).json()["id"]
         # Save an OAuth config (so the row exists in google_drive mode) but
         # don't connect — refresh_token stays empty. To make sure the 400
         # branch fires, manually clear both creds in the DB.

@@ -68,7 +68,7 @@ def _setup_folder(tmp_path: Path, app, client: TestClient, n_files: int = 5) -> 
     src.mkdir(parents=True, exist_ok=True)
     for i in range(n_files):
         (src / f"f{i}.md").write_text(f"file {i} body alpha bravo charlie")
-    r = client.post("/api/folders", json={"path": str(src)})
+    r = client.post("/api/folders", json={"name": src.name})
     assert r.status_code == 201, r.text
     fid = r.json()["id"]
     _index_files(fid)

@@ -27,6 +27,7 @@ def env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None]:
         if k.startswith("VOITTA_"):
             monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("VOITTA_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("VOITTA_ROOT_PATH", str(tmp_path))
     monkeypatch.setenv("VOITTA_DISABLE_BACKGROUND", "true")
     monkeypatch.setenv("VOITTA_USE_FAKE_EMBEDDERS", "true")
     monkeypatch.setenv("VOITTA_USE_FAKE_PDF_PARSER", "true")

@@ -45,7 +45,7 @@ def _app():
 
 def _register(client: TestClient, app, email: str, path: Path) -> dict:
     auth_as(app, email)
-    r = client.post("/api/folders", json={"path": str(path)})
+    r = client.post("/api/folders", json={"name": path.name})
     assert r.status_code == 201, r.text
     return r.json()
 

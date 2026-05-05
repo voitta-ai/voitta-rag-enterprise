@@ -37,9 +37,8 @@ class Settings(BaseSettings):
     qdrant_url: str | None = None
     qdrant_path: Path | None = None
 
-    # Optional parent for "managed" folders: folders the API itself creates,
-    # which can later have sync connectors attached. Folders registered by
-    # absolute path are "external" and never get syncs.
+    # Required parent for all user-registered folders. Every folder is created
+    # under this path; arbitrary host paths cannot be registered.
     root_path: Path | None = None
 
     # Network

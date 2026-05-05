@@ -35,7 +35,7 @@ def _seed_and_index(client: TestClient, folder_root: Path, files: dict[str, byte
             p.write_text(content)
         else:
             p.write_bytes(content)
-    r = client.post("/api/folders", json={"path": str(folder_root)})
+    r = client.post("/api/folders", json={"name": folder_root.name})
     folder_id = r.json()["id"]
     init_db()
     # Drive the pipeline manually since the test fixture disables background workers.

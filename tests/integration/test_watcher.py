@@ -180,7 +180,7 @@ def test_post_folder_registers_with_running_watcher(
     app = create_app()
     auth_as(app, "alice@x.com")
     with TestClient(app) as client:
-        r = client.post("/api/folders", json={"path": str(src)})
+        r = client.post("/api/folders", json={"name": src.name})
         assert r.status_code == 201
         (src / "fresh.txt").write_text("hi")
         jobs = _wait_until(lambda: _extract_jobs() if _extract_jobs() else None, timeout=4.0)

@@ -33,7 +33,7 @@ def _seed(client: TestClient, root: Path, layout: dict[str, bytes | str]) -> int
             p.write_text(content)
         else:
             p.write_bytes(content)
-    folder_id = client.post("/api/folders", json={"path": str(root)}).json()["id"]
+    folder_id = client.post("/api/folders", json={"name": root.name}).json()["id"]
     init_db()
     with session_scope() as s:
         ids = [
@@ -98,7 +98,7 @@ def test_stats_unsupported_files_not_counted_as_error(
     (src / "a.md").write_text("hello")
     (src / "c.weird").write_bytes(b"\x00\x00\x00\x18ftypmp42")
     (src / "d.zzz").write_bytes(b"unknown blob")
-    folder_id = client.post("/api/folders", json={"path": str(src)}).json()["id"]
+    folder_id = client.post("/api/folders", json={"name": src.name}).json()["id"]
     init_db()
     with session_scope() as s:
         ids = [
@@ -131,7 +131,7 @@ def test_stats_distinguishes_in_progress_from_pending(
     src.mkdir()
     (src / "a.md").write_text("alpha")
     (src / "b.md").write_text("bravo")
-    folder_id = client.post("/api/folders", json={"path": str(src)}).json()["id"]
+    folder_id = client.post("/api/folders", json={"name": src.name}).json()["id"]
     init_db()
     with session_scope() as s:
         files_in_db = list(
@@ -159,7 +159,7 @@ def test_stats_unknown_folder_returns_404(client: TestClient) -> None:
 def test_stats_empty_folder(client: TestClient, tmp_path: Path) -> None:
     src = tmp_path / "empty"
     src.mkdir()
-    fid = client.post("/api/folders", json={"path": str(src)}).json()["id"]
+    fid = client.post("/api/folders", json={"name": src.name}).json()["id"]
     s = client.get(f"/api/folders/{fid}/stats").json()
     assert s == {
         "folder_id": fid,

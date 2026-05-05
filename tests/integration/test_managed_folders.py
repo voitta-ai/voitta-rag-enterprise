@@ -31,7 +31,6 @@ def test_create_managed_folder(root_env: Path) -> None:
         r = c.post("/api/folders", json={"name": "project-x"})
         assert r.status_code == 201, r.text
         body = r.json()
-        assert body["managed"] is True
         assert body["path"] == str(root_env / "project-x")
         assert (root_env / "project-x").is_dir()
 
@@ -41,7 +40,6 @@ def test_create_managed_uses_existing_dir(root_env: Path) -> None:
     with _client(root_env) as c:
         r = c.post("/api/folders", json={"name": "preexisting"})
         assert r.status_code == 201
-        assert r.json()["managed"] is True
 
 
 def test_managed_requires_root(env: None, monkeypatch, tmp_path: Path) -> None:
@@ -65,25 +63,26 @@ def test_managed_rejects_path_traversal(root_env: Path) -> None:
             assert r.status_code == 400, f"{bad!r} should be rejected, got {r.status_code}"
 
 
-def test_must_provide_exactly_one_of_path_or_name(root_env: Path, tmp_path: Path) -> None:
+def test_name_is_required(root_env: Path) -> None:
     with _client(root_env) as c:
-        # Neither
         r = c.post("/api/folders", json={})
-        assert r.status_code == 400
-        # Both
-        ext = tmp_path / "ext"
-        ext.mkdir()
-        r = c.post("/api/folders", json={"path": str(ext), "name": "x"})
-        assert r.status_code == 400
+        assert r.status_code == 422
 
 
-def test_external_folder_is_not_managed(root_env: Path, tmp_path: Path) -> None:
+def test_path_field_is_rejected(root_env: Path, tmp_path: Path) -> None:
+    """External-path registration was removed for security; the field is no
+    longer accepted by the schema."""
     ext = tmp_path / "external"
     ext.mkdir()
     with _client(root_env) as c:
+        # Schema has no `path` field; sending it without `name` is a
+        # missing-field error (422). Sending it alongside name doesn't
+        # register anything outside VOITTA_ROOT_PATH.
         r = c.post("/api/folders", json={"path": str(ext)})
+        assert r.status_code == 422
+        r = c.post("/api/folders", json={"path": str(ext), "name": "y"})
         assert r.status_code == 201
-        assert r.json()["managed"] is False
+        assert r.json()["path"] == str(root_env / "y")
 
 
 def test_root_endpoint_reports_configuration(root_env: Path) -> None:
@@ -135,18 +134,6 @@ def test_upload_multiple_files_to_managed_folder(root_env: Path) -> None:
         assert (root_env / "batch" / "b.txt").read_bytes() == b"beta"
 
 
-def test_upload_to_external_folder_rejected(root_env: Path, tmp_path: Path) -> None:
-    ext = tmp_path / "external"
-    ext.mkdir()
-    with _client(root_env) as c:
-        fid = c.post("/api/folders", json={"path": str(ext)}).json()["id"]
-        r = c.post(
-            f"/api/folders/{fid}/upload",
-            files={"file": ("x.txt", b"x", "text/plain")},
-        )
-        assert r.status_code == 400
-
-
 def test_upload_path_traversal_rejected(root_env: Path) -> None:
     with _client(root_env) as c:
         fid = c.post("/api/folders", json={"name": "u2"}).json()["id"]
@@ -157,13 +144,3 @@ def test_upload_path_traversal_rejected(root_env: Path) -> None:
         assert r.status_code == 400
 
 
-def test_listing_includes_managed_flag(root_env: Path, tmp_path: Path) -> None:
-    ext = tmp_path / "external"
-    ext.mkdir()
-    with _client(root_env) as c:
-        c.post("/api/folders", json={"name": "managed-one"})
-        c.post("/api/folders", json={"path": str(ext)})
-        rows = c.get("/api/folders").json()
-        flags = {f["display_name"]: f["managed"] for f in rows}
-        assert flags["managed-one"] is True
-        assert flags["external"] is False

@@ -51,15 +51,6 @@ def test_mkdir_idempotent(root_env: Path) -> None:
         assert r.status_code == 201
 
 
-def test_mkdir_rejected_on_external(root_env: Path, tmp_path: Path) -> None:
-    ext = tmp_path / "external"
-    ext.mkdir()
-    with _client(root_env) as c:
-        fid = c.post("/api/folders", json={"path": str(ext)}).json()["id"]
-        r = c.post(f"/api/folders/{fid}/mkdir", json={"path": "x"})
-        assert r.status_code == 400
-
-
 def test_mkdir_path_traversal_rejected(root_env: Path) -> None:
     with _client(root_env) as c:
         fid = c.post("/api/folders", json={"name": "u"}).json()["id"]

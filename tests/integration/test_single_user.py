@@ -31,7 +31,7 @@ def test_listing_returns_all_folders_regardless_of_grants(
     src = tmp_path / "shared"
     src.mkdir()
     with TestClient(app) as c:
-        c.post("/api/folders", json={"path": str(src)})
+        c.post("/api/folders", json={"name": src.name})
         rows = c.get("/api/folders").json()
         assert len(rows) == 1
 

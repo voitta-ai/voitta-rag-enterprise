@@ -33,17 +33,14 @@ router = APIRouter(prefix="/folders", tags=["folders"])
 
 
 class FolderIn(BaseModel):
-    """Two modes:
+    """Create a folder under ``$VOITTA_ROOT_PATH``.
 
-    - **External**: pass ``path`` (absolute host path that already exists).
-      ``managed=False``; never gets a sync connector.
-    - **Managed**: pass ``name`` (single path segment). Server creates
-      ``$VOITTA_ROOT_PATH/<name>`` if missing. ``managed=True``; sync
-      connectors can later be attached.
+    Pass ``name`` (single path segment); the server creates
+    ``$VOITTA_ROOT_PATH/<name>`` if missing. Sync connectors can later be
+    attached. External-path registration was removed — see commit log.
     """
 
-    path: str | None = Field(default=None, description="Absolute host path (external mode)")
-    name: str | None = Field(default=None, description="Folder name under VOITTA_ROOT_PATH (managed mode)")
+    name: str = Field(description="Folder name under VOITTA_ROOT_PATH")
     display_name: str | None = None
 
 
@@ -53,7 +50,6 @@ class FolderOut(BaseModel):
     display_name: str
     source_type: str
     enabled: bool
-    managed: bool
     created_at: int
     has_sync_source: bool = False
     # Ownership / sharing — see services/acl.py docstring.
@@ -94,7 +90,6 @@ def _to_folder_out(
         display_name=f.display_name,
         source_type=f.source_type,
         enabled=f.enabled,
-        managed=f.managed,
         created_at=f.created_at,
         has_sync_source=has_sync_source,
         owner_id=f.owner_id,
@@ -172,24 +167,8 @@ def create_folder(
     db: Session = Depends(db_session),
     user: CurrentUser = Depends(current_user),
 ) -> FolderOut:
-    if bool(body.path) == bool(body.name):
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            "Provide exactly one of: 'path' (external) or 'name' (managed under VOITTA_ROOT_PATH)",
-        )
-
-    if body.name is not None:
-        abs_path = _resolve_managed(body.name)
-        abs_path.mkdir(parents=True, exist_ok=True)
-        managed = True
-    else:
-        abs_path = Path(body.path).expanduser().resolve()
-        if not abs_path.exists() or not abs_path.is_dir():
-            raise HTTPException(
-                status.HTTP_400_BAD_REQUEST,
-                f"Path does not exist or is not a directory: {abs_path}",
-            )
-        managed = False
+    abs_path = _resolve_managed(body.name)
+    abs_path.mkdir(parents=True, exist_ok=True)
 
     existing = db.execute(
         select(Folder).where(Folder.path == str(abs_path))
@@ -203,7 +182,6 @@ def create_folder(
         path=str(abs_path),
         display_name=body.display_name or abs_path.name or str(abs_path),
         source_type="filesystem",
-        managed=managed,
         owner_id=user.id,
     )
     db.add(folder)
@@ -269,18 +247,8 @@ async def upload_file(
     db: Session = Depends(db_session),
     user: CurrentUser = Depends(current_user),
 ) -> UploadBatchOut:
-    """Upload files into a managed folder. The watcher picks them up and indexes them.
-
-    External (non-managed) folders are read-only via the API by design — write
-    files there with your usual tooling and the watcher will catch the change.
-    """
+    """Upload files into a folder. The watcher picks them up and indexes them."""
     folder = _require_owner(db, folder_id, user)
-    if not folder.managed:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            "Uploads are only allowed on managed folders (created with {'name': ...}).",
-        )
-
     folder_root = Path(folder.path).resolve()
     if rel_path is not None and len(file) != 1:
         raise HTTPException(
@@ -343,18 +311,13 @@ def mkdir(
     db: Session = Depends(db_session),
     user: CurrentUser = Depends(current_user),
 ) -> MkdirOut:
-    """Create an empty subdirectory inside a managed folder.
+    """Create an empty subdirectory inside a folder.
 
     Useful for organising uploads ahead of dropping files. Watcher won't see
     the empty directory (no file events), so the directory exists on disk
     but no DB rows are created.
     """
     folder = _require_owner(db, folder_id, user)
-    if not folder.managed:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            "Subfolders are only allowed under managed folders.",
-        )
     rel = _safe_rel_path(body.path)
     target = (Path(folder.path) / rel).resolve()
     folder_root = Path(folder.path).resolve()

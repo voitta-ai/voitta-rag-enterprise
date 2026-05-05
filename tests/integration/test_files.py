@@ -11,7 +11,7 @@ def test_get_file_returns_detail(client: TestClient, tmp_path: Path) -> None:
     src = tmp_path / "src"
     src.mkdir()
     (src / "a.txt").write_text("hello")
-    folder_id = client.post("/api/folders", json={"path": str(src)}).json()["id"]
+    folder_id = client.post("/api/folders", json={"name": src.name}).json()["id"]
     files = client.get(f"/api/folders/{folder_id}/files").json()
     file_id = files[0]["id"]
 

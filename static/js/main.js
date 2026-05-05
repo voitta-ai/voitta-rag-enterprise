@@ -443,7 +443,6 @@ function selectNode(folderId, relDir) {
 
 function updateToolbarState() {
     const folder = folders.get().find((f) => f.id === selectedFolderId);
-    const isManaged = !!(folder && folder.managed);
     const isRoot = !!folder && selectedRelDir === "";
     // Read-only = a shared folder owned by someone else. Owner-only mutations
     // (upload, mkdir, reindex, sync, remove) are disabled; viewers can still
@@ -451,15 +450,15 @@ function updateToolbarState() {
     const isOwned = !!(folder && folder.owned);
     const readOnly = !!folder && !isOwned;
 
-    $("#btn-new-subfolder").disabled = !isManaged || readOnly;
-    $("#btn-upload").disabled = !isManaged || readOnly;
+    $("#btn-new-subfolder").disabled = !folder || readOnly;
+    $("#btn-upload").disabled = !folder || readOnly;
     $("#btn-reindex").disabled = !folder || readOnly;
-    // Sync button: only at the folder root on managed folders. Hidden when
-    // the folder is non-empty AND has no sync source — sync can't be
-    // configured on an existing folder of files. When a sync source already
-    // exists, the same button reads "Config" (re-opens the same modal).
+    // Sync button: only at the folder root. Hidden when the folder is
+    // non-empty AND has no sync source — sync can't be configured on an
+    // existing folder of files. When a sync source already exists, the
+    // same button reads "Config" (re-opens the same modal).
     const syncBtn = $("#btn-sync");
-    if (!(isManaged && isRoot) || readOnly) {
+    if (!folder || !isRoot || readOnly) {
         syncBtn.hidden = true;
         syncBtn.disabled = true;
     } else {
@@ -488,7 +487,7 @@ function updateToolbarState() {
 
 async function createSubfolder() {
     const folder = folders.get().find((f) => f.id === selectedFolderId);
-    if (!folder?.managed) return;
+    if (!folder) return;
     const name = prompt("Subfolder name:");
     if (!name?.trim()) return;
     const target = selectedRelDir
@@ -528,7 +527,6 @@ function renderSidebar() {
     $("#folder-path").textContent = selectedRelDir
         ? `${folder.path}/${selectedRelDir}`
         : folder.path;
-    $("#folder-managed-badge").hidden = !folder.managed;
     $("#folder-source-badge").textContent = folder.source_type;
 
     // Subtree-scoped counts (fall back to whole folder when relDir is empty).
@@ -709,8 +707,7 @@ function renderSidebar() {
         extTbody.append(tr);
     }
 
-    const hint = $("#upload-target-hint");
-    hint.hidden = !folder.managed;
+    $("#upload-target-hint").hidden = false;
     $("#upload-target").textContent = selectedRelDir ? `/${selectedRelDir}/` : "/";
 }
 

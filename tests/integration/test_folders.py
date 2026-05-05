@@ -19,7 +19,7 @@ def test_register_folder_lists_files(client: TestClient, tmp_path: Path) -> None
     src = tmp_path / "src"
     _seed(src, {"a.txt": "alpha", "b/c.txt": "charlie", "b/d.txt": "delta"})
 
-    r = client.post("/api/folders", json={"path": str(src)})
+    r = client.post("/api/folders", json={"name": src.name})
     assert r.status_code == 201, r.text
     folder = r.json()
     assert folder["display_name"] == "src"
@@ -46,7 +46,7 @@ def test_ignored_patterns_excluded(client: TestClient, tmp_path: Path) -> None:
         },
     )
 
-    r = client.post("/api/folders", json={"path": str(src)})
+    r = client.post("/api/folders", json={"name": src.name})
     folder_id = r.json()["id"]
 
     files = client.get(f"/api/folders/{folder_id}/files").json()
@@ -61,7 +61,7 @@ def test_sidecar_source_urls_surface(client: TestClient, tmp_path: Path) -> None
         json.dumps({"spec.md": "https://example.com/docs/spec"})
     )
 
-    r = client.post("/api/folders", json={"path": str(src)})
+    r = client.post("/api/folders", json={"name": src.name})
     folder_id = r.json()["id"]
 
     files = client.get(f"/api/folders/{folder_id}/files").json()
@@ -71,17 +71,11 @@ def test_sidecar_source_urls_surface(client: TestClient, tmp_path: Path) -> None
     assert ".voitta_sources.json" not in by_path
 
 
-def test_register_nonexistent_path_returns_400(client: TestClient, tmp_path: Path) -> None:
-    bogus = tmp_path / "does-not-exist"
-    r = client.post("/api/folders", json={"path": str(bogus)})
-    assert r.status_code == 400
-
-
 def test_duplicate_registration_returns_409(client: TestClient, tmp_path: Path) -> None:
     src = tmp_path / "src"
     src.mkdir()
-    assert client.post("/api/folders", json={"path": str(src)}).status_code == 201
-    assert client.post("/api/folders", json={"path": str(src)}).status_code == 409
+    assert client.post("/api/folders", json={"name": src.name}).status_code == 201
+    assert client.post("/api/folders", json={"name": src.name}).status_code == 409
 
 
 def test_list_and_delete_folder(client: TestClient, tmp_path: Path) -> None:
@@ -89,8 +83,8 @@ def test_list_and_delete_folder(client: TestClient, tmp_path: Path) -> None:
     a.mkdir()
     b = tmp_path / "b"
     b.mkdir()
-    client.post("/api/folders", json={"path": str(a)})
-    bid = client.post("/api/folders", json={"path": str(b)}).json()["id"]
+    client.post("/api/folders", json={"name": a.name})
+    bid = client.post("/api/folders", json={"name": b.name}).json()["id"]
 
     folders = client.get("/api/folders").json()
     assert len(folders) == 2
@@ -113,7 +107,7 @@ def test_restart_picks_up_new_files_and_marks_vanished(
     """Re-creating the app simulates a restart; the lifespan scan reconciles."""
     src = tmp_path / "src"
     _seed(src, {"a.txt": "a", "b.txt": "b"})
-    folder_id = client.post("/api/folders", json={"path": str(src)}).json()["id"]
+    folder_id = client.post("/api/folders", json={"name": src.name}).json()["id"]
     assert {f["rel_path"] for f in client.get(f"/api/folders/{folder_id}/files").json()} == {
         "a.txt",
         "b.txt",
@@ -138,7 +132,7 @@ def test_reindex_folder_resets_files_and_enqueues_extracts(
 ) -> None:
     src = tmp_path / "src"
     _seed(src, {"a.txt": "a", "b/c.txt": "c", "b/d.txt": "d", "e.txt": "e"})
-    folder_id = client.post("/api/folders", json={"path": str(src)}).json()["id"]
+    folder_id = client.post("/api/folders", json={"name": src.name}).json()["id"]
 
     # Pretend everything has already been indexed once: SHA set, state=indexed,
     # plus some chunks attached so we can verify reindex wipes them.
@@ -232,7 +226,7 @@ def test_reindex_folder_resets_files_and_enqueues_extracts(
 def test_reindex_subdir_scopes_to_subtree(client: TestClient, tmp_path: Path) -> None:
     src = tmp_path / "src"
     _seed(src, {"top.txt": "t", "b/c.txt": "c", "b/d.txt": "d", "z/x.txt": "x"})
-    folder_id = client.post("/api/folders", json={"path": str(src)}).json()["id"]
+    folder_id = client.post("/api/folders", json={"name": src.name}).json()["id"]
 
     from sqlalchemy import select
 
@@ -291,7 +285,7 @@ def test_reindex_subdir_scopes_to_subtree(client: TestClient, tmp_path: Path) ->
 def test_reindex_rejects_path_traversal(client: TestClient, tmp_path: Path) -> None:
     src = tmp_path / "src"
     _seed(src, {"a.txt": "a"})
-    folder_id = client.post("/api/folders", json={"path": str(src)}).json()["id"]
+    folder_id = client.post("/api/folders", json={"name": src.name}).json()["id"]
 
     r = client.post(f"/api/folders/{folder_id}/reindex", json={"rel_dir": "../etc"})
     assert r.status_code == 400
@@ -307,7 +301,7 @@ def test_sync_get_returns_null_when_unconfigured(
 ) -> None:
     src = tmp_path / "src"
     src.mkdir()
-    folder_id = client.post("/api/folders", json={"path": str(src)}).json()["id"]
+    folder_id = client.post("/api/folders", json={"name": src.name}).json()["id"]
     r = client.get(f"/api/folders/{folder_id}/sync")
     assert r.status_code == 200
     assert r.json() is None
@@ -316,7 +310,7 @@ def test_sync_get_returns_null_when_unconfigured(
 def test_sync_put_rejects_non_empty_folder(client: TestClient, tmp_path: Path) -> None:
     src = tmp_path / "src"
     _seed(src, {"already.txt": "existing"})
-    folder_id = client.post("/api/folders", json={"path": str(src)}).json()["id"]
+    folder_id = client.post("/api/folders", json={"name": src.name}).json()["id"]
 
     body = {
         "source_type": "github",
@@ -334,7 +328,7 @@ def test_sync_put_rejects_non_empty_folder(client: TestClient, tmp_path: Path) -
 def test_sync_put_then_get_round_trips(client: TestClient, tmp_path: Path) -> None:
     src = tmp_path / "src"
     src.mkdir()
-    folder_id = client.post("/api/folders", json={"path": str(src)}).json()["id"]
+    folder_id = client.post("/api/folders", json={"name": src.name}).json()["id"]
 
     body = {
         "source_type": "github",
@@ -372,7 +366,7 @@ def test_sync_put_rejects_no_branch_selection(
 ) -> None:
     src = tmp_path / "src"
     src.mkdir()
-    folder_id = client.post("/api/folders", json={"path": str(src)}).json()["id"]
+    folder_id = client.post("/api/folders", json={"name": src.name}).json()["id"]
 
     r = client.put(
         f"/api/folders/{folder_id}/sync",
@@ -396,7 +390,7 @@ def test_sync_reconfig_allowed_after_files_present(
     the folder."""
     src = tmp_path / "src"
     src.mkdir()
-    folder_id = client.post("/api/folders", json={"path": str(src)}).json()["id"]
+    folder_id = client.post("/api/folders", json={"name": src.name}).json()["id"]
 
     body = {
         "source_type": "github",
@@ -418,7 +412,7 @@ def test_sync_reconfig_allowed_after_files_present(
 def test_sync_trigger_enqueues_job(client: TestClient, tmp_path: Path) -> None:
     src = tmp_path / "src"
     src.mkdir()
-    folder_id = client.post("/api/folders", json={"path": str(src)}).json()["id"]
+    folder_id = client.post("/api/folders", json={"name": src.name}).json()["id"]
 
     client.put(
         f"/api/folders/{folder_id}/sync",
@@ -444,7 +438,7 @@ def test_sync_trigger_without_source_returns_400(
 ) -> None:
     src = tmp_path / "src"
     src.mkdir()
-    folder_id = client.post("/api/folders", json={"path": str(src)}).json()["id"]
+    folder_id = client.post("/api/folders", json={"name": src.name}).json()["id"]
     r = client.post(f"/api/folders/{folder_id}/sync/trigger")
     assert r.status_code == 400
 
@@ -454,7 +448,7 @@ def test_folder_listing_exposes_has_sync_source_flag(
 ) -> None:
     src = tmp_path / "src"
     src.mkdir()
-    folder_id = client.post("/api/folders", json={"path": str(src)}).json()["id"]
+    folder_id = client.post("/api/folders", json={"name": src.name}).json()["id"]
 
     folders = client.get("/api/folders").json()
     me = next(f for f in folders if f["id"] == folder_id)
@@ -478,7 +472,7 @@ def test_folder_listing_exposes_has_sync_source_flag(
 def test_sync_delete_removes_source(client: TestClient, tmp_path: Path) -> None:
     src = tmp_path / "src"
     src.mkdir()
-    folder_id = client.post("/api/folders", json={"path": str(src)}).json()["id"]
+    folder_id = client.post("/api/folders", json={"name": src.name}).json()["id"]
     client.put(
         f"/api/folders/{folder_id}/sync",
         json={

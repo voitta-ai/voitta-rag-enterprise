@@ -43,7 +43,7 @@ def test_ws_receives_folder_added_event(client: TestClient, tmp_path: Path) -> N
         ws.send_json({"type": "subscribe", "topics": ["folders"]})
         ws.receive_json()  # subscribed
 
-        r = client.post("/api/folders", json={"path": str(src)})
+        r = client.post("/api/folders", json={"name": src.name})
         assert r.status_code == 201
 
         event = ws.receive_json()
@@ -54,7 +54,7 @@ def test_ws_receives_folder_added_event(client: TestClient, tmp_path: Path) -> N
 def test_ws_receives_folder_removed_event(client: TestClient, tmp_path: Path) -> None:
     src = tmp_path / "src"
     src.mkdir()
-    fid = client.post("/api/folders", json={"path": str(src)}).json()["id"]
+    fid = client.post("/api/folders", json={"name": src.name}).json()["id"]
     with client.websocket_connect("/ws") as ws:
         ws.send_json({"type": "subscribe", "topics": ["folders"]})
         ws.receive_json()

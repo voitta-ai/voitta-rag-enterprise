@@ -384,7 +384,6 @@ def _publish_folder_changed(folder: Folder, *, has_sync_source: bool) -> None:
                 "display_name": folder.display_name,
                 "source_type": folder.source_type,
                 "enabled": folder.enabled,
-                "managed": folder.managed,
                 "created_at": folder.created_at,
                 "has_sync_source": has_sync_source,
             },

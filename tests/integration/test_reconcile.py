@@ -43,7 +43,7 @@ def _seed_indexed_folder(
     for rel, content in layout.items():
         (root / rel).parent.mkdir(parents=True, exist_ok=True)
         (root / rel).write_text(content)
-    r = client.post("/api/folders", json={"path": str(root)})
+    r = client.post("/api/folders", json={"name": root.name})
     assert r.status_code == 201, r.text
     fid = r.json()["id"]
     init_db()
@@ -85,7 +85,7 @@ def test_folder_health_empty_when_nothing_indexed(env: None, tmp_path: Path) -> 
     src = tmp_path / "empty"
     src.mkdir()
     with TestClient(app) as client:
-        r = client.post("/api/folders", json={"path": str(src)})
+        r = client.post("/api/folders", json={"name": src.name})
         assert r.status_code == 201
         fid = r.json()["id"]
         with session_scope() as s:
