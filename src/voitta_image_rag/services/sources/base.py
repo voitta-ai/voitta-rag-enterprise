@@ -5,7 +5,7 @@ writes it into a local directory under a registered folder. The watcher then
 picks up the new/changed files and the indexing pipeline takes over from there.
 
 Connectors **never** write directly to Qdrant or SQLite. This keeps the
-downstream pipeline source-agnostic. See ARCHITECTURE.md §10.
+downstream pipeline source-agnostic.
 """
 
 from __future__ import annotations

@@ -1,6 +1,11 @@
 """End-to-end ``extract`` job handler.
 
-See ARCHITECTURE.md §4.3 (reindex strategy) and §4.5 (image-chunk linkage).
+Reindex is whole-file: any change resets ``state='pending'`` and re-runs
+the full extract → chunk → embed pipeline against the new bytes. Image
+↔ chunk linkage is built here too: every extracted image carries an
+anchor chunk (the chunk straddling its position in the markdown);
+chunks within ``chunk_image_link_radius`` get a ``nearby_image`` link
+with chunk-index distance as the score.
 """
 
 from __future__ import annotations

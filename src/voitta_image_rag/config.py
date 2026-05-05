@@ -1,6 +1,7 @@
 """Application settings loaded from the environment.
 
-Mirrors ARCHITECTURE.md §11. All env vars carry the ``VOITTA_`` prefix.
+All env vars carry the ``VOITTA_`` prefix; see ``.env.example`` for the
+full list.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ def _default_data_dir() -> Path:
 
 
 class Settings(BaseSettings):
-    """Environment-driven settings. See ARCHITECTURE.md §11."""
+    """Environment-driven settings."""
 
     model_config = SettingsConfigDict(
         env_prefix="VOITTA_",
@@ -120,7 +121,7 @@ class Settings(BaseSettings):
     # without invoking MinerU. Used by the test suite to keep runs fast.
     use_fake_pdf_parser: bool = False
 
-    # Auth — see ARCHITECTURE.md §9
+    # Auth
     single_user: bool = False
     dev_user: str | None = None
     users_file: Path = Path("users.txt")

@@ -1,4 +1,8 @@
-"""Parser base types. See ARCHITECTURE.md §4.4."""
+"""Parser base types: ``Parser`` ABC + ``ParseResult`` / ``ExtractedImage``.
+
+Concrete parsers in this package are dispatched by file extension via
+``registry.get_default_registry()``.
+"""
 
 from __future__ import annotations
 

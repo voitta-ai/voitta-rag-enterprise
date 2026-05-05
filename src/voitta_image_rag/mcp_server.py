@@ -89,7 +89,7 @@ def _resolved_user_id() -> int | None:
     """Resolve the caller's user id, creating the user row on first call.
 
     Returns ``None`` when single-user mode is on — the search-time ACL filter
-    becomes a no-op (per ARCHITECTURE.md §9).
+    becomes a no-op.
     """
     if get_settings().single_user:
         return None

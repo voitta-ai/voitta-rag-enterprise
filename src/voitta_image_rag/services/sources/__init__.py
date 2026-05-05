@@ -1,8 +1,8 @@
 """Sync connectors.
 
 Connectors write into the watched filesystem; they never bypass the pipeline.
-See ARCHITECTURE.md §10. v1 ships only the base contract + registry; concrete
-connectors (Google Drive, GitHub, …) land in v2.
+The watcher then picks up the new/changed files and the indexing pipeline
+takes over from there.
 """
 
 from .base import SyncConnector, SyncResult

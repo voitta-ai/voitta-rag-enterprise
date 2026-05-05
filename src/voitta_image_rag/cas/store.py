@@ -1,6 +1,6 @@
 """Content-addressable storage for files and images.
 
-Two namespaces (see ARCHITECTURE.md §3.1):
+Two namespaces:
 
 - ``cas/files/<file_sha>/`` — directory holding ``text.md``, ``manifest.json``, ...
 - ``cas/images/<image_sha>.bin`` — flat file with raw image bytes.

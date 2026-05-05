@@ -1,6 +1,6 @@
 """ACL: user resolution + folder/file authorisation.
 
-Modes (see ARCHITECTURE.md §9):
+Modes:
 
 - ``VOITTA_SINGLE_USER=true`` → every request maps to ``root@localhost``.
 - ``VOITTA_DEV_USER=<email>`` → every request maps to that email.

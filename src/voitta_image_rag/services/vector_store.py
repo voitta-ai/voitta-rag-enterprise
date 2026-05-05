@@ -1,6 +1,13 @@
 """Qdrant adapter — collection bootstrap, upserts, search.
 
-See ARCHITECTURE.md §3.4 for the named-vector layout and payload schema.
+Two collections:
+
+- ``chunks`` — named vectors ``dense`` (e5-base-v2) and ``sparse`` (BM25),
+  RRF-fused at query time.
+- ``images`` — single SigLIP-2 vector, searchable by text or image.
+
+Payload carries ``file_id`` / ``folder_id`` / ``chunk_index``
+(or ``image_index``) plus ``allowed_users`` for the search-time ACL filter.
 """
 
 from __future__ import annotations
