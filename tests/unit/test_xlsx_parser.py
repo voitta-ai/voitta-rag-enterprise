@@ -6,7 +6,7 @@ from pathlib import Path
 
 from openpyxl import Workbook
 
-from voitta_image_rag.services.parsers.xlsx_parser import XlsxParser
+from voitta_rag_enterprise.services.parsers.xlsx_parser import XlsxParser
 
 
 def _build_workbook(tmp_path: Path) -> Path:

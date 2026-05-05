@@ -11,10 +11,10 @@ from pathlib import Path
 from PIL import Image as PILImage
 from sqlalchemy import select
 
-from voitta_image_rag.cas import store as cas_store
-from voitta_image_rag.db.database import init_db, session_scope
-from voitta_image_rag.db.models import Chunk, File, Folder, Image, User
-from voitta_image_rag.services.indexing import (
+from voitta_rag_enterprise.cas import store as cas_store
+from voitta_rag_enterprise.db.database import init_db, session_scope
+from voitta_rag_enterprise.db.models import Chunk, File, Folder, Image, User
+from voitta_rag_enterprise.services.indexing import (
     run_embed_image,
     run_embed_text,
     run_extract,
@@ -139,7 +139,7 @@ def test_reembed_stale_dry_run_reports(
 
     _seed_full(tmp_path / "src", {"a.md": "alpha beta gamma"})
 
-    from voitta_image_rag.config import reset_settings_cache
+    from voitta_rag_enterprise.config import reset_settings_cache
 
     monkeypatch.setenv("VOITTA_DENSE_VERSION", "e5-base-v2@2")  # bump
     reset_settings_cache()

@@ -10,9 +10,9 @@ from fastapi.testclient import TestClient
 from PIL import Image as PILImage
 from sqlalchemy import select
 
-from voitta_image_rag.db.database import init_db, session_scope
-from voitta_image_rag.db.models import Image
-from voitta_image_rag.services.indexing import (
+from voitta_rag_enterprise.db.database import init_db, session_scope
+from voitta_rag_enterprise.db.models import Image
+from voitta_rag_enterprise.services.indexing import (
     run_embed_image,
     run_embed_text,
     run_extract,
@@ -40,7 +40,7 @@ def _seed_and_index(client: TestClient, folder_root: Path, files: dict[str, byte
     init_db()
     # Drive the pipeline manually since the test fixture disables background workers.
     with session_scope() as s:
-        from voitta_image_rag.db.models import File
+        from voitta_rag_enterprise.db.models import File
 
         file_ids = [
             f.id for f in s.execute(select(File).where(File.folder_id == folder_id)).scalars()
@@ -103,7 +103,7 @@ def test_search_folder_filter_excludes_other_folder(client: TestClient, tmp_path
 def test_search_unauthenticated_returns_401(env: None) -> None:
     from fastapi.testclient import TestClient
 
-    from voitta_image_rag.main import create_app
+    from voitta_rag_enterprise.main import create_app
 
     app = create_app()
     with TestClient(app) as anon:

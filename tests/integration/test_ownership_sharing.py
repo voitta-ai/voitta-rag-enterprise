@@ -13,13 +13,13 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from voitta_image_rag.db.database import init_db, session_scope
-from voitta_image_rag.db.models import (
+from voitta_rag_enterprise.db.database import init_db, session_scope
+from voitta_rag_enterprise.db.models import (
     File,
     Folder,
     FolderUserSettings,
 )
-from voitta_image_rag.services.acl import (
+from voitta_rag_enterprise.services.acl import (
     folder_active_for_user,
     is_folder_owner,
     mcp_visible_folder_ids,
@@ -38,7 +38,7 @@ def _seed(root: Path, layout: dict[str, str]) -> None:
 
 
 def _app():
-    from voitta_image_rag.main import create_app
+    from voitta_rag_enterprise.main import create_app
 
     return create_app()
 
@@ -205,8 +205,8 @@ def test_active_toggle_per_user_doesnt_affect_others(
     env: None, tmp_path: Path
 ) -> None:
     """Bob mutes a folder he's been granted; alice's view is unchanged."""
-    from voitta_image_rag.db.models import User as _User
-    from voitta_image_rag.services.acl import grant_folder
+    from voitta_rag_enterprise.db.models import User as _User
+    from voitta_rag_enterprise.services.acl import grant_folder
 
     src = tmp_path / "alice"
     _seed(src, {"a.md": "alpha"})
@@ -246,7 +246,7 @@ def test_search_respects_visible_folder_set(
 ) -> None:
     """Bob searches for content that exists in alice's private folder; expect
     zero hits. Then alice shares; bob's search now returns it."""
-    from voitta_image_rag.services.indexing import (
+    from voitta_rag_enterprise.services.indexing import (
         run_embed_text,
         run_extract,
     )
@@ -295,7 +295,7 @@ def test_caller_supplied_folder_ids_intersect_with_visible(
     """If bob asks to search alice's folder explicitly via folder_ids, the
     server must intersect with bob's visible set — not honour the request
     naively. Otherwise folder_ids would be a privilege-escalation backdoor."""
-    from voitta_image_rag.services.indexing import (
+    from voitta_rag_enterprise.services.indexing import (
         run_embed_text,
         run_extract,
     )
@@ -338,7 +338,7 @@ def test_non_owner_cannot_configure_sync_on_shared_folder(
     """Shared folder is read-only for non-owners — sync configuration must
     not be reachable. Otherwise a viewer could repoint the sync source."""
     monkeypatch.setenv("VOITTA_ROOT_PATH", str(tmp_path / "managed-root"))
-    from voitta_image_rag.config import reset_settings_cache
+    from voitta_rag_enterprise.config import reset_settings_cache
 
     reset_settings_cache()
 

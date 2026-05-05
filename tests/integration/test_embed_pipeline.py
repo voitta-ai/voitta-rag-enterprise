@@ -13,11 +13,11 @@ from pathlib import Path
 from PIL import Image as PILImage
 from sqlalchemy import select
 
-from voitta_image_rag.cas import store as cas_store
-from voitta_image_rag.db.database import init_db, session_scope
-from voitta_image_rag.db.models import File, Folder, Image
-from voitta_image_rag.services import vector_store
-from voitta_image_rag.services.indexing import (
+from voitta_rag_enterprise.cas import store as cas_store
+from voitta_rag_enterprise.db.database import init_db, session_scope
+from voitta_rag_enterprise.db.models import File, Folder, Image
+from voitta_rag_enterprise.services import vector_store
+from voitta_rag_enterprise.services.indexing import (
     run_embed_image,
     run_embed_text,
     run_extract,
@@ -139,7 +139,7 @@ def test_search_chunks_returns_hit_for_indexed_text(env: None, tmp_path: Path) -
     asyncio.run(run_extract({"file_id": file_id}))
     asyncio.run(run_embed_text({"file_id": file_id}))
 
-    from voitta_image_rag.services.embedding import (
+    from voitta_rag_enterprise.services.embedding import (
         get_sparse_embedder,
         get_text_embedder,
     )
@@ -171,7 +171,7 @@ def test_search_images_returns_same_image_top1(env: None, tmp_path: Path) -> Non
         img_id = s.execute(select(Image)).scalar_one().id
     asyncio.run(run_embed_image({"image_id": img_id}))
 
-    from voitta_image_rag.services.embedding import get_image_embedder
+    from voitta_rag_enterprise.services.embedding import get_image_embedder
 
     image_emb = get_image_embedder()
     vec = image_emb.embed_image(png)  # query with the same bytes
@@ -207,7 +207,7 @@ def test_pending_embeds_decrement_only_after_both_jobs(env: None, tmp_path: Path
 
     # Second decrement (simulate embed_text completing on a chunkless file
     # by calling the helper directly).
-    from voitta_image_rag.services.indexing import _decrement_pending_embeds
+    from voitta_rag_enterprise.services.indexing import _decrement_pending_embeds
 
     _decrement_pending_embeds(file_id)
     with session_scope() as s:

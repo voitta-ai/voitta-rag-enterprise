@@ -5,11 +5,11 @@ from __future__ import annotations
 import pytest
 from fastapi import HTTPException
 
-from voitta_image_rag.services.acl import ROOT_EMAIL, resolve_user_email
+from voitta_rag_enterprise.services.acl import ROOT_EMAIL, resolve_user_email
 
 
 def _reset() -> None:
-    from voitta_image_rag.config import reset_settings_cache
+    from voitta_rag_enterprise.config import reset_settings_cache
 
     reset_settings_cache()
 

@@ -14,9 +14,9 @@ import argparse
 import logging
 from pathlib import Path
 
-from voitta_image_rag.config import get_settings
-from voitta_image_rag.db.database import init_db, session_scope
-from voitta_image_rag.services.acl import seed_users_from_file
+from voitta_rag_enterprise.config import get_settings
+from voitta_rag_enterprise.db.database import init_db, session_scope
+from voitta_rag_enterprise.services.acl import seed_users_from_file
 
 logger = logging.getLogger(__name__)
 

@@ -17,10 +17,10 @@ from fastapi.testclient import TestClient
 from PIL import Image as PILImage
 from sqlalchemy import select
 
-from voitta_image_rag.db.database import init_db, session_scope
-from voitta_image_rag.db.models import Chunk, File, Image
-from voitta_image_rag.services import events as events_mod
-from voitta_image_rag.services.indexing import (
+from voitta_rag_enterprise.db.database import init_db, session_scope
+from voitta_rag_enterprise.db.models import Chunk, File, Image
+from voitta_rag_enterprise.services import events as events_mod
+from voitta_rag_enterprise.services.indexing import (
     run_embed_image,
     run_embed_text,
     run_extract,
@@ -85,8 +85,8 @@ def test_reindex_bulk_wipe_clears_chunks_and_images(env: None, tmp_path: Path) -
     be gone (the worker re-extracts and rewrites them downstream; we don't
     drive that here). Catches any path where the bulk SQL DELETE would
     miss rows because of an in-memory ORM state mismatch."""
-    from voitta_image_rag.main import create_app
-    from voitta_image_rag.services import vector_store
+    from voitta_rag_enterprise.main import create_app
+    from voitta_rag_enterprise.services import vector_store
 
     app = create_app()
     with TestClient(app) as client:
@@ -144,7 +144,7 @@ def test_reindex_emits_progress_events_in_phase_order(
     of each phase, mid-phase per chunk, and a final phase=done. The SPA
     relies on the order (cancelling → wiping → queueing → done) so the
     "Wiping…" pill flips through the right verbs."""
-    from voitta_image_rag.main import create_app
+    from voitta_rag_enterprise.main import create_app
 
     app = create_app()
     with TestClient(app) as client:
@@ -203,8 +203,8 @@ def test_reindex_progress_chunks_size_param(
     """With a small chunk size, we should see multiple ``wiping`` events —
     not just the start + final one. Confirms the per-chunk progress emit
     actually fires inside the loop."""
-    from voitta_image_rag.main import create_app
-    from voitta_image_rag.services import indexing
+    from voitta_rag_enterprise.main import create_app
+    from voitta_rag_enterprise.services import indexing
 
     monkeypatch.setattr(indexing, "_REINDEX_PROGRESS_CHUNK", 2)
 

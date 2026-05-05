@@ -1649,14 +1649,14 @@ $("#key-create").addEventListener("click", async () => {
     const mcpUrl = `${window.location.origin}/mcp`;
     const claudeDesktop = JSON.stringify({
         mcpServers: {
-            "voitta-image-rag": {
+            "voitta-rag-enterprise": {
                 type: "http",
                 url: mcpUrl,
                 headers: { Authorization: `Bearer ${created.token}` },
             },
         },
     }, null, 2);
-    const cli = `claude mcp add --transport http voitta-image-rag ${mcpUrl} \\\n  --header "Authorization: Bearer ${created.token}"`;
+    const cli = `claude mcp add --transport http voitta-rag-enterprise ${mcpUrl} \\\n  --header "Authorization: Bearer ${created.token}"`;
     $("#key-reveal-claude").textContent = claudeDesktop;
     $("#key-reveal-cli").textContent = cli;
     $("#key-reveal").hidden = false;

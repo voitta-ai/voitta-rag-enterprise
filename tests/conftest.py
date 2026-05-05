@@ -18,10 +18,10 @@ def env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None]:
     Strips ``VOITTA_*`` vars, points ``VOITTA_DATA_DIR`` at a per-test tmp dir,
     and clears the Settings + engine caches so the new env takes effect.
     """
-    from voitta_image_rag.config import reset_settings_cache
-    from voitta_image_rag.db.database import reset_engine_cache
-    from voitta_image_rag.services.embedding import reset_embedder_caches
-    from voitta_image_rag.services.vector_store import reset_client_cache
+    from voitta_rag_enterprise.config import reset_settings_cache
+    from voitta_rag_enterprise.db.database import reset_engine_cache
+    from voitta_rag_enterprise.services.embedding import reset_embedder_caches
+    from voitta_rag_enterprise.services.vector_store import reset_client_cache
 
     for k in list(os.environ):
         if k.startswith("VOITTA_"):
@@ -45,7 +45,7 @@ def env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None]:
 @pytest.fixture
 def auth_env(env: None, monkeypatch: pytest.MonkeyPatch) -> None:
     """``env`` plus ``VOITTA_DEV_USER`` so authenticated routes accept requests."""
-    from voitta_image_rag.config import reset_settings_cache
+    from voitta_rag_enterprise.config import reset_settings_cache
 
     monkeypatch.setenv("VOITTA_DEV_USER", "test@localhost")
     reset_settings_cache()
@@ -53,7 +53,7 @@ def auth_env(env: None, monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def app(auth_env: None) -> FastAPI:
-    from voitta_image_rag.main import create_app
+    from voitta_rag_enterprise.main import create_app
 
     return create_app()
 
@@ -80,9 +80,9 @@ def auth_as(app: FastAPI, email: str) -> int:
     OAuth flow in tests is too heavy, so we patch the dependency directly.
     This is the standard FastAPI testing pattern.
     """
-    from voitta_image_rag.api.deps import current_user
-    from voitta_image_rag.db.database import session_scope
-    from voitta_image_rag.services.acl import CurrentUser, get_or_create_user
+    from voitta_rag_enterprise.api.deps import current_user
+    from voitta_rag_enterprise.db.database import session_scope
+    from voitta_rag_enterprise.services.acl import CurrentUser, get_or_create_user
 
     with session_scope() as s:
         user = get_or_create_user(s, email)

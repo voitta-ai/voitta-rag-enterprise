@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from voitta_image_rag.services.chunking import (
+from voitta_rag_enterprise.services.chunking import (
     ChunkInfo,
     anchor_chunk_for_position,
     chunk_markdown,

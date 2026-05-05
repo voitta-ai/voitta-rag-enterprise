@@ -18,7 +18,7 @@ must carry a valid bearer.
 
 Run standalone::
 
-    python -m voitta_image_rag.mcp_server
+    python -m voitta_rag_enterprise.mcp_server
 """
 
 from __future__ import annotations
@@ -63,7 +63,7 @@ logger = logging.getLogger(__name__)
 
 _current_user: ContextVar[str | None] = ContextVar("voitta_mcp_user", default=None)
 
-mcp = FastMCP("voitta-image-rag")
+mcp = FastMCP("voitta-rag-enterprise")
 
 
 def _resolved_user() -> str:
@@ -528,7 +528,7 @@ def _unauthorized(detail: str) -> JSONResponse:
     return JSONResponse(
         {"error": "unauthorized", "detail": detail},
         status_code=401,
-        headers={"WWW-Authenticate": 'Bearer realm="voitta-image-rag"'},
+        headers={"WWW-Authenticate": 'Bearer realm="voitta-rag-enterprise"'},
     )
 
 

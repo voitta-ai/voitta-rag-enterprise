@@ -16,7 +16,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 def _default_data_dir() -> Path:
-    return Path(os.path.expanduser("~/.voitta-image-rag"))
+    return Path(os.path.expanduser("~/.voitta-rag-enterprise"))
 
 
 class Settings(BaseSettings):

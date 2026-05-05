@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from voitta_image_rag.cas import store
-from voitta_image_rag.db.database import init_db, session_scope
-from voitta_image_rag.db.models import CasRef
+from voitta_rag_enterprise.cas import store
+from voitta_rag_enterprise.db.database import init_db, session_scope
+from voitta_rag_enterprise.db.models import CasRef
 
 
 def test_hash_bytes_is_sha256() -> None:
@@ -109,7 +109,7 @@ def test_remove_blob_image(env: None) -> None:
 
 
 def test_cas_paths_under_data_dir(env: None) -> None:
-    from voitta_image_rag.config import get_settings
+    from voitta_rag_enterprise.config import get_settings
 
     settings = get_settings()
     assert store.files_dir() == settings.data_dir / "cas" / "files"

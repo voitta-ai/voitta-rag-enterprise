@@ -91,7 +91,7 @@ def log_startup_warnings(db: Session) -> None:
     """Run during app lifespan startup; emit one WARNING per out-of-sync folder.
 
     Intentionally non-fatal — the app still boots and serves what it can.
-    Visibility lives in ``~/.voitta-image-rag/logs/app.log`` and on the SPA
+    Visibility lives in ``$VOITTA_DATA_DIR/logs/app.log`` and on the SPA
     folder-detail panel via the ``index_health`` field on ``GET /folders/{id}/stats``.
     """
     out_of_sync = [h for h in all_folder_health(db) if h.out_of_sync]

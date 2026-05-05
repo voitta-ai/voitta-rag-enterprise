@@ -7,14 +7,14 @@ import hashlib
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from voitta_image_rag.db.database import session_scope
-from voitta_image_rag.db.models import ApiKey
+from voitta_rag_enterprise.db.database import session_scope
+from voitta_rag_enterprise.db.models import ApiKey
 
 from ..conftest import auth_as
 
 
 def _app():
-    from voitta_image_rag.main import create_app
+    from voitta_rag_enterprise.main import create_app
 
     return create_app()
 
@@ -87,7 +87,7 @@ def test_delete_only_owner_can_delete(env: None) -> None:
 def test_verify_token_round_trip_bumps_last_used_at(env: None) -> None:
     """The plaintext token from POST works as the lookup key, and a successful
     verify advances ``last_used_at`` so the UI can show usage."""
-    from voitta_image_rag.api.routes.auth import verify_token
+    from voitta_rag_enterprise.api.routes.auth import verify_token
 
     app = _app()
     auth_as(app, "alice@x")

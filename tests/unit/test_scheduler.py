@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import time
 
-from voitta_image_rag.db.database import init_db, session_scope
-from voitta_image_rag.db.models import Folder, FolderSyncSource, Job
-from voitta_image_rag.services.scheduler import _tick_once
+from voitta_rag_enterprise.db.database import init_db, session_scope
+from voitta_rag_enterprise.db.models import Folder, FolderSyncSource, Job
+from voitta_rag_enterprise.services.scheduler import _tick_once
 
 
 def _make_folder(s, name: str) -> int:

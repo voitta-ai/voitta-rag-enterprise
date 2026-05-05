@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from voitta_image_rag.db.database import init_db, session_scope
-from voitta_image_rag.db.models import Folder, FolderAcl, User
-from voitta_image_rag.services.acl import (
+from voitta_rag_enterprise.db.database import init_db, session_scope
+from voitta_rag_enterprise.db.models import Folder, FolderAcl, User
+from voitta_rag_enterprise.services.acl import (
     allowed_user_ids_for_file,
     folder_user_ids,
     grant_folder,
@@ -105,7 +105,7 @@ def test_folder_user_ids_returns_grant_set(env: None) -> None:
 
 def test_allowed_user_ids_for_file_inherits_from_folder(env: None) -> None:
     init_db()
-    from voitta_image_rag.db.models import File
+    from voitta_rag_enterprise.db.models import File
 
     with session_scope() as s:
         fid = _make_folder(s, "/p", "p")

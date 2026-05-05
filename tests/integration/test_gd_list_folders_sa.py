@@ -15,15 +15,15 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from voitta_image_rag.db.database import session_scope
-from voitta_image_rag.db.models import FolderSyncSource
-from voitta_image_rag.services.sync import google_drive
+from voitta_rag_enterprise.db.database import session_scope
+from voitta_rag_enterprise.db.models import FolderSyncSource
+from voitta_rag_enterprise.services.sync import google_drive
 
 from ..conftest import auth_as
 
 
 def _app():
-    from voitta_image_rag.main import create_app
+    from voitta_rag_enterprise.main import create_app
 
     return create_app()
 
@@ -133,7 +133,7 @@ def test_endpoint_accepts_sa_only(env: None, tmp_path: Path) -> None:
         with patch.object(google_drive, "list_root_folders", fake_list):
             # The route imports list_root_folders by alias at module load,
             # so patch the route's binding too.
-            from voitta_image_rag.api.routes import sync as sync_route
+            from voitta_rag_enterprise.api.routes import sync as sync_route
 
             with patch.object(sync_route, "gd_list_root_folders", fake_list):
                 r = client.get(f"/api/folders/{fid}/sync/google-drive/folders")
@@ -190,7 +190,7 @@ def test_endpoint_surfaces_owner_and_dates(env: None, tmp_path: Path) -> None:
                 "shared_drives": [],
             }
 
-        from voitta_image_rag.api.routes import sync as sync_route
+        from voitta_rag_enterprise.api.routes import sync as sync_route
 
         with patch.object(sync_route, "gd_list_root_folders", fake_list):
             r = client.get(f"/api/folders/{fid}/sync/google-drive/folders")

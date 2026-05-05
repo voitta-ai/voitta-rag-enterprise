@@ -1,6 +1,6 @@
 # Licensing
 
-`voitta-image-rag` is dual-licensed.
+`Voitta RAG Enterprise` is dual-licensed.
 
 ## Open source: AGPL-3.0-or-later
 
@@ -20,7 +20,7 @@ non-proprietary products, and contributing back to the project.
 
 ## Commercial license
 
-For organisations that want to use `voitta-image-rag` without the AGPL-3
+For organisations that want to use `Voitta RAG Enterprise` without the AGPL-3
 obligations — typically because they need to embed it in a proprietary
 product, or run a modified hosted version without publishing modifications —
 a separate commercial license is available.
@@ -43,5 +43,5 @@ license, which is what makes the dual-licensing model possible.
 
 ## Trademark
 
-"Voitta" and "voitta-image-rag" are trademarks of Voitta AI. The AGPL-3
+"Voitta" and "Voitta RAG Enterprise" are trademarks of Voitta AI. The AGPL-3
 license covers the code, not the name. Forks must rename.

@@ -7,10 +7,10 @@ from pathlib import Path
 
 from sqlalchemy import select
 
-from voitta_image_rag.db.database import init_db, session_scope
-from voitta_image_rag.db.models import File, Folder, Job
-from voitta_image_rag.services.ignore import IgnoreMatcher
-from voitta_image_rag.services.watcher import WatcherManager
+from voitta_rag_enterprise.db.database import init_db, session_scope
+from voitta_rag_enterprise.db.models import File, Folder, Job
+from voitta_rag_enterprise.services.ignore import IgnoreMatcher
+from voitta_rag_enterprise.services.watcher import WatcherManager
 
 
 def _make_folder(path: Path) -> int:
@@ -165,7 +165,7 @@ def test_post_folder_registers_with_running_watcher(
     """End-to-end: POST /api/folders → drop a file → watcher enqueues extract."""
     from fastapi.testclient import TestClient
 
-    from voitta_image_rag.config import reset_settings_cache
+    from voitta_rag_enterprise.config import reset_settings_cache
 
     monkeypatch.setenv("VOITTA_DISABLE_BACKGROUND", "false")
     reset_settings_cache()
@@ -173,7 +173,7 @@ def test_post_folder_registers_with_running_watcher(
     src = tmp_path / "live"
     src.mkdir()
 
-    from voitta_image_rag.main import create_app
+    from voitta_rag_enterprise.main import create_app
 
     from ..conftest import auth_as
 

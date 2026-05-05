@@ -15,8 +15,8 @@ def test_healthz_returns_ok(client: TestClient) -> None:
 
 def test_app_creates_data_dir_on_startup(env: None, tmp_path: Path) -> None:
     """The lifespan should create ``data_dir`` if missing."""
-    from voitta_image_rag.config import get_settings
-    from voitta_image_rag.main import create_app
+    from voitta_rag_enterprise.config import get_settings
+    from voitta_rag_enterprise.main import create_app
 
     expected = tmp_path / "data"
     assert get_settings().data_dir == expected
@@ -30,4 +30,4 @@ def test_app_creates_data_dir_on_startup(env: None, tmp_path: Path) -> None:
 def test_static_mount_serves_index(client: TestClient) -> None:
     r = client.get("/static/index.html")
     assert r.status_code == 200
-    assert "voitta-image-rag" in r.text
+    assert "Voitta RAG Enterprise" in r.text

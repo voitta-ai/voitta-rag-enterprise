@@ -15,8 +15,8 @@ from pathlib import Path
 
 import pytest
 
-from voitta_image_rag.services.parsers import pdf_parser
-from voitta_image_rag.services.parsers.pdf_parser import (
+from voitta_rag_enterprise.services.parsers import pdf_parser
+from voitta_rag_enterprise.services.parsers.pdf_parser import (
     _MineruDaemon,
     reset_mineru_daemon_for_tests,
 )
@@ -196,6 +196,6 @@ def test_subsequent_call_respawns_after_kill(
 
 def test_settings_carry_default_timeout() -> None:
     """Sanity: the new env var has a sensible default and is wired through."""
-    from voitta_image_rag.config import get_settings
+    from voitta_rag_enterprise.config import get_settings
 
     assert get_settings().pdf_parse_timeout_s == 600

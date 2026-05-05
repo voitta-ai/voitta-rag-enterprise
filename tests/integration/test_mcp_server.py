@@ -14,16 +14,16 @@ from pathlib import Path
 from PIL import Image as PILImage
 from sqlalchemy import select
 
-from voitta_image_rag.cas import store as cas_store
-from voitta_image_rag.db.database import init_db, session_scope
-from voitta_image_rag.db.models import (
+from voitta_rag_enterprise.cas import store as cas_store
+from voitta_rag_enterprise.db.database import init_db, session_scope
+from voitta_rag_enterprise.db.models import (
     Chunk,
     ChunkImageLink,
     File,
     Folder,
     Image,
 )
-from voitta_image_rag.mcp_server import (
+from voitta_rag_enterprise.mcp_server import (
     get_chunk_images,
     get_chunk_range,
     get_file,
@@ -33,7 +33,7 @@ from voitta_image_rag.mcp_server import (
     search,
     search_images,
 )
-from voitta_image_rag.services.indexing import (
+from voitta_rag_enterprise.services.indexing import (
     run_embed_image,
     run_embed_text,
     run_extract,
@@ -213,7 +213,7 @@ def test_resolve_url_exact_and_prefix(env: None, tmp_path: Path) -> None:
     (src / "a.md").write_text("alpha")
     (src / "b.md").write_text("beta")
 
-    from voitta_image_rag.services.scanner import scan_folder
+    from voitta_rag_enterprise.services.scanner import scan_folder
 
     with session_scope() as s:
         folder = Folder(path=str(src), display_name="src")

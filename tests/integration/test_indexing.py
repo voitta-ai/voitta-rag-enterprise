@@ -11,9 +11,9 @@ from pathlib import Path
 from PIL import Image as PILImage
 from sqlalchemy import select
 
-from voitta_image_rag.cas import store as cas_store
-from voitta_image_rag.db.database import init_db, session_scope
-from voitta_image_rag.db.models import (
+from voitta_rag_enterprise.cas import store as cas_store
+from voitta_rag_enterprise.db.database import init_db, session_scope
+from voitta_rag_enterprise.db.models import (
     CasRef,
     Chunk,
     ChunkImageLink,
@@ -22,7 +22,7 @@ from voitta_image_rag.db.models import (
     Image,
     Job,
 )
-from voitta_image_rag.services.indexing import run_extract
+from voitta_rag_enterprise.services.indexing import run_extract
 
 
 def _png(color: tuple[int, int, int] = (10, 20, 30), size: tuple[int, int] = (8, 8)) -> bytes:

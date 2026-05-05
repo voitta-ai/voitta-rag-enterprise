@@ -16,9 +16,9 @@ from __future__ import annotations
 import argparse
 import logging
 
-from voitta_image_rag.config import get_settings
-from voitta_image_rag.db.database import init_db, session_scope
-from voitta_image_rag.services import job_queue, vector_store
+from voitta_rag_enterprise.config import get_settings
+from voitta_rag_enterprise.db.database import init_db, session_scope
+from voitta_rag_enterprise.services import job_queue, vector_store
 
 logger = logging.getLogger(__name__)
 

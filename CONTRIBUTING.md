@@ -1,10 +1,10 @@
-# Contributing to voitta-image-rag
+# Contributing to Voitta RAG Enterprise
 
 Thanks for your interest. A few things before you open a PR.
 
 ## Contributor License Agreement
 
-`voitta-image-rag` is [dual-licensed](./LICENSING.md) — AGPL-3.0 for the
+`Voitta RAG Enterprise` is [dual-licensed](./LICENSING.md) — AGPL-3.0 for the
 public, commercial license for customers who can't or won't take on AGPL
 obligations. For dual licensing to work, the project needs the right to
 relicense every line of code.

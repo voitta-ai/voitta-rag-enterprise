@@ -322,7 +322,7 @@ class _MineruDaemon:
         # Use the same Python that's running the parent so the subprocess
         # picks up our installed venv (MinerU and torch live there).
         self._proc = subprocess.Popen(
-            [sys.executable, "-m", "voitta_image_rag.services.parsers._mineru_subprocess"],
+            [sys.executable, "-m", "voitta_rag_enterprise.services.parsers._mineru_subprocess"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

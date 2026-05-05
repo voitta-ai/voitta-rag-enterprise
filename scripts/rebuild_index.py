@@ -23,16 +23,16 @@ import shutil
 
 from sqlalchemy import delete, update
 
-from voitta_image_rag.cas import store as cas_store
-from voitta_image_rag.db.database import init_db, session_scope
-from voitta_image_rag.db.models import (
+from voitta_rag_enterprise.cas import store as cas_store
+from voitta_rag_enterprise.db.database import init_db, session_scope
+from voitta_rag_enterprise.db.models import (
     CasRef,
     Chunk,
     ChunkImageLink,
     File,
     Image,
 )
-from voitta_image_rag.services import job_queue, vector_store
+from voitta_rag_enterprise.services import job_queue, vector_store
 
 logger = logging.getLogger(__name__)
 

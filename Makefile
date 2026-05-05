@@ -36,15 +36,15 @@ UVICORN_FLAGS := --host 0.0.0.0 --port "$${VOITTA_PORT:-8000}" --ws-ping-interva
 
 run:
 	@$(DOTENV) \
-	$(PYTHON) -m uvicorn voitta_image_rag.main:app $(UVICORN_FLAGS)
+	$(PYTHON) -m uvicorn voitta_rag_enterprise.main:app $(UVICORN_FLAGS)
 
 dev:
 	@$(DOTENV) \
-	$(PYTHON) -m uvicorn voitta_image_rag.main:app $(UVICORN_FLAGS) --reload
+	$(PYTHON) -m uvicorn voitta_rag_enterprise.main:app $(UVICORN_FLAGS) --reload
 
 mcp:
 	@$(DOTENV) \
-	$(PYTHON) -m voitta_image_rag.mcp_server
+	$(PYTHON) -m voitta_rag_enterprise.mcp_server
 
 doctor:
 	$(PYTHON) -m scripts.doctor

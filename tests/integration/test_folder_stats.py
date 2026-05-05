@@ -10,9 +10,9 @@ from fastapi.testclient import TestClient
 from PIL import Image as PILImage
 from sqlalchemy import select
 
-from voitta_image_rag.db.database import init_db, session_scope
-from voitta_image_rag.db.models import File
-from voitta_image_rag.services.indexing import (
+from voitta_rag_enterprise.db.database import init_db, session_scope
+from voitta_rag_enterprise.db.models import File
+from voitta_rag_enterprise.services.indexing import (
     run_extract,
 )
 

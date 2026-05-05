@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import pytest
 
-from voitta_image_rag.services.embedding import (
+from voitta_rag_enterprise.services.embedding import (
     SparseVector,
     get_image_embedder,
     get_sparse_embedder,
     get_text_embedder,
 )
-from voitta_image_rag.services.embedding.image import FakeImageEmbedder
-from voitta_image_rag.services.embedding.sparse import FakeSparseEmbedder
-from voitta_image_rag.services.embedding.text import FakeTextEmbedder
+from voitta_rag_enterprise.services.embedding.image import FakeImageEmbedder
+from voitta_rag_enterprise.services.embedding.sparse import FakeSparseEmbedder
+from voitta_rag_enterprise.services.embedding.text import FakeTextEmbedder
 
 
 def test_factory_returns_fake_in_test_env(env: None) -> None:

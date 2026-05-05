@@ -11,12 +11,12 @@ from pathlib import Path
 
 from PIL import Image as PILImage
 
-from voitta_image_rag.services.parsers.image_parser import ImageFileParser
-from voitta_image_rag.services.parsers.registry import (
+from voitta_rag_enterprise.services.parsers.image_parser import ImageFileParser
+from voitta_rag_enterprise.services.parsers.registry import (
     build_default_registry,
     get_default_registry,
 )
-from voitta_image_rag.services.parsers.text_parser import TextParser
+from voitta_rag_enterprise.services.parsers.text_parser import TextParser
 
 
 def _png_bytes(color: tuple[int, int, int] = (255, 0, 0), size: tuple[int, int] = (8, 8)) -> bytes:
@@ -82,7 +82,7 @@ def test_svg_parser_rasterizes_to_png(tmp_path: Path) -> None:
     pytest = __import__("pytest")
     cairosvg = pytest.importorskip("cairosvg")
     del cairosvg  # only used to gate the test
-    from voitta_image_rag.services.parsers.svg_parser import SvgParser
+    from voitta_rag_enterprise.services.parsers.svg_parser import SvgParser
 
     p = tmp_path / "shape.svg"
     p.write_text(

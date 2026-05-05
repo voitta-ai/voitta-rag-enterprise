@@ -100,7 +100,7 @@ def create_app() -> FastAPI:
         settings = get_settings()
         settings.data_dir.mkdir(parents=True, exist_ok=True)
         setup_logging(settings.data_dir / "logs")
-        logger.info("voitta-image-rag starting (data_dir=%s)", settings.data_dir)
+        logger.info("Voitta RAG Enterprise starting (data_dir=%s)", settings.data_dir)
         init_db()
         events.install_loop(asyncio.get_running_loop())
         _seed_users()
@@ -222,9 +222,9 @@ def create_app() -> FastAPI:
                     app.state.watcher.stop()
                     uninstall_default()
                 events.uninstall_loop()
-                logger.info("voitta-image-rag stopped")
+                logger.info("Voitta RAG Enterprise stopped")
 
-    app = FastAPI(title="voitta-image-rag", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Voitta RAG Enterprise", version="0.1.0", lifespan=lifespan)
 
     # Signed session cookie — used by the Google login flow to persist the
     # authenticated email across requests. Kept to ``/`` so both REST routes

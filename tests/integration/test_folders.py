@@ -116,7 +116,7 @@ def test_restart_picks_up_new_files_and_marks_vanished(
     (src / "a.txt").unlink()
     (src / "c.txt").write_text("c")
 
-    from voitta_image_rag.main import create_app
+    from voitta_rag_enterprise.main import create_app
 
     new_app = create_app()
     with TestClient(new_app) as new_client:
@@ -138,8 +138,8 @@ def test_reindex_folder_resets_files_and_enqueues_extracts(
     # plus some chunks attached so we can verify reindex wipes them.
     from sqlalchemy import select
 
-    from voitta_image_rag.db.database import session_scope
-    from voitta_image_rag.db.models import Chunk, File, Job
+    from voitta_rag_enterprise.db.database import session_scope
+    from voitta_rag_enterprise.db.models import Chunk, File, Job
 
     with session_scope() as s:
         for f in s.execute(select(File).where(File.folder_id == folder_id)).scalars():
@@ -179,7 +179,7 @@ def test_reindex_folder_resets_files_and_enqueues_extracts(
     # worker would do when it dequeues this job.
     import asyncio
 
-    from voitta_image_rag.services.indexing import run_reindex_folder
+    from voitta_rag_enterprise.services.indexing import run_reindex_folder
 
     with session_scope() as s:
         file_ids = [
@@ -230,8 +230,8 @@ def test_reindex_subdir_scopes_to_subtree(client: TestClient, tmp_path: Path) ->
 
     from sqlalchemy import select
 
-    from voitta_image_rag.db.database import session_scope
-    from voitta_image_rag.db.models import File
+    from voitta_rag_enterprise.db.database import session_scope
+    from voitta_rag_enterprise.db.models import File
 
     with session_scope() as s:
         for f in s.execute(select(File).where(File.folder_id == folder_id)).scalars():
@@ -249,7 +249,7 @@ def test_reindex_subdir_scopes_to_subtree(client: TestClient, tmp_path: Path) ->
     # in tests via VOITTA_DISABLE_BACKGROUND).
     import asyncio
 
-    from voitta_image_rag.services.indexing import run_reindex_folder
+    from voitta_rag_enterprise.services.indexing import run_reindex_folder
 
     with session_scope() as s:
         # rel_dir="b" → match files under the b/ subtree only.
@@ -486,7 +486,7 @@ def test_sync_delete_removes_source(client: TestClient, tmp_path: Path) -> None:
 
 def test_unauthenticated_request_returns_401(env: None, tmp_path: Path) -> None:
     """With no auth mode set, every API call needs a Google session."""
-    from voitta_image_rag.main import create_app
+    from voitta_rag_enterprise.main import create_app
 
     from ..conftest import auth_as
 

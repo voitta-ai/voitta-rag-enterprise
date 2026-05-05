@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 
 @pytest.fixture
 def root_env(env: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    from voitta_image_rag.config import reset_settings_cache
+    from voitta_rag_enterprise.config import reset_settings_cache
 
     root = tmp_path / "root"
     root.mkdir()
@@ -21,7 +21,7 @@ def root_env(env: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path
 
 
 def _client(root_env: Path) -> TestClient:
-    from voitta_image_rag.main import create_app
+    from voitta_rag_enterprise.main import create_app
 
     return TestClient(create_app())
 

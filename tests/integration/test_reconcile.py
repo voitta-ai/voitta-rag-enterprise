@@ -11,13 +11,13 @@ from fastapi.testclient import TestClient
 from PIL import Image as PILImage
 from sqlalchemy import select
 
-from voitta_image_rag.db.database import init_db, session_scope
-from voitta_image_rag.db.models import File, Folder
-from voitta_image_rag.services.indexing import (
+from voitta_rag_enterprise.db.database import init_db, session_scope
+from voitta_rag_enterprise.db.models import File, Folder
+from voitta_rag_enterprise.services.indexing import (
     run_embed_text,
     run_extract,
 )
-from voitta_image_rag.services.reconcile import (
+from voitta_rag_enterprise.services.reconcile import (
     all_folder_health,
     folder_health,
     log_startup_warnings,
@@ -58,7 +58,7 @@ def _seed_indexed_folder(
 
 
 def test_folder_health_ok_after_pipeline(env: None, tmp_path: Path) -> None:
-    from voitta_image_rag.main import create_app
+    from voitta_rag_enterprise.main import create_app
 
     app = create_app()
     with TestClient(app) as client:
@@ -78,7 +78,7 @@ def test_folder_health_empty_when_nothing_indexed(env: None, tmp_path: Path) -> 
     """Registering a folder without seeding any files: indexed_files == 0,
     so the status should be ``empty`` — not ``out_of_sync``. The latter is
     a panic state reserved for "DB says yes, Qdrant says no"."""
-    from voitta_image_rag.main import create_app
+    from voitta_rag_enterprise.main import create_app
 
     app = create_app()
     auth_as(app, "alice@x")
@@ -102,8 +102,8 @@ def test_folder_health_out_of_sync_when_qdrant_wiped(
     """The bug we shipped this check for: SQLite says ``state='indexed'`` for
     files but the Qdrant collection has no matching points. Simulate by
     extracting + embedding, then deleting the chunks collection by hand."""
-    from voitta_image_rag.main import create_app
-    from voitta_image_rag.services import vector_store
+    from voitta_rag_enterprise.main import create_app
+    from voitta_rag_enterprise.services import vector_store
 
     app = create_app()
     with TestClient(app) as client:
@@ -133,10 +133,10 @@ def test_log_startup_warnings_emits_warning_per_out_of_sync_folder(
 ) -> None:
     """Attach a handler directly to the reconcile logger and assert the
     warning lands on it. caplog doesn't help here because the lifespan's
-    ``setup_logging`` sets ``propagate=False`` on the voitta_image_rag
+    ``setup_logging`` sets ``propagate=False`` on the voitta_rag_enterprise
     logger tree, so records never reach the root caplog handler."""
-    from voitta_image_rag.main import create_app
-    from voitta_image_rag.services import vector_store
+    from voitta_rag_enterprise.main import create_app
+    from voitta_rag_enterprise.services import vector_store
 
     app = create_app()
     with TestClient(app) as client:
@@ -156,7 +156,7 @@ def test_log_startup_warnings_emits_warning_per_out_of_sync_folder(
         def emit(self, record: logging.LogRecord) -> None:
             records.append(record)
 
-    logger = logging.getLogger("voitta_image_rag.services.reconcile")
+    logger = logging.getLogger("voitta_rag_enterprise.services.reconcile")
     handler = _Capture(level=logging.WARNING)
     logger.addHandler(handler)
     try:
@@ -171,7 +171,7 @@ def test_log_startup_warnings_emits_warning_per_out_of_sync_folder(
 
 
 def test_stats_endpoint_carries_index_health(env: None, tmp_path: Path) -> None:
-    from voitta_image_rag.main import create_app
+    from voitta_rag_enterprise.main import create_app
 
     app = create_app()
     with TestClient(app) as client:
@@ -187,7 +187,7 @@ def test_stats_endpoint_carries_index_health(env: None, tmp_path: Path) -> None:
 
 
 def test_all_folder_health_orders_by_id(env: None, tmp_path: Path) -> None:
-    from voitta_image_rag.main import create_app
+    from voitta_rag_enterprise.main import create_app
 
     app = create_app()
     with TestClient(app) as client:

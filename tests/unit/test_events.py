@@ -7,7 +7,7 @@ import threading
 
 import pytest
 
-from voitta_image_rag.services import events
+from voitta_rag_enterprise.services import events
 
 
 async def _drain_one(sub: events.Subscription, timeout: float = 1.0) -> dict:

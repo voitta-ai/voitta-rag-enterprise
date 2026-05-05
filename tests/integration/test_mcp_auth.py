@@ -11,7 +11,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from voitta_image_rag.config import reset_settings_cache
+from voitta_rag_enterprise.config import reset_settings_cache
 
 from ..conftest import auth_as
 
@@ -31,7 +31,7 @@ def _create_key(app: FastAPI, client: TestClient, email: str) -> str:
 
 
 def _unified_app():
-    from voitta_image_rag.main import create_app
+    from voitta_rag_enterprise.main import create_app
 
     return create_app()
 
@@ -152,7 +152,7 @@ def test_standalone_mcp_app_also_requires_bearer(env: None) -> None:
     """The standalone ASGI app (built by ``mcp_server.build_app``) must enforce
     the same bearer requirement — otherwise running uvicorn against
     ``mcp_server:run`` would expose an unauth'd surface on port 8001."""
-    from voitta_image_rag.mcp_server import build_app
+    from voitta_rag_enterprise.mcp_server import build_app
 
     app = build_app(transport="streamable-http", path="/")
     with TestClient(app) as client:

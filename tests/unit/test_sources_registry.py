@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from voitta_image_rag.services.sources import (
+from voitta_rag_enterprise.services.sources import (
     FILESYSTEM_SOURCE,
     SourceRegistry,
     SyncConnector,

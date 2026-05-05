@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from voitta_image_rag.db.database import init_db, session_scope
-from voitta_image_rag.db.models import Job
-from voitta_image_rag.services import job_queue
+from voitta_rag_enterprise.db.database import init_db, session_scope
+from voitta_rag_enterprise.db.models import Job
+from voitta_rag_enterprise.services import job_queue
 
 
 def test_enqueue_assigns_id_and_persists(env: None) -> None:

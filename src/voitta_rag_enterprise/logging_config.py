@@ -3,7 +3,7 @@
 All application logging is routed to rotating files under
 ``<data_dir>/logs/`` — nothing of ours hits the console:
 
-* ``indexing.log`` (DEBUG) — every record from the ``voitta_image_rag``
+* ``indexing.log`` (DEBUG) — every record from the ``voitta_rag_enterprise``
   package, used to diagnose extract / embed / sync failures.
 * ``app.log`` (INFO) — root-logger catch-all that also captures third-party
   loggers (mineru, transformers, huggingface_hub, qdrant_client, …).
@@ -77,7 +77,7 @@ def setup_logging(log_dir: Path, level: str | None = None) -> None:
     Idempotent: re-running replaces the configuration. The handlers write
     under ``log_dir`` which is created on demand. ``level`` (or
     ``VOITTA_LOG_LEVEL``) controls the root level only; the
-    ``voitta_image_rag`` tree is always DEBUG so we never lose detail.
+    ``voitta_rag_enterprise`` tree is always DEBUG so we never lose detail.
     """
     log_dir.mkdir(parents=True, exist_ok=True)
     root_level = (level or os.environ.get("VOITTA_LOG_LEVEL") or "INFO").upper()
@@ -124,7 +124,7 @@ def setup_logging(log_dir: Path, level: str | None = None) -> None:
             },
         },
         "loggers": {
-            "voitta_image_rag": {
+            "voitta_rag_enterprise": {
                 "level": "DEBUG",
                 "handlers": ["indexing_file"],
                 "propagate": False,

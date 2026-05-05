@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from voitta_image_rag.services.sync.google_drive import (
+from voitta_rag_enterprise.services.sync.google_drive import (
     NATIVE_DOC,
     NATIVE_FOLDER,
     NATIVE_SHEET,
@@ -805,7 +805,7 @@ async def test_progress_callback_failures_dont_break_sync(
 
 
 def test_coerce_folders_field_handles_legacy_and_new_shapes() -> None:
-    from voitta_image_rag.services.sync.google_drive import (
+    from voitta_rag_enterprise.services.sync.google_drive import (
         coerce_folders_field,
         encode_folders_field,
     )

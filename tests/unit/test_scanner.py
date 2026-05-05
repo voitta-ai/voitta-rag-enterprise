@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from voitta_image_rag.db.database import init_db, session_scope
-from voitta_image_rag.db.models import File, Folder
-from voitta_image_rag.services.ignore import IgnoreMatcher
-from voitta_image_rag.services.scanner import load_sidecar, scan_folder
+from voitta_rag_enterprise.db.database import init_db, session_scope
+from voitta_rag_enterprise.db.models import File, Folder
+from voitta_rag_enterprise.services.ignore import IgnoreMatcher
+from voitta_rag_enterprise.services.scanner import load_sidecar, scan_folder
 
 
 def _seed(root: Path, layout: dict[str, str]) -> None:

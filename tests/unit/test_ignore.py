@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from voitta_image_rag.services.ignore import IgnoreMatcher
+from voitta_rag_enterprise.services.ignore import IgnoreMatcher
 
 
 def test_matches_filename_glob() -> None:

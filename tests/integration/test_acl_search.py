@@ -10,9 +10,9 @@ from fastapi.testclient import TestClient
 from PIL import Image as PILImage
 from sqlalchemy import select
 
-from voitta_image_rag.db.database import init_db, session_scope
-from voitta_image_rag.db.models import File, FolderAcl, Image, User
-from voitta_image_rag.services.indexing import (
+from voitta_rag_enterprise.db.database import init_db, session_scope
+from voitta_rag_enterprise.db.models import File, FolderAcl, Image, User
+from voitta_rag_enterprise.services.indexing import (
     run_embed_image,
     run_embed_text,
     run_extract,
@@ -68,7 +68,7 @@ def _seed_authed(
 
 def test_register_grants_creator(env: None, tmp_path: Path) -> None:
     """When alice POSTs /api/folders, alice gets the grant. Bob does not."""
-    from voitta_image_rag.main import create_app
+    from voitta_rag_enterprise.main import create_app
 
     app = create_app()
     auth_as(app, "alice@x")
@@ -85,7 +85,7 @@ def test_register_grants_creator(env: None, tmp_path: Path) -> None:
 
 
 def test_users_only_see_their_folders_in_listing(env: None, tmp_path: Path) -> None:
-    from voitta_image_rag.main import create_app
+    from voitta_rag_enterprise.main import create_app
 
     app = create_app()
     with TestClient(app) as client:
@@ -102,7 +102,7 @@ def test_users_only_see_their_folders_in_listing(env: None, tmp_path: Path) -> N
 
 
 def test_listing_files_in_other_users_folder_returns_404(env: None, tmp_path: Path) -> None:
-    from voitta_image_rag.main import create_app
+    from voitta_rag_enterprise.main import create_app
 
     app = create_app()
     with TestClient(app) as client:
@@ -113,7 +113,7 @@ def test_listing_files_in_other_users_folder_returns_404(env: None, tmp_path: Pa
 
 
 def test_search_chunks_filtered_by_acl(env: None, tmp_path: Path) -> None:
-    from voitta_image_rag.main import create_app
+    from voitta_rag_enterprise.main import create_app
 
     app = create_app()
     with TestClient(app) as client:
@@ -139,7 +139,7 @@ def test_search_chunks_filtered_by_acl(env: None, tmp_path: Path) -> None:
 
 
 def test_search_images_filtered_by_acl(env: None, tmp_path: Path) -> None:
-    from voitta_image_rag.main import create_app
+    from voitta_rag_enterprise.main import create_app
 
     app = create_app()
     with TestClient(app) as client:
@@ -168,7 +168,7 @@ def test_search_images_filtered_by_acl(env: None, tmp_path: Path) -> None:
 
 
 def test_grant_then_revoke_via_api(env: None, tmp_path: Path) -> None:
-    from voitta_image_rag.main import create_app
+    from voitta_rag_enterprise.main import create_app
 
     app = create_app()
     alice_email = "alice@example.com"
@@ -203,7 +203,7 @@ def test_grant_then_revoke_via_api(env: None, tmp_path: Path) -> None:
 
 
 def test_users_me_returns_caller(env: None) -> None:
-    from voitta_image_rag.main import create_app
+    from voitta_rag_enterprise.main import create_app
 
     app = create_app()
     auth_as(app, "alice@x")
@@ -216,8 +216,8 @@ def test_users_me_returns_caller(env: None) -> None:
 
 def test_grant_existing_qdrant_payload_carries_allowed_users(env: None, tmp_path: Path) -> None:
     """Stamp test: every chunk point's payload should include the granting user id."""
-    from voitta_image_rag.main import create_app
-    from voitta_image_rag.services import vector_store
+    from voitta_rag_enterprise.main import create_app
+    from voitta_rag_enterprise.services import vector_store
 
     app = create_app()
     with TestClient(app) as client:

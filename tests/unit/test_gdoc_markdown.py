@@ -6,7 +6,7 @@ the renderer is pure-python over plain dicts.
 
 from __future__ import annotations
 
-from voitta_image_rag.services.sync._gdoc_markdown import (
+from voitta_rag_enterprise.services.sync._gdoc_markdown import (
     has_tabs,
     render_body,
     render_document_tabs,

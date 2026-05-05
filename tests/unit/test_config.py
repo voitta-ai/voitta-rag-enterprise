@@ -8,7 +8,7 @@ import pytest
 
 
 def test_defaults_apply(env: None) -> None:
-    from voitta_image_rag.config import get_settings
+    from voitta_rag_enterprise.config import get_settings
 
     s = get_settings()
     assert s.port == 8000
@@ -22,7 +22,7 @@ def test_defaults_apply(env: None) -> None:
 
 
 def test_env_overrides(env: None, monkeypatch: pytest.MonkeyPatch) -> None:
-    from voitta_image_rag.config import get_settings, reset_settings_cache
+    from voitta_rag_enterprise.config import get_settings, reset_settings_cache
 
     monkeypatch.setenv("VOITTA_PORT", "9000")
     monkeypatch.setenv("VOITTA_NEARBY_RADIUS", "5")
@@ -38,7 +38,7 @@ def test_env_overrides(env: None, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_path_resolution_defaults(env: None) -> None:
-    from voitta_image_rag.config import get_settings
+    from voitta_rag_enterprise.config import get_settings
 
     s = get_settings()
     assert s.resolved_db_path() == s.data_dir / "voitta.db"
@@ -47,7 +47,7 @@ def test_path_resolution_defaults(env: None) -> None:
 
 
 def test_db_path_override(env: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from voitta_image_rag.config import get_settings, reset_settings_cache
+    from voitta_rag_enterprise.config import get_settings, reset_settings_cache
 
     custom = tmp_path / "elsewhere.db"
     monkeypatch.setenv("VOITTA_DB_PATH", str(custom))
@@ -57,7 +57,7 @@ def test_db_path_override(env: None, monkeypatch: pytest.MonkeyPatch, tmp_path: 
 
 
 def test_data_dir_expands_tilde(env: None, monkeypatch: pytest.MonkeyPatch) -> None:
-    from voitta_image_rag.config import get_settings, reset_settings_cache
+    from voitta_rag_enterprise.config import get_settings, reset_settings_cache
 
     monkeypatch.setenv("VOITTA_DATA_DIR", "~/some-place")
     reset_settings_cache()
@@ -68,7 +68,7 @@ def test_data_dir_expands_tilde(env: None, monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_ignore_globs_parsing(env: None, monkeypatch: pytest.MonkeyPatch) -> None:
-    from voitta_image_rag.config import get_settings, reset_settings_cache
+    from voitta_rag_enterprise.config import get_settings, reset_settings_cache
 
     monkeypatch.setenv("VOITTA_IGNORE_PATTERNS", " a , b ,, c ")
     reset_settings_cache()
@@ -77,13 +77,13 @@ def test_ignore_globs_parsing(env: None, monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_workers_defaults_to_cpu_count(env: None) -> None:
-    from voitta_image_rag.config import get_settings
+    from voitta_rag_enterprise.config import get_settings
 
     assert get_settings().resolved_workers() >= 1
 
 
 def test_workers_explicit_override(env: None, monkeypatch: pytest.MonkeyPatch) -> None:
-    from voitta_image_rag.config import get_settings, reset_settings_cache
+    from voitta_rag_enterprise.config import get_settings, reset_settings_cache
 
     monkeypatch.setenv("VOITTA_WORKERS", "7")
     reset_settings_cache()

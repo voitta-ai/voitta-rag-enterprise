@@ -6,10 +6,10 @@ import asyncio
 
 import pytest
 
-from voitta_image_rag.db.database import init_db, session_scope
-from voitta_image_rag.db.models import Job
-from voitta_image_rag.services import job_queue
-from voitta_image_rag.services.worker import WorkerPool
+from voitta_rag_enterprise.db.database import init_db, session_scope
+from voitta_rag_enterprise.db.models import Job
+from voitta_rag_enterprise.services import job_queue
+from voitta_rag_enterprise.services.worker import WorkerPool
 
 
 async def _wait_until(predicate, timeout: float = 2.0, interval: float = 0.02) -> None:

@@ -1,4 +1,4 @@
-# voitta-image-rag
+# Voitta RAG Enterprise
 
 Filesystem-driven RAG with first-class image support, content-addressable extraction, real-time websocket UI, and a pluggable sync layer.
 
@@ -84,7 +84,7 @@ All settings carry the `VOITTA_` env-var prefix. See [.env.example](./.env.examp
 
 | Var                          | Purpose                                                       |
 |------------------------------|---------------------------------------------------------------|
-| `VOITTA_DATA_DIR`            | Where SQLite + CAS + Qdrant live (default `~/.voitta-image-rag`) |
+| `VOITTA_DATA_DIR`            | Where SQLite + CAS + Qdrant live (default `~/.voitta-rag-enterprise`) |
 | `VOITTA_USE_FAKE_EMBEDDERS`  | Skip real model loads — recommended for dev                   |
 | `VOITTA_SINGLE_USER`         | Collapse to a `root` user (no ACL filtering)                  |
 | `VOITTA_DEV_USER`            | Authenticate every request as this email (no proxy needed)    |
@@ -96,7 +96,7 @@ All eight implementation stages are complete. 200+ tests; CI runs lint + tests o
 
 ## License
 
-`voitta-image-rag` is dual-licensed:
+`Voitta RAG Enterprise` is dual-licensed:
 
 - **[AGPL-3.0-or-later](./LICENSE)** for open-source use, self-hosting, and contributions.
 - **Commercial license** for embedding in proprietary products or running modified hosted versions without AGPL §13 obligations — contact **support@voitta.ai**.

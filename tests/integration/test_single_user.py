@@ -8,14 +8,14 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from voitta_image_rag.db.database import init_db, session_scope
-from voitta_image_rag.db.models import File, Folder
-from voitta_image_rag.services.indexing import run_embed_text, run_extract
+from voitta_rag_enterprise.db.database import init_db, session_scope
+from voitta_rag_enterprise.db.models import File, Folder
+from voitta_rag_enterprise.services.indexing import run_embed_text, run_extract
 
 
 @pytest.fixture
 def single_user(env: None, monkeypatch: pytest.MonkeyPatch) -> None:
-    from voitta_image_rag.config import reset_settings_cache
+    from voitta_rag_enterprise.config import reset_settings_cache
 
     monkeypatch.setenv("VOITTA_SINGLE_USER", "true")
     reset_settings_cache()
@@ -25,7 +25,7 @@ def test_listing_returns_all_folders_regardless_of_grants(
     single_user: None, tmp_path: Path
 ) -> None:
     """A folder created by user A is visible to user B in single-user mode."""
-    from voitta_image_rag.main import create_app
+    from voitta_rag_enterprise.main import create_app
 
     app = create_app()
     src = tmp_path / "shared"
@@ -40,7 +40,7 @@ def test_search_returns_legacy_acl_stamped_data(
     env: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Data indexed under user A is searchable after switching to single-user mode."""
-    from voitta_image_rag.config import reset_settings_cache
+    from voitta_rag_enterprise.config import reset_settings_cache
 
     # First pass: multi-user. User "alice" registers a folder + indexes it.
     monkeypatch.setenv("VOITTA_DEV_USER", "alice@example.com")
@@ -55,7 +55,7 @@ def test_search_returns_legacy_acl_stamped_data(
         s.add(folder)
         s.flush()
 
-        from voitta_image_rag.services.acl import get_or_create_user, grant_folder
+        from voitta_rag_enterprise.services.acl import get_or_create_user, grant_folder
 
         alice = get_or_create_user(s, "alice@example.com")
         grant_folder(s, folder.id, alice.id)
@@ -75,7 +75,7 @@ def test_search_returns_legacy_acl_stamped_data(
     monkeypatch.setenv("VOITTA_SINGLE_USER", "true")
     reset_settings_cache()
 
-    from voitta_image_rag.main import create_app
+    from voitta_rag_enterprise.main import create_app
 
     with TestClient(create_app()) as c:
         r = c.post(
@@ -87,8 +87,8 @@ def test_search_returns_legacy_acl_stamped_data(
 
 
 def test_user_can_see_folder_helper(env: None, monkeypatch: pytest.MonkeyPatch) -> None:
-    from voitta_image_rag.config import reset_settings_cache
-    from voitta_image_rag.services.acl import user_can_see_folder
+    from voitta_rag_enterprise.config import reset_settings_cache
+    from voitta_rag_enterprise.services.acl import user_can_see_folder
 
     monkeypatch.setenv("VOITTA_SINGLE_USER", "true")
     reset_settings_cache()

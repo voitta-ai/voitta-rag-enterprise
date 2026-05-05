@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import time
 
-from voitta_image_rag.cas import gc, store
-from voitta_image_rag.db.database import init_db, session_scope
-from voitta_image_rag.db.models import CasRef
+from voitta_rag_enterprise.cas import gc, store
+from voitta_rag_enterprise.db.database import init_db, session_scope
+from voitta_rag_enterprise.db.models import CasRef
 
 
 def test_sweep_skips_nonzero_refcount(env: None) -> None:

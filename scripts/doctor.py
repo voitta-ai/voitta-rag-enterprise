@@ -15,7 +15,7 @@ import os
 import sys
 from pathlib import Path
 
-from voitta_image_rag.config import get_settings
+from voitta_rag_enterprise.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -90,8 +90,8 @@ def main() -> int:
 
     _section("SQLite")
     try:
-        from voitta_image_rag.db.database import init_db, session_scope
-        from voitta_image_rag.db.models import Folder
+        from voitta_rag_enterprise.db.database import init_db, session_scope
+        from voitta_rag_enterprise.db.models import Folder
 
         init_db()
         with session_scope() as s:
@@ -103,7 +103,7 @@ def main() -> int:
 
     _section("Qdrant")
     try:
-        from voitta_image_rag.services import vector_store
+        from voitta_rag_enterprise.services import vector_store
 
         def _probe():
             client = vector_store.get_client()
@@ -136,8 +136,8 @@ def main() -> int:
 
     _section("Index health")
     try:
-        from voitta_image_rag.db.database import init_db, session_scope
-        from voitta_image_rag.services.reconcile import all_folder_health
+        from voitta_rag_enterprise.db.database import init_db, session_scope
+        from voitta_rag_enterprise.services.reconcile import all_folder_health
 
         init_db()
         with session_scope() as s:
@@ -184,21 +184,21 @@ def main() -> int:
 
 
 def _check_dense() -> None:
-    from voitta_image_rag.services.embedding import get_text_embedder
+    from voitta_rag_enterprise.services.embedding import get_text_embedder
 
     e = get_text_embedder()
     e.embed_query("warmup")
 
 
 def _check_sparse() -> None:
-    from voitta_image_rag.services.embedding import get_sparse_embedder
+    from voitta_rag_enterprise.services.embedding import get_sparse_embedder
 
     e = get_sparse_embedder()
     e.embed_query("warmup")
 
 
 def _check_image() -> None:
-    from voitta_image_rag.services.embedding import get_image_embedder
+    from voitta_rag_enterprise.services.embedding import get_image_embedder
 
     e = get_image_embedder()
     e.embed_text("warmup")
