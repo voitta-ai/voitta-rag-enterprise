@@ -90,6 +90,23 @@ All settings carry the `VOITTA_` env-var prefix. See [.env.example](./.env.examp
 | `VOITTA_DEV_USER`            | Authenticate every request as this email (no proxy needed)    |
 | `VOITTA_DISABLE_BACKGROUND`  | Skip watcher + workers (useful for tests)                     |
 
+## Container image
+
+Tagged releases publish a runtime image to GitHub Container Registry:
+
+```
+ghcr.io/voitta-ai/voitta-rag-enterprise:<tag>
+ghcr.io/voitta-ai/voitta-rag-enterprise:latest
+```
+
+`linux/amd64` only. Image is public — no GHCR login required to pull. To
+cut a release, push a `v*` tag (`git tag v0.1.0 && git push --tags`); the
+[release workflow](./.github/workflows/release.yml) builds and pushes
+both the version tag and `latest`.
+
+For the full GCP customer-deploy story (Terraform, Secret Manager, KMS,
+Caddy/Cloud LB), see [`deploy/`](./deploy/) once issues #3+ ship.
+
 ## Status
 
 All eight implementation stages are complete. 200+ tests; CI runs lint + tests on every PR.
