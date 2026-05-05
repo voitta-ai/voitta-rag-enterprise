@@ -785,8 +785,7 @@ function renderJobs() {
 
 // ----- Toolbar / sidebar actions -----
 
-$("#btn-new-folder").addEventListener("click", () => openModal("managed"));
-$("#btn-add-existing").addEventListener("click", () => openModal("picker"));
+$("#btn-new-folder").addEventListener("click", openModal);
 $("#modal-close").addEventListener("click", closeModal);
 $("#modal-backdrop").addEventListener("click", (e) => {
     if (e.target.id === "modal-backdrop") closeModal();
@@ -901,26 +900,15 @@ $("#btn-clear-failed").addEventListener("click", async () => {
 
 // ----- Modal: create / picker -----
 
-function openModal(mode) {
-    $("#modal-backdrop").hidden = false;
-    if (mode === "managed") {
-        if (!rootInfo.configured) {
-            alert("Set VOITTA_ROOT_PATH in .env to create new folders.");
-            $("#modal-backdrop").hidden = true;
-            return;
-        }
-        $("#modal-title").textContent = "New folder";
-        $("#modal-managed").hidden = false;
-        $("#modal-picker").hidden = true;
-        $("#modal-root").textContent = rootInfo.root_path;
-        $("#managed-name").value = "";
-        $("#managed-name").focus();
-    } else {
-        $("#modal-title").textContent = "Add existing folder";
-        $("#modal-managed").hidden = true;
-        $("#modal-picker").hidden = false;
-        pickerNavigate(null);
+function openModal() {
+    if (!rootInfo.configured) {
+        alert("Set VOITTA_ROOT_PATH in .env to create new folders.");
+        return;
     }
+    $("#modal-backdrop").hidden = false;
+    $("#modal-root").textContent = rootInfo.root_path;
+    $("#managed-name").value = "";
+    $("#managed-name").focus();
 }
 
 function closeModal() {
@@ -936,42 +924,6 @@ $("#managed-create").addEventListener("click", async () => {
     } catch (err) { alert(err.message); }
 });
 
-let pickerCwd = null;
-async function pickerNavigate(path) {
-    try {
-        const res = await api.fsList(path);
-        pickerCwd = res.path;
-        $("#picker-path").textContent = res.path;
-        const ul = $("#picker-list");
-        ul.innerHTML = "";
-        for (const entry of res.entries) {
-            const li = document.createElement("li");
-            li.textContent = entry.name;
-            li.className = entry.is_dir ? "dir" : "file";
-            if (entry.is_dir) {
-                li.addEventListener("click", () => {
-                    const sep = res.path === "/" ? "" : "/";
-                    pickerNavigate(`${res.path}${sep}${entry.name}`);
-                });
-            }
-            ul.append(li);
-        }
-        $("#picker-up").disabled = !res.parent;
-        $("#picker-up").dataset.target = res.parent || "";
-    } catch (err) { alert(err.message); }
-}
-
-$("#picker-up").addEventListener("click", () => {
-    const target = $("#picker-up").dataset.target;
-    if (target) pickerNavigate(target);
-});
-$("#picker-pick").addEventListener("click", async () => {
-    if (!pickerCwd) return;
-    try {
-        await api.addFolderByPath(pickerCwd);
-        closeModal();
-    } catch (err) { alert(err.message); }
-});
 
 // ----- Sync modal -----
 //
@@ -1748,7 +1700,7 @@ async function bootstrap() {
         const hint = $("#root-hint");
         hint.textContent = rootInfo.configured
             ? `Managed root: ${rootInfo.root_path}`
-            : "VOITTA_ROOT_PATH not set — only 'Add existing' works.";
+            : "VOITTA_ROOT_PATH not set — folder creation is disabled.";
         $("#btn-new-folder").disabled = !rootInfo.configured;
         folders.set(await api.listFolders());
         files.set(await api.listAllFiles());

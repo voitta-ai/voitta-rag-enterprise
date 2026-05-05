@@ -30,9 +30,7 @@ async function req(method, path, body) {
 
 export const api = {
     root: () => req("GET", "/api/folders/root"),
-    fsList: (path) => req("GET", `/api/fs/list${path ? `?path=${encodeURIComponent(path)}` : ""}`),
     listFolders: () => req("GET", "/api/folders"),
-    addFolderByPath: (path) => req("POST", "/api/folders", { path }),
     addFolderByName: (name) => req("POST", "/api/folders", { name }),
     deleteFolder: (id) => req("DELETE", `/api/folders/${id}`),
     setFolderShare: (id, shared) => req("PATCH", `/api/folders/${id}/share`, { shared }),

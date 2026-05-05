@@ -797,53 +797,6 @@ input[type="text"], input[type="file"] {
     letter-spacing: 0.03em;
 }
 
-.picker-header {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-.picker-path {
-    flex: 1;
-    background: var(--color-bg);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-md);
-    padding: 6px 12px;
-    font: 12px ui-monospace, "SF Mono", Menlo, monospace;
-    color: var(--color-text-secondary);
-    overflow-x: auto;
-    white-space: nowrap;
-}
-.picker-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    border: 1px solid var(--color-border-light);
-    border-radius: var(--radius-md);
-    max-height: 320px;
-    overflow-y: auto;
-    background: var(--color-bg);
-}
-.picker-list li {
-    padding: 6px 12px;
-    border-bottom: 1px solid var(--color-border-light);
-    cursor: default;
-    user-select: none;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-.picker-list li:last-child { border-bottom: none; }
-.picker-list li.dir { cursor: pointer; }
-.picker-list li.dir:hover { background: var(--color-bg-hover); }
-.picker-list li.file { color: var(--color-text-tertiary); }
-.picker-list li::before {
-    width: 16px;
-    text-align: center;
-    flex-shrink: 0;
-}
-.picker-list li.dir::before { content: "▸"; color: var(--color-accent); }
-.picker-list li.file::before { content: "·"; }
-
 .agpl-footer {
     padding: var(--md);
     text-align: center;

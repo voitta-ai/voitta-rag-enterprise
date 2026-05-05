@@ -49,7 +49,6 @@
             <div class="toolbar">
                 <div class="toolbar-group">
                     <button id="btn-new-folder" class="btn btn-primary" title="Create a managed folder under VOITTA_ROOT_PATH">📁 New folder</button>
-                    <button id="btn-add-existing" class="btn btn-secondary" title="Register an existing folder anywhere on the host">＋ Add existing</button>
                 </div>
                 <div class="toolbar-divider"></div>
                 <div class="toolbar-group">
@@ -141,31 +140,20 @@
         </div>
     </main>
 
-    <!-- Modal: pick or create folder -->
+    <!-- Modal: create managed folder -->
     <div id="modal-backdrop" class="modal-backdrop" hidden>
         <div class="modal">
             <div class="modal-header">
-                <h3 id="modal-title">Add folder</h3>
+                <h3 id="modal-title">New folder</h3>
                 <button id="modal-close" class="btn-text">×</button>
             </div>
 
-            <div id="modal-managed" class="modal-body" hidden>
+            <div id="modal-managed" class="modal-body">
                 <label>Folder name</label>
                 <input type="text" id="managed-name" placeholder="project-x">
                 <p class="hint">Created under <code id="modal-root"></code>.</p>
                 <div class="actions actions-right">
                     <button id="managed-create" class="btn btn-primary">Create folder</button>
-                </div>
-            </div>
-
-            <div id="modal-picker" class="modal-body" hidden>
-                <div class="picker-header">
-                    <button id="picker-up" type="button" class="btn btn-secondary btn-sm">↑</button>
-                    <code id="picker-path" class="picker-path"></code>
-                </div>
-                <ul id="picker-list" class="picker-list"></ul>
-                <div class="actions actions-right">
-                    <button id="picker-pick" class="btn btn-primary">Add this folder</button>
                 </div>
             </div>
         </div>
