@@ -1,0 +1,46 @@
+# Keep the build context small. pip installs from src/ + pyproject.toml;
+# everything else is local-dev clutter that we don't want shipping into
+# image layers.
+
+.git
+.gitignore
+.github
+
+.claude
+.claude.local
+.idea
+.vscode
+*.iml
+
+.venv
+venv
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+build
+dist
+*.egg-info
+
+.env
+.env.*
+!.env.example
+
+tests
+docs
+Makefile
+CONTRIBUTING.md
+LICENSING.md
+
+# Exclude deploy/ but keep the bits we COPY into the image.
+deploy/*
+!deploy/docker-entrypoint.sh
+
+# Local app data
+data
+*.db
+*.sqlite
+*.sqlite3
