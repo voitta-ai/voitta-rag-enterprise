@@ -39,10 +39,7 @@ class SidecarEntry:
 def load_sidecar(folder_root: Path) -> dict[str, SidecarEntry]:
     """Return the ``rel_path → SidecarEntry`` mapping from ``.voitta_sources.json``.
 
-    Two on-disk shapes are accepted so older sidecars keep working:
-
-    - ``{rel_path: "https://…"}`` — URL only (legacy)
-    - ``{rel_path: {"url": "https://…", "tab": "Overview"}}`` — extended
+    Expected on-disk shape: ``{rel_path: {"url": "https://…", "tab": "Overview"}}``.
     """
     sidecar = folder_root / SIDECAR_FILENAME
     if not sidecar.exists():
@@ -56,17 +53,14 @@ def load_sidecar(folder_root: Path) -> dict[str, SidecarEntry]:
         return {}
     out: dict[str, SidecarEntry] = {}
     for k, v in data.items():
-        if not isinstance(k, str):
+        if not isinstance(k, str) or not isinstance(v, dict):
             continue
-        if isinstance(v, str):
-            out[k] = SidecarEntry(url=v)
-        elif isinstance(v, dict):
-            url = v.get("url")
-            tab = v.get("tab")
-            out[k] = SidecarEntry(
-                url=str(url) if isinstance(url, str) else None,
-                tab=str(tab) if isinstance(tab, str) else None,
-            )
+        url = v.get("url")
+        tab = v.get("tab")
+        out[k] = SidecarEntry(
+            url=str(url) if isinstance(url, str) else None,
+            tab=str(tab) if isinstance(tab, str) else None,
+        )
     return out
 
 

@@ -16,11 +16,8 @@ CREATE TABLE IF NOT EXISTS folders (
     source_type   TEXT NOT NULL DEFAULT 'filesystem',
     source_config TEXT,
     enabled       INTEGER NOT NULL DEFAULT 1,
-    managed       INTEGER NOT NULL DEFAULT 0,  -- 1 if created under VOITTA_ROOT_PATH; sync connectors require managed=1
     -- The user who registered the folder. They alone can rename, delete,
     -- toggle ``shared``, configure sync, reindex, upload, grant, revoke.
-    -- NULL on legacy rows registered before ownership existed; the migration
-    -- backfills from any folder_acl row.
     owner_id      INTEGER REFERENCES users(id) ON DELETE SET NULL,
     -- When 1, every signed-in user sees this folder (read-only) regardless
     -- of folder_acl. Owner-toggleable.

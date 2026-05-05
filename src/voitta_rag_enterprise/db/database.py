@@ -60,59 +60,15 @@ def session_scope() -> Iterator[Session]:
 
 
 def init_db() -> None:
-    """Apply ``schema.sql`` plus idempotent ALTER migrations for older DBs."""
+    """Apply ``schema.sql``."""
     engine = get_engine()
     sql = SCHEMA_PATH.read_text()
     raw_conn: sqlite3.Connection = engine.raw_connection()
     try:
         raw_conn.executescript(sql)
-        _apply_migrations(raw_conn)
         raw_conn.commit()
     finally:
         raw_conn.close()
-
-
-def _apply_migrations(conn: sqlite3.Connection) -> None:
-    """Apply additive column migrations that ``CREATE TABLE IF NOT EXISTS`` skips
-    on existing databases. Each ALTER is wrapped to ignore the "duplicate
-    column" error so the function is idempotent.
-    """
-    cur = conn.cursor()
-    try:
-        for stmt in (
-            "ALTER TABLE files ADD COLUMN embed_round INTEGER NOT NULL DEFAULT 0",
-            "ALTER TABLE files ADD COLUMN tab TEXT",
-            "ALTER TABLE folder_sync_sources ADD COLUMN gd_client_id TEXT",
-            "ALTER TABLE folder_sync_sources ADD COLUMN gd_client_secret TEXT",
-            "ALTER TABLE folder_sync_sources ADD COLUMN gd_refresh_token TEXT",
-            "ALTER TABLE folder_sync_sources ADD COLUMN gd_service_account_json TEXT",
-            "ALTER TABLE folder_sync_sources ADD COLUMN gd_folder_id TEXT",
-            "ALTER TABLE folder_sync_sources ADD COLUMN auto_sync_enabled INTEGER NOT NULL DEFAULT 0",
-            "ALTER TABLE folder_sync_sources ADD COLUMN auto_sync_hours INTEGER NOT NULL DEFAULT 6",
-            "ALTER TABLE folders ADD COLUMN owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL",
-            "ALTER TABLE folders ADD COLUMN shared INTEGER NOT NULL DEFAULT 0",
-        ):
-            try:
-                cur.execute(stmt)
-            except sqlite3.OperationalError as e:
-                if "duplicate column" not in str(e).lower():
-                    raise
-
-        # Backfill ownership for legacy folders. Pick the lowest user_id from
-        # folder_acl (deterministic across restarts) when no owner is set.
-        # Folders with no folder_acl rows at all stay NULL — they're already
-        # invisible to everyone in multi-user mode.
-        cur.execute(
-            """
-            UPDATE folders
-               SET owner_id = (
-                   SELECT MIN(user_id) FROM folder_acl WHERE folder_id = folders.id
-               )
-             WHERE owner_id IS NULL
-            """
-        )
-    finally:
-        cur.close()
 
 
 def reset_engine_cache() -> None:

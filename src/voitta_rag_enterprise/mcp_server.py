@@ -532,10 +532,6 @@ def _unauthorized(detail: str) -> JSONResponse:
     )
 
 
-# Backwards-compat alias for any external importer pinned to the old name.
-UserHeaderMiddleware = BearerAuthMiddleware
-
-
 # ---------------------------------------------------------------------------
 # Standalone runner
 # ---------------------------------------------------------------------------

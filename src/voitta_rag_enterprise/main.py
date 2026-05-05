@@ -111,11 +111,7 @@ def create_app() -> FastAPI:
             from .services.indexing import (
                 HANDLERS as INDEXING_HANDLERS,
             )
-            from .services.indexing import (
-                reconcile_abandoned_extracts,
-                reconcile_pending_embeds,
-                reconcile_unsupported_files,
-            )
+            from .services.indexing import reconcile_abandoned_extracts
             from .services.watcher import (
                 from_settings_for_all_folders,
                 install_default,
@@ -135,18 +131,6 @@ def create_app() -> FastAPI:
                     "reset %d file(s) from extracted/embedding -> pending"
                     " (extract job was abandoned)",
                     extracts_repaired,
-                )
-            repaired = reconcile_pending_embeds()
-            if repaired:
-                logger.warning(
-                    "reconciled %d file(s) stuck in pending state at startup",
-                    repaired,
-                )
-            moved = reconcile_unsupported_files()
-            if moved:
-                logger.info(
-                    "migrated %d file(s) from error -> unsupported (no-parser)",
-                    moved,
                 )
 
             # Index health: warn if any folder has files marked indexed in

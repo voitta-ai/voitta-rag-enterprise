@@ -1132,9 +1132,9 @@ def reconcile_abandoned_extracts() -> int:
     have requeued the original extract; failing that, the next folder
     scan will pick it up.
 
-    Files whose ``pending_embeds`` is already 0 are left to
-    :func:`reconcile_pending_embeds`, which handles the dual case of
-    "embeds finished, decrement was lost".
+    Files where ``pending_embeds=0`` and a CAS row exists take a fast path
+    below: snap straight to ``indexed`` instead of cycling through a
+    no-op re-extract.
     """
     repaired_ids: list[int] = []
     with session_scope() as s:
@@ -1181,8 +1181,7 @@ def reconcile_abandoned_extracts() -> int:
             # points (the decrement just got lost on the way out). Snap to
             # indexed instead of cycling through pending + a no-op extract
             # that would short-circuit on unchanged sha and leave the file
-            # stuck in pending. Mirrors `reconcile_pending_embeds`'s logic
-            # for the pending_embeds>0 dual case.
+            # stuck in pending.
             if f.pending_embeds == 0 and f.file_cas_id is not None:
                 logger.warning(
                     "reconcile: file_id=%d was stuck (state=%s pending=0) "
@@ -1208,96 +1207,6 @@ def reconcile_abandoned_extracts() -> int:
             job_queue.enqueue(
                 s, "extract", {"file_id": f.id}, dedup_key=f"extract:{f.id}"
             )
-            repaired_ids.append(f.id)
-    for fid in repaired_ids:
-        _publish_file_upserted(fid)
-    return len(repaired_ids)
-
-
-def reconcile_unsupported_files() -> int:
-    """Migrate ``state='error'`` rows whose error is just "no parser for X"
-    into the new ``unsupported`` state. One-shot cleanup for DBs that were
-    written before the unsupported state existed; idempotent.
-    """
-    moved: list[int] = []
-    with session_scope() as s:
-        rows = list(
-            s.execute(
-                select(File).where(
-                    File.state == "error",
-                    File.error.like("no parser for%"),
-                )
-            ).scalars()
-        )
-        for f in rows:
-            f.state = "unsupported"
-            moved.append(f.id)
-    for fid in moved:
-        _publish_file_upserted(fid)
-    return len(moved)
-
-
-def reconcile_pending_embeds() -> int:
-    """Resolve files left in a non-terminal state with no in-flight jobs.
-
-    Called once at startup. A re-extract racing with stale embed completions
-    used to leave a file with ``state=extracted`` and ``pending_embeds>0`` but
-    no queued / running embed jobs to ever drive it back to ``indexed``. The
-    embed_round token in ``_commit_indexing`` prevents new occurrences; this
-    pass cleans up rows from before the fix was deployed.
-
-    For every such row we treat the file as fully embedded (chunks and images
-    exist in the DB; the corresponding Qdrant points were upserted before the
-    decrement was lost) and force ``state=indexed``, ``pending_embeds=0``.
-    """
-    repaired_ids: list[int] = []
-    with session_scope() as s:
-        candidates = list(
-            s.execute(
-                select(File).where(
-                    File.pending_embeds > 0,
-                    File.state.in_(("extracted", "embedding")),
-                )
-            ).scalars()
-        )
-        # Build the set of file_ids that actually have an in-flight embed job
-        # right now. We parse payloads because newer embed jobs have no
-        # dedup_key (the round-token mechanism replaces that role).
-        inflight_files: set[int] = set()
-        live_jobs = s.execute(
-            select(Job).where(
-                Job.state.in_(("queued", "running")),
-                Job.kind.in_(("embed_text", "embed_image")),
-            )
-        ).scalars()
-        for j in live_jobs:
-            try:
-                payload = json.loads(j.payload)
-            except (TypeError, ValueError):
-                continue
-            fid = payload.get("file_id")
-            if isinstance(fid, int):
-                inflight_files.add(fid)
-            # Legacy embed_image jobs only carried image_id; resolve via row.
-            elif "image_id" in payload:
-                row = s.execute(
-                    select(Image.file_id).where(Image.id == int(payload["image_id"]))
-                ).first()
-                if row is not None:
-                    inflight_files.add(row[0])
-
-        for f in candidates:
-            if f.id in inflight_files:
-                continue
-            logger.warning(
-                "reconcile: file_id=%d was stuck (state=%s pending=%d) — forcing indexed",
-                f.id,
-                f.state,
-                f.pending_embeds,
-            )
-            f.pending_embeds = 0
-            f.state = "indexed"
-            f.error = None
             repaired_ids.append(f.id)
     for fid in repaired_ids:
         _publish_file_upserted(fid)

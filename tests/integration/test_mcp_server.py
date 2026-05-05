@@ -208,7 +208,7 @@ def test_resolve_url_exact_and_prefix(env: None, tmp_path: Path) -> None:
     src = tmp_path / "src"
     src.mkdir()
     (src / ".voitta_sources.json").write_text(
-        '{"a.md": "https://docs.example/page"}'
+        '{"a.md": {"url": "https://docs.example/page"}}'
     )
     (src / "a.md").write_text("alpha")
     (src / "b.md").write_text("beta")

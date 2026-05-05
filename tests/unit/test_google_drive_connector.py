@@ -804,7 +804,7 @@ async def test_progress_callback_failures_dont_break_sync(
     assert (tmp_path / "root" / "Root" / "note.txt").read_bytes() == b"hello"
 
 
-def test_coerce_folders_field_handles_legacy_and_new_shapes() -> None:
+def test_folders_field_round_trip() -> None:
     from voitta_rag_enterprise.services.sync.google_drive import (
         coerce_folders_field,
         encode_folders_field,
@@ -814,10 +814,7 @@ def test_coerce_folders_field_handles_legacy_and_new_shapes() -> None:
     assert coerce_folders_field(None) == []
     assert coerce_folders_field("") == []
 
-    # Legacy plain-string folder ID → wrapped
-    assert coerce_folders_field("0AB123") == [{"id": "0AB123", "name": ""}]
-
-    # New JSON-array shape round-trips
+    # JSON-array shape round-trips
     encoded = encode_folders_field(
         [{"id": "x", "name": "X"}, {"id": "y", "name": "Y"}]
     )

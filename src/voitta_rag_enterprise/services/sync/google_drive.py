@@ -136,35 +136,24 @@ def _safe_folder_name(name: str, fallback: str = "drive") -> str:
 def coerce_folders_field(raw: str | None) -> list[dict[str, str]]:
     """Decode the JSON array stored in ``folder_sync_sources.gd_folder_id``.
 
-    Accepts three on-disk shapes for backwards compatibility:
-
-    * ``None`` / empty → ``[]``
-    * Legacy plain-string folder ID → wrapped as ``[{"id": <s>, "name": ""}]``
-    * JSON array of ``{"id": str, "name": str}`` objects → returned as-is
-
-    Older single-folder rows persisted before multi-folder support landed
-    fall through the second branch and keep working.
+    Expected shape: a JSON array of ``{"id": str, "name": str}`` objects,
+    as produced by :func:`encode_folders_field`. Empty / None → ``[]``.
     """
     if not raw:
         return []
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        return [{"id": raw, "name": ""}]
-    if isinstance(parsed, list):
-        out: list[dict[str, str]] = []
-        for entry in parsed:
-            if isinstance(entry, dict) and "id" in entry:
-                out.append(
-                    {
-                        "id": str(entry["id"]),
-                        "name": str(entry.get("name") or ""),
-                    }
-                )
-        return out
-    if isinstance(parsed, str):
-        return [{"id": parsed, "name": ""}]
-    return []
+    parsed = json.loads(raw)
+    if not isinstance(parsed, list):
+        return []
+    out: list[dict[str, str]] = []
+    for entry in parsed:
+        if isinstance(entry, dict) and "id" in entry:
+            out.append(
+                {
+                    "id": str(entry["id"]),
+                    "name": str(entry.get("name") or ""),
+                }
+            )
+    return out
 
 
 def encode_folders_field(folders: list[dict[str, str]] | None) -> str | None:
@@ -643,9 +632,8 @@ class GoogleDriveConnector:
         pending_docs: list[tuple[dict[str, Any], str]] = []
         # Each picked Drive folder is mirrored under its own subdirectory so
         # multi-folder syncs can't collide on same-named children. The
-        # subdirectory is the folder's display name when we have one (set by
-        # the picker UI), with a stable fallback when it's missing — rare
-        # legacy single-folder rows where only the ID was stored.
+        # subdirectory is the folder's display name (set by the picker UI),
+        # with a stable fallback when it's missing.
         used_dirs: set[str] = set()
         n_drive_folders = len(drive_folders)
 

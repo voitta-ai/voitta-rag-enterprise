@@ -71,10 +71,6 @@ class E5TextEmbedder(TextEmbedder):
                         self._model = SentenceTransformer(self.model_name)
         return self._model  # type: ignore[return-value]
 
-    # Backwards-compatible alias for callers (incl. warmup) that don't care
-    # about the lock detail.
-    _ensure_loaded = _load_under_gpu_lock
-
     @property
     def dim(self) -> int:
         # ``get_embedding_dimension`` is the post-3.x name; the old

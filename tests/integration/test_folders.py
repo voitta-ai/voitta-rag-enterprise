@@ -58,7 +58,7 @@ def test_sidecar_source_urls_surface(client: TestClient, tmp_path: Path) -> None
     src = tmp_path / "src"
     _seed(src, {"spec.md": "# spec", "code.py": "print('x')"})
     (src / ".voitta_sources.json").write_text(
-        json.dumps({"spec.md": "https://example.com/docs/spec"})
+        json.dumps({"spec.md": {"url": "https://example.com/docs/spec"}})
     )
 
     r = client.post("/api/folders", json={"name": src.name})

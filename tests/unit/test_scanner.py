@@ -131,7 +131,9 @@ def test_scan_reads_sidecar_urls(env: None, tmp_path: Path) -> None:
     init_db()
     src = tmp_path / "src"
     _seed(src, {"a.md": "alpha", "b.py": "print(1)"})
-    (src / ".voitta_sources.json").write_text(json.dumps({"a.md": "https://docs.example/a"}))
+    (src / ".voitta_sources.json").write_text(
+        json.dumps({"a.md": {"url": "https://docs.example/a"}})
+    )
 
     with session_scope() as s:
         folder = _create_folder(s, src)
@@ -179,14 +181,13 @@ def test_load_sidecar_accepts_object_form_with_tab(tmp_path: Path) -> None:
                     "url": "https://docs.example/d/abc?tab=t.1",
                     "tab": "Overview",
                 },
-                "plain.pdf": "https://example/plain",
+                "plain.pdf": {"url": "https://example/plain"},
             }
         )
     )
     sidecar = load_sidecar(tmp_path)
     assert sidecar["Specs/01-Overview.md"].url == "https://docs.example/d/abc?tab=t.1"
     assert sidecar["Specs/01-Overview.md"].tab == "Overview"
-    # Legacy string form still parses.
     assert sidecar["plain.pdf"].url == "https://example/plain"
     assert sidecar["plain.pdf"].tab is None
 
