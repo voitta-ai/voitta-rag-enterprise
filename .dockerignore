@@ -1,0 +1,36 @@
+# Keep the build context lean — anything below either bloats the image or
+# leaks dev-only state into it.
+
+# VCS + dev caches
+.git
+.github
+.venv
+venv
+.mypy_cache
+.pytest_cache
+.ruff_cache
+__pycache__
+**/__pycache__
+*.pyc
+
+# Local data + secrets
+.env
+.env.local
+data/
+users.txt
+
+# Build artefacts
+build/
+dist/
+*.egg-info
+
+# Tests are not needed at runtime; the image ships only the app.
+tests/
+
+# Editor
+.vscode/
+.idea/
+.DS_Store
+
+# Terraform — copied into images by accident otherwise
+terraform/
