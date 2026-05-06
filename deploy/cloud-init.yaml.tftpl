@@ -62,6 +62,22 @@ write_files:
     content: |
       ${voitta_service_indented}
 
+%{ if enable_caddy ~}
+  # Caddy reverse proxy + auto-Let's-Encrypt. Skipped when
+  # create_load_balancer=true (the Cloud LB path, #6).
+  - path: /etc/caddy/Caddyfile
+    permissions: "0644"
+    owner: root:root
+    content: |
+      ${caddyfile_indented}
+
+  - path: /etc/systemd/system/caddy.service
+    permissions: "0644"
+    owner: root:root
+    content: |
+      ${caddy_service_indented}
+%{ endif ~}
+
 runcmd:
   # 1. Format the data disk on first boot only. blkid prints nothing
   #    (and exits non-zero) for an unformatted block device; we treat
@@ -84,6 +100,20 @@ runcmd:
   #    real filesystem, not the empty placeholder.
   - chown 1000:1000 /var/lib/voitta
 
-  # 4. Start the app. systemd resolves the dependency chain
+  # 4. Caddy state lives on the data disk so disk snapshots include
+  #    ACME certs/account keys.
+%{ if enable_caddy ~}
+  - mkdir -p /var/lib/voitta/caddy
+  - chown 1000:1000 /var/lib/voitta/caddy
+%{ endif ~}
+
+  # 5. Start the app. systemd resolves the dependency chain
   #    docker.service → var-lib-voitta.mount → voitta.service.
   - systemctl enable --now voitta.service
+
+%{ if enable_caddy ~}
+  # 6. Bring up Caddy after the app is healthy. caddy.service has
+  #    Wants=voitta.service so this ordering is enforced even if the
+  #    enable lines run in the opposite order on a future tweak.
+  - systemctl enable --now caddy.service
+%{ endif ~}
