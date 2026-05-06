@@ -47,12 +47,24 @@ curl -X POST http://localhost:8000/api/search \
 
 Open `http://localhost:8000/` for the SPA (folder list + live job feed + search).
 
-## Real models
+### Single-user mode (no auth, single-box deploy)
 
-Fake embedders are deterministic (hash-based) and good for development; for real RAG quality install the `[ml]` extra:
+Skip Make and run uvicorn directly. Works on any host as long as `VOITTA_ROOT_PATH` exists and is writable:
 
 ```bash
-pip install -e ".[dev,ml]"
+python -m venv .venv && .venv/bin/pip install -e .
+VOITTA_SINGLE_USER=true \
+VOITTA_ROOT_PATH=/mnt/ssddata/data/voitta-rag-enterprise \
+.venv/bin/uvicorn voitta_rag_enterprise.main:app --host 0.0.0.0 --port 10000
+```
+
+Everything (managed folders, ACL checks) collapses onto a built-in `root` user — no Google OAuth, no headers needed. Open `http://<host>:10000/`.
+
+## Real models
+
+Fake embedders are deterministic (hash-based) and good for development. For real RAG quality just unset the toggle — `pip install -e .` already pulls in everything the embedders need:
+
+```bash
 unset VOITTA_USE_FAKE_EMBEDDERS
 make dev
 ```

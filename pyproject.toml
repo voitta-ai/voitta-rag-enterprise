@@ -31,6 +31,14 @@ dependencies = [
     "google-auth-oauthlib>=1.2",
     "httpx>=0.28",
     "itsdangerous>=2.2",
+    # Real text embedder backbone (e5-base-v2 via SentenceTransformer).
+    # ``transformers`` and ``torch`` arrive transitively via mineru[all],
+    # so adding this here is essentially a no-op install-size-wise — but
+    # it keeps prod deploys from breaking the moment someone unsets
+    # VOITTA_USE_FAKE_EMBEDDERS. Dev and CI use the fake embedder env var
+    # and pay the install cost without ever loading the model.
+    "sentence-transformers>=3.2",
+    "transformers>=4.45",
 ]
 
 [project.optional-dependencies]
@@ -41,10 +49,10 @@ dev = [
     "ruff>=0.7",
     "mypy>=1.13",
 ]
-ml = [
-    "sentence-transformers>=3.2",
-    "transformers>=4.45",
-]
+# Back-compat alias for ``pip install -e ".[ml]"`` references in older
+# docs / scripts. The ml deps are now in core; this stays empty so the
+# extra still resolves but installs nothing extra.
+ml = []
 
 [build-system]
 requires = ["hatchling"]
