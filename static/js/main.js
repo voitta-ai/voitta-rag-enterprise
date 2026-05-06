@@ -1738,7 +1738,6 @@ async function refreshAdmin() {
             api.adminListUsers(),
         ]);
         renderList("#admin-domains", allow.domains, "domain", api.adminRemoveDomain);
-        renderList("#admin-allowed-users", allow.users, "email", api.adminRemoveUser);
         renderList("#admin-blocked", allow.blocked, "email", api.adminUnblock);
         renderUsersTable(users);
     } catch (err) {
@@ -1831,25 +1830,54 @@ $("#admin-backdrop").addEventListener("click", (e) => {
     if (e.target.id === "admin-backdrop") closeAdmin();
 });
 
-$("#admin-domain-add").addEventListener("click", async () => {
-    const v = $("#admin-domain-input").value.trim();
-    if (!v) return;
-    try { await api.adminAddDomain(v); $("#admin-domain-input").value = ""; await refreshAdmin(); }
-    catch (err) { alert(err.message); }
-});
+// Wire each input + button pair so click and Enter both submit. Without
+// the Enter binding the form looked broken to anyone who typed and hit
+// return — a real bug report from the first admin-UI session.
+function wireAdminAdd(inputSel, buttonSel, apiFn) {
+    const input = $(inputSel);
+    const submit = async () => {
+        const v = input.value.trim();
+        if (!v) return;
+        try {
+            await apiFn(v);
+            input.value = "";
+            await refreshAdmin();
+        } catch (err) {
+            alert(err.message);
+        }
+    };
+    $(buttonSel).addEventListener("click", submit);
+    input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+            e.preventDefault();
+            submit();
+        }
+    });
+}
 
-$("#admin-allowed-add").addEventListener("click", async () => {
-    const v = $("#admin-allowed-input").value.trim();
-    if (!v) return;
-    try { await api.adminAddUser(v); $("#admin-allowed-input").value = ""; await refreshAdmin(); }
-    catch (err) { alert(err.message); }
-});
+wireAdminAdd("#admin-domain-input", "#admin-domain-add", api.adminAddDomain);
+wireAdminAdd("#admin-block-input", "#admin-block-add", api.adminBlock);
 
-$("#admin-block-add").addEventListener("click", async () => {
-    const v = $("#admin-block-input").value.trim();
-    if (!v) return;
-    try { await api.adminBlock(v); $("#admin-block-input").value = ""; await refreshAdmin(); }
-    catch (err) { alert(err.message); }
+// Pre-create user (with optional admin grant). Different shape from the
+// allowlist add rows because it has an extra "Admin" checkbox alongside
+// the email input — wireAdminAdd only handles single-input.
+async function submitAddUser() {
+    const input = $("#admin-newuser-input");
+    const adminCb = $("#admin-newuser-admin");
+    const email = input.value.trim();
+    if (!email) return;
+    try {
+        await api.adminCreateUser(email, adminCb.checked);
+        input.value = "";
+        adminCb.checked = false;
+        await refreshAdmin();
+    } catch (err) {
+        alert(err.message);
+    }
+}
+$("#admin-newuser-add").addEventListener("click", submitAddUser);
+$("#admin-newuser-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); submitAddUser(); }
 });
 
 $("#btn-stop-impersonate").addEventListener("click", async () => {

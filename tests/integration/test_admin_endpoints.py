@@ -103,6 +103,46 @@ def test_admin_can_promote_demote_users(app: FastAPI) -> None:
         assert s.get(User, target_id).is_admin is False
 
 
+def test_admin_can_pre_create_user_with_admin_flag(app: FastAPI) -> None:
+    """The whole point of POST /api/admin/users: grant admin status to
+    a teammate before they've ever signed in. Without this, the Users
+    table only showed users with at least one prior login, leaving no
+    way to pre-grant admin powers to a new hire."""
+    from voitta_rag_enterprise.db.database import session_scope
+    from voitta_rag_enterprise.db.models import User
+    from voitta_rag_enterprise.services import admin_store
+
+    _make_admin(app, "boss@example.com")
+    with TestClient(app) as c:
+        out = c.post(
+            "/api/admin/users",
+            json={"email": "newhire@customer.com", "is_admin": True},
+        ).json()
+        assert out["email"] == "newhire@customer.com"
+        assert out["is_admin"] is True
+
+    # User row exists, flag set, allowlist updated so they can sign in.
+    with session_scope() as s:
+        row = s.query(User).filter(User.email == "newhire@customer.com").one()
+        assert row.is_admin is True
+    assert "newhire@customer.com" in admin_store.list_allowed_users()
+
+
+def test_pre_create_user_without_signin_grant(app: FastAPI) -> None:
+    """grant_signin=False creates the row but does NOT touch the allowlist —
+    rare path, but exists for cases where the admin wants the User row
+    to exist (e.g. for ACL grants) without admitting the email."""
+    from voitta_rag_enterprise.services import admin_store
+
+    _make_admin(app, "boss@example.com")
+    with TestClient(app) as c:
+        c.post(
+            "/api/admin/users",
+            json={"email": "ghost@example.com", "grant_signin": False},
+        ).raise_for_status()
+    assert "ghost@example.com" not in admin_store.list_allowed_users()
+
+
 def test_super_admin_flag_surfaced_in_user_listing(
     app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:

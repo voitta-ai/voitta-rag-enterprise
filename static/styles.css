@@ -806,81 +806,154 @@ input[type="text"], input[type="file"] {
 .agpl-footer a { color: var(--color-text-secondary); text-decoration: none; }
 .agpl-footer a:hover { color: var(--color-accent); }
 
-/* Admin panel */
+/* Admin panel
+ *
+ * Density choices:
+ *   - 3-up grid for the three allowlist editors so vertical scrolling
+ *     is rarely needed even on a 13" laptop.
+ *   - Per-section header is one row: h4 + a small inline hint, no
+ *     dedicated <p> blocks.
+ *   - Lists capped at 140px scroll, since real allowlists rarely have
+ *     more than a handful of entries; if they do, the user scrolls.
+ *   - The Users table is the dense piece — 32px rows, monospace email,
+ *     small action buttons.
+ */
+.admin-modal { max-width: 880px; }
+.admin-body { padding: 16px 20px; gap: 14px; }
+
+.admin-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+}
+@media (max-width: 600px) {
+    .admin-grid { grid-template-columns: 1fr; }
+}
+
+.admin-section {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    flex-shrink: 0;
+}
+.admin-section header {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+.admin-section header h4 {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--color-text-primary);
+}
+.admin-section header .hint { font-size: 11px; line-height: 1.3; }
+
 .admin-list {
     list-style: none;
-    margin: 8px 0;
+    margin: 0;
     padding: 0;
     border: 1px solid var(--color-border-light);
     border-radius: 4px;
-    max-height: 160px;
+    max-height: 140px;
     overflow-y: auto;
+    /* modal-body is display:flex/column with overflow-y:auto; without
+       flex-shrink:0 the column flex layout collapses non-fixed-height
+       items even though the modal can scroll. */
+    flex-shrink: 0;
+    background: var(--color-bg);
 }
 .admin-list li {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 6px 12px;
+    padding: 4px 8px 4px 10px;
     border-bottom: 1px solid var(--color-border-light);
-    font-family: monospace;
-    font-size: 13px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px;
 }
 .admin-list li:last-child { border-bottom: none; }
-.admin-list li.empty { color: var(--color-text-tertiary); font-family: inherit; font-style: italic; }
+.admin-list li.empty { color: var(--color-text-tertiary); font-family: inherit; font-style: italic; padding: 6px 10px; }
 .admin-list .btn-remove {
     background: none;
     border: none;
     color: var(--color-text-tertiary);
     cursor: pointer;
-    padding: 2px 6px;
-    font-size: 16px;
+    padding: 0 4px;
+    font-size: 14px;
+    line-height: 1;
 }
 .admin-list .btn-remove:hover { color: #ef4444; }
 
 .admin-add-row {
     display: flex;
-    gap: 8px;
-    margin-top: 6px;
+    gap: 6px;
 }
 .admin-add-row input {
     flex: 1;
-    padding: 6px 10px;
+    min-width: 0;
+    padding: 4px 8px;
     border: 1px solid var(--color-border-light);
     border-radius: 4px;
     background: var(--color-bg);
     color: var(--color-text);
-    font-size: 13px;
+    font-size: 12px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
 }
 
+.admin-users { margin-top: 4px; }
 .admin-table {
     width: 100%;
     border-collapse: collapse;
-    margin-top: 8px;
-    font-size: 13px;
+    font-size: 12px;
 }
 .admin-table th, .admin-table td {
     text-align: left;
-    padding: 8px 10px;
+    padding: 5px 10px;
     border-bottom: 1px solid var(--color-border-light);
+    vertical-align: middle;
 }
 .admin-table th {
     font-weight: 600;
     color: var(--color-text-secondary);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    background: transparent;
+    border-bottom-color: var(--color-border);
+}
+.admin-table td:first-child {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+.admin-table td:last-child {
+    text-align: right;
+    width: 80px;
+}
+.admin-add-user { margin-top: 8px; }
+.admin-inline-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
     font-size: 11px;
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: 0.04em;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    user-select: none;
+    /* Match the input's vertical padding so all three controls in the
+       row align on the same baseline. */
+    padding: 0 6px;
 }
-.admin-table .row-actions {
-    display: flex;
-    gap: 6px;
-    justify-content: flex-end;
-}
+.admin-inline-check input[type="checkbox"] { margin: 0; }
+
 .admin-table .badge-super {
-    font-size: 10px;
+    font-size: 9px;
     background: var(--color-accent);
     color: #fff;
-    padding: 1px 6px;
+    padding: 1px 5px;
     border-radius: 3px;
     margin-left: 6px;
+    letter-spacing: 0.04em;
+    font-family: var(--font);
 }
 

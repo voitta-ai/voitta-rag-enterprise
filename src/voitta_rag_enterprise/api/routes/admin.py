@@ -156,6 +156,58 @@ class _AdminFlagIn(BaseModel):
     is_admin: bool
 
 
+class _CreateUserIn(BaseModel):
+    email: EmailStr
+    # Default-true: the natural intent of "add a user" via the admin
+    # panel is that they can actually sign in. Operator can flip the
+    # checkbox off in the UI for the rare "I want a row in the DB but
+    # not on the allowlist" case (mostly: legacy data).
+    grant_signin: bool = True
+    is_admin: bool = False
+
+
+@router.post("/users", response_model=AdminUserOut)
+def create_user(
+    body: _CreateUserIn,
+    db: Session = Depends(db_session),
+    me: CurrentUser = Depends(admin_user),
+) -> AdminUserOut:
+    """Pre-create a User row and (optionally) mark them admin + allowlist.
+
+    Why this exists: the Users table only ever showed users who had
+    signed in at least once, so an admin couldn't pre-grant admin
+    powers to a teammate who hadn't logged in yet. This endpoint
+    creates the row up front so the flag has somewhere to live, and
+    by default also adds the address to ``allowed_users.txt`` so the
+    teammate can actually sign in. The admin flag is then just one
+    PATCH away — or set in this same call via ``is_admin=True``.
+    """
+    from ...config import get_settings
+    from ...services.acl import get_or_create_user
+
+    email = str(body.email).strip().lower()
+    user = get_or_create_user(db, email)
+    user.is_admin = bool(body.is_admin) or bool(user.is_admin)
+    db.commit()
+
+    if body.grant_signin:
+        admin_store.add_allowed_user(email)
+
+    logger.info(
+        "admin: %s pre-created %s (admin=%s, signin=%s)",
+        me.email, email, body.is_admin, body.grant_signin,
+    )
+
+    super_set = {sa.lower() for sa in get_settings().super_admin_list()}
+    return AdminUserOut(
+        id=user.id,
+        email=user.email,
+        display_name=user.display_name,
+        is_admin=bool(user.is_admin),
+        is_super_admin=user.email.lower() in super_set,
+    )
+
+
 @router.get("/users", response_model=list[AdminUserOut])
 def list_users(
     db: Session = Depends(db_session),

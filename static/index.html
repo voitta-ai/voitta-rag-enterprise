@@ -26,44 +26,47 @@
 
     <!-- Admin modal -->
     <div id="admin-backdrop" class="modal-backdrop" hidden>
-        <div class="modal modal-wide" style="max-width:880px;">
+        <div class="modal modal-wide admin-modal">
             <div class="modal-header">
                 <h3>Admin</h3>
-                <button id="admin-close" class="modal-close" aria-label="Close">×</button>
+                <button id="admin-close" class="btn-text" aria-label="Close">×</button>
             </div>
-            <div class="modal-body" style="padding:20px 24px;">
-                <p class="hint">Manage who can sign in and who has admin powers. Changes take effect immediately for future sign-ins.</p>
+            <div class="modal-body admin-body">
+                <div class="admin-grid">
+                    <section class="admin-section">
+                        <header><h4>Allowed domains</h4><span class="hint">Anyone with a Google account in this domain can sign in.</span></header>
+                        <ul id="admin-domains" class="admin-list"></ul>
+                        <div class="admin-add-row">
+                            <input id="admin-domain-input" type="text" placeholder="customer.com" />
+                            <button id="admin-domain-add" class="btn btn-primary btn-sm">Add</button>
+                        </div>
+                    </section>
 
-                <h4 style="margin-top:16px;">Allowed domains</h4>
-                <p class="hint">Anyone with a verified Google account in one of these domains can sign in.</p>
-                <ul id="admin-domains" class="admin-list"></ul>
-                <div class="admin-add-row">
-                    <input id="admin-domain-input" type="text" placeholder="customer.com" />
-                    <button id="admin-domain-add" class="btn btn-primary btn-sm">Add domain</button>
+                    <section class="admin-section">
+                        <header><h4>Blocked</h4><span class="hint">Trumps everything, including super-admins.</span></header>
+                        <ul id="admin-blocked" class="admin-list"></ul>
+                        <div class="admin-add-row">
+                            <input id="admin-block-input" type="email" placeholder="rogue@customer.com" />
+                            <button id="admin-block-add" class="btn btn-secondary btn-sm">Block</button>
+                        </div>
+                    </section>
                 </div>
 
-                <h4 style="margin-top:24px;">Allowed individual emails</h4>
-                <p class="hint">Specific addresses outside the allowed domains.</p>
-                <ul id="admin-allowed-users" class="admin-list"></ul>
-                <div class="admin-add-row">
-                    <input id="admin-allowed-input" type="email" placeholder="bob@gmail.com" />
-                    <button id="admin-allowed-add" class="btn btn-primary btn-sm">Allow email</button>
-                </div>
-
-                <h4 style="margin-top:24px;">Blocked emails</h4>
-                <p class="hint">Block-list trumps everything (including super-admins). Use this to revoke access.</p>
-                <ul id="admin-blocked" class="admin-list"></ul>
-                <div class="admin-add-row">
-                    <input id="admin-block-input" type="email" placeholder="rogue@customer.com" />
-                    <button id="admin-block-add" class="btn btn-secondary btn-sm">Block email</button>
-                </div>
-
-                <h4 style="margin-top:24px;">Users</h4>
-                <p class="hint">Everyone who has signed in at least once. Toggle admin to grant the admin button + this panel. Click "View as" to impersonate.</p>
-                <table id="admin-users-table" class="admin-table">
-                    <thead><tr><th>Email</th><th>Display name</th><th>Admin</th><th>Actions</th></tr></thead>
-                    <tbody></tbody>
-                </table>
+                <section class="admin-section admin-users">
+                    <header><h4>Users</h4><span class="hint">Add an individual address to allow them in (whether or not their domain is allowed). Toggle admin to grant access to this panel. "View as" to impersonate.</span></header>
+                    <table id="admin-users-table" class="admin-table">
+                        <thead><tr><th>Email</th><th>Name</th><th>Admin</th><th></th></tr></thead>
+                        <tbody></tbody>
+                    </table>
+                    <div class="admin-add-row admin-add-user">
+                        <input id="admin-newuser-input" type="email" placeholder="new-user@customer.com" />
+                        <label class="admin-inline-check">
+                            <input id="admin-newuser-admin" type="checkbox" />
+                            Admin
+                        </label>
+                        <button id="admin-newuser-add" class="btn btn-primary btn-sm">Add</button>
+                    </div>
+                </section>
             </div>
         </div>
     </div>

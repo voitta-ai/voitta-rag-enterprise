@@ -121,6 +121,8 @@ export const api = {
     adminUnblock: (email) =>
         req("DELETE", `/api/admin/blocklist/${encodeURIComponent(email)}`),
     adminListUsers: () => req("GET", "/api/admin/users"),
+    adminCreateUser: (email, is_admin) =>
+        req("POST", "/api/admin/users", { email, is_admin, grant_signin: true }),
     adminSetIsAdmin: (id, is_admin) =>
         req("PATCH", `/api/admin/users/${id}`, { is_admin }),
     adminImpersonate: (id) => req("POST", `/api/admin/impersonate/${id}`),
