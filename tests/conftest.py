@@ -80,7 +80,7 @@ def auth_as(app: FastAPI, email: str) -> int:
     OAuth flow in tests is too heavy, so we patch the dependency directly.
     This is the standard FastAPI testing pattern.
     """
-    from voitta_rag_enterprise.api.deps import current_user
+    from voitta_rag_enterprise.api.deps import current_user, real_user
     from voitta_rag_enterprise.db.database import session_scope
     from voitta_rag_enterprise.services.acl import CurrentUser, get_or_create_user
 
@@ -89,5 +89,12 @@ def auth_as(app: FastAPI, email: str) -> int:
         s.commit()
         uid, mail = user.id, user.email
 
-    app.dependency_overrides[current_user] = lambda: CurrentUser(id=uid, email=mail)
+    fake = lambda: CurrentUser(id=uid, email=mail)  # noqa: E731
+    # Override both ``current_user`` (used by app routes) and ``real_user``
+    # (used by admin guard) so tests don't have to think about which one
+    # a given route depends on. Real auth distinguishes them only for
+    # impersonation; tests don't impersonate, so binding both to the same
+    # identity is correct.
+    app.dependency_overrides[current_user] = fake
+    app.dependency_overrides[real_user] = fake
     return uid

@@ -108,4 +108,21 @@ export const api = {
     cleanupFailedJobs: () => req("DELETE", "/api/jobs/cleanup-failed"),
     search: (query, modes = ["chunks"], folderIds = null, limit = 10) =>
         req("POST", "/api/search", { query, modes, folder_ids: folderIds, limit }),
+
+    // Admin
+    adminAllowlist: () => req("GET", "/api/admin/allowlist"),
+    adminAddDomain: (domain) => req("POST", "/api/admin/allowlist/domains", { domain }),
+    adminRemoveDomain: (domain) =>
+        req("DELETE", `/api/admin/allowlist/domains/${encodeURIComponent(domain)}`),
+    adminAddUser: (email) => req("POST", "/api/admin/allowlist/users", { email }),
+    adminRemoveUser: (email) =>
+        req("DELETE", `/api/admin/allowlist/users/${encodeURIComponent(email)}`),
+    adminBlock: (email) => req("POST", "/api/admin/blocklist", { email }),
+    adminUnblock: (email) =>
+        req("DELETE", `/api/admin/blocklist/${encodeURIComponent(email)}`),
+    adminListUsers: () => req("GET", "/api/admin/users"),
+    adminSetIsAdmin: (id, is_admin) =>
+        req("PATCH", `/api/admin/users/${id}`, { is_admin }),
+    adminImpersonate: (id) => req("POST", `/api/admin/impersonate/${id}`),
+    adminStopImpersonate: () => req("DELETE", "/api/admin/impersonate"),
 };

@@ -25,14 +25,14 @@ locals {
   # passed into the container as --env-file.
   voitta_env = merge(
     {
-      VOITTA_DATA_DIR              = "/data"
-      VOITTA_ROOT_PATH             = "/data/folders"
-      VOITTA_USERS_FILE            = "/etc/voitta/users.txt"
-      VOITTA_PORT                  = "8000"
-      VOITTA_ALLOWED_DOMAINS       = join(",", var.allowed_domains)
-      VOITTA_GOOGLE_AUTH_CLIENT_ID = var.google_oauth_client_id
+      VOITTA_DATA_DIR                  = "/data"
+      VOITTA_ROOT_PATH                 = "/data/folders"
+      VOITTA_USERS_FILE                = "/etc/voitta/users.txt"
+      VOITTA_PORT                      = "8000"
+      VOITTA_SUPER_ADMINS              = join(",", var.super_admins)
+      VOITTA_GOOGLE_AUTH_CLIENT_ID     = var.google_oauth_client_id
       VOITTA_GOOGLE_AUTH_CLIENT_SECRET = var.google_oauth_client_secret
-      VOITTA_SESSION_SECRET        = var.session_secret
+      VOITTA_SESSION_SECRET            = var.session_secret
     },
     var.extra_env,
   )

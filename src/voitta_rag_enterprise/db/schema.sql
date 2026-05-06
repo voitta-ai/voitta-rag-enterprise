@@ -6,6 +6,10 @@ CREATE TABLE IF NOT EXISTS users (
     id           INTEGER PRIMARY KEY,
     email        TEXT UNIQUE NOT NULL,
     display_name TEXT,
+    -- 1 = full admin: can edit allowlist/blocklist, toggle other admins,
+    -- and impersonate other users. Bootstrap admins listed in
+    -- VOITTA_SUPER_ADMINS get is_admin=1 stamped on every sign-in.
+    is_admin     INTEGER NOT NULL DEFAULT 0,
     created_at   INTEGER NOT NULL
 );
 

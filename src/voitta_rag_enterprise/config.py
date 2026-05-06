@@ -125,13 +125,20 @@ class Settings(BaseSettings):
     dev_user: str | None = None
     users_file: Path = Path("users.txt")
 
-    # Google sign-in allowlist. Comma-separated list of domains (e.g.
-    # "customer.com,partner.org"). On each OAuth callback the verified
-    # email is admitted iff its domain is listed here OR its address
-    # appears in ``users_file``. When both lists are empty the deploy
-    # rejects every sign-in — a deliberate fail-loud default so a misconfig
-    # can't silently accept the public internet.
+    # Legacy: pre-admin-UI allowlist. No longer consulted by the sign-in
+    # gate — admins manage the allowlist via the UI (stored on the data
+    # PD, see services/admin_store.py). Kept as a field so existing
+    # ``VOITTA_ALLOWED_DOMAINS`` env vars don't blow up Settings init;
+    # ignore otherwise.
     allowed_domains: str = ""
+
+    # Comma-separated bootstrap admin emails. Every address listed here
+    # is *unconditionally* admitted at sign-in (block-list aside) and
+    # gets ``is_admin=True`` stamped on the User row on every login. The
+    # purpose is to keep at least one admin able to sign in even when
+    # the data-PD allowlists are empty (fresh deploy, lockout recovery).
+    # In production this is set per-deploy via Terraform.
+    super_admins: str = ""
 
     # "Sign in with Google" — when both ``google_auth_client_id`` and
     # ``google_auth_client_secret`` are set the API exposes
@@ -183,14 +190,25 @@ class Settings(BaseSettings):
         return [g.strip() for g in self.ignore_patterns.split(",") if g.strip()]
 
     def allowed_domain_list(self) -> list[str]:
-        """Normalised domain allowlist. Strips whitespace, lowercases, drops
-        a leading ``@`` so ``@customer.com`` and ``customer.com`` both work.
+        """Legacy. Returns the parsed VOITTA_ALLOWED_DOMAINS env var. Not
+        consulted by the sign-in gate — kept for back-compat with any code
+        still reading it. New callers should use
+        ``services.admin_store.list_allowed_domains()`` instead.
         """
         out: list[str] = []
         for raw in self.allowed_domains.split(","):
             d = raw.strip().lower().lstrip("@")
             if d:
                 out.append(d)
+        return out
+
+    def super_admin_list(self) -> list[str]:
+        """Lowercased emails from VOITTA_SUPER_ADMINS."""
+        out: list[str] = []
+        for raw in self.super_admins.split(","):
+            v = raw.strip().lower()
+            if v and "@" in v:
+                out.append(v)
         return out
 
     @property

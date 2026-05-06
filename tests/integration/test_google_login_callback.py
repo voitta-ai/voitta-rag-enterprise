@@ -103,55 +103,58 @@ def _login(
 def test_login_allowed_when_domain_matches(
     google_app: FastAPI,
     stubbed_httpx: None,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from voitta_rag_enterprise.config import reset_settings_cache
+    from voitta_rag_enterprise.services import admin_store
 
-    monkeypatch.setenv("VOITTA_ALLOWED_DOMAINS", "customer.com")
-    reset_settings_cache()
-    app = google_app
-    code, _ = _login(app, "alice@customer.com")
+    admin_store.add_allowed_domain("customer.com")
+    code, _ = _login(google_app, "alice@customer.com")
     assert code == 303  # redirect home
 
 
-def test_login_allowed_when_email_in_users_file(
+def test_login_allowed_when_email_in_admin_users(
     google_app: FastAPI,
     stubbed_httpx: None,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
-    from voitta_rag_enterprise.config import reset_settings_cache
+    from voitta_rag_enterprise.services import admin_store
 
-    extras = tmp_path / "extras.txt"
-    extras.write_text("bob@gmail.com\n")
-    monkeypatch.setenv("VOITTA_USERS_FILE", str(extras))
-    reset_settings_cache()
-    app = google_app
-    code, _ = _login(app, "bob@gmail.com")
+    admin_store.add_allowed_user("bob@gmail.com")
+    code, _ = _login(google_app, "bob@gmail.com")
     assert code == 303
 
 
 def test_login_denied_when_neither_matches(
     google_app: FastAPI,
     stubbed_httpx: None,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from voitta_rag_enterprise.config import reset_settings_cache
+    from voitta_rag_enterprise.services import admin_store
 
-    monkeypatch.setenv("VOITTA_ALLOWED_DOMAINS", "customer.com")
-    reset_settings_cache()
-    app = google_app
-    code, body = _login(app, "eve@evil.example")
+    admin_store.add_allowed_domain("customer.com")
+    code, body = _login(google_app, "eve@evil.example")
     assert code == 403
     assert "not authorized" in body.lower()
+
+
+def test_super_admin_signs_in_on_empty_allowlist(
+    google_app: FastAPI,
+    stubbed_httpx: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bootstrap admin can sign in with no allowlist entries — required so a
+    fresh deploy isn't permanently locked out."""
+    from voitta_rag_enterprise.config import reset_settings_cache
+
+    monkeypatch.setenv("VOITTA_SUPER_ADMINS", "boss@anywhere.com")
+    reset_settings_cache()
+    code, _ = _login(google_app, "boss@anywhere.com")
+    assert code == 303
 
 
 def test_login_denied_when_no_allowlist_configured(
     google_app: FastAPI,
     stubbed_httpx: None,
 ) -> None:
-    """Fail-loud default: with no domains and no users.txt, every sign-in is
-    rejected — no silent accept-all on a misconfigured deploy.
+    """Fail-loud default: with no domains, no allowed users, and no
+    super-admins, every sign-in is rejected.
     """
     app = google_app
     code, _ = _login(app, "alice@customer.com")

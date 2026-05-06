@@ -289,27 +289,20 @@ def allowed_user_ids_for_file(session: Session, file_id: int) -> list[int]:
     return folder_user_ids(session, file.folder_id)
 
 
-def _read_users_file(path: Path) -> list[str]:
-    """Return the raw email lines from ``path`` (no lower-casing).
+def seed_users_from_file(session: Session, path: Path) -> int:
+    """Create ``users`` rows for every email in ``path`` (one per line). Returns count added.
 
-    One email per line; blanks and ``#``-comments are skipped. Missing
-    file → empty list.
+    Used at startup to bootstrap a new install with the addresses listed
+    in ``users.txt``. The runtime sign-in gate no longer consults this
+    file — see ``services/admin_store.py`` for the live allowlist.
     """
     if not path.exists():
-        return []
-    out: list[str] = []
-    for line in path.read_text().splitlines():
-        email = line.strip()
+        return 0
+    added = 0
+    for raw in path.read_text().splitlines():
+        email = raw.strip()
         if not email or email.startswith("#"):
             continue
-        out.append(email)
-    return out
-
-
-def seed_users_from_file(session: Session, path: Path) -> int:
-    """Create ``users`` rows for every email in ``path`` (one per line). Returns count added."""
-    added = 0
-    for email in _read_users_file(path):
         existing = session.execute(
             select(User).where(User.email == email)
         ).scalar_one_or_none()
@@ -319,26 +312,6 @@ def seed_users_from_file(session: Session, path: Path) -> int:
     if added:
         session.flush()
     return added
-
-
-def is_email_allowed(
-    email: str, allowed_domains: list[str], extras_file: Path
-) -> bool:
-    """Return True iff ``email`` may sign in via Google OAuth.
-
-    The address is allowed when its domain is in ``allowed_domains`` OR the
-    address itself appears (case-insensitive) in ``extras_file``. With both
-    empty the function returns ``False`` for every input — see the comment
-    on ``Settings.allowed_domains`` for the rationale.
-    """
-    addr = email.strip().lower()
-    if "@" not in addr:
-        return False
-    domain = addr.split("@", 1)[1]
-    if domain in {d.lower() for d in allowed_domains}:
-        return True
-    extras = {e.lower() for e in _read_users_file(extras_file)}
-    return addr in extras
 
 
 def public_user_ids(session: Session) -> list[int]:

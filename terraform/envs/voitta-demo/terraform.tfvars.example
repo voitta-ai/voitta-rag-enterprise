@@ -1,0 +1,12 @@
+# Copy this file to terraform.tfvars and fill in the OAuth secrets from
+# https://console.cloud.google.com/apis/credentials?project=voitta-report-builder
+#
+# terraform.tfvars is gitignored — the actual client secret never lands
+# in git.
+
+google_oauth_client_id     = "xxxxxxxx-yyyyyyy.apps.googleusercontent.com"
+google_oauth_client_secret = "GOCSPX-zzzzzzzzzzzzzzzzzzz"
+
+# Allowlists are managed at runtime via the admin UI (Admin button in the
+# top-right). The bootstrap super-admin lives in main.tf, not in tfvars,
+# so a wiped state file still has a human able to sign in.

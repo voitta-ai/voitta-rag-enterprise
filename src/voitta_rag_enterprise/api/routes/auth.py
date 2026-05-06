@@ -29,7 +29,8 @@ from sqlalchemy.orm import Session
 
 from ...config import get_settings
 from ...db.models import ApiKey
-from ...services.acl import CurrentUser, get_or_create_user, is_email_allowed
+from ...services.acl import CurrentUser, get_or_create_user
+from ...services.admin_store import is_email_allowed, is_super_admin
 from ..deps import current_user, db_session
 
 logger = logging.getLogger(__name__)
@@ -83,31 +84,69 @@ class MeOut(BaseModel):
     id: int
     email: str
     display_name: str | None
+    # ``is_admin`` reflects the *real* signed-in user — admin status is
+    # never inherited via impersonation. The SPA uses this to decide
+    # whether to render the Admin button.
+    is_admin: bool
+    # When the admin has chosen "view as <other>", these surface the
+    # effective identity. UI shows a banner + a "Stop impersonating"
+    # button. ``acting_as_user_id is None`` means no impersonation in
+    # progress and the SPA renders the user's own data.
+    acting_as_user_id: int | None
+    acting_as_email: str | None
 
 
 @router.get("/me", response_model=MeOut)
 def me(
+    request: Request,
     db: Session = Depends(db_session),
     user: CurrentUser = Depends(current_user),
 ) -> MeOut:
-    """Return the signed-in user.
+    """Return the effective signed-in user (impersonation honoured).
 
-    Identity resolution lives in ``current_user``: env-based dev shortcuts
-    win, otherwise the signed session cookie. A missing/invalid identity
-    becomes a 401 from ``current_user`` so the SPA can render its login
-    gate.
-
-    We re-fetch the User row here (rather than read straight off
-    ``CurrentUser``) so we can surface ``display_name``, which the dataclass
-    doesn't carry.
+    Admin-related fields reflect the real (pre-impersonation) identity.
+    A 401 from ``current_user`` lets the SPA render its login gate.
     """
     from ...db.models import User as _User
 
-    row = db.get(_User, user.id)
+    eff_row = db.get(_User, user.id)
+
+    # Pull the real identity from the session cookie directly so the
+    # ``is_admin`` flag isn't masked by impersonation. Fall back to dev
+    # shortcuts the way ``resolve_user_email`` does.
+    real_email = request.session.get("user_email") if hasattr(request, "session") else None
+    s = get_settings()
+    if s.single_user:
+        real_email = "root@localhost"
+    elif s.dev_user:
+        real_email = s.dev_user
+    real_row = (
+        db.query(_User).filter(_User.email == real_email).one_or_none()
+        if real_email
+        else None
+    )
+    is_admin = bool(real_row.is_admin) if real_row else False
+
+    acting_id = (
+        request.session.get("acting_as_user_id")
+        if hasattr(request, "session")
+        else None
+    )
+    acting_email: str | None = None
+    if acting_id is not None and is_admin and eff_row is not None and eff_row.id != (
+        real_row.id if real_row else -1
+    ):
+        acting_email = eff_row.email
+    else:
+        acting_id = None
+
     return MeOut(
         id=user.id,
         email=user.email,
-        display_name=row.display_name if row else None,
+        display_name=eff_row.display_name if eff_row else None,
+        is_admin=is_admin,
+        acting_as_user_id=int(acting_id) if acting_id is not None else None,
+        acting_as_email=acting_email,
     )
 
 
@@ -209,13 +248,8 @@ async def google_login_callback(
             "Google reports this email is not verified",
         )
 
-    if not is_email_allowed(email, s.allowed_domain_list(), s.users_file):
-        logger.warning(
-            "login_denied: %s (allowed_domains=%r, users_file=%s)",
-            email,
-            s.allowed_domain_list(),
-            s.users_file,
-        )
+    if not is_email_allowed(email):
+        logger.warning("login_denied: %s", email)
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
             "Your account is not authorized for this deployment. "
@@ -226,6 +260,12 @@ async def google_login_callback(
     user = get_or_create_user(db, email)
     if not user.display_name and display_name:
         user.display_name = display_name
+    # Bootstrap admins are stamped on every sign-in: even if a previous
+    # admin flipped the flag off in the DB, the next sign-in re-grants it.
+    # That makes the env var the recoverable source of truth — wipe it
+    # to demote, redeploy to promote.
+    if is_super_admin(email):
+        user.is_admin = True
     db.commit()
 
     request.session["user_email"] = email

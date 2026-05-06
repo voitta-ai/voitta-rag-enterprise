@@ -32,6 +32,7 @@ class User(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     email: Mapped[str]
     display_name: Mapped[str | None] = mapped_column(default=None)
+    is_admin: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[int] = mapped_column(default=_now_s)
 
 

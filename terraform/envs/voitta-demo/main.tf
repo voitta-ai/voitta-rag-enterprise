@@ -1,7 +1,8 @@
 # First-customer test deploy in project ``voitta-report-builder``.
 #
-# Single VM. No OAuth. Auto-signed-in as VOITTA_DEV_USER for the test;
-# real customer deploys flip OAuth on by populating client_id/secret.
+# OAuth is enabled. Credentials live in terraform.tfvars (gitignored) so
+# the client secret never lands in source. The variable defaults below
+# give an empty fallback so a fresh checkout still ``init``s.
 
 terraform {
   required_version = ">= 1.6"
@@ -24,6 +25,19 @@ provider "google" {
   region  = "us-central1"
 }
 
+variable "google_oauth_client_id" {
+  type      = string
+  sensitive = true
+  default   = ""
+}
+
+variable "google_oauth_client_secret" {
+  type      = string
+  sensitive = true
+  default   = ""
+}
+
+
 module "voitta_rag" {
   source = "../../modules/voitta-rag"
 
@@ -38,14 +52,13 @@ module "voitta_rag" {
   domain       = "rag-enterprise-demo.voitta.ai"
   data_disk_gb = 200
 
-  # Test deploy — OAuth disabled, auto-sign-in as the dev user.
-  allowed_domains            = ["voitta.ai"]
-  google_oauth_client_id     = ""
-  google_oauth_client_secret = ""
+  # Bootstrap super-admins for THIS deployment. Hardcoded into the env so
+  # a fresh Docker.raw / wiped data PD still leaves at least one human
+  # able to sign in and rebuild the allowlists. Customer envs override.
+  super_admins = ["roman.semein@gmail.com"]
 
-  extra_env = {
-    VOITTA_DEV_USER = "demo@voitta.ai"
-  }
+  google_oauth_client_id     = var.google_oauth_client_id
+  google_oauth_client_secret = var.google_oauth_client_secret
 }
 
 output "external_ip" {

@@ -1534,6 +1534,18 @@ async function ensureAuthenticated() {
         $("#user-pill").textContent = me.email;
         $("#user-pill").hidden = false;
         $("#btn-logout").hidden = false;
+        // Admin button is gated on the *real* user's flag — impersonation
+        // never grants admin powers. The /api/auth/me endpoint enforces
+        // the same: ``is_admin`` reflects the real identity.
+        $("#btn-admin").hidden = !me.is_admin;
+        // Impersonation banner: visible iff an admin has chosen "view as".
+        if (me.acting_as_user_id) {
+            $("#impersonate-text").textContent =
+                `Viewing the app as ${me.acting_as_email} — your own admin status is unaffected.`;
+            $("#impersonate-banner").hidden = false;
+        } else {
+            $("#impersonate-banner").hidden = true;
+        }
         $("#login-gate").hidden = true;
         return true;
     } catch (err) {
@@ -1707,5 +1719,144 @@ async function bootstrap() {
     }
     connect();
 }
+
+// ----- Admin modal -----
+
+function openAdmin() {
+    $("#admin-backdrop").hidden = false;
+    refreshAdmin();
+}
+
+function closeAdmin() {
+    $("#admin-backdrop").hidden = true;
+}
+
+async function refreshAdmin() {
+    try {
+        const [allow, users] = await Promise.all([
+            api.adminAllowlist(),
+            api.adminListUsers(),
+        ]);
+        renderList("#admin-domains", allow.domains, "domain", api.adminRemoveDomain);
+        renderList("#admin-allowed-users", allow.users, "email", api.adminRemoveUser);
+        renderList("#admin-blocked", allow.blocked, "email", api.adminUnblock);
+        renderUsersTable(users);
+    } catch (err) {
+        alert(err.message);
+    }
+}
+
+function renderList(sel, items, _kind, removeFn) {
+    const ul = $(sel);
+    ul.innerHTML = "";
+    if (!items.length) {
+        const li = document.createElement("li");
+        li.className = "empty";
+        li.textContent = "(none)";
+        ul.appendChild(li);
+        return;
+    }
+    for (const v of items) {
+        const li = document.createElement("li");
+        const span = document.createElement("span");
+        span.textContent = v;
+        const btn = document.createElement("button");
+        btn.className = "btn-remove";
+        btn.title = "Remove";
+        btn.textContent = "×";
+        btn.addEventListener("click", async () => {
+            try { await removeFn(v); await refreshAdmin(); }
+            catch (err) { alert(err.message); }
+        });
+        li.appendChild(span);
+        li.appendChild(btn);
+        ul.appendChild(li);
+    }
+}
+
+function renderUsersTable(users) {
+    const tbody = $("#admin-users-table tbody");
+    tbody.innerHTML = "";
+    for (const u of users) {
+        const tr = document.createElement("tr");
+
+        const tdEmail = document.createElement("td");
+        tdEmail.textContent = u.email;
+        if (u.is_super_admin) {
+            const badge = document.createElement("span");
+            badge.className = "badge-super";
+            badge.textContent = "SUPER";
+            badge.title = "From VOITTA_SUPER_ADMINS — can't be demoted via UI.";
+            tdEmail.appendChild(badge);
+        }
+        tr.appendChild(tdEmail);
+
+        const tdName = document.createElement("td");
+        tdName.textContent = u.display_name || "—";
+        tr.appendChild(tdName);
+
+        const tdAdmin = document.createElement("td");
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.checked = u.is_admin;
+        cb.disabled = u.is_super_admin;
+        cb.addEventListener("change", async () => {
+            try { await api.adminSetIsAdmin(u.id, cb.checked); }
+            catch (err) { alert(err.message); cb.checked = !cb.checked; }
+        });
+        tdAdmin.appendChild(cb);
+        tr.appendChild(tdAdmin);
+
+        const tdActions = document.createElement("td");
+        tdActions.className = "row-actions";
+        const viewBtn = document.createElement("button");
+        viewBtn.className = "btn btn-secondary btn-sm";
+        viewBtn.textContent = "View as";
+        viewBtn.addEventListener("click", async () => {
+            try {
+                await api.adminImpersonate(u.id);
+                window.location.reload();
+            } catch (err) { alert(err.message); }
+        });
+        tdActions.appendChild(viewBtn);
+        tr.appendChild(tdActions);
+
+        tbody.appendChild(tr);
+    }
+}
+
+$("#btn-admin").addEventListener("click", openAdmin);
+$("#admin-close").addEventListener("click", closeAdmin);
+$("#admin-backdrop").addEventListener("click", (e) => {
+    if (e.target.id === "admin-backdrop") closeAdmin();
+});
+
+$("#admin-domain-add").addEventListener("click", async () => {
+    const v = $("#admin-domain-input").value.trim();
+    if (!v) return;
+    try { await api.adminAddDomain(v); $("#admin-domain-input").value = ""; await refreshAdmin(); }
+    catch (err) { alert(err.message); }
+});
+
+$("#admin-allowed-add").addEventListener("click", async () => {
+    const v = $("#admin-allowed-input").value.trim();
+    if (!v) return;
+    try { await api.adminAddUser(v); $("#admin-allowed-input").value = ""; await refreshAdmin(); }
+    catch (err) { alert(err.message); }
+});
+
+$("#admin-block-add").addEventListener("click", async () => {
+    const v = $("#admin-block-input").value.trim();
+    if (!v) return;
+    try { await api.adminBlock(v); $("#admin-block-input").value = ""; await refreshAdmin(); }
+    catch (err) { alert(err.message); }
+});
+
+$("#btn-stop-impersonate").addEventListener("click", async () => {
+    try {
+        await api.adminStopImpersonate();
+        window.location.reload();
+    } catch (err) { alert(err.message); }
+});
 
 bootstrap();

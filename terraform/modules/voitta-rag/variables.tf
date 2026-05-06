@@ -47,15 +47,21 @@ variable "data_disk_type" {
   default     = "hyperdisk-balanced"
 }
 
+variable "super_admins" {
+  type        = list(string)
+  description = "Bootstrap admin emails. Always admitted at sign-in (block-list aside) and stamped with is_admin=true on every login. Used to make sure at least one human can recover from an empty/lockout-out allowlist. In a real deploy, set to one email you control; the demo env hardcodes the operator."
+  default     = []
+}
+
 variable "allowed_domains" {
   type        = list(string)
-  description = "Email domains permitted to sign in via Google OAuth."
+  description = "Legacy. No longer consulted by the sign-in gate — admins manage the live allowlist via the UI (persisted on the data PD). Kept as a variable so older tfvars files don't break."
   default     = []
 }
 
 variable "extra_users" {
   type        = list(string)
-  description = "Individual addresses (outside allowed_domains) that can also sign in. Rendered into the in-VM users.txt."
+  description = "Legacy. Same status as allowed_domains — admin UI is the live source of truth now."
   default     = []
 }
 
