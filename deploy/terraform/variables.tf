@@ -66,6 +66,17 @@ variable "create_load_balancer" {
   default     = false
 }
 
+variable "domain_aliases" {
+  description = <<-EOT
+    Additional hostnames to include on the managed SSL cert when
+    create_load_balancer = true (e.g. www. aliases or vanity domains).
+    Each must be DNS-resolvable to the LB IP before terraform apply,
+    or cert provisioning stalls. Empty by default.
+  EOT
+  type        = list(string)
+  default     = []
+}
+
 # ----- Image -----
 
 variable "image_repo" {
