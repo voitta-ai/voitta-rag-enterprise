@@ -41,13 +41,18 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Free disk
-        # The default GHA runner has ~14GB free. Pre-warmed models +
-        # toolchain layers exceed that. Drop preinstalled SDKs we don't
-        # use to claim back ~25GB.
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-                       /opt/hostedtoolcache/CodeQL /usr/local/.ghcup
-          df -h /
+        # Default runner has ~14GB free. The warmed image hits ~35GB peak
+        # disk during the multi-stage copy. jlumbroso/free-disk-space
+        # reliably reclaims ~45GB by removing dotnet, android, ghc,
+        # haskell, haskellghc, swap, and large preinstalled images.
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: true
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
