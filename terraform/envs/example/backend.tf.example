@@ -1,0 +1,17 @@
+# Per-customer state bucket. Copy to backend.tf and adjust the bucket
+# name. Each customer's state lives in its own bucket so blast radius of
+# a fat-fingered destroy is exactly one customer.
+#
+# Pre-create the bucket out of band:
+#
+#   gsutil mb -p <ops-project> -l us -b on \
+#     gs://voitta-tfstate-<customer-shortname>
+#   gsutil versioning set on \
+#     gs://voitta-tfstate-<customer-shortname>
+
+terraform {
+  backend "gcs" {
+    bucket = "voitta-tfstate-acme"
+    prefix = "voitta-rag"
+  }
+}
