@@ -135,9 +135,43 @@ Why not GKE: it was the original target, but for a single-replica stateful workl
 
 Caddy fetches a Let's Encrypt cert via HTTP-01 on first request and renews automatically. Set `var.domain` to the FQDN; leave it empty during bring-up and Caddy serves plain HTTP on `:80` until DNS is wired. Switching from HTTP to HTTPS requires recreating the VM (cloud-init only runs on first boot) — `terraform apply -replace=...google_compute_instance.this` does this; the data PD persists.
 
-### Auth: domain allowlist + extras
+### Authentication
 
-Each deploy has an OAuth client in the customer's GCP project. Allowed sign-ins are: every verified email at one of `VOITTA_ALLOWED_DOMAINS` (e.g. `customer.com`), plus any address listed in `users.txt` (consultants, contractors). Anyone else is rejected at the OAuth callback. With **both** lists empty every sign-in is denied — a deliberate fail-loud default.
+**Users sign in with Google.** The app never stores or sees a password — it relies on Google's OAuth 2.0 flow, reads the verified email from Google's response, and decides admit-or-deny against a runtime allowlist managed by admins inside the app.
+
+```
+[user's browser]  ──▶  [Google consent screen]  ──▶  [/api/auth/google/callback]
+                                                              │
+                                                              ▼
+                                          ┌──────────────────────────────┐
+                                          │ verified email checked vs:   │
+                                          │   • super_admins (env var)   │
+                                          │   • allowed_domains.txt      │
+                                          │   • allowed_users.txt        │
+                                          │   • blocked_users.txt (deny) │
+                                          └──────────────────────────────┘
+```
+
+**Two modes** — toggled by whether `VOITTA_GOOGLE_AUTH_CLIENT_ID/SECRET` are set:
+
+| Mode | When to use | Sign-in screen |
+|---|---|---|
+| **OAuth on** (production) | Customer-facing deploys | "Sign in with Google" button |
+| **OAuth off** (dev) | Local `make dev`, smoke tests | None — auto-signed-in as `VOITTA_DEV_USER` |
+
+**The allowlist is in-app, not in env vars.** Admins manage three lists from the **🔒 Admin** panel:
+
+- **Allowed domains** — anyone with a verified Google account in one of these domains can sign in.
+- **Users** — individual addresses, with optional admin grant in the same step. Use this to admit / promote one person whose domain isn't on the list.
+- **Blocked** — trumps everything (including super-admins). Use to revoke compromised accounts.
+
+The three lists are persisted as plain text files on the data PD (`<data_dir>/admin/{allowed_domains,allowed_users,blocked_users}.txt`). Also human-editable via SSH for emergency lockout recovery.
+
+**Bootstrap admin via Terraform**: `super_admins` (env: `VOITTA_SUPER_ADMINS`) is a list of email addresses that are *always* admitted at sign-in (block-list aside) and re-stamped `is_admin=True` on every login. This is how a fresh deploy gets its first admin, and the recovery path if every admin gets demoted in the DB. With this env var empty AND the in-app allowlist empty, every sign-in is denied — a deliberate fail-loud default.
+
+**Impersonation**: admins can "View as" any user from the panel — useful for debugging "what does X see in their folder list?" Admin status is real-identity, never inherited via impersonation.
+
+For per-customer deployment instructions including the manual GCP-console OAuth setup, see [terraform/README.md](./terraform/README.md).
 
 ### Container image
 
