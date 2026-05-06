@@ -90,6 +90,61 @@ All settings carry the `VOITTA_` env-var prefix. See [.env.example](./.env.examp
 | `VOITTA_DEV_USER`            | Authenticate every request as this email (no proxy needed)    |
 | `VOITTA_DISABLE_BACKGROUND`  | Skip watcher + workers (useful for tests)                     |
 
+## Deploying on GCP
+
+The supported production target is a single-instance, per-customer deployment in the customer's own GCP project. Everything is co-located: app, worker, embedded Qdrant, SQLite, and CAS share one persistent disk; uploads and Google Drive sync land in the same volume. There is no horizontal scaling — indexing is deliberately serial (see [config.py](./src/voitta_rag_enterprise/config.py)).
+
+The runtime shape is described below; the Terraform module that provisions it is under [`terraform/`](./terraform/) — see [terraform/README.md](./terraform/README.md) for the per-customer setup steps. The container image is built by [`.github/workflows/image.yml`](./.github/workflows/image.yml) from [`Dockerfile`](./Dockerfile) and published to `ghcr.io/<owner>/voitta-rag-enterprise:<tag>`.
+
+### Compute: pick the right CPU family
+
+Embedding (e5-base, SigLIP-2, fastembed BM25) and PDF parsing (MinerU layout/OCR) are matmul-heavy. CPU choice changes throughput by 2–4× even before considering GPUs.
+
+| Family    | Silicon                | AVX-512 | AMX¹ | Notes                                  |
+|-----------|------------------------|:-------:|:----:|----------------------------------------|
+| E2 / N1   | mixed / Skylake        | ⚠       | ✗    | Avoid — variable, no AMX               |
+| N2        | Cascade / Ice Lake     | ✓       | ✗    | OK fallback                            |
+| N2D / T2D | AMD Milan              | ✗       | ✗    | Avoid for ML inference                 |
+| C2        | Cascade Lake           | ✓       | ✗    | OK                                     |
+| **C3**    | **Sapphire Rapids**    | ✓       | **✓**| Recommended                            |
+| **C4**    | **Emerald Rapids**     | ✓       | **✓**| Recommended (newer than C3)            |
+| C3D       | AMD Genoa (Zen 4)      | ✓       | ✗    | Decent but no AMX                      |
+| G2        | + NVIDIA L4 GPU        | —       | —    | Use when GPU acceleration is wanted    |
+
+¹ AMX (Advanced Matrix Extensions) is the on-CPU tile matmul unit on Sapphire/Emerald Rapids. ONNX Runtime (fastembed) and PyTorch via oneDNN emit AMX automatically for INT8 / BF16 — this is what closes most of the gap to entry-level GPUs for embedding workloads.
+
+**Default**: `c4-standard-8` (8 vCPU / 32 GB), or `c3-standard-8` if C4 isn't available in the region. Falls back to `n2-standard-8` cleanly if neither is offered.
+
+**Optional GPU**: `g2-standard-8` (1× L4) lights up MinerU and the embedders for noticeably better ingest throughput. The app picks GPU automatically when CUDA is available; no config change required.
+
+### Cluster: GKE Standard, single-node
+
+GKE **Standard** (not Autopilot) with a single-node pool pinned to C4. Autopilot's compute classes can target C-family silicon but at a per-pod premium and with less deterministic scheduling — Standard is simpler and cheaper for a fixed single-replica workload.
+
+- Deployment with `replicas: 1`, `strategy: Recreate` (avoids two writers on SQLite/Qdrant).
+- 200 GB balanced PD mounted at `VOITTA_DATA_DIR`. `VOITTA_ROOT_PATH` is a subdirectory of the same volume — uploads + Google Drive mirrors live there.
+- HTTPS Ingress with a reserved global static IP. The Terraform outputs the IP; the customer points an A record at it and provisions a managed cert (manual one-time step per customer).
+- ConfigMap-mounted `users.txt` rendered from a Terraform `extra_users` variable; Secret Manager (via the CSI driver) for OAuth client id/secret and the session secret.
+- Outbound egress for Google Drive sync and (during first boot) any model downloads not baked into the image.
+
+### Auth: domain allowlist + extras
+
+Each deploy has an OAuth client in the customer's GCP project. Allowed sign-ins are: every verified email at one of `VOITTA_ALLOWED_DOMAINS` (e.g. `customer.com`), plus any address listed in `users.txt` (consultants, contractors). Anyone else is rejected at the OAuth callback. With **both** lists empty every sign-in is denied — a deliberate fail-loud default.
+
+### Container image
+
+Built by GitHub Actions on tag and published to GHCR. Customers consume it by tag — they do not build anything.
+
+- Base: `python:3.12-slim` + system deps for MinerU, cairo, poppler.
+- Models baked into the image at build time: e5-base, SigLIP-2, fastembed BM25, and MinerU's pipeline weights. This makes the image ~6–8 GB but gives instant cold-start and works in egress-restricted environments.
+- Pinned by version tag (`v0.x.y`); the customer's tfvars references a specific tag.
+
+The local terminal flow (`make dev`) is unaffected by any of this — it doesn't use Docker, doesn't pull weights, and doesn't go through Google OAuth (it uses `VOITTA_DEV_USER`).
+
+### Updating a deployment
+
+Bump `image_uri` in the customer's tfvars and `terraform apply`. The single replica recreates with ~30–60s of downtime — there is no blue/green path because the embedded Qdrant + SQLite cannot be safely run from two pods at once.
+
 ## Status
 
 All eight implementation stages are complete. 200+ tests; CI runs lint + tests on every PR.

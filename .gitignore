@@ -18,12 +18,23 @@ htmlcov/
 .env
 .env.local
 
-# Data
+# Data — including the ./local-data dir suggested for `docker run` smoke tests
 data/
+local-data/
 *.db
 *.db-journal
 *.db-wal
 *.db-shm
+
+# Terraform local state + per-customer secrets. Modules are committed;
+# everything below stays out of git.
+**/.terraform/
+**/.terraform.lock.hcl
+**/terraform.tfstate
+**/terraform.tfstate.*
+**/terraform.tfvars
+**/*.auto.tfvars
+**/backend.tf
 
 # UI build outputs (Stage 5)
 static/dist/
