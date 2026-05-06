@@ -1,0 +1,24 @@
+output "vm_external_ip" {
+  description = "Static external IP of the VM. Point your A record here (or at the LB IP, when #6 lands)."
+  value       = google_compute_address.vm_ip.address
+}
+
+output "vm_name" {
+  description = "Compute Engine instance name. Used by the deploy/scripts/* helpers."
+  value       = google_compute_instance.vm.name
+}
+
+output "vm_zone" {
+  description = "Zone the VM lives in."
+  value       = google_compute_instance.vm.zone
+}
+
+output "vm_service_account_email" {
+  description = "Service account the VM runs as. Grant additional IAM bindings against this principal."
+  value       = google_service_account.vm.email
+}
+
+output "ssh_command" {
+  description = "Copy/paste command to SSH into the VM via IAP."
+  value       = "gcloud compute ssh ${google_compute_instance.vm.name} --zone=${google_compute_instance.vm.zone} --project=${var.project_id} --tunnel-through-iap"
+}
