@@ -46,7 +46,11 @@ def _handle_request(req: dict) -> dict:
         f_dump_middle_json=False,
         f_dump_model_output=False,
         f_dump_orig_pdf=False,
-        f_dump_content_list=False,
+        # We read this back in the parent (pdf_parser._merge_buckets) to
+        # recover per-image page numbers — MinerU's pipeline doesn't
+        # propagate them to the .md, but content_list.json carries
+        # ``page_idx`` and ``img_path`` per block.
+        f_dump_content_list=True,
     )
     return {"status": "ok"}
 

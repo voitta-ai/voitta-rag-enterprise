@@ -186,6 +186,10 @@ def _run_extract_inner(file_id: int) -> None:
             image_shas: list[str] = [
                 cas_store.write_image_blob(img.bytes) for img in result.images
             ]
+        with _stage("cas_write_page_images", count=len(result.page_images)):
+            page_image_shas: list[str] = [
+                cas_store.write_image_blob(p.bytes) for p in result.page_images
+            ]
         with _stage("chunk_markdown"):
             chunks = chunk_markdown(result.content)
         logger.info("chunked: count=%d", len(chunks))
@@ -199,6 +203,7 @@ def _run_extract_inner(file_id: int) -> None:
                         "parser": parser.__class__.__name__,
                         "chunk_count": len(chunks),
                         "image_count": len(result.images),
+                        "page_image_count": len(result.page_images),
                         "image_positions": [img.position for img in result.images],
                         "metadata": result.metadata,
                     },
@@ -213,6 +218,9 @@ def _run_extract_inner(file_id: int) -> None:
                 mtime_ns=stat.st_mtime_ns,
                 chunks=chunks,
                 images=list(zip(image_shas, result.images, strict=True)),
+                page_images=list(
+                    zip(page_image_shas, result.page_images, strict=True)
+                ),
                 nearby_radius=settings.nearby_radius,
             )
     except Exception:
@@ -340,10 +348,16 @@ def _commit_indexing(
     new_sha: str,
     mtime_ns: int,
     chunks: list[ChunkInfo],
-    images: list[tuple[str, object]],  # (sha, ExtractedImage)
+    images: list[tuple[str, object]],  # (sha, ExtractedImage) — kind='figure'
+    page_images: list[tuple[str, object]],  # (sha, RenderedPage) — kind='page_render'
     nearby_radius: int,
 ) -> tuple[int, list[int]] | None:
-    """Commit chunks/images for ``file_id`` and return ``(round_token, image_ids)``.
+    """Commit chunks/images for ``file_id`` and return ``(round_token, figure_image_ids)``.
+
+    ``figure_image_ids`` covers only ``kind='figure'`` rows; page renders
+    are intentionally excluded because we do not embed them (they exist
+    purely for layout retrieval) and the caller's inline embed loop must
+    therefore skip them.
 
     Embeds are NOT enqueued here — the caller in ``_run_extract_inner`` runs
     them inline so the entire pipeline (extract + embeds) runs end-to-end
@@ -406,6 +420,7 @@ def _commit_indexing(
                 width=img_data.width,
                 height=img_data.height,
                 mime=img_data.mime,
+                kind="figure",
                 created_at=now,
             )
             s.add(image)
@@ -422,6 +437,28 @@ def _commit_indexing(
                             )
                         )
 
+        # Page renders sit at image_index >= len(figures) so the (file_id,
+        # image_index) UNIQUE constraint stays satisfied alongside figures.
+        # Intentionally no anchor_chunk + no chunk_image_links: these are
+        # full-page rasters, not crops; linking every chunk on a page would
+        # bury figure links in noise.
+        for j, (sha, page_img) in enumerate(page_images):
+            page_row = Image(
+                file_id=file_id,
+                image_index=len(images) + j,
+                image_cas_id=sha,
+                anchor_chunk=None,
+                page=page_img.page,
+                width=page_img.width,
+                height=page_img.height,
+                mime=page_img.mime,
+                kind="page_render",
+                created_at=now,
+            )
+            s.add(page_row)
+            cas_store.incref(s, cas_store.KIND_IMAGE, sha)
+        s.flush()
+
         # Bump embed_round so any in-flight decrements from a prior round are
         # ignored (see ``_decrement_pending_embeds``). Without this guard, a
         # stale embed completing after re-extract would corrupt the new
@@ -434,6 +471,8 @@ def _commit_indexing(
         file.last_indexed_at = now
         file.state = "extracted"
         file.error = None
+        # page_render rows are deliberately excluded from pending_embeds:
+        # we don't run SigLIP on them, so there is no embed to wait on.
         file.pending_embeds = (1 if chunks else 0) + len(images)
         _committed_file_id = file.id
 
@@ -441,7 +480,7 @@ def _commit_indexing(
             iid
             for (iid,) in s.execute(
                 select(Image.id)
-                .where(Image.file_id == file_id)
+                .where(Image.file_id == file_id, Image.kind == "figure")
                 .order_by(Image.image_index)
             ).all()
         ]

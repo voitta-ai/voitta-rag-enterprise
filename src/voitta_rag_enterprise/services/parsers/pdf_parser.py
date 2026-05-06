@@ -44,7 +44,7 @@ import fitz  # PyMuPDF — used only to count/split pages, not to extract text.
 
 from ...config import get_settings
 from ..gpu_lock import gpu_lock
-from .base import BaseParser, ExtractedImage, ParserResult
+from .base import BaseParser, ExtractedImage, ParserResult, RenderedPage
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +60,14 @@ class _BucketResult:
     page_start: int  # 1-indexed inclusive
     page_end: int  # 1-indexed inclusive
     elapsed_s: float
+    # MinerU's per-block content list parsed from ``<name>_content_list.json``.
+    # Each block dict carries at least ``type`` and ``page_idx`` (0-based,
+    # local to the bucket). We only consult it to recover accurate page
+    # numbers for image blocks — see ``_image_page_map``.
+    content_list: list[dict]
+    # Per-page renders captured by ``_render_pages``. Pages are 1-indexed and
+    # absolute (``page_start`` already added in).
+    page_renders: list[RenderedPage]
 
 
 class PdfParser(BaseParser):
@@ -192,11 +200,16 @@ def _parse_bucket(
     images_dir = md_path.parent / "images"
     if not images_dir.exists():
         images_dir = md_path.parent  # we'll resolve refs against the md's dir
+
+    content_list = _read_content_list(md_path.parent, pdf_name)
+    page_renders = _render_pages(bucket_path, page_start)
+
     logger.info(
-        "pdf bucket parsed: pages=%d-%d chars=%d in %.1fs",
+        "pdf bucket parsed: pages=%d-%d chars=%d renders=%d in %.1fs",
         page_start,
         page_end,
         len(markdown),
+        len(page_renders),
         elapsed,
     )
     return _BucketResult(
@@ -205,7 +218,93 @@ def _parse_bucket(
         page_start=page_start,
         page_end=page_end,
         elapsed_s=elapsed,
+        content_list=content_list,
+        page_renders=page_renders,
     )
+
+
+def _read_content_list(md_dir: Path, pdf_name: str) -> list[dict]:
+    """Load MinerU's ``<name>_content_list.json``. Returns ``[]`` if missing.
+
+    The file is the only output that retains per-block page numbers under
+    the pipeline backend, which we use to fix ``ExtractedImage.page`` (the
+    .md alone is page-agnostic).
+    """
+    candidate = md_dir / f"{pdf_name}_content_list.json"
+    if not candidate.exists():
+        # Defensive fallback for layout drift: pick any *_content_list.json
+        # under md_dir before giving up.
+        candidates = list(md_dir.rglob("*_content_list.json"))
+        if not candidates:
+            logger.warning("pdf bucket: content_list.json missing under %s", md_dir)
+            return []
+        candidate = candidates[0]
+    try:
+        with candidate.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning("pdf bucket: content_list.json unreadable: %s", e)
+        return []
+    return data if isinstance(data, list) else []
+
+
+def _render_pages(pdf_path: Path, page_start: int) -> list[RenderedPage]:
+    """Rasterise every page of ``pdf_path`` to WebP for layout context.
+
+    ``page_start`` is the 1-indexed absolute page of this bucket's first
+    page; we add it to the local index so callers see absolute numbers.
+    Skips silently if rendering is disabled or PIL/WebP is unavailable.
+
+    The output sits intentionally low-res: the LLM has the per-figure
+    crops + the full markdown already; these renders only carry layout
+    cues, so quality 75 at ~1024px is plenty.
+    """
+    settings = get_settings()
+    if not settings.pdf_render_pages:
+        return []
+    long_edge = max(64, int(settings.pdf_page_render_long_edge_px))
+    quality = max(1, min(100, int(settings.pdf_page_render_webp_quality)))
+    try:
+        from PIL import Image as PILImage
+    except ImportError:
+        logger.warning("PIL missing — skipping page renders")
+        return []
+
+    pages: list[RenderedPage] = []
+    doc = fitz.open(pdf_path)
+    try:
+        for local_idx in range(len(doc)):
+            page = doc.load_page(local_idx)
+            rect = page.rect
+            page_long = max(rect.width, rect.height)
+            if page_long <= 0:
+                continue
+            # Pick a render scale that targets ``long_edge`` on the long axis;
+            # PyMuPDF measures pages in PDF points (72 dpi), so dpi = 72*scale.
+            scale = long_edge / page_long
+            matrix = fitz.Matrix(scale, scale)
+            pix = page.get_pixmap(matrix=matrix, alpha=False)
+            try:
+                pil = PILImage.frombytes(
+                    "RGB", (pix.width, pix.height), pix.samples
+                )
+                buf = io.BytesIO()
+                pil.save(buf, format="WEBP", quality=quality, method=6)
+                data = buf.getvalue()
+            finally:
+                pix = None  # type: ignore[assignment]
+            pages.append(
+                RenderedPage(
+                    bytes=data,
+                    mime="image/webp",
+                    page=page_start + local_idx,
+                    width=pil.width,
+                    height=pil.height,
+                )
+            )
+    finally:
+        doc.close()
+    return pages
 
 
 def _merge_buckets(
@@ -213,10 +312,16 @@ def _merge_buckets(
 ) -> ParserResult:
     parts: list[str] = []
     images: list[ExtractedImage] = []
+    page_images: list[RenderedPage] = []
     cursor = 0  # char offset into the joined markdown for the current bucket
 
     join_sep = "\n\n"
     for i, b in enumerate(buckets):
+        # Bucket-local map: image filename → absolute (1-indexed) page,
+        # derived from MinerU's content_list.json. Missing keys fall back
+        # to the bucket's first page (the old, less-accurate behavior).
+        page_by_name = _image_page_map(b.content_list, b.page_start)
+
         # Walk image references in the bucket's markdown — their char offsets
         # are absolute in the merged output once we add ``cursor``.
         for m in _IMG_REF_RE.finditer(b.markdown):
@@ -236,16 +341,19 @@ def _merge_buckets(
                 continue
             width, height = _dimensions(data)
             mime = mimetypes.guess_type(img_path.name)[0] or "application/octet-stream"
+            page = page_by_name.get(img_path.name, b.page_start)
             images.append(
                 ExtractedImage(
                     bytes=data,
                     mime=mime,
                     position=cursor + m.start(),
-                    page=b.page_start,  # MinerU output isn't per-page; use bucket start
+                    page=page,
                     width=width,
                     height=height,
                 )
             )
+
+        page_images.extend(b.page_renders)
 
         parts.append(b.markdown)
         cursor += len(b.markdown)
@@ -260,8 +368,38 @@ def _merge_buckets(
         "buckets": len(buckets),
         "page_count": page_count,
         "parse_time_seconds": sum(b.elapsed_s for b in buckets),
+        "page_images": len(page_images),
     }
-    return ParserResult(content=content, images=images, metadata=metadata)
+    return ParserResult(
+        content=content,
+        images=images,
+        page_images=page_images,
+        metadata=metadata,
+    )
+
+
+def _image_page_map(content_list: list[dict], page_start: int) -> dict[str, int]:
+    """Map ``image_basename → absolute_page`` from MinerU's content list.
+
+    The blob's ``page_idx`` is 0-based and local to the bucket; we add
+    ``page_start - 1`` to land on absolute 1-indexed pages. Both
+    ``type='image'`` and ``type='table'`` blocks expose ``img_path``.
+    """
+    out: dict[str, int] = {}
+    for blk in content_list:
+        if not isinstance(blk, dict):
+            continue
+        path = blk.get("img_path")
+        if not isinstance(path, str) or not path:
+            continue
+        page_idx = blk.get("page_idx")
+        if not isinstance(page_idx, int):
+            continue
+        # MinerU writes ``img_path`` as either ``foo.jpg`` or
+        # ``images/foo.jpg`` — the basename is the stable key.
+        name = path.rsplit("/", 1)[-1]
+        out[name] = page_start + page_idx
+    return out
 
 
 def _resolve_image_path(images_dir: Path, ref: str) -> Path | None:

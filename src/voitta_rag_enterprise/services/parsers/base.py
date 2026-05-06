@@ -23,9 +23,24 @@ class ExtractedImage:
 
 
 @dataclass
+class RenderedPage:
+    """A full-page raster of a source-document page, surfaced to the LLM
+    purely as layout context. Distinct from ``ExtractedImage`` (cropped
+    figures): these are not embedded for image search and have no anchor
+    chunk — they are fetched on demand by ``(file_id, page)``."""
+
+    bytes: bytes
+    mime: str  # always "image/webp" today
+    page: int  # 1-indexed
+    width: int | None = None
+    height: int | None = None
+
+
+@dataclass
 class ParserResult:
     content: str
     images: list[ExtractedImage] = field(default_factory=list)
+    page_images: list[RenderedPage] = field(default_factory=list)
     metadata: dict = field(default_factory=dict)
     success: bool = True
     error: str | None = None

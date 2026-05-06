@@ -116,6 +116,13 @@ class Settings(BaseSettings):
     # file is parked as ``state='error'`` and the queue keeps moving.
     # 600s = 10 minutes is generous for a 20-page bucket on a single GPU.
     pdf_parse_timeout_s: int = 600
+    # Per-page WebP renders captured for layout context. The LLM already
+    # has the per-figure crops + the full markdown; these renders are only
+    # for "show me what this page looks like". Long-edge 1024 ≈ ~50 KB/page
+    # at quality 75 — good enough for layout reasoning, cheap to store.
+    pdf_render_pages: bool = True
+    pdf_page_render_long_edge_px: int = 1024
+    pdf_page_render_webp_quality: int = 75
     # Test override: when true, the PDF parser returns a deterministic stub
     # without invoking MinerU. Used by the test suite to keep runs fast.
     use_fake_pdf_parser: bool = False

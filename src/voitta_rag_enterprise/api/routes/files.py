@@ -95,9 +95,14 @@ def get_file_images(
     file = db.get(File, file_id)
     if file is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
+    # SPA renders these inline next to their anchor chunk; page renders
+    # have no anchor and would just clutter the carousel. Page renders are
+    # served separately via the MCP list_page_images / get_page_image tools.
     rows = (
         db.execute(
-            select(Image).where(Image.file_id == file_id).order_by(Image.image_index)
+            select(Image)
+            .where(Image.file_id == file_id, Image.kind == "figure")
+            .order_by(Image.image_index)
         )
         .scalars()
         .all()

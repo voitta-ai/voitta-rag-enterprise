@@ -149,7 +149,22 @@ class ImageInfo(BaseModel):
     width: int | None
     height: int | None
     mime: str | None
+    # 'figure' (cropped extract) or 'page_render' (full-page raster).
+    # search_images / get_chunk_images return only figures; page renders
+    # are surfaced via list_page_images / get_page_image.
+    kind: str = "figure"
     score: float | None = None
+
+
+class PageImageInfo(BaseModel):
+    """Catalog entry for a per-page render. Bytes are fetched separately."""
+
+    image_id: int
+    file_id: int
+    page: int
+    width: int | None
+    height: int | None
+    mime: str | None
 
 
 # ---------------------------------------------------------------------------
@@ -335,7 +350,11 @@ def get_chunk_range(
 
 @mcp.tool()
 def get_chunk_images(chunk_id: int) -> list[ImageInfo]:
-    """Return the images linked to ``chunk_id`` (within the configured radius)."""
+    """Return the figure images linked to ``chunk_id`` (within the configured radius).
+
+    Page renders are not linked — fetch them via ``list_page_images`` /
+    ``get_page_image`` instead.
+    """
     with session_scope() as s:
         chunk = s.get(Chunk, chunk_id)
         if chunk is None:
@@ -359,6 +378,7 @@ def get_chunk_images(chunk_id: int) -> list[ImageInfo]:
                 width=img.width,
                 height=img.height,
                 mime=img.mime,
+                kind=img.kind,
                 score=float(distance),
             )
             for (img, distance) in rows
@@ -367,7 +387,11 @@ def get_chunk_images(chunk_id: int) -> list[ImageInfo]:
 
 @mcp.tool()
 def get_image(image_id: int) -> dict:
-    """Return image bytes (base64) + mime for inline rendering by an MCP client."""
+    """Return image bytes (base64) + mime for inline rendering by an MCP client.
+
+    Works for both figures and page renders — the caller already has the
+    id from search hits, ``get_chunk_images``, or ``list_page_images``.
+    """
     with session_scope() as s:
         img = s.get(Image, image_id)
         if img is None:
@@ -380,6 +404,76 @@ def get_image(image_id: int) -> dict:
         raise ValueError(f"Image bytes missing for {image_id}") from e
     return {
         "image_id": image_id,
+        "mime": mime,
+        "data_base64": base64.b64encode(data).decode("ascii"),
+    }
+
+
+@mcp.tool()
+def list_page_images(file_id: int) -> list[PageImageInfo]:
+    """List per-page renders for ``file_id``, in page order.
+
+    Returns layout-context rasters (typically WebP, ~1024px on the long
+    edge). Use the returned ``image_id`` with ``get_page_image`` to fetch
+    bytes. Files that weren't rendered (non-PDF, or PDFs indexed before
+    page-rendering was enabled) return an empty list.
+    """
+    with session_scope() as s:
+        rows = list(
+            s.execute(
+                select(Image)
+                .where(Image.file_id == file_id, Image.kind == "page_render")
+                .order_by(Image.page, Image.image_index)
+            ).scalars()
+        )
+        return [
+            PageImageInfo(
+                image_id=img.id,
+                file_id=img.file_id,
+                page=img.page or 0,
+                width=img.width,
+                height=img.height,
+                mime=img.mime,
+            )
+            for img in rows
+        ]
+
+
+@mcp.tool()
+def get_page_image(file_id: int, page: int) -> dict:
+    """Return bytes (base64) of the page-render for ``(file_id, page)``.
+
+    Pages are 1-indexed. Raises ``ValueError`` if no render exists for
+    that combination — typically because the file isn't a PDF or was
+    indexed before per-page rendering was enabled.
+    """
+    with session_scope() as s:
+        img = s.execute(
+            select(Image)
+            .where(
+                Image.file_id == file_id,
+                Image.kind == "page_render",
+                Image.page == page,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        if img is None:
+            raise ValueError(
+                f"No page render for file_id={file_id} page={page}"
+            )
+        image_id = img.id
+        cas_id = img.image_cas_id
+        mime = img.mime or "image/webp"
+    try:
+        data = cas_store.read_image_blob(cas_id)
+    except FileNotFoundError as e:
+        raise ValueError(
+            f"Page-render bytes missing for file_id={file_id} page={page}"
+        ) from e
+    return {
+        "image_id": image_id,
+        "file_id": file_id,
+        "page": page,
         "mime": mime,
         "data_base64": base64.b64encode(data).decode("ascii"),
     }

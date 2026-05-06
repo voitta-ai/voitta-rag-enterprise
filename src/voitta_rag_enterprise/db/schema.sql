@@ -73,11 +73,19 @@ CREATE TABLE IF NOT EXISTS images (
     width         INTEGER,
     height        INTEGER,
     mime          TEXT,
+    -- Discriminator. 'figure' = a crop extracted from a page (default,
+    -- and what every parser produced before this column existed); these
+    -- are the rows that get SigLIP-embedded for image search and linked
+    -- into chunk_image_links. 'page_render' = a full-page raster captured
+    -- as layout context for the LLM; not embedded, no anchor_chunk, no
+    -- chunk links — fetched on demand via the MCP get_page_image tool.
+    kind          TEXT NOT NULL DEFAULT 'figure',
     created_at    INTEGER NOT NULL,
     UNIQUE (file_id, image_index)
 );
 CREATE INDEX IF NOT EXISTS idx_images_cas ON images(image_cas_id);
 CREATE INDEX IF NOT EXISTS idx_images_anchor ON images(file_id, anchor_chunk);
+CREATE INDEX IF NOT EXISTS idx_images_kind ON images(file_id, kind, page);
 
 CREATE TABLE IF NOT EXISTS chunk_image_links (
     chunk_id  INTEGER NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,

@@ -73,6 +73,13 @@ def init_db() -> None:
     try:
         raw_conn.executescript(sql)
         _ensure_column(raw_conn, "users", "is_admin", "INTEGER NOT NULL DEFAULT 0")
+        # 'figure' default keeps every legacy row classified as a cropped
+        # extract; 'page_render' is reserved for the per-page WebP rasters
+        # the PDF parser now emits.
+        _ensure_column(raw_conn, "images", "kind", "TEXT NOT NULL DEFAULT 'figure'")
+        raw_conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_images_kind ON images(file_id, kind, page)"
+        )
         raw_conn.commit()
     finally:
         raw_conn.close()

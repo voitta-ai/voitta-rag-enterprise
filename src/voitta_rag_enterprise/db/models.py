@@ -106,6 +106,9 @@ class Image(Base):
     width: Mapped[int | None] = mapped_column(default=None)
     height: Mapped[int | None] = mapped_column(default=None)
     mime: Mapped[str | None] = mapped_column(default=None)
+    # 'figure' (cropped extract, embedded for image search) or
+    # 'page_render' (full-page raster, layout context only — no embed).
+    kind: Mapped[str] = mapped_column(default="figure")
     created_at: Mapped[int] = mapped_column(default=_now_s)
 
 
