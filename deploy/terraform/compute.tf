@@ -44,16 +44,31 @@ resource "google_compute_disk" "data" {
   labels = var.labels
 }
 
-# cloud-init payload. The systemd unit's content lives in the
-# repo-tracked source-of-truth file at deploy/systemd/voitta.service
-# and gets indented to slot under the YAML write_files block scalar.
+# cloud-init payload. Files referenced via file() are repo-tracked
+# source of truth in deploy/{systemd,Caddyfile.tpl}; we indent them to
+# slot under the YAML write_files block scalar. Each substitution
+# point in the template carries a manual 6-space prefix because
+# terraform's indent() leaves the first line alone.
 locals {
+  enable_caddy = !var.create_load_balancer
+
+  # Render the Caddyfile by substituting ${DOMAIN} via templatefile.
+  # Empty string when Caddy is disabled; the template branch won't
+  # reference it anyway, but locals must always evaluate.
+  caddyfile_rendered = local.enable_caddy ? templatefile(
+    "${path.module}/../Caddyfile.tpl",
+    { DOMAIN = var.domain },
+  ) : ""
+
   cloud_init_user_data = templatefile(
     "${path.module}/../cloud-init.yaml.tftpl",
     {
       image_repo              = var.image_repo
       image_tag               = var.image_tag
       voitta_service_indented = indent(6, file("${path.module}/../systemd/voitta.service"))
+      enable_caddy            = local.enable_caddy
+      caddyfile_indented      = indent(6, local.caddyfile_rendered)
+      caddy_service_indented  = indent(6, file("${path.module}/../systemd/caddy.service"))
     }
   )
 }

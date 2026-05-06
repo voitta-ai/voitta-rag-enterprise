@@ -1,0 +1,42 @@
+[Unit]
+Description=Caddy TLS reverse proxy in front of voitta-rag
+Documentation=https://caddyserver.com/docs/
+Wants=network-online.target docker.service voitta.service
+After=network-online.target docker.service voitta.service
+Requires=docker.service
+
+[Service]
+# Belt-and-braces cleanup before each start (matches the voitta unit's
+# pattern). Hyphen prefix means non-fatal when nothing exists yet.
+ExecStartPre=-/usr/bin/docker rm -f caddy
+
+# Pull on every start so a `systemctl restart caddy` after editing
+# /etc/caddy/Caddyfile picks up new image fixes too. caddy:2-alpine is
+# the upstream slim image — ~50 MB.
+ExecStartPre=/usr/bin/docker pull caddy:2-alpine
+
+# --network=host: Caddy needs to bind 80 and 443 on the host. The app
+# binds 8000 separately; no conflict. Caddy reverse-proxies to
+# 127.0.0.1:8000 over the host loopback.
+# Volume mounts:
+#   /etc/caddy/Caddyfile (ro): rendered by cloud-init from Caddyfile.tpl.
+#   /var/lib/voitta/caddy: persistent ACME state (account key, certs,
+#   OCSP cache). Lives on the data disk so disk-snapshot backups
+#   include it; rebuild from scratch otherwise = re-issue certs and
+#   risk hitting Let's Encrypt rate limits.
+ExecStart=/usr/bin/docker run --rm --name caddy \
+    --network=host \
+    -v /etc/caddy/Caddyfile:/etc/caddy/Caddyfile:ro \
+    -v /var/lib/voitta/caddy:/data \
+    caddy:2-alpine
+
+ExecStop=/usr/bin/docker stop --time=15 caddy
+
+Restart=always
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -34,6 +34,38 @@ variable "name_prefix" {
   }
 }
 
+# ----- TLS / domain -----
+
+variable "domain" {
+  description = <<-EOT
+    Hostname the app serves under. Used by Caddy (Let's Encrypt) and
+    later by the optional Cloud LB managed cert (#6). Customer must
+    point an A record at the VM's static IP BEFORE first apply, else
+    ACME HTTP-01 fails and Caddy temporarily serves a self-signed
+    cert. Leave empty to bring Caddy up without TLS (HTTP only) for
+    smoke testing.
+  EOT
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.domain == "" || can(regex("^[a-zA-Z0-9.-]+$", var.domain))
+    error_message = "domain must be a valid hostname (letters, digits, dots, hyphens) or the empty string."
+  }
+}
+
+variable "create_load_balancer" {
+  description = <<-EOT
+    Toggle for the Tier A TLS path:
+      false (default): Caddy on the VM auto-issues a Let's Encrypt
+        cert. Cheap, no LB cost.
+      true: Cloud Load Balancer + Google-managed SSL cert (issue #6).
+        Caddy is skipped on the VM; the app is reached only via the LB.
+  EOT
+  type        = bool
+  default     = false
+}
+
 # ----- Image -----
 
 variable "image_repo" {
