@@ -1,19 +1,19 @@
-output "ingress_ip" {
-  description = "Reserved global IPv4 the LB answers on. Point a DNS A record at this to wire up the customer's hostname."
-  value       = google_compute_global_address.ingress.address
+output "external_ip" {
+  description = "Static external IPv4 attached to the VM. Point your DNS A record at this."
+  value       = google_compute_address.this.address
 }
 
-output "redirect_uri" {
-  description = "Authorized redirect URI to register on the OAuth client. Replace <host> with whatever DNS name resolves to ingress_ip."
+output "vm_name" {
+  description = "Compute Engine instance name. Use with `gcloud compute ssh`."
+  value       = google_compute_instance.this.name
+}
+
+output "vm_zone" {
+  description = "Zone the VM lives in."
+  value       = google_compute_instance.this.zone
+}
+
+output "redirect_uri_template" {
+  description = "Authorized redirect URI to register on the OAuth client. Replace <host> with the FQDN you wire DNS for."
   value       = "https://<host>/api/auth/google/callback"
-}
-
-output "cluster_name" {
-  description = "GKE cluster name — feed into ``gcloud container clusters get-credentials`` to talk kubectl directly."
-  value       = google_container_cluster.this.name
-}
-
-output "namespace" {
-  description = "Kubernetes namespace the workload runs in."
-  value       = kubernetes_namespace.this.metadata[0].name
 }

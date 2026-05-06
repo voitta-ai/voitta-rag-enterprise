@@ -35,6 +35,7 @@ local-data/
 **/terraform.tfvars
 **/*.auto.tfvars
 **/backend.tf
+**/tfplan
 
 # UI build outputs (Stage 5)
 static/dist/

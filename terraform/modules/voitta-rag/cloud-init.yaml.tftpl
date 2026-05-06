@@ -1,0 +1,179 @@
+#cloud-config
+
+# Container-Optimized OS bootstrap.
+#
+# What this does, in order:
+#   1. Format + mount the attached data disk under /mnt/disks/voitta on
+#      first boot (idempotent — re-mount on subsequent boots).
+#   2. Drop /etc/voitta/{env.list,users.txt} with values rendered from
+#      Terraform variables.
+#   3. Pull + run two containers as systemd units:
+#        - voitta:  the app, listens on 127.0.0.1:8000
+#        - caddy:   reverse-proxy + auto-TLS, listens on 80/443
+#   4. Caddy reads the FQDN from /etc/caddy/Caddyfile, which the operator
+#      writes once via SSH/IAP after pointing DNS at the VM's IP. Until
+#      then Caddy serves an HTTP-only "no FQDN configured" page on port 80.
+#
+# Logs are visible via:
+#   gcloud compute instances get-serial-port-output <vm-name>
+#   gcloud compute ssh <vm-name> -- 'sudo journalctl -u voitta -f'
+
+write_files:
+  # ----- env file consumed by the app container -----
+  - path: /etc/voitta/env.list
+    permissions: "0600"
+    owner: root:root
+    content: |
+%{ for k, v in env_pairs ~}
+      ${k}=${v}
+%{ endfor ~}
+
+  # ----- users.txt mounted into the app container -----
+  - path: /etc/voitta/users.txt
+    permissions: "0644"
+    owner: root:root
+    content: |
+      ${indent(6, users_txt)}
+
+  # ----- helper that mounts the data PD -----
+  - path: /etc/voitta/mount-data.sh
+    permissions: "0755"
+    owner: root:root
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+
+      # COS exposes attached disks as /dev/disk/by-id/google-<device_name>.
+      # We named the device ``voitta-data`` in the Terraform attachment.
+      DEV=/dev/disk/by-id/google-voitta-data
+      MNT=/mnt/disks/voitta
+
+      mkdir -p "$MNT"
+
+      # If the disk is brand new, mkfs it. Otherwise just mount.
+      if ! blkid "$DEV" >/dev/null 2>&1; then
+        echo "voitta: formatting fresh data disk $DEV"
+        mkfs.ext4 -F "$DEV"
+      fi
+
+      # Mount idempotently. Add an fstab entry so reboots stick.
+      if ! mountpoint -q "$MNT"; then
+        mount -o discard,defaults "$DEV" "$MNT"
+      fi
+      grep -q "$MNT" /etc/fstab || \
+        echo "$DEV $MNT ext4 discard,defaults,nofail 0 2" >> /etc/fstab
+
+      mkdir -p "$MNT/voitta-data" "$MNT/folders"
+      chown -R 1000:1000 "$MNT/voitta-data" "$MNT/folders"
+
+  # ----- systemd unit for the app container -----
+  - path: /etc/systemd/system/voitta.service
+    permissions: "0644"
+    owner: root:root
+    content: |
+      [Unit]
+      Description=Voitta RAG Enterprise
+      After=network-online.target voitta-mount.service
+      Requires=network-online.target voitta-mount.service
+
+      [Service]
+      Restart=always
+      RestartSec=5
+      # The image is ~14GB; the default 90s start timeout aborts mid-pull
+      # on a fresh VM. 15 min is generous for any reasonable network.
+      TimeoutStartSec=900
+      ExecStartPre=-/usr/bin/docker rm -f voitta
+      ExecStartPre=/usr/bin/docker pull ${image_uri}
+      ExecStart=/usr/bin/docker run --rm --name voitta \
+        --env-file /etc/voitta/env.list \
+        -v /mnt/disks/voitta/voitta-data:/data \
+        -v /etc/voitta/users.txt:/etc/voitta/users.txt:ro \
+        -p 127.0.0.1:8000:8000 \
+        ${image_uri}
+      ExecStop=/usr/bin/docker stop voitta
+
+      [Install]
+      WantedBy=multi-user.target
+
+  # ----- systemd unit that runs the mount helper -----
+  - path: /etc/systemd/system/voitta-mount.service
+    permissions: "0644"
+    owner: root:root
+    content: |
+      [Unit]
+      Description=Mount Voitta data disk
+      Before=voitta.service caddy.service
+      DefaultDependencies=no
+      After=local-fs.target
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/etc/voitta/mount-data.sh
+
+      [Install]
+      WantedBy=multi-user.target
+
+  # ----- Caddyfile, rendered from the ``domain`` Terraform variable -----
+  #
+  # When ``domain`` is set, Caddy:
+  #   - listens on :443 with a Let's Encrypt cert it fetches automatically
+  #     via HTTP-01 challenge on :80
+  #   - 308-redirects every other :80 request to https://<domain>
+  #   - renews the cert in the background before expiry
+  #
+  # When ``domain`` is empty (no DNS yet), Caddy serves plain HTTP on :80
+  # so the operator can verify the app is reachable before pointing DNS.
+  - path: /etc/caddy/Caddyfile
+    permissions: "0644"
+    owner: root:root
+    content: |
+%{ if domain != "" ~}
+      ${domain} {
+        reverse_proxy 127.0.0.1:8000
+      }
+%{ else ~}
+      :80 {
+        reverse_proxy 127.0.0.1:8000
+      }
+%{ endif ~}
+
+  # ----- systemd unit for Caddy -----
+  - path: /etc/systemd/system/caddy.service
+    permissions: "0644"
+    owner: root:root
+    content: |
+      [Unit]
+      Description=Caddy reverse proxy
+      After=network-online.target voitta.service
+      Requires=network-online.target
+
+      [Service]
+      Restart=always
+      RestartSec=5
+      ExecStartPre=-/usr/bin/docker rm -f caddy
+      ExecStartPre=/usr/bin/docker pull caddy:2
+      ExecStart=/usr/bin/docker run --rm --name caddy \
+        -p 80:80 -p 443:443 \
+        -v /etc/caddy/Caddyfile:/etc/caddy/Caddyfile:ro \
+        -v caddy_data:/data \
+        -v caddy_config:/config \
+        --network host \
+        caddy:2
+      ExecStop=/usr/bin/docker stop caddy
+
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  # COS ships with a default-DROP host iptables INPUT chain and only
+  # opens port 22 — even with the GCP VPC firewall allowing 80/443,
+  # the in-VM iptables drops the packets before Caddy can see them.
+  # Insert ACCEPT rules ahead of the default DROP. Persistence is
+  # cloud-init's responsibility — it re-runs every boot via systemd.
+  - iptables -I INPUT -p tcp --dport 80 -j ACCEPT
+  - iptables -I INPUT -p tcp --dport 443 -j ACCEPT
+  - systemctl daemon-reload
+  - systemctl enable --now voitta-mount.service
+  - systemctl enable --now voitta.service
+  - systemctl enable --now caddy.service

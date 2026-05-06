@@ -5,17 +5,17 @@ variable "project_id" {
 
 variable "region" {
   type        = string
-  description = "GCP region (e.g. \"us-central1\"). Used for the static IP and Artifact Registry pulls."
+  description = "GCP region (e.g. \"us-central1\"). Used for the static IP."
 }
 
 variable "zone" {
   type        = string
-  description = "GCP zone for the GKE cluster + node pool (e.g. \"us-central1-a\"). Single-zone — there is no regional spread; the single replica only runs here."
+  description = "GCP zone for the VM and its data PD. Single-zone — no regional spread."
 }
 
 variable "name" {
   type        = string
-  description = "Short identifier for this deployment (lowercase, dashes). Used as a prefix for cluster, PVC, ingress, IP. Pick something stable per customer."
+  description = "Short identifier for this deployment (lowercase, dashes). Prefix for VM, PD, and IP."
   default     = "voitta-rag"
 
   validation {
@@ -24,63 +24,83 @@ variable "name" {
   }
 }
 
-variable "image_uri" {
-  type        = string
-  description = "Full container image reference, including tag (e.g. \"ghcr.io/voitta-ai/voitta-rag-enterprise:v0.1.0\"). The image is pulled by the node, so a public registry is simplest; for a private registry, also configure imagePullSecrets out-of-band."
-}
-
 variable "machine_type" {
   type        = string
-  description = "GKE node machine type. Default c4-standard-8 has AVX-512 + AMX which materially accelerates ONNX/oneDNN-backed embedders. Fall back to c3-standard-8 if c4 is unavailable in the region."
+  description = "Compute Engine machine type. Default c4-standard-8 has AVX-512 + AMX which materially accelerates ONNX/oneDNN-backed embedders."
   default     = "c4-standard-8"
+}
+
+variable "image_uri" {
+  type        = string
+  description = "Full container image reference, including tag (e.g. \"ghcr.io/voitta-ai/voitta-rag-enterprise:v0.1.0\")."
 }
 
 variable "data_disk_gb" {
   type        = number
-  description = "Size of the persistent disk holding SQLite, CAS, embedded Qdrant, uploads, and Drive mirrors. 200GB is plenty for ~100k pages; bump for larger corpora."
+  description = "Size of the persistent disk holding SQLite, CAS, embedded Qdrant, uploads, and Drive mirrors."
   default     = 200
 }
 
 variable "data_disk_type" {
   type        = string
-  description = "PD class. balanced is the right default; ssd helps Qdrant query latency under heavy load."
-  default     = "pd-balanced"
+  description = "PD class. ``hyperdisk-balanced`` is required when machine_type is C/C4-family; ``pd-balanced`` works for older N/E2 series."
+  default     = "hyperdisk-balanced"
 }
 
 variable "allowed_domains" {
   type        = list(string)
-  description = "Email domains permitted to sign in. Combined with extra_users — match either to admit. Empty list + empty extra_users denies every sign-in (deliberate fail-loud default)."
+  description = "Email domains permitted to sign in via Google OAuth."
   default     = []
 }
 
 variable "extra_users" {
   type        = list(string)
-  description = "Individual email addresses outside allowed_domains that can also sign in (consultants, contractors). Rendered into users.txt and mounted into the pod."
+  description = "Individual addresses (outside allowed_domains) that can also sign in. Rendered into the in-VM users.txt."
   default     = []
 }
 
 variable "google_oauth_client_id" {
   type        = string
-  description = "OAuth 2.0 Client ID (type: Web application). The redirect URI to register on the Google side is output as `redirect_uri` after apply."
+  description = "OAuth 2.0 Client ID. Empty string disables Google sign-in."
   sensitive   = true
+  default     = ""
 }
 
 variable "google_oauth_client_secret" {
   type        = string
-  description = "OAuth 2.0 Client secret matching google_oauth_client_id."
+  description = "OAuth 2.0 Client secret."
   sensitive   = true
+  default     = ""
 }
 
 variable "session_secret" {
   type        = string
-  description = "Cookie-signing secret. Leave empty and the app generates + persists one under the data PD on first boot."
+  description = "Cookie-signing secret. Empty string makes the app generate + persist one on the data PD on first boot."
   sensitive   = true
   default     = ""
 }
 
 variable "extra_env" {
   type        = map(string)
-  description = "Free-form VOITTA_* env vars to inject. Use for tuning (e.g. VOITTA_PDF_PARSE_TIMEOUT_S, VOITTA_NEARBY_RADIUS) without editing the module."
+  description = "Free-form VOITTA_* env vars to inject — used for tuning or to set VOITTA_DEV_USER in test deploys."
   default     = {}
   sensitive   = true
+}
+
+variable "ssh_pubkey" {
+  type        = string
+  description = "Optional SSH public key to drop on the VM (user 'voitta'). Empty = no SSH access; use IAP tunnels via gcloud instead."
+  default     = ""
+}
+
+variable "open_http" {
+  type        = bool
+  description = "When true, opens 80/443 to 0.0.0.0/0 so a browser can reach Caddy. Set false when fronting with an external LB or restricting access."
+  default     = true
+}
+
+variable "domain" {
+  type        = string
+  description = "Public hostname this deploy answers on (e.g. \"rag.customer.com\"). When set, Caddy issues a Let's Encrypt cert via HTTP-01 on port 80 and serves the app on HTTPS, with all HTTP traffic 308-redirected to HTTPS. When empty, Caddy serves plain HTTP on port 80 — for early bring-up before DNS is wired."
+  default     = ""
 }
