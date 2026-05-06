@@ -125,6 +125,14 @@ class Settings(BaseSettings):
     dev_user: str | None = None
     users_file: Path = Path("users.txt")
 
+    # Google sign-in allowlist. Comma-separated list of domains (e.g.
+    # "customer.com,partner.org"). On each OAuth callback the verified
+    # email is admitted iff its domain is listed here OR its address
+    # appears in ``users_file``. When both lists are empty the deploy
+    # rejects every sign-in — a deliberate fail-loud default so a misconfig
+    # can't silently accept the public internet.
+    allowed_domains: str = ""
+
     # "Sign in with Google" — when both ``google_auth_client_id`` and
     # ``google_auth_client_secret`` are set the API exposes
     # ``/api/auth/login/google`` and the UI renders a sign-in button. The
@@ -173,6 +181,17 @@ class Settings(BaseSettings):
 
     def ignore_globs(self) -> list[str]:
         return [g.strip() for g in self.ignore_patterns.split(",") if g.strip()]
+
+    def allowed_domain_list(self) -> list[str]:
+        """Normalised domain allowlist. Strips whitespace, lowercases, drops
+        a leading ``@`` so ``@customer.com`` and ``customer.com`` both work.
+        """
+        out: list[str] = []
+        for raw in self.allowed_domains.split(","):
+            d = raw.strip().lower().lstrip("@")
+            if d:
+                out.append(d)
+        return out
 
     @property
     def google_auth_enabled(self) -> bool:

@@ -29,7 +29,7 @@ from sqlalchemy.orm import Session
 
 from ...config import get_settings
 from ...db.models import ApiKey
-from ...services.acl import CurrentUser, get_or_create_user
+from ...services.acl import CurrentUser, get_or_create_user, is_email_allowed
 from ..deps import current_user, db_session
 
 logger = logging.getLogger(__name__)
@@ -207,6 +207,19 @@ async def google_login_callback(
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             "Google reports this email is not verified",
+        )
+
+    if not is_email_allowed(email, s.allowed_domain_list(), s.users_file):
+        logger.warning(
+            "login_denied: %s (allowed_domains=%r, users_file=%s)",
+            email,
+            s.allowed_domain_list(),
+            s.users_file,
+        )
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Your account is not authorized for this deployment. "
+            "Contact your administrator.",
         )
 
     display_name = profile.get("name") or email.split("@")[0]
