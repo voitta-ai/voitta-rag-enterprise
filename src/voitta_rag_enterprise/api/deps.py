@@ -29,12 +29,21 @@ def real_user(
 
     Used by admin endpoints — only the *real* user's admin flag may grant
     access; an impersonated user does not inherit privileges.
+
+    As a side-effect, every super-admin sign-in (including the
+    ``VOITTA_DEV_USER`` shortcut) re-stamps ``is_admin=True``. The OAuth
+    callback does the same, but for dev/single-user mode this is the
+    only place the stamp can land — there is no callback in those flows.
     """
+    from ..services.admin_store import is_super_admin
+
     session_email = (
         request.session.get("user_email") if hasattr(request, "session") else None
     )
     email = resolve_user_email(session_email)
     u = get_or_create_user(db, email)
+    if is_super_admin(email) and not u.is_admin:
+        u.is_admin = True
     db.commit()
     return CurrentUser(id=u.id, email=u.email)
 
