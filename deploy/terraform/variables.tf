@@ -77,6 +77,32 @@ variable "domain_aliases" {
   default     = []
 }
 
+# ----- Encryption -----
+
+variable "enable_cmek" {
+  description = <<-EOT
+    When true, disks are encrypted with a customer-managed key (CMEK)
+    in Cloud KMS instead of the default Google-managed key. Same key
+    is used for Secret Manager secrets in #8 and for app-level
+    envelope encryption in #10. Once turned on, never turn off — the
+    disk would have to be recreated.
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "kms_keyring" {
+  description = "Cloud KMS keyring name. Created when enable_cmek=true."
+  type        = string
+  default     = "voitta"
+}
+
+variable "kms_key" {
+  description = "Cloud KMS crypto-key name. Created under the keyring with 90-day rotation."
+  type        = string
+  default     = "disk-and-secrets"
+}
+
 # ----- Image -----
 
 variable "image_repo" {

@@ -42,6 +42,16 @@ resource "google_compute_disk" "data" {
   size = var.disk_size_gb
 
   labels = var.labels
+
+  # CMEK when enabled. The kms_key_self_link sub-attribute is
+  # force-new on the disk; once set, you can't switch back to
+  # Google-managed without recreating (and losing) the volume.
+  dynamic "disk_encryption_key" {
+    for_each = var.enable_cmek ? [1] : []
+    content {
+      kms_key_self_link = local.kms_crypto_key_id
+    }
+  }
 }
 
 # cloud-init payload. Files referenced via file() are repo-tracked
@@ -87,6 +97,8 @@ resource "google_compute_instance" "vm" {
       image = var.boot_disk_image
       size  = var.boot_disk_size_gb
     }
+
+    kms_key_self_link = local.kms_crypto_key_id
   }
 
   attached_disk {
