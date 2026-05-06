@@ -42,6 +42,23 @@ def test_text_parser_can_parse_extensions() -> None:
     assert not parser.can_parse(Path("a.pdf"))
 
 
+def test_text_parser_covers_common_code_extensions() -> None:
+    """Spot-check the expanded code-file allowlist.
+
+    The list is open-ended — every entry here was a real "why isn't my X
+    file indexed?" report waiting to happen. Add to this test whenever the
+    extension list grows so we don't regress a recovered case.
+    """
+    parser = TextParser()
+    must_match = [
+        "x.php", "x.rb", "x.swift", "x.kt", "x.scala", "x.lua", "x.r",
+        "x.dart", "x.ex", "x.hs", "x.cs", "x.vue", "x.svelte", "x.scss",
+        "x.bash", "x.zsh", "x.ini", "x.conf", "x.tex", "x.patch",
+    ]
+    for name in must_match:
+        assert parser.can_parse(Path(name)), f"{name} should be parseable"
+
+
 def test_image_file_parser_returns_one_image(tmp_path: Path) -> None:
     p = tmp_path / "logo.png"
     p.write_bytes(_png_bytes())
