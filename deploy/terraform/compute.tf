@@ -44,9 +44,20 @@ resource "google_compute_disk" "data" {
   labels = var.labels
 }
 
-# The VM itself. No metadata.user-data (cloud-init) yet — that lands in
-# #4. Right now this just gets you a bootable host with the right SA,
-# tags, IP, and disk attached.
+# cloud-init payload. The systemd unit's content lives in the
+# repo-tracked source-of-truth file at deploy/systemd/voitta.service
+# and gets indented to slot under the YAML write_files block scalar.
+locals {
+  cloud_init_user_data = templatefile(
+    "${path.module}/../cloud-init.yaml.tftpl",
+    {
+      image_repo              = var.image_repo
+      image_tag               = var.image_tag
+      voitta_service_indented = indent(6, file("${path.module}/../systemd/voitta.service"))
+    }
+  )
+}
+
 resource "google_compute_instance" "vm" {
   name         = "${local.prefix}-vm"
   machine_type = var.machine_type
@@ -88,9 +99,20 @@ resource "google_compute_instance" "vm" {
 
   labels = var.labels
 
-  # The cloud-init script (#4) will mutate the disk on first boot; we
-  # don't want a tag/label tweak to trigger a VM rebuild that wipes the
-  # boot-time work. Lock the boot image to changes only.
+  metadata = {
+    # COS reads cloud-init payloads from `user-data`.
+    # https://cloud.google.com/container-optimized-os/docs/how-to/create-configure-instance#cloud-init
+    user-data = local.cloud_init_user_data
+
+    # No project-wide SSH keys; rely on IAP + OS Login.
+    block-project-ssh-keys = "TRUE"
+    enable-oslogin         = "TRUE"
+  }
+
+  # cloud-init runs once at first boot. Subsequent image upgrades go
+  # through `make deploy-upgrade` (#13), which SSHs in and updates
+  # /etc/voitta/image.env. Freezing metadata here means a later
+  # `terraform apply` won't fight that out-of-band change.
   lifecycle {
     ignore_changes = [
       metadata,

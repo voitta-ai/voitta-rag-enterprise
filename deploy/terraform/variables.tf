@@ -34,6 +34,29 @@ variable "name_prefix" {
   }
 }
 
+# ----- Image -----
+
+variable "image_repo" {
+  description = <<-EOT
+    Container image repository the VM pulls from. Defaults to the
+    public GHCR image published by the release workflow (#2). Customers
+    who mirror into their own Artifact Registry override this.
+  EOT
+  type        = string
+  default     = "ghcr.io/voitta-ai/voitta-rag-enterprise"
+}
+
+variable "image_tag" {
+  description = <<-EOT
+    Image tag to pull on first boot. Subsequent upgrades go through
+    `make deploy-upgrade` (issue #13), not by changing this and running
+    `terraform apply` — the VM's metadata is in `lifecycle.ignore_changes`
+    so terraform doesn't try to reset it.
+  EOT
+  type        = string
+  default     = "latest"
+}
+
 # ----- Compute -----
 
 variable "machine_type" {
