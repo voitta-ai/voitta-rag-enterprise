@@ -1,0 +1,52 @@
+[Unit]
+Description=voitta-rag application container
+Documentation=https://github.com/voitta-ai/voitta-rag-enterprise
+Wants=network-online.target docker.service
+After=network-online.target docker.service var-lib-voitta.mount
+Requires=docker.service var-lib-voitta.mount
+
+[Service]
+# Image coordinates are written by cloud-init at first boot and updated
+# by `make deploy-upgrade` (#13) thereafter. Keeping them in /etc/voitta
+# (instead of baking into this unit) means upgrades don't need a
+# `systemctl daemon-reload`.
+EnvironmentFile=/etc/voitta/image.env
+EnvironmentFile=/etc/voitta/app.env
+
+# Belt-and-braces cleanup: if a previous run left a dead container,
+# remove it. Hyphen prefix makes the failure non-fatal when nothing
+# exists to remove.
+ExecStartPre=-/usr/bin/docker rm -f voitta
+
+# Pull-on-start so a `systemctl restart voitta` after editing
+# /etc/voitta/image.env actually picks up the new tag.
+ExecStartPre=/usr/bin/docker pull ${IMAGE_REPO}:${IMAGE_TAG}
+
+# --network=host: app expects to bind 0.0.0.0:8000 directly so that
+# Caddy / the load balancer (#5/#6) can reach it on localhost without
+# port-publishing acrobatics.
+# --rm: container removes itself on exit; combined with ExecStartPre
+# this gives us a clean state every restart.
+# --env-file: app config (mostly VOITTA_*). cloud-init writes the
+# initial set; #9 wires Secret Manager into this same file.
+# Volume mount: durable state.
+ExecStart=/usr/bin/docker run --rm --name voitta \
+    --network=host \
+    --env-file /etc/voitta/app.env \
+    -v /var/lib/voitta:/var/lib/voitta \
+    ${IMAGE_REPO}:${IMAGE_TAG}
+
+ExecStop=/usr/bin/docker stop --time=30 voitta
+
+# Restart on any non-zero exit. Backoff 5s so a crashloop pulls back
+# at a sustainable rate without spamming the registry.
+Restart=always
+RestartSec=5
+
+# StandardOutput=journal is the default on systemd >= 234 but spell it
+# out; this is what `journalctl -u voitta` reads.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,89 @@
+#cloud-config
+#
+# First-boot bootstrap for the voitta-rag VM.
+#
+# Container-Optimized OS (COS) ships with Docker and systemd preinstalled,
+# so this script does NOT touch apt or install Docker. If a customer
+# switches `boot_disk_image` to Ubuntu LTS, replace this file with one
+# that does the apt-get + docker.io install dance.
+#
+# Cloud-init runs once at first boot. After that, ops actions go through
+# `make deploy-upgrade` and friends (#13), not by editing user-data.
+
+write_files:
+  # Image coordinates the systemd unit reads. Customers update this file
+  # via `make deploy-upgrade` to roll forward.
+  - path: /etc/voitta/image.env
+    permissions: "0644"
+    owner: root:root
+    content: |
+      IMAGE_REPO=${image_repo}
+      IMAGE_TAG=${image_tag}
+
+  # Initial application config. Real-model auth + OAuth / Secret Manager
+  # values land in #9; Tier A first-boot uses fake embedders + single-user
+  # so /healthz answers without us having populated secrets yet.
+  - path: /etc/voitta/app.env
+    permissions: "0644"
+    owner: root:root
+    content: |
+      VOITTA_DATA_DIR=/var/lib/voitta
+      VOITTA_PORT=8000
+      VOITTA_USE_FAKE_EMBEDDERS=true
+      VOITTA_SINGLE_USER=true
+
+  # systemd mount unit for the attached data disk. Naming must match the
+  # mount point (var-lib-voitta.mount → /var/lib/voitta).
+  - path: /etc/systemd/system/var-lib-voitta.mount
+    permissions: "0644"
+    owner: root:root
+    content: |
+      [Unit]
+      Description=Mount voitta data disk
+      Before=voitta.service
+
+      [Mount]
+      What=/dev/disk/by-id/google-voitta-data
+      Where=/var/lib/voitta
+      Type=ext4
+      Options=defaults,noatime,discard
+
+      [Install]
+      WantedBy=multi-user.target
+
+  # Application unit — content is the source-of-truth file at
+  # deploy/systemd/voitta.service, embedded here at terraform time.
+  # Note the 6 leading spaces before the substitution: terraform's
+  # indent(N, str) leaves the first line untouched, so we manually put
+  # it at the right column to match the rest.
+  - path: /etc/systemd/system/voitta.service
+    permissions: "0644"
+    owner: root:root
+    content: |
+      ${voitta_service_indented}
+
+runcmd:
+  # 1. Format the data disk on first boot only. blkid prints nothing
+  #    (and exits non-zero) for an unformatted block device; we treat
+  #    that as the trigger to mkfs.ext4. On subsequent boots blkid
+  #    reports the existing filesystem and we skip.
+  - |
+    set -eux
+    DEV=/dev/disk/by-id/google-voitta-data
+    if ! blkid "$DEV" >/dev/null 2>&1; then
+      mkfs.ext4 -F -L voitta-data "$DEV"
+    fi
+
+  # 2. Make the mount point and put it under systemd's control.
+  - mkdir -p /var/lib/voitta
+  - systemctl daemon-reload
+  - systemctl enable --now var-lib-voitta.mount
+
+  # 3. Hand the mount point to the non-root container user (UID 1000 in
+  #    deploy/Dockerfile). Done after the mount so we're chowning the
+  #    real filesystem, not the empty placeholder.
+  - chown 1000:1000 /var/lib/voitta
+
+  # 4. Start the app. systemd resolves the dependency chain
+  #    docker.service → var-lib-voitta.mount → voitta.service.
+  - systemctl enable --now voitta.service
