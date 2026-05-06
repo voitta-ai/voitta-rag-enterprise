@@ -77,7 +77,10 @@ resource "google_compute_instance" "vm" {
   name         = "${local.prefix}-vm"
   machine_type = var.machine_type
   zone         = var.zone
-  tags         = ["${local.prefix}-web", "${local.prefix}-iap"]
+  # `-lb` tag is harmless when create_load_balancer = false (no
+  # firewall rule references it). Adding it unconditionally keeps the
+  # VM resource shape stable across the toggle.
+  tags = ["${local.prefix}-web", "${local.prefix}-iap", "${local.prefix}-lb"]
 
   boot_disk {
     initialize_params {

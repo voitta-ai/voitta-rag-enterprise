@@ -1,6 +1,11 @@
 output "vm_external_ip" {
-  description = "Static external IP of the VM. Point your A record here (or at the LB IP, when #6 lands)."
+  description = "Static external IP of the VM. Point your A record here when create_load_balancer=false; otherwise use lb_external_ip."
   value       = google_compute_address.vm_ip.address
+}
+
+output "lb_external_ip" {
+  description = "Global LB IP. Null when create_load_balancer=false. Customer's DNS A record for var.domain points here."
+  value       = try(google_compute_global_address.lb[0].address, null)
 }
 
 output "vm_name" {
