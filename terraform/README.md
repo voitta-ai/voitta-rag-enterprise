@@ -1,89 +1,70 @@
 # Terraform — GCP deployment
 
-Provisions one Voitta RAG Enterprise stack per customer on GKE Standard.
+Provisions one Voitta RAG Enterprise stack per customer as a single Compute Engine VM running Container-Optimized OS. The app and an automatic-TLS reverse proxy (Caddy) run as Docker containers under systemd; a separate persistent disk holds all app state across VM lifetimes.
+
+See [`DEPLOYMENT_LOG.md`](DEPLOYMENT_LOG.md) for the running record of what was tried and what didn't work — annotated with fixes.
 
 ## Layout
 
-- [`modules/voitta-rag/`](modules/voitta-rag/) — the reusable module. Don't edit per-customer; pass values in via tfvars.
-- [`envs/example/`](envs/example/) — copy this to `envs/<customer>/` for each new deployment. Each env has its own state bucket.
+- [`modules/voitta-rag/`](modules/voitta-rag/) — the reusable module. Don't edit per-customer; pass values via the env's `main.tf`.
+- [`envs/voitta-demo/`](envs/voitta-demo/) — example consumer; the live `voitta-report-builder` deployment. Copy to `envs/<customer>/` for each new deploy.
 
 ## What you need before `terraform apply`
 
-1. **A GCP project** owned by the customer (or a sub-project under their org). You — the operator — need `roles/owner` or equivalent.
-2. **A GCS bucket** for the Terraform state. Create it out of band (see `backend.tf.example`).
-3. **OAuth credentials**: in the customer's project, GCP Console → APIs & Services → Credentials → Create OAuth client ID → Web application. The redirect URI is `https://<host>/api/auth/google/callback`; you'll know the host *after* the first apply, so just register a placeholder for now and update it once DNS is wired.
-4. **A container image tag** to deploy — produced by the `image` GitHub Actions workflow.
+1. **A GCP project** owned by the customer (or a sub-project under their org), with a billing account attached. Newly-created projects do **not** inherit the org's billing account; link it explicitly:
+   ```bash
+   gcloud billing projects link <project-id> --billing-account=<id>
+   ```
+2. **A GCS bucket** for the Terraform state. Created once per project; reused across re-applies:
+   ```bash
+   gcloud storage buckets create gs://voitta-tfstate-<short> \
+     --project=<project-id> --location=us --uniform-bucket-level-access
+   gcloud storage buckets update gs://voitta-tfstate-<short> --versioning
+   ```
+3. **Application Default Credentials** for Terraform:
+   ```bash
+   gcloud auth application-default login
+   ```
+4. **A container image tag** to deploy — produced by the [`image` GitHub Actions workflow](../.github/workflows/image.yml). The `voitta-rag-enterprise` GHCR package must be **public** for anonymous pull, or you'll need to wire `imagePullSecrets` (not currently supported by the module).
+5. **OAuth credentials** (only if you want Google sign-in — for the test deploy this is skipped):
+   - GCP Console → APIs & Services → Credentials → Create OAuth client ID → Web application.
+   - Authorized redirect URI: `https://<your-fqdn>/api/auth/google/callback`.
 
 ## First-time apply
 
 ```bash
-cd terraform/envs/example       # or your customer copy
-cp terraform.tfvars.example terraform.tfvars
-cp backend.tf.example backend.tf
-$EDITOR terraform.tfvars        # fill in project_id, name, OAuth, allowed_domains, image_uri
-
+cd terraform/envs/<customer>
 terraform init
 terraform apply
 ```
 
-The first apply is sometimes flaky because the kubernetes provider tries to authenticate against a cluster that doesn't exist yet. If you hit that, run:
+The apply takes ~3 min. Outputs include `external_ip` — point your DNS A record at it.
+
+## Wiring DNS + TLS
+
+1. Create an A record at your DNS provider:
+   ```
+   <fqdn>  A  <external_ip>  TTL=300
+   ```
+2. Wait for propagation (`dig +short <fqdn>` returns the IP).
+3. Set `domain = "<fqdn>"` in your env's `main.tf`.
+4. Re-apply, **forcing VM replacement** so cloud-init re-runs:
+   ```bash
+   terraform apply -replace=module.voitta_rag.google_compute_instance.this
+   ```
+   Cloud-init only runs on first boot; an in-place metadata update won't reconfigure Caddy.
+
+Caddy fetches a Let's Encrypt cert via HTTP-01 on the first inbound request, serves HTTPS on `:443`, and 308-redirects all `:80` traffic. Renewals are automatic.
+
+## Updating the deployed image
+
+Bump `image_uri` in the env's `main.tf` and apply with `-replace`:
 
 ```bash
-terraform apply -target=module.voitta_rag.google_container_node_pool.primary
-terraform apply
+terraform apply -replace=module.voitta_rag.google_compute_instance.this
 ```
 
-## After apply — manual one-time wiring per customer
-
-`terraform output` prints the four values you need:
-
-```
-ingress_ip   = "34.117.x.y"
-redirect_uri = "https://<host>/api/auth/google/callback"
-cluster_name = "acme-rag-cluster"
-namespace    = "acme-rag"
-```
-
-1. **DNS**: point an A record `rag.customer.com` at `ingress_ip`. Wait a few minutes for propagation.
-
-2. **Managed certificate**: GCE Ingress can do TLS via a `ManagedCertificate` CRD. Apply it directly with `kubectl`:
-
-   ```bash
-   gcloud container clusters get-credentials "$(terraform output -raw cluster_name)" \
-     --zone us-central1-a
-
-   kubectl -n "$(terraform output -raw namespace)" apply -f - <<EOF
-   apiVersion: networking.gke.io/v1
-   kind: ManagedCertificate
-   metadata:
-     name: voitta-rag-cert
-   spec:
-     domains:
-       - rag.customer.com
-   EOF
-
-   kubectl -n "$(terraform output -raw namespace)" annotate ingress voitta-rag \
-     networking.gke.io/managed-certificates=voitta-rag-cert --overwrite
-   ```
-
-   Cert provisioning takes 15–60 min. Status:
-
-   ```bash
-   kubectl -n "$(terraform output -raw namespace)" get managedcertificate voitta-rag-cert
-   ```
-
-3. **Update the OAuth client** in the customer's GCP Console with the real redirect URI: `https://rag.customer.com/api/auth/google/callback`.
-
-4. **Smoke test**: open `https://rag.customer.com/` in a browser, click Sign in with Google, confirm an in-domain email is admitted and an out-of-domain one gets a 403.
-
-## Updating a deployment
-
-```bash
-$EDITOR terraform.tfvars        # bump image_uri to the new tag
-terraform apply
-```
-
-The single replica recreates with ~30–60s of downtime — `strategy: Recreate` is required because SQLite + the embedded Qdrant cannot run two writers against the same PD.
+The data PD is a separate `google_compute_disk` resource, so VM replacement preserves app state. Downtime is dominated by the new VM's image pull (~3-5 min for an in-region pull).
 
 ## Tearing down
 
@@ -91,10 +72,26 @@ The single replica recreates with ~30–60s of downtime — `strategy: Recreate`
 terraform destroy
 ```
 
-The PD is deleted along with everything else. **There are no automatic backups.** If you need to preserve the data, snapshot the PD before destroy:
+Wipes everything including the data PD. To preserve data across teardown, snapshot the PD first:
 
 ```bash
-gcloud compute disks snapshot \
-  $(gcloud compute disks list --filter='name~voitta-rag-data' --format='value(name)') \
-  --zone us-central1-a
+gcloud compute disks snapshot voitta-rag-data --zone=<zone>
 ```
+
+## Cost
+
+- VM (`c4-standard-8`, 8 vCPU / 32 GB): ~$0.40/hr
+- 200 GB hyperdisk-balanced: ~$0.024/hr
+- Static external IP (attached): free
+
+≈ **$0.42/hr running**. Stop the VM (without destroying) and only the disk charges (~$17/mo for 200 GB).
+
+## Troubleshooting
+
+The deployment log under [`DEPLOYMENT_LOG.md`](DEPLOYMENT_LOG.md) records every gotcha hit during the first real deploy, with fixes. Highlights:
+
+- **C4 instances reject `pd-balanced`** — the module defaults to `hyperdisk-balanced`.
+- **COS host iptables drops 80/443 by default** — cloud-init opens them with explicit ACCEPT rules.
+- **The 14 GB image overruns systemd's default 90s start timeout** — `voitta.service` sets `TimeoutStartSec=900`.
+
+If a problem doesn't match any of these, SSH into the VM with `gcloud compute ssh voitta-rag-vm --tunnel-through-iap` and check `sudo journalctl -u voitta.service` and `sudo journalctl -u caddy.service`.

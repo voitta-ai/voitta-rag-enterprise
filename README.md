@@ -117,15 +117,23 @@ Embedding (e5-base, SigLIP-2, fastembed BM25) and PDF parsing (MinerU layout/OCR
 
 **Optional GPU**: `g2-standard-8` (1× L4) lights up MinerU and the embedders for noticeably better ingest throughput. The app picks GPU automatically when CUDA is available; no config change required.
 
-### Cluster: GKE Standard, single-node
+### Runtime shape: one Compute Engine VM
 
-GKE **Standard** (not Autopilot) with a single-node pool pinned to C4. Autopilot's compute classes can target C-family silicon but at a per-pod premium and with less deterministic scheduling — Standard is simpler and cheaper for a fixed single-replica workload.
+A single VM running [Container-Optimized OS](https://cloud.google.com/container-optimized-os) with two Docker containers managed as systemd units:
 
-- Deployment with `replicas: 1`, `strategy: Recreate` (avoids two writers on SQLite/Qdrant).
-- 200 GB balanced PD mounted at `VOITTA_DATA_DIR`. `VOITTA_ROOT_PATH` is a subdirectory of the same volume — uploads + Google Drive mirrors live there.
-- HTTPS Ingress with a reserved global static IP. The Terraform outputs the IP; the customer points an A record at it and provisions a managed cert (manual one-time step per customer).
-- ConfigMap-mounted `users.txt` rendered from a Terraform `extra_users` variable; Secret Manager (via the CSI driver) for OAuth client id/secret and the session secret.
-- Outbound egress for Google Drive sync and (during first boot) any model downloads not baked into the image.
+- **`voitta`** — the app, listening on `127.0.0.1:8000`.
+- **`caddy`** — reverse proxy + automatic Let's Encrypt TLS on `:443`, with `:80` serving only the ACME challenge and a 308 redirect to HTTPS.
+
+Storage:
+
+- A 200 GB `hyperdisk-balanced` PD attached at `/mnt/disks/voitta`, mounted persistently across VM lifetimes. Holds `VOITTA_DATA_DIR` (SQLite + CAS + embedded Qdrant) and `VOITTA_ROOT_PATH` (uploads + Drive mirror).
+- The boot disk is ephemeral. VM replacement (e.g. on image upgrade) preserves the data PD; only the docker image cache is lost.
+
+Why not GKE: it was the original target, but for a single-replica stateful workload the k8s control-plane fee, PVC abstraction, and Service+Ingress LB layer added cost and complexity for zero benefit. The GCE VM path is ~250 lines of HCL vs. ~600 for the GKE equivalent.
+
+### TLS
+
+Caddy fetches a Let's Encrypt cert via HTTP-01 on first request and renews automatically. Set `var.domain` to the FQDN; leave it empty during bring-up and Caddy serves plain HTTP on `:80` until DNS is wired. Switching from HTTP to HTTPS requires recreating the VM (cloud-init only runs on first boot) — `terraform apply -replace=...google_compute_instance.this` does this; the data PD persists.
 
 ### Auth: domain allowlist + extras
 
@@ -143,7 +151,7 @@ The local terminal flow (`make dev`) is unaffected by any of this — it doesn't
 
 ### Updating a deployment
 
-Bump `image_uri` in the customer's tfvars and `terraform apply`. The single replica recreates with ~30–60s of downtime — there is no blue/green path because the embedded Qdrant + SQLite cannot be safely run from two pods at once.
+Bump `image_uri` in the customer's tfvars and `terraform apply -replace=module.voitta_rag.google_compute_instance.this`. The VM is recreated and re-pulls the image; the data PD is a separate resource so app state survives. Downtime ≈ image-pull time on the new VM (a few minutes for the ~14 GB cold pull). There is no blue/green path because the embedded Qdrant + SQLite cannot be safely run from two VMs at once.
 
 ## Status
 
