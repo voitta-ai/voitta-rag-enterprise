@@ -42,22 +42,21 @@ export const api = {
         const all = await Promise.all(fs.map(f => req("GET", `/api/folders/${f.id}/files`)));
         return all.flat();
     },
-    upload: async (folderId, files, relDir = "", onProgress = null) => {
-        // XMLHttpRequest because fetch doesn't expose upload progress
-        // events. ``onProgress({loaded, total, fraction})`` is called
-        // repeatedly while the FormData body is being sent; the server
-        // reads the upload before the response is built, so loaded == total
-        // means the bytes are off the client and the user is now waiting on
-        // server-side disk writes.
-        const batch = Array.from(files);
+    uploadOne: (folderId, file, relDir = "", onProgress = null) => {
+        // One file per POST. The server (folders.upload_file) streams the
+        // body straight to disk and atomically renames the sidecar into
+        // place — so as soon as this Promise resolves, the file exists at
+        // its final path and the watcher will fire ``file.upserted``.
+        // Smaller-than-batch POSTs also give us per-file XHR progress
+        // events instead of a single aggregate fraction.
         const form = new FormData();
-        for (const file of batch) form.append("file", file);
+        form.append("file", file);
         const query = relDir ? `?rel_dir=${encodeURIComponent(relDir)}` : "";
         const url = `/api/folders/${folderId}/upload${query}`;
-        return await new Promise((resolve, reject) => {
+        return new Promise((resolve, reject) => {
             const xhr = new XMLHttpRequest();
             xhr.open("POST", url);
-            xhr.withCredentials = true;  // send the session cookie
+            xhr.withCredentials = true;
             xhr.responseType = "json";
             if (onProgress) {
                 xhr.upload.addEventListener("progress", (e) => {
@@ -81,6 +80,40 @@ export const api = {
             xhr.addEventListener("abort", () => reject(new Error("upload aborted")));
             xhr.send(form);
         });
+    },
+    uploadBatch: async (
+        folderId, files, relDir = "",
+        { concurrency = 3, onFileProgress = null, onFileDone = null, onFileError = null } = {},
+    ) => {
+        // Drive N parallel uploadOne calls with a small concurrency cap.
+        // Per-file callbacks let the UI render a row per file ("a.pdf —
+        // 42%" / "✓ a.pdf"); the watcher's ``file.upserted`` events also
+        // populate the folder's file list as each file lands.
+        const list = Array.from(files);
+        let next = 0;
+        const failures = [];
+        async function worker() {
+            while (true) {
+                const idx = next++;
+                if (idx >= list.length) return;
+                const file = list[idx];
+                try {
+                    const resp = await api.uploadOne(
+                        folderId, file, relDir,
+                        onFileProgress
+                            ? (p) => onFileProgress(idx, file, p)
+                            : null,
+                    );
+                    if (onFileDone) onFileDone(idx, file, resp);
+                } catch (err) {
+                    failures.push({ idx, file, err });
+                    if (onFileError) onFileError(idx, file, err);
+                }
+            }
+        }
+        const cap = Math.max(1, Math.min(concurrency, list.length));
+        await Promise.all(Array.from({ length: cap }, () => worker()));
+        return { count: list.length, failures };
     },
     mkdir: (folderId, path) =>
         req("POST", `/api/folders/${folderId}/mkdir`, { path }),

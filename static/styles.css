@@ -150,10 +150,12 @@ body {
 }
 .upload-progress {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 8px;
     margin-left: auto;
     min-width: 220px;
+    max-width: 480px;
 }
 .upload-progress-label {
     font-size: 11px;
@@ -162,6 +164,7 @@ body {
 }
 .upload-progress-bar {
     flex: 1;
+    min-width: 120px;
     height: 6px;
     background: var(--color-bg);
     border: 1px solid var(--color-border);
@@ -174,6 +177,38 @@ body {
     background: var(--color-accent);
     transition: width 100ms linear;
 }
+.upload-file-list {
+    flex-basis: 100%;
+    margin: 4px 0 0;
+    padding: 0;
+    list-style: none;
+    max-height: 140px;
+    overflow-y: auto;
+    font-size: 11px;
+    color: var(--color-text-secondary);
+}
+.upload-file-list li {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 0;
+}
+.upload-file-list li .name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.upload-file-list li .pct {
+    font-variant-numeric: tabular-nums;
+    color: var(--color-text-secondary);
+    min-width: 36px;
+    text-align: right;
+}
+.upload-file-list li.done .pct,
+.upload-file-list li.done .name { color: var(--color-accent); }
+.upload-file-list li.failed .pct,
+.upload-file-list li.failed .name { color: #c33; }
 .browser-layout {
     display: grid;
     grid-template-columns: 1fr 360px;

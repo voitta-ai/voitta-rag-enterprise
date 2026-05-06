@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
-from fastapi import File as FormFile
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -241,55 +241,245 @@ def _safe_filename(filename: str | None) -> str:
 )
 async def upload_file(
     folder_id: int,
-    file: list[UploadFile] = FormFile(...),
+    request: Request,
     rel_path: str | None = None,
     rel_dir: str | None = None,
     db: Session = Depends(db_session),
     user: CurrentUser = Depends(current_user),
 ) -> UploadBatchOut:
-    """Upload files into a folder. The watcher picks them up and indexes them."""
+    """Upload files into a folder, streaming each one to disk as it arrives.
+
+    Bytes flow ``request.stream() → multipart parser → target_dir/.<name>.tmp``,
+    then an atomic ``os.replace`` flips each finished file into place. The
+    handler never buffers a whole file in memory or in ``/tmp``: peak RSS
+    is one chunk (~64 KiB) regardless of upload size.
+
+    Files commit one-by-one as their multipart part terminates, so the
+    watcher can fire ``file.upserted`` and the SPA can show the file
+    while later files in the same POST are still uploading.
+    """
     folder = _require_owner(db, folder_id, user)
     folder_root = Path(folder.path).resolve()
-    if rel_path is not None and len(file) != 1:
+
+    content_type = request.headers.get("content-type", "")
+    if not content_type.lower().startswith("multipart/form-data"):
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            "rel_path can only be used when uploading one file; use rel_dir for batches.",
+            "expected multipart/form-data",
         )
 
     rel_base = _safe_rel_path(rel_dir) if rel_dir else Path()
-    uploaded: list[UploadOut] = []
-    for item in file:
-        target_rel = (
-            _safe_rel_path(rel_path)
-            if rel_path is not None
-            else rel_base / _safe_filename(item.filename)
-        )
-        target = (folder_root / target_rel).resolve()
-        if folder_root not in target.parents and target.parent != folder_root:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "rel_path escapes folder")
-
-        target.parent.mkdir(parents=True, exist_ok=True)
-        bytes_written = 0
-        tmp_name: str | None = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                "wb", dir=target.parent, prefix=f".{target.name}.", delete=False
-            ) as out:
-                tmp_name = out.name
-                while chunk := await item.read(1024 * 1024):
-                    out.write(chunk)
-                    bytes_written += len(chunk)
-            os.replace(tmp_name, target)
-        finally:
-            if tmp_name is not None and Path(tmp_name).exists():
-                Path(tmp_name).unlink()
-        uploaded.append(UploadOut(rel_path=target_rel.as_posix(), size_bytes=bytes_written))
-
+    uploaded = await _stream_multipart_to_folder(
+        request=request,
+        folder_root=folder_root,
+        rel_base=rel_base,
+        rel_path_override=rel_path,
+    )
     return UploadBatchOut(
         files=uploaded,
         count=len(uploaded),
         size_bytes=sum(item.size_bytes for item in uploaded),
     )
+
+
+async def _stream_multipart_to_folder(
+    *,
+    request: Request,
+    folder_root: Path,
+    rel_base: Path,
+    rel_path_override: str | None,
+) -> list[UploadOut]:
+    """Drive python-multipart's streaming parser against ``request.stream()``.
+
+    For each file part we open a hidden ``.<name>.<rand>`` sidecar in the
+    target directory, write chunks straight in, and ``os.replace`` it on
+    part end. Anything other than file parts (rare — the SPA passes
+    ``rel_path``/``rel_dir`` as query params) is read and discarded so a
+    misconfigured client can't smuggle bytes past the rel_path safety
+    check.
+    """
+    from python_multipart.multipart import (
+        MultipartParser,
+        parse_options_header,
+    )
+
+    content_type = request.headers["content-type"]
+    _, options = parse_options_header(content_type)
+    boundary = options.get(b"boundary")
+    if not boundary:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "multipart body missing boundary",
+        )
+
+    uploaded: list[UploadOut] = []
+
+    # Mutable per-part state. We can't bind these as closures of the
+    # callbacks (parser callbacks fire from the same thread as feed(),
+    # so a plain dict works) — keeping them in one scope makes the
+    # cleanup-on-error path tractable.
+    state: dict = {
+        "header_field": bytearray(),
+        "header_value": bytearray(),
+        "headers": [],
+        "filename": None,
+        "field_name": None,
+        "out": None,           # open file handle for the active file part
+        "tmp_path": None,      # sidecar path for cleanup-on-error
+        "target_path": None,   # final path the sidecar will be renamed to
+        "target_rel": None,    # rel-path string for the response
+        "bytes_written": 0,
+        "is_file_part": False,
+    }
+
+    def _close_partial_part() -> None:
+        out = state.get("out")
+        tmp = state.get("tmp_path")
+        if out is not None:
+            try:
+                out.close()
+            except OSError:
+                pass
+        if tmp is not None and Path(tmp).exists():
+            with contextlib.suppress(OSError):
+                Path(tmp).unlink()
+        state["out"] = None
+        state["tmp_path"] = None
+
+    def on_part_begin() -> None:
+        state["headers"] = []
+        state["filename"] = None
+        state["field_name"] = None
+        state["bytes_written"] = 0
+        state["is_file_part"] = False
+
+    def on_header_field(data: bytes, start: int, end: int) -> None:
+        state["header_field"] += data[start:end]
+
+    def on_header_value(data: bytes, start: int, end: int) -> None:
+        state["header_value"] += data[start:end]
+
+    def on_header_end() -> None:
+        state["headers"].append(
+            (bytes(state["header_field"]), bytes(state["header_value"]))
+        )
+        state["header_field"] = bytearray()
+        state["header_value"] = bytearray()
+
+    def on_headers_finished() -> None:
+        for name, value in state["headers"]:
+            if name.lower() != b"content-disposition":
+                continue
+            _, opts = parse_options_header(value)
+            fn = opts.get(b"filename")
+            fname = opts.get(b"name")
+            if fn is not None:
+                state["filename"] = fn.decode("utf-8", "replace")
+            if fname is not None:
+                state["field_name"] = fname.decode("utf-8", "replace")
+            break
+        # Only ``name="file"`` parts that carry a filename are uploads.
+        if state["field_name"] == "file" and state["filename"] is not None:
+            target_rel = (
+                _safe_rel_path(rel_path_override)
+                if rel_path_override is not None
+                else rel_base / _safe_filename(state["filename"])
+            )
+            target = (folder_root / target_rel).resolve()
+            if folder_root not in target.parents and target.parent != folder_root:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST, "rel_path escapes folder"
+                )
+            target.parent.mkdir(parents=True, exist_ok=True)
+            # delete=False: we manage the lifetime ourselves so we can
+            # rename on success or unlink on failure.
+            tmp = tempfile.NamedTemporaryFile(
+                "wb",
+                dir=target.parent,
+                prefix=f".{target.name}.",
+                delete=False,
+            )
+            state["out"] = tmp
+            state["tmp_path"] = tmp.name
+            state["target_path"] = target
+            state["target_rel"] = target_rel.as_posix()
+            state["is_file_part"] = True
+
+    def on_part_data(data: bytes, start: int, end: int) -> None:
+        if not state["is_file_part"]:
+            return  # silently drop non-file fields
+        chunk = data[start:end]
+        state["out"].write(chunk)
+        state["bytes_written"] += len(chunk)
+
+    def on_part_end() -> None:
+        if not state["is_file_part"]:
+            return
+        out = state["out"]
+        out.flush()
+        out.close()
+        os.replace(state["tmp_path"], state["target_path"])
+        uploaded.append(
+            UploadOut(
+                rel_path=state["target_rel"],
+                size_bytes=state["bytes_written"],
+            )
+        )
+        state["out"] = None
+        state["tmp_path"] = None
+        # The second-file guard below uses ``is_file_part`` to detect a
+        # part that's mid-flight — once we've committed this one, clear
+        # the flag so trailing boundary bytes don't look like a new part.
+        state["is_file_part"] = False
+
+    def on_end() -> None:
+        pass
+
+    parser = MultipartParser(
+        boundary,
+        callbacks={
+            "on_part_begin": on_part_begin,
+            "on_header_field": on_header_field,
+            "on_header_value": on_header_value,
+            "on_header_end": on_header_end,
+            "on_headers_finished": on_headers_finished,
+            "on_part_data": on_part_data,
+            "on_part_end": on_part_end,
+            "on_end": on_end,
+        },
+    )
+
+    # rel_path is single-file only (matches the pre-streaming contract).
+    # In streaming mode we can't know the count up front, so detect a
+    # second file part as soon as it's announced and bail out before its
+    # bytes start landing on disk.
+    try:
+        async for chunk in request.stream():
+            if not chunk:
+                continue
+            parser.write(chunk)
+            if rel_path_override is not None and len(uploaded) + (
+                1 if state["is_file_part"] else 0
+            ) > 1:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    "rel_path can only be used when uploading one file; "
+                    "use rel_dir for batches.",
+                )
+        parser.finalize()
+    except HTTPException:
+        _close_partial_part()
+        raise
+    except Exception as e:
+        _close_partial_part()
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, f"upload failed: {e}"
+        ) from e
+
+    # Sidecar lingering past the loop means the client cut us off
+    # mid-part. Unlink so we don't leave dotfiles around.
+    _close_partial_part()
+    return uploaded
 
 
 class MkdirIn(BaseModel):
