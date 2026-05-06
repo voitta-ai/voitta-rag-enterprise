@@ -17,6 +17,15 @@ htmlcov/
 # Env
 .env
 .env.local
+.env.terraform
+.env.secrets
+
+# Terraform — keep .terraform.lock.hcl tracked for reproducible installs.
+deploy/terraform/.terraform/
+deploy/terraform/terraform.tfstate
+deploy/terraform/terraform.tfstate.backup
+deploy/terraform/*.tfvars
+!deploy/terraform/*.tfvars.example
 
 # Data
 data/
