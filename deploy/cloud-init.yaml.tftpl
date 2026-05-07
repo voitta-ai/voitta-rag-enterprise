@@ -37,6 +37,11 @@ write_files:
       VOITTA_PORT=8000
       VOITTA_USE_FAKE_EMBEDDERS=true
       VOITTA_SINGLE_USER=true
+%{ if kms_key_resource != "" ~}
+      # CMEK key from #7. services/crypto.py wraps the secret
+      # columns of folder_sync_sources at rest with this key.
+      VOITTA_KMS_KEY=${kms_key_resource}
+%{ endif ~}
       # Uncomment to enable real OAuth + signed sessions:
       # VOITTA_GOOGLE_AUTH_CLIENT_ID=sm://voitta-google-auth-client-id
       # VOITTA_GOOGLE_AUTH_CLIENT_SECRET=sm://voitta-google-auth-client-secret
