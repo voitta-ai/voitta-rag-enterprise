@@ -29,7 +29,15 @@ def get_engine() -> Engine:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         _engine = create_engine(
             f"sqlite:///{db_path}",
-            connect_args={"check_same_thread": False},
+            # ``timeout`` is the SQLite busy-timeout (seconds): when a
+            # writer finds the DB locked, it waits up to this long for the
+            # holder to commit instead of erroring instantly. The Python
+            # sqlite3 default of 5s is not enough for our worker —
+            # ``_commit_indexing`` writes hundreds of rows in one
+            # transaction (chunks + figures + page renders for a long
+            # PDF), and the watcher thread that races a fresh-file INSERT
+            # into the same window otherwise hits "database is locked".
+            connect_args={"check_same_thread": False, "timeout": 30},
             future=True,
         )
         _register_pragmas(_engine)
@@ -116,4 +124,9 @@ def _register_pragmas(engine: Engine) -> None:
         cur.execute("PRAGMA journal_mode=WAL")
         cur.execute("PRAGMA synchronous=NORMAL")
         cur.execute("PRAGMA foreign_keys=ON")
+        # Belt-and-suspenders for the connect_args timeout above: if a
+        # connection is opened through a path that doesn't honour the
+        # SQLAlchemy connect_args (raw_connection() outside this engine,
+        # for instance), this PRAGMA still wires the same wait.
+        cur.execute("PRAGMA busy_timeout=30000")
         cur.close()
