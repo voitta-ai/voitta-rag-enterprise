@@ -20,9 +20,15 @@ write_files:
       IMAGE_REPO=${image_repo}
       IMAGE_TAG=${image_tag}
 
-  # Initial application config. Real-model auth + OAuth / Secret Manager
-  # values land in #9; Tier A first-boot uses fake embedders + single-user
-  # so /healthz answers without us having populated secrets yet.
+  # Initial application config. First boot uses fake embedders +
+  # single-user mode so /healthz answers without any Secret Manager
+  # work. To switch to real mode:
+  #   1. `make deploy-secrets` populates the secrets created in #8.
+  #   2. SSH into the VM (`make deploy-shell`), edit /etc/voitta/app.env:
+  #      - drop VOITTA_USE_FAKE_EMBEDDERS / VOITTA_SINGLE_USER lines
+  #      - uncomment the VOITTA_*=sm://... lines below
+  #   3. `sudo systemctl restart voitta` — the container entrypoint
+  #      (deploy/docker-entrypoint.sh) resolves sm:// refs at boot.
   - path: /etc/voitta/app.env
     permissions: "0644"
     owner: root:root
@@ -31,6 +37,14 @@ write_files:
       VOITTA_PORT=8000
       VOITTA_USE_FAKE_EMBEDDERS=true
       VOITTA_SINGLE_USER=true
+      # Uncomment to enable real OAuth + signed sessions:
+      # VOITTA_GOOGLE_AUTH_CLIENT_ID=sm://voitta-google-auth-client-id
+      # VOITTA_GOOGLE_AUTH_CLIENT_SECRET=sm://voitta-google-auth-client-secret
+      # VOITTA_SESSION_SECRET=sm://voitta-session-secret
+      # Optional embedder version overrides (only set when migrating):
+      # VOITTA_DENSE_VERSION=sm://voitta-dense-version
+      # VOITTA_SPARSE_VERSION=sm://voitta-sparse-version
+      # VOITTA_IMAGE_VERSION=sm://voitta-image-version
 
   # systemd mount unit for the attached data disk. Naming must match the
   # mount point (var-lib-voitta.mount → /var/lib/voitta).
