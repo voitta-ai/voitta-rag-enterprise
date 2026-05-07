@@ -134,6 +134,54 @@ def test_upload_multiple_files_to_managed_folder(root_env: Path) -> None:
         assert (root_env / "batch" / "b.txt").read_bytes() == b"beta"
 
 
+def test_delete_folder_removes_disk_content(root_env: Path) -> None:
+    with _client(root_env) as c:
+        fid = c.post("/api/folders", json={"name": "doomed"}).json()["id"]
+        # Drop a real file in there so we can prove rmtree actually ran.
+        c.post(
+            f"/api/folders/{fid}/upload",
+            files={"file": ("hi.txt", b"bye", "text/plain")},
+        )
+        target = root_env / "doomed"
+        assert (target / "hi.txt").exists()
+
+        r = c.delete(f"/api/folders/{fid}")
+        assert r.status_code == 204, r.text
+
+        # Folder + every file inside must be gone from disk; the root
+        # itself stays put for sibling folders.
+        assert not target.exists()
+        assert root_env.exists()
+
+
+def test_delete_folder_outside_root_skips_disk_wipe(
+    root_env: Path, tmp_path: Path
+) -> None:
+    """Defensive: hand-edit the DB to point a folder outside root, confirm
+    rmtree refuses to touch it. Catches the ``rm -rf /`` foot-gun if a
+    future change widens what gets stored in folders.path.
+    """
+    from sqlalchemy import update
+
+    from voitta_rag_enterprise.db.database import session_scope
+    from voitta_rag_enterprise.db.models import Folder
+
+    outside = tmp_path / "external"
+    outside.mkdir()
+    (outside / "keep_me.txt").write_text("untouched")
+
+    with _client(root_env) as c:
+        fid = c.post("/api/folders", json={"name": "redirected"}).json()["id"]
+        with session_scope() as s:
+            s.execute(update(Folder).where(Folder.id == fid).values(path=str(outside)))
+
+        r = c.delete(f"/api/folders/{fid}")
+        assert r.status_code == 204
+
+    assert outside.exists()
+    assert (outside / "keep_me.txt").read_text() == "untouched"
+
+
 def test_upload_path_traversal_rejected(root_env: Path) -> None:
     with _client(root_env) as c:
         fid = c.post("/api/folders", json={"name": "u2"}).json()["id"]

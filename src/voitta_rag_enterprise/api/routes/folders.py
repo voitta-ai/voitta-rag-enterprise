@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -29,6 +31,7 @@ from ...services.scanner import scan_folder
 from ...services.watcher import unwatch_folder_in_default, watch_folder_in_default
 from ..deps import current_user, db_session
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/folders", tags=["folders"])
 
 
@@ -878,10 +881,64 @@ def delete_folder(
     db: Session = Depends(db_session),
     user: CurrentUser = Depends(current_user),
 ) -> None:
+    """Unregister a managed folder and delete its content from disk.
+
+    Order of operations is load-bearing: unwatch FIRST so the disk wipe
+    doesn't fan a thousand ``file.deleted`` events through the watcher,
+    then rmtree, then DB delete. The DB delete cascades file/chunk/image
+    rows; CAS refcounts and Qdrant points belonging to the folder go
+    stale but the GC sweeper / search-time ACL cover that. (Reindex
+    folder uses the same shape.)
+
+    Disk deletion is gated on the folder living under
+    ``VOITTA_ROOT_PATH`` — a defensive check that should always hold
+    for managed folders since external-path registration was removed,
+    but if someone hand-edits the DB to point a folder at ``/`` we
+    refuse to rm there. Any rmtree failure (broken symlink, perms) is
+    logged but does NOT block the unregister, so the user isn't stuck
+    with a dead row whose path they can't fix from the UI.
+    """
     folder = _require_owner(db, folder_id, user)
+    folder_path_str = folder.path
+
+    # Stop the watcher before we touch the directory so we don't
+    # broadcast a ``file.deleted`` per file as rmtree walks them.
+    unwatch_folder_in_default(folder_id)
+
+    settings = get_settings()
+    root = settings.root_path
+    folder_path = Path(folder_path_str)
+    if root is not None and folder_path.exists():
+        try:
+            resolved_root = root.resolve()
+            resolved_folder = folder_path.resolve()
+            # ``Path.is_relative_to`` is 3.9+; safe for our 3.11+ floor.
+            if resolved_folder == resolved_root:
+                logger.warning(
+                    "delete_folder %d refusing to wipe root: %s",
+                    folder_id,
+                    resolved_folder,
+                )
+            elif not resolved_folder.is_relative_to(resolved_root):
+                logger.warning(
+                    "delete_folder %d path %s is outside %s — skipping disk wipe",
+                    folder_id,
+                    resolved_folder,
+                    resolved_root,
+                )
+            else:
+                shutil.rmtree(resolved_folder, ignore_errors=False)
+                logger.info("delete_folder %d wiped %s", folder_id, resolved_folder)
+        except OSError as e:
+            logger.warning(
+                "delete_folder %d rmtree failed for %s: %s",
+                folder_id,
+                folder_path_str,
+                e,
+            )
+
     db.delete(folder)
     db.commit()
-    unwatch_folder_in_default(folder_id)
     events.publish("folders", {"type": "folder.removed", "folder_id": folder_id})
 
 

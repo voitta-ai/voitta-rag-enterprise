@@ -914,7 +914,7 @@ $("#btn-remove").addEventListener("click", async () => {
     if (!selectedFolderId) return;
     const folder = folders.get().find((f) => f.id === selectedFolderId);
     if (!folder) return;
-    if (!confirm(`Unregister "${folder.display_name}"?\n\nFiles on disk are not deleted.`)) return;
+    if (!confirm(`Delete folder "${folder.display_name}"?\n\nThe folder and all its files will be permanently removed from disk.`)) return;
     try {
         await api.deleteFolder(selectedFolderId);
         selectedFolderId = null;
