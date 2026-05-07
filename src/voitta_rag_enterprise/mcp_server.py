@@ -386,11 +386,18 @@ def get_chunk_images(chunk_id: int) -> list[ImageInfo]:
 
 
 @mcp.tool()
-def get_image(image_id: int) -> dict:
+def get_image(image_id: int, max_size: int = 420) -> dict:
     """Return image bytes (base64) + mime for inline rendering by an MCP client.
 
     Works for both figures and page renders — the caller already has the
     id from search hits, ``get_chunk_images``, or ``list_page_images``.
+
+    ``max_size`` clamps the long edge of the returned raster: if the
+    stored image is larger, it's downscaled with LANCZOS and re-encoded
+    as WebP @ q75 before base64. The default is a thumbnail-grade 420px
+    so the LLM doesn't drown in pixels it doesn't need; ask for more
+    (e.g. 1024) when the detail actually matters. Pass ``0`` to skip
+    resizing entirely and get the original bytes/mime.
     """
     with session_scope() as s:
         img = s.get(Image, image_id)
@@ -402,6 +409,7 @@ def get_image(image_id: int) -> dict:
         data = cas_store.read_image_blob(cas_id)
     except FileNotFoundError as e:
         raise ValueError(f"Image bytes missing for {image_id}") from e
+    data, mime = _resize_for_response(data, mime, max_size)
     return {
         "image_id": image_id,
         "mime": mime,
@@ -440,12 +448,18 @@ def list_page_images(file_id: int) -> list[PageImageInfo]:
 
 
 @mcp.tool()
-def get_page_image(file_id: int, page: int) -> dict:
+def get_page_image(file_id: int, page: int, max_size: int = 420) -> dict:
     """Return bytes (base64) of the page-render for ``(file_id, page)``.
 
     Pages are 1-indexed. Raises ``ValueError`` if no render exists for
     that combination — typically because the file isn't a PDF or was
     indexed before per-page rendering was enabled.
+
+    ``max_size`` clamps the long edge: stored renders are at ~1024px, so
+    the default 420px gives a thumbnail-grade preview that's plenty for
+    layout context while keeping payload small. Crank it up (e.g. 1024)
+    when you actually need to read the typography. Pass ``0`` to skip
+    resizing.
     """
     with session_scope() as s:
         img = s.execute(
@@ -470,6 +484,7 @@ def get_page_image(file_id: int, page: int) -> dict:
         raise ValueError(
             f"Page-render bytes missing for file_id={file_id} page={page}"
         ) from e
+    data, mime = _resize_for_response(data, mime, max_size)
     return {
         "image_id": image_id,
         "file_id": file_id,
@@ -551,6 +566,55 @@ def _nearby_image_ids(session, chunk_id: int) -> list[int]:
         .scalars()
         .all()
     ]
+
+
+def _resize_for_response(
+    data: bytes, mime: str, max_size: int
+) -> tuple[bytes, str]:
+    """Downscale ``data`` so its long edge is at most ``max_size`` px.
+
+    No-op fast paths:
+      * ``max_size <= 0`` — caller wants the raw blob.
+      * source already fits — return original bytes/mime unchanged.
+
+    Otherwise: decode, LANCZOS-resize preserving aspect ratio, re-encode
+    as WebP at quality 75 (matches the storage default for page renders
+    so the format change is invisible for that case; figures get a small
+    quality hit in exchange for a much smaller payload). Decode failures
+    fall back to the original bytes — better to over-deliver pixels than
+    drop the response.
+    """
+    if max_size <= 0:
+        return data, mime
+    try:
+        import io
+
+        from PIL import Image as PILImage
+
+        with PILImage.open(io.BytesIO(data)) as img:
+            long_edge = max(img.width, img.height)
+            if long_edge <= max_size:
+                return data, mime
+            scale = max_size / long_edge
+            new_size = (
+                max(1, int(round(img.width * scale))),
+                max(1, int(round(img.height * scale))),
+            )
+            # WebP handles RGB/RGBA natively; collapse anything else
+            # (palette, grayscale, CMYK) to one of those before resize.
+            mode = img.mode
+            if mode not in ("RGB", "RGBA"):
+                target_mode = "RGBA" if mode in ("LA", "PA", "P") and (
+                    "transparency" in img.info or mode in ("LA", "PA")
+                ) else "RGB"
+                img = img.convert(target_mode)
+            resized = img.resize(new_size, PILImage.LANCZOS)
+            buf = io.BytesIO()
+            resized.save(buf, format="WEBP", quality=75, method=6)
+            return buf.getvalue(), "image/webp"
+    except Exception as e:
+        logger.warning("resize_for_response failed (max_size=%d): %s", max_size, e)
+        return data, mime
 
 
 # ---------------------------------------------------------------------------
