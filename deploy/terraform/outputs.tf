@@ -27,3 +27,8 @@ output "ssh_command" {
   description = "Copy/paste command to SSH into the VM via IAP."
   value       = "gcloud compute ssh ${google_compute_instance.vm.name} --zone=${google_compute_instance.vm.zone} --project=${var.project_id} --tunnel-through-iap"
 }
+
+output "secret_ids" {
+  description = "Secret Manager secret IDs declared by terraform. deploy/scripts/populate_secrets.sh iterates this list."
+  value       = sort([for s in google_secret_manager_secret.app : s.secret_id])
+}
