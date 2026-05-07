@@ -41,6 +41,14 @@ class ParserResult:
     content: str
     images: list[ExtractedImage] = field(default_factory=list)
     page_images: list[RenderedPage] = field(default_factory=list)
+    # Per-block layout list passed through from the parser unchanged
+    # (today only the PDF parser populates this, from MinerU's
+    # ``*_content_list.json``). Each block carries at least ``type`` and
+    # ``page`` (1-indexed, absolute across buckets); additional fields
+    # like ``bbox``, ``text``, ``img_path`` are passed through as-is so
+    # downstream consumers can lean on whatever MinerU emits without us
+    # re-modeling it. Empty for parsers that don't have layout.
+    page_layout: list[dict] = field(default_factory=list)
     metadata: dict = field(default_factory=dict)
     success: bool = True
     error: str | None = None

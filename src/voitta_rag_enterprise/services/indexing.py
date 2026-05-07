@@ -194,6 +194,18 @@ def _run_extract_inner(file_id: int) -> None:
             chunks = chunk_markdown(result.content)
         logger.info("chunked: count=%d", len(chunks))
 
+        # Persist the structured layout next to text.md so it dedupes
+        # via the same content hash. Empty for parsers that don't emit
+        # layout — keep the file off disk in that case so callers can
+        # treat its absence as "no layout".
+        if result.page_layout:
+            with _stage("cas_write_page_layout", count=len(result.page_layout)):
+                cas_store.write_file_blob(
+                    new_sha,
+                    "page_layout.json",
+                    json.dumps(result.page_layout),
+                )
+
         with _stage("cas_write_manifest"):
             cas_store.write_file_blob(
                 new_sha,
@@ -204,6 +216,7 @@ def _run_extract_inner(file_id: int) -> None:
                         "chunk_count": len(chunks),
                         "image_count": len(result.images),
                         "page_image_count": len(result.page_images),
+                        "page_layout_block_count": len(result.page_layout),
                         "image_positions": [img.position for img in result.images],
                         "metadata": result.metadata,
                     },

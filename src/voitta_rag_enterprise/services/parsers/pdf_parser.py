@@ -313,6 +313,7 @@ def _merge_buckets(
     parts: list[str] = []
     images: list[ExtractedImage] = []
     page_images: list[RenderedPage] = []
+    page_layout: list[dict] = []
     cursor = 0  # char offset into the joined markdown for the current bucket
 
     join_sep = "\n\n"
@@ -321,6 +322,7 @@ def _merge_buckets(
         # derived from MinerU's content_list.json. Missing keys fall back
         # to the bucket's first page (the old, less-accurate behavior).
         page_by_name = _image_page_map(b.content_list, b.page_start)
+        page_layout.extend(_layout_for_bucket(b.content_list, b.page_start))
 
         # Walk image references in the bucket's markdown — their char offsets
         # are absolute in the merged output once we add ``cursor``.
@@ -369,13 +371,42 @@ def _merge_buckets(
         "page_count": page_count,
         "parse_time_seconds": sum(b.elapsed_s for b in buckets),
         "page_images": len(page_images),
+        "page_layout_blocks": len(page_layout),
     }
     return ParserResult(
         content=content,
         images=images,
         page_images=page_images,
+        page_layout=page_layout,
         metadata=metadata,
     )
+
+
+def _layout_for_bucket(content_list: list[dict], page_start: int) -> list[dict]:
+    """Normalise MinerU's per-bucket content list for global storage.
+
+    MinerU writes ``page_idx`` as 0-based and local to the parsed PDF
+    (each bucket sees pages 0..N-1). We translate to absolute 1-indexed
+    pages and store the result under a new ``page`` key, keeping
+    ``page_idx`` around in case a downstream wants the raw value.
+    Anything else MinerU emits (``type``, ``bbox``, ``text``,
+    ``text_level``, ``img_path``, ``img_caption``, ``table_caption``,
+    ``table_body`` for tables, etc.) is passed through unchanged.
+
+    Blocks without an int ``page_idx`` are dropped — they would land on
+    an unknown page and only confuse the consumer.
+    """
+    out: list[dict] = []
+    for blk in content_list:
+        if not isinstance(blk, dict):
+            continue
+        page_idx = blk.get("page_idx")
+        if not isinstance(page_idx, int):
+            continue
+        merged = dict(blk)
+        merged["page"] = page_start + page_idx
+        out.append(merged)
+    return out
 
 
 def _image_page_map(content_list: list[dict], page_start: int) -> dict[str, int]:

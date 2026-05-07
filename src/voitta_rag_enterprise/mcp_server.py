@@ -24,8 +24,10 @@ Run standalone::
 from __future__ import annotations
 
 import base64
+import json
 import logging
 from contextvars import ContextVar
+from functools import lru_cache
 
 from fastmcp import FastMCP
 from pydantic import BaseModel, Field
@@ -448,7 +450,12 @@ def list_page_images(file_id: int) -> list[PageImageInfo]:
 
 
 @mcp.tool()
-def get_page_image(file_id: int, page: int, max_size: int = 420) -> dict:
+def get_page_image(
+    file_id: int,
+    page: int,
+    max_size: int = 420,
+    include_layout: bool = True,
+) -> dict:
     """Return bytes (base64) of the page-render for ``(file_id, page)``.
 
     Pages are 1-indexed. Raises ``ValueError`` if no render exists for
@@ -460,6 +467,14 @@ def get_page_image(file_id: int, page: int, max_size: int = 420) -> dict:
     layout context while keeping payload small. Crank it up (e.g. 1024)
     when you actually need to read the typography. Pass ``0`` to skip
     resizing.
+
+    ``include_layout`` (default True) attaches a ``layout`` field with
+    the parser's per-block list for this page — types are MinerU's
+    (``text``, ``title``, ``image``, ``table``, ``equation``, ...) plus
+    coordinates in PDF points (top-left origin) when the parser
+    provides them. ``layout`` is an empty list when the file was
+    indexed before layout capture was added, or for non-PDF files. Set
+    ``include_layout=False`` to skip the read + JSON parse.
     """
     with session_scope() as s:
         img = s.execute(
@@ -478,6 +493,10 @@ def get_page_image(file_id: int, page: int, max_size: int = 420) -> dict:
         image_id = img.id
         cas_id = img.image_cas_id
         mime = img.mime or "image/webp"
+        file_cas_id = None
+        if include_layout:
+            file = s.get(File, file_id)
+            file_cas_id = file.file_cas_id if file else None
     try:
         data = cas_store.read_image_blob(cas_id)
     except FileNotFoundError as e:
@@ -485,13 +504,43 @@ def get_page_image(file_id: int, page: int, max_size: int = 420) -> dict:
             f"Page-render bytes missing for file_id={file_id} page={page}"
         ) from e
     data, mime = _resize_for_response(data, mime, max_size)
+    layout: list[dict] = []
+    if include_layout and file_cas_id:
+        layout = _layout_for_page(file_cas_id, page)
     return {
         "image_id": image_id,
         "file_id": file_id,
         "page": page,
         "mime": mime,
         "data_base64": base64.b64encode(data).decode("ascii"),
+        "layout": layout,
     }
+
+
+@mcp.tool()
+def get_page_layout(file_id: int, page: int) -> list[dict]:
+    """Return the structured layout (per-block list) for ``(file_id, page)``.
+
+    Same data as the ``layout`` field on ``get_page_image`` but without
+    the image bytes — preferable when the LLM only needs to reason
+    about page structure (which blocks exist, what types, what's
+    above/below) and not see the actual rendering. Pages are 1-indexed.
+    Returns an empty list if the file was indexed before layout capture
+    or isn't a PDF.
+
+    Each block carries at least ``type`` and ``page``; PDFs from MinerU
+    typically also include ``bbox`` (PDF points, top-left origin),
+    ``text`` for text/title blocks, and ``img_path`` for image/table
+    blocks. Other fields are passed through as-is.
+    """
+    with session_scope() as s:
+        file = s.get(File, file_id)
+        if file is None:
+            raise ValueError(f"File {file_id} not found")
+        file_cas_id = file.file_cas_id
+    if not file_cas_id:
+        return []
+    return _layout_for_page(file_cas_id, page)
 
 
 @mcp.tool()
@@ -566,6 +615,35 @@ def _nearby_image_ids(session, chunk_id: int) -> list[int]:
         .scalars()
         .all()
     ]
+
+
+@lru_cache(maxsize=64)
+def _load_layout_blocks(file_cas_id: str) -> tuple[dict, ...]:
+    """Read + parse a file's stored ``page_layout.json`` once per CAS sha.
+
+    LRU-cached so a sweep over a 150-page document costs one JSON parse
+    total. Tuple-of-dicts (immutable container) is what makes the cache
+    safe to share across threads — callers index into it but don't
+    mutate. Returns ``()`` when the file has no layout (older index, or
+    a non-PDF parser).
+    """
+    try:
+        raw = cas_store.read_file_blob(file_cas_id, "page_layout.json")
+    except FileNotFoundError:
+        return ()
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        logger.warning("page_layout.json unparseable for cas=%s", file_cas_id)
+        return ()
+    if not isinstance(data, list):
+        return ()
+    return tuple(b for b in data if isinstance(b, dict))
+
+
+def _layout_for_page(file_cas_id: str, page: int) -> list[dict]:
+    """Filter the cached layout list down to blocks on ``page``."""
+    return [b for b in _load_layout_blocks(file_cas_id) if b.get("page") == page]
 
 
 def _resize_for_response(
