@@ -148,6 +148,13 @@ class Settings(BaseSettings):
     # set in dev to avoid the model-download cost.
     use_fake_embedders: bool = False
 
+    # Cloud KMS resource name used by services.crypto to encrypt the
+    # secret columns of folder_sync_sources at rest. Format:
+    # projects/<id>/locations/<region>/keyRings/<name>/cryptoKeys/<key>.
+    # When unset, encryption is a pass-through (no-op) and the columns
+    # store plaintext — fine for dev, never for prod.
+    kms_key: str | None = None
+
     @field_validator("data_dir", "db_path", "cas_dir", "qdrant_path", "root_path", mode="before")
     @classmethod
     def _expand_user(cls, v: Any) -> Any:

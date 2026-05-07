@@ -79,6 +79,9 @@ locals {
       enable_caddy            = local.enable_caddy
       caddyfile_indented      = indent(6, local.caddyfile_rendered)
       caddy_service_indented  = indent(6, file("${path.module}/../systemd/caddy.service"))
+      # Empty string when enable_cmek=false; the template branch
+      # keys off non-empty to render the VOITTA_KMS_KEY line.
+      kms_key_resource = local.kms_crypto_key_id == null ? "" : local.kms_crypto_key_id
     }
   )
 }

@@ -29,6 +29,7 @@ dependencies = [
     "google-api-python-client>=2.140",
     "google-auth>=2.34",
     "google-auth-oauthlib>=1.2",
+    "google-cloud-kms>=3.0",
     "httpx>=0.28",
     "itsdangerous>=2.2",
 ]

@@ -17,6 +17,8 @@ import time
 from sqlalchemy import ForeignKey
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from ..services.crypto import EncryptedString
+
 
 class Base(DeclarativeBase):
     pass
@@ -173,13 +175,17 @@ class FolderSyncSource(Base):
     gh_extended: Mapped[bool] = mapped_column(default=False)
     gh_auth_method: Mapped[str | None] = mapped_column(default=None)
     gh_username: Mapped[str | None] = mapped_column(default=None)
-    gh_pat: Mapped[str | None] = mapped_column(default=None)
-    gh_token: Mapped[str | None] = mapped_column(default=None)
+    # The five secret columns below carry credentials and are
+    # transparently encrypted at write / decrypted at read by
+    # services/crypto.py:EncryptedString. Plain `String` when
+    # VOITTA_KMS_KEY is unset (dev), Cloud KMS otherwise.
+    gh_pat: Mapped[str | None] = mapped_column(EncryptedString, default=None)
+    gh_token: Mapped[str | None] = mapped_column(EncryptedString, default=None)
     # Google Drive
     gd_client_id: Mapped[str | None] = mapped_column(default=None)
-    gd_client_secret: Mapped[str | None] = mapped_column(default=None)
-    gd_refresh_token: Mapped[str | None] = mapped_column(default=None)
-    gd_service_account_json: Mapped[str | None] = mapped_column(default=None)
+    gd_client_secret: Mapped[str | None] = mapped_column(EncryptedString, default=None)
+    gd_refresh_token: Mapped[str | None] = mapped_column(EncryptedString, default=None)
+    gd_service_account_json: Mapped[str | None] = mapped_column(EncryptedString, default=None)
     gd_folder_id: Mapped[str | None] = mapped_column(default=None)
     # Status
     sync_status: Mapped[str] = mapped_column(default="idle")
