@@ -103,6 +103,30 @@ variable "kms_key" {
   default     = "disk-and-secrets"
 }
 
+# ----- Backups -----
+
+variable "snapshot_hour" {
+  description = "UTC hour the daily snapshot policy fires (0-23). Default 03:00 UTC."
+  type        = number
+  default     = 3
+
+  validation {
+    condition     = var.snapshot_hour >= 0 && var.snapshot_hour <= 23
+    error_message = "snapshot_hour must be between 0 and 23."
+  }
+}
+
+variable "snapshot_retention_days" {
+  description = "How many days to keep auto-generated snapshots before GCP deletes them."
+  type        = number
+  default     = 7
+
+  validation {
+    condition     = var.snapshot_retention_days >= 1
+    error_message = "snapshot_retention_days must be at least 1."
+  }
+}
+
 # ----- Image -----
 
 variable "image_repo" {

@@ -32,3 +32,14 @@ output "secret_ids" {
   description = "Secret Manager secret IDs declared by terraform. deploy/scripts/populate_secrets.sh iterates this list."
   value       = sort([for s in google_secret_manager_secret.app : s.secret_id])
 }
+
+output "manual_snapshot_command" {
+  description = "Copy/paste gcloud invocation for an ad-hoc snapshot of the data disk outside the daily policy."
+  value = join(" ", [
+    "gcloud compute disks snapshot",
+    google_compute_disk.data.name,
+    "--zone=${var.zone}",
+    "--project=${var.project_id}",
+    "--snapshot-names=${google_compute_disk.data.name}-manual-$(date +%Y%m%d-%H%M%S)",
+  ])
+}
