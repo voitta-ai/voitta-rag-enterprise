@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from ...config import get_settings
 from ...db.models import Chunk, File, Folder, FolderSyncSource, Image, Job
 from ...services import events, job_queue
+from ...services.indexing import _file_event_payload as _file_event_payload
 from ...services.acl import (
     CurrentUser,
     folder_active_for_user,
@@ -859,6 +860,36 @@ def reindex_folder(
         q = q.where(File.rel_path.like(like_prefix, escape="\\"))
 
     file_ids = [fid for (fid,) in db.execute(q).all()]
+
+    # Pre-emptive state flip: every targeted file goes to ``pending``
+    # immediately so the SPA's per-file state pill stops saying ``indexed``
+    # the moment the click lands. Without this, files stay visually
+    # ``indexed`` until the worker reaches phase 3 of ``_run_reindex_sync``
+    # — which can be minutes when ``_EXTRACT_LOCK`` is held by an in-flight
+    # PDF — and the user has no per-file signal that anything changed.
+    #
+    # ``embed_round`` is bumped here so any in-flight embed completion
+    # racing against the wipe takes the stale-round path in
+    # ``_decrement_pending_embeds`` and doesn't accidentally heal the file
+    # back to ``indexed``. ``file_cas_id`` is left untouched on purpose:
+    # phase 2's CAS decref reads it back to release the file blob, and
+    # nulling it here would leak a CAS ref. Phase 3 nulls it itself.
+    if file_ids:
+        from sqlalchemy import bindparam, update
+
+        db.execute(
+            update(File)
+            .where(File.id.in_(bindparam("ids", expanding=True)))
+            .values(
+                state="pending",
+                error=None,
+                pending_embeds=0,
+                embed_round=File.embed_round + 1,
+            ),
+            {"ids": file_ids},
+        )
+        db.flush()
+
     job_id = job_queue.enqueue(
         db,
         "reindex_folder",
@@ -909,6 +940,18 @@ def reindex_folder(
             "detail": {"behind": behind_rel} if behind_rel else None,
         },
     )
+
+    # Emit a ``file.upserted`` per targeted row so the SPA's per-file
+    # state pill flips from ``indexed`` to ``pending`` without waiting
+    # on a poll. The bulk UPDATE above is already committed; we reuse
+    # the request session to fetch each row for its event payload.
+    for fid in file_ids:
+        row = db.get(File, fid)
+        if row is not None:
+            events.publish(
+                "files",
+                {"type": "file.upserted", "file": _file_event_payload(row)},
+            )
 
     return ReindexOut(
         folder_id=folder_id,

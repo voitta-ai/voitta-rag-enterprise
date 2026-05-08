@@ -140,6 +140,15 @@ class ChunkInfo(BaseModel):
     text: str
     nearby_image_ids: list[int] = Field(default_factory=list)
     score: float | None = None
+    # Page anchoring + layout summary, attached at index time. ``page``
+    # is the chunk's primary (start-anchored) page; ``pages`` is every
+    # page the chunk touches. ``layout`` is the per-page summary dict
+    # (``layout_kind``, ``layout_has_image``/``_table``, ``layout_n_*``,
+    # …) — mirror of what search filters can match on. All None / empty
+    # for chunks indexed before the layout pipeline shipped.
+    page: int | None = None
+    pages: list[int] = Field(default_factory=list)
+    layout: dict | None = None
 
 
 class ImageInfo(BaseModel):
@@ -156,6 +165,9 @@ class ImageInfo(BaseModel):
     # are surfaced via list_page_images / get_page_image.
     kind: str = "figure"
     score: float | None = None
+    # Per-page layout summary for the page this image sits on. None for
+    # images indexed before the layout pipeline shipped.
+    layout: dict | None = None
 
 
 class PageImageInfo(BaseModel):
@@ -317,7 +329,15 @@ def get_chunk_range(
     start_index: int = 0,
     end_index: int = 10,
 ) -> list[ChunkInfo]:
-    """Return chunks ``[start_index, end_index)`` of a file, in order."""
+    """Return chunks ``[start_index, end_index)`` of a file, in order.
+
+    Each chunk also carries the same ``page`` / ``pages`` / ``layout``
+    fields as search hits, so the LLM can navigate "show me chunks on
+    pages with tables" without going back through ``search``.
+    """
+    from .services.indexing import _load_char_to_page, _load_layout_summaries
+    from .services.layout import pages_for_range, primary_page_for_range
+
     start_index = max(0, start_index)
     end_index = min(end_index, start_index + 500)
     if end_index <= start_index:
@@ -326,6 +346,8 @@ def get_chunk_range(
         f = s.get(File, file_id)
         if f is None:
             raise ValueError(f"File {file_id} not found")
+        file_cas_id = f.file_cas_id
+        rel_path = f.rel_path
         rows = list(
             s.execute(
                 select(Chunk)
@@ -337,17 +359,48 @@ def get_chunk_range(
                 .order_by(Chunk.chunk_index)
             ).scalars()
         )
-        return [
-            ChunkInfo(
-                chunk_id=c.id,
-                file_id=c.file_id,
-                file_path=f.rel_path,
-                chunk_index=c.chunk_index,
-                text=c.text,
-                nearby_image_ids=_nearby_image_ids(s, c.id),
+        chunk_data = [
+            (
+                c.id,
+                c.chunk_index,
+                c.text,
+                c.char_start,
+                c.char_end,
+                _nearby_image_ids(s, c.id),
             )
             for c in rows
         ]
+
+    char_to_page = _load_char_to_page(file_cas_id)
+    layout_summaries = _load_layout_summaries(file_cas_id)
+    out: list[ChunkInfo] = []
+    for cid, idx, text, c_start, c_end, nearby in chunk_data:
+        primary = (
+            primary_page_for_range(char_to_page, c_start or 0, c_end or 0)
+            if char_to_page
+            else None
+        )
+        pages = (
+            pages_for_range(
+                char_to_page, c_start or 0, c_end or (c_start or 0) + 1
+            )
+            if char_to_page
+            else []
+        )
+        out.append(
+            ChunkInfo(
+                chunk_id=cid,
+                file_id=file_id,
+                file_path=rel_path,
+                chunk_index=idx,
+                text=text,
+                nearby_image_ids=nearby,
+                page=primary,
+                pages=pages,
+                layout=layout_summaries.get(primary) if primary else None,
+            )
+        )
+    return out
 
 
 @mcp.tool()
@@ -588,6 +641,9 @@ def _chunk_from_hit(h: SearchHit) -> ChunkInfo:
         text=str(p.get("text", "")),
         nearby_image_ids=list(p.get("nearby_image_ids") or []),
         score=h.score,
+        page=p.get("page"),
+        pages=list(p.get("pages") or []),
+        layout=_layout_from_payload(p),
     )
 
 
@@ -603,7 +659,23 @@ def _image_from_hit(h: SearchHit) -> ImageInfo:
         height=None,
         mime=None,
         score=h.score,
+        layout=_layout_from_payload(p),
     )
+
+
+def _layout_from_payload(payload: dict) -> dict | None:
+    """Re-collect the flat ``layout_*`` fields from a Qdrant payload back
+    into a single dict for the LLM-facing schema.
+
+    The indexer flattens ``layout_summary`` into top-level payload keys
+    (one Qdrant payload index per scalar — see vector_store._chunk_payload)
+    so each is independently filterable. The LLM doesn't filter, it
+    reads, so a wrapped dict keeps the response surface tidy. Returns
+    ``None`` when no layout fields are present (chunk indexed before
+    the layout pipeline shipped, or non-PDF parser).
+    """
+    layout = {k: v for k, v in payload.items() if k.startswith("layout_")}
+    return layout or None
 
 
 def _nearby_image_ids(session, chunk_id: int) -> list[int]:
