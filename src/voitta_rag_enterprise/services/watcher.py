@@ -116,6 +116,7 @@ class _FolderHandler(FileSystemEventHandler):
             return
         if stat.st_size > self.max_file_bytes:
             return
+        file_id: int | None = None
         with session_scope() as s:
             file = s.execute(
                 select(File).where(File.folder_id == self.folder_id, File.rel_path == rel)
@@ -138,11 +139,28 @@ class _FolderHandler(FileSystemEventHandler):
                 file.last_seen_at = now
                 if file.state == "deleted":
                     file.state = "pending"
+            file_id = file.id
             job_queue.enqueue(
                 s, "extract", {"file_id": file.id}, dedup_key=f"extract:{file.id}"
             )
+        # Outside the session: tell the SPA the row exists *now*, in
+        # ``state='pending'``. Without this the file stays invisible to
+        # the UI until the worker finishes extracting and emits its own
+        # event — which can be many minutes for a multi-PDF batch
+        # behind ``_EXTRACT_LOCK``. The result was the user complaint:
+        # uploaded files don't show up in counters / file list.
+        if file_id is not None:
+            from .indexing import publish_file_upserted
+
+            publish_file_upserted(file_id)
 
     def _mark_deleted(self, rel: str) -> None:
+        # We deliberately don't publish file.upserted here — emitting an
+        # 'upsert' with state='deleted' would briefly flash a "deleted"
+        # row in the SPA that is then removed by the worker's eventual
+        # ``file.deleted`` event. Skipping keeps the UI flicker-free;
+        # the worker's terminal event is the only one the SPA acts on
+        # for deletes.
         with session_scope() as s:
             file = s.execute(
                 select(File).where(File.folder_id == self.folder_id, File.rel_path == rel)

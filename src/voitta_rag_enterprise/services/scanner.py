@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from sqlalchemy import select
@@ -26,6 +26,15 @@ class ScanResult:
     added: int
     updated: int
     vanished: int
+    # File ids that were newly inserted, mtime-bumped, or state-flipped.
+    # Caller is expected to publish ``file.upserted`` for each (and
+    # ``file.deleted`` for ``vanished_ids``) after committing the
+    # session, so the SPA's files store reflects the scan in real time.
+    # Without this the SPA only sees scan-driven inserts on its next
+    # full ``listAllFiles`` round-trip — which only happens on the next
+    # WS connect.
+    touched_ids: list[int] = field(default_factory=list)
+    vanished_ids: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -90,6 +99,8 @@ def scan_folder(
     now = int(time.time())
     seen: set[str] = set()
     added = updated = 0
+    touched_ids: list[int] = []
+    vanished_ids: list[int] = []
 
     for path in root.rglob("*"):
         if not path.is_file():
@@ -132,6 +143,7 @@ def scan_folder(
                 session, "extract", {"file_id": new_file.id}, dedup_key=f"extract:{new_file.id}"
             )
             added += 1
+            touched_ids.append(new_file.id)
         else:
             changed = (
                 existing.mtime_ns != stat.st_mtime_ns
@@ -154,6 +166,7 @@ def scan_folder(
                     {"file_id": existing.id},
                     dedup_key=f"extract:{existing.id}",
                 )
+                touched_ids.append(existing.id)
             updated += 1
 
     vanished = 0
@@ -171,5 +184,12 @@ def scan_folder(
                 session, "delete_file", {"file_id": f.id}, dedup_key=f"delete:{f.id}"
             )
             vanished += 1
+            vanished_ids.append(f.id)
 
-    return ScanResult(added=added, updated=updated, vanished=vanished)
+    return ScanResult(
+        added=added,
+        updated=updated,
+        vanished=vanished,
+        touched_ids=touched_ids,
+        vanished_ids=vanished_ids,
+    )

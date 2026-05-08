@@ -329,7 +329,7 @@ def _short_circuit_unchanged(file_id: int, new_sha: str, mtime_ns: int) -> bool:
             file.error = None
             healed = True
     if healed:
-        _publish_file_upserted(file_id)
+        publish_file_upserted(file_id)
     return True
 
 
@@ -340,10 +340,19 @@ def _mark_state(file_id: int, *, state: str, error: str | None = None) -> None:
             return
         file.state = state
         file.error = error
-    _publish_file_upserted(file_id)
+    publish_file_upserted(file_id)
 
 
-def _publish_file_upserted(file_id: int) -> None:
+def publish_file_upserted(file_id: int) -> None:
+    """Publish ``file.upserted`` for the SPA so its files store stays in sync.
+
+    Single source of truth — every call site that mutates a ``File`` row
+    must call this (or ``events.publish('files', {'type': 'file.deleted',
+    ...})`` for terminal removals). Reads the row back from the DB inside
+    a fresh session so the payload reflects the committed state, not
+    whatever the caller happens to have in memory. No-op if the row
+    vanished between the mutation and this call.
+    """
     with session_scope() as s:
         file = s.get(File, file_id)
         if file is None:
@@ -352,12 +361,13 @@ def _publish_file_upserted(file_id: int) -> None:
             "files",
             {
                 "type": "file.upserted",
-                "file": _file_event_payload(file),
+                "file": file_event_payload(file),
             },
         )
 
 
-def _file_event_payload(file: File) -> dict:
+def file_event_payload(file: File) -> dict:
+    """Shape the SPA expects on every ``file.upserted`` event."""
     return {
         "id": file.id,
         "folder_id": file.folder_id,
@@ -520,7 +530,7 @@ def _commit_indexing(
             ).all()
         ]
 
-    _publish_file_upserted(_committed_file_id)
+    publish_file_upserted(_committed_file_id)
     return new_round, image_ids
 
 
@@ -877,7 +887,7 @@ def _run_reindex_sync(folder_id: int | None, file_ids: list[int]) -> None:
         )
 
     for fid in upserts:
-        _publish_file_upserted(fid)
+        publish_file_upserted(fid)
     _publish_reindex_progress(folder_id, phase="done", done=total, total=total)
 
 
@@ -1255,7 +1265,7 @@ def _decrement_pending_embeds(file_id: int, round_token: int | None = None) -> N
     # 50+ such decrements per file. Coalescing in events.py would already
     # squash them, but skipping the publish entirely is cheaper.
     if state_changed:
-        _publish_file_upserted(file_id)
+        publish_file_upserted(file_id)
 
 
 def _mark_file_error_for_image(image_id: int, message: str) -> None:
@@ -1376,7 +1386,7 @@ def reconcile_abandoned_extracts() -> int:
             )
             repaired_ids.append(f.id)
     for fid in repaired_ids:
-        _publish_file_upserted(fid)
+        publish_file_upserted(fid)
     return len(repaired_ids)
 
 

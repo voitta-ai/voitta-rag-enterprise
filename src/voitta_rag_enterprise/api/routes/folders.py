@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from ...config import get_settings
 from ...db.models import Chunk, File, Folder, FolderSyncSource, Image, Job
 from ...services import events, job_queue
-from ...services.indexing import _file_event_payload as _file_event_payload
+from ...services.indexing import file_event_payload, publish_file_upserted
 from ...services.acl import (
     CurrentUser,
     folder_active_for_user,
@@ -192,11 +192,19 @@ def create_folder(
     db.add(folder)
     db.flush()
     grant_folder(db, folder.id, user.id)
-    scan_folder(db, folder)
+    scan = scan_folder(db, folder)
     db.commit()
     watch_folder_in_default(folder)
     out = _to_folder_out(folder, owned=True, active=True)
     events.publish("folders", {"type": "folder.added", "folder": out.model_dump()})
+    # The scan may have INSERTed File rows for files that already lived
+    # at this path (folder pre-existed on disk). Publish file.upserted
+    # for each so the SPA's files store reflects them without waiting
+    # on the next reconnect-driven listAllFiles refresh.
+    for fid in scan.touched_ids:
+        publish_file_upserted(fid)
+    for fid in scan.vanished_ids:
+        events.publish("files", {"type": "file.deleted", "file_id": fid})
     return out
 
 
@@ -950,7 +958,7 @@ def reindex_folder(
         if row is not None:
             events.publish(
                 "files",
-                {"type": "file.upserted", "file": _file_event_payload(row)},
+                {"type": "file.upserted", "file": file_event_payload(row)},
             )
 
     return ReindexOut(
