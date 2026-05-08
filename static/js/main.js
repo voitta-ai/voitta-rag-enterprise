@@ -585,11 +585,25 @@ function renderSidebar() {
     const reindexBadge = $("#folder-reindex-badge");
     const progress = reindexProgress.get().get(folder.id);
     if (progress) {
-        const verb = progress.phase === "cancelling" ? "Cancelling stale jobs"
-            : progress.phase === "wiping" ? "Wiping"
-            : progress.phase === "queueing" ? "Queueing fresh extracts"
-            : progress.phase;
-        reindexBadge.textContent = `↻ ${verb} — ${progress.done}/${progress.total}`;
+        // phase='queued' fires the moment the REST handler enqueues
+        // the reindex job, before the worker actually picks it up.
+        // While the worker is busy on another extract, this is what
+        // the user sees — keep the message specific so the pill
+        // doesn't look stuck.
+        let label;
+        if (progress.phase === "queued") {
+            const behind = progress.detail?.behind;
+            label = behind
+                ? `↻ Queued behind ${behind}`
+                : "↻ Queued";
+        } else {
+            const verb = progress.phase === "cancelling" ? "Cancelling stale jobs"
+                : progress.phase === "wiping" ? "Wiping"
+                : progress.phase === "queueing" ? "Queueing fresh extracts"
+                : progress.phase;
+            label = `↻ ${verb} — ${progress.done}/${progress.total}`;
+        }
+        reindexBadge.textContent = label;
         // Hide the "Reindex needed" warning while we're actively reindexing
         // so the two pills don't shout at each other.
         healthBadge.hidden = true;
@@ -934,6 +948,17 @@ $("#btn-clear-failed").addEventListener("click", async () => {
     if (!confirm("Permanently delete all failed-job records?")) return;
     try {
         await api.cleanupFailedJobs();
+        jobs.set(await api.recentJobs());
+    } catch (err) { alert(err.message); }
+});
+$("#btn-kill-all").addEventListener("click", async () => {
+    if (!confirm("Stop the running job and discard everything queued?")) return;
+    try {
+        const r = await api.cancelAllJobs();
+        if (r.cancelled_queued === 0 && r.killed_running === 0) {
+            alert("No running or queued jobs to kill");
+        }
+        // Refresh the panel so the user sees queued rows flip to done.
         jobs.set(await api.recentJobs());
     } catch (err) { alert(err.message); }
 });

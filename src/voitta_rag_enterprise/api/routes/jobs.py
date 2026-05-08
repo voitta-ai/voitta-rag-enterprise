@@ -126,3 +126,57 @@ def cleanup_failed(
         removed += 1
     db.commit()
     return RetryAllOut(retried=removed, skipped=0)
+
+
+class CancelAllOut(BaseModel):
+    cancelled_queued: int
+    killed_running: int
+
+
+@router.post("/cancel-all", response_model=CancelAllOut)
+def cancel_all(
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(current_user),
+) -> CancelAllOut:
+    """Drain every queued job and kill the currently-running one (if any).
+
+    Three things happen, in order:
+
+    1. ``state='queued'`` rows are flipped to ``state='done'`` with
+       ``error='cancelled'``. They will never run.
+    2. The MinerU subprocess (if alive) is SIGKILLed. The parent's
+       ``readline`` returns empty, the parse raises TimeoutError, and
+       the extract handler routes the file to ``state='error'`` —
+       which is fine: the user can retry or reindex it.
+    3. ``state='running'`` rows whose handler doesn't yet hold the
+       MinerU subprocess (embed_text / embed_image runs on the GPU,
+       sync runs in pure Python) are left alone — we have no
+       interrupt for them. They finish naturally; the queue is empty
+       behind them so the worker comes to a halt afterwards.
+
+    No-op on a quiet queue. Race with a queued→running transition:
+    benign, the now-running job either started before our UPDATE (it
+    will finish normally) or after (it sees its own row already in
+    ``done`` and skips).
+    """
+    from ...services.parsers import pdf_parser
+
+    cancelled = 0
+    queued = db.execute(select(Job).where(Job.state == "queued")).scalars().all()
+    for job in queued:
+        job.state = "done"
+        job.error = "cancelled"
+        cancelled += 1
+
+    killed = 0
+    # Kill any live MinerU subprocess; this unblocks an in-flight
+    # extract by making its readline() return empty. If the daemon
+    # isn't alive (no extract has run yet, or it already exited),
+    # this is a no-op.
+    if pdf_parser._DAEMON is not None and pdf_parser._DAEMON._proc is not None:
+        if pdf_parser._DAEMON._proc.poll() is None:
+            pdf_parser._DAEMON._kill("user cancel")
+            killed = 1
+
+    db.commit()
+    return CancelAllOut(cancelled_queued=cancelled, killed_running=killed)

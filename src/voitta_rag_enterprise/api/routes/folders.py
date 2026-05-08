@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import os
 import shutil
@@ -15,7 +16,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ...config import get_settings
-from ...db.models import Chunk, File, Folder, FolderSyncSource, Image
+from ...db.models import Chunk, File, Folder, FolderSyncSource, Image, Job
 from ...services import events, job_queue
 from ...services.acl import (
     CurrentUser,
@@ -865,7 +866,49 @@ def reindex_folder(
         dedup_key=f"reindex:{folder_id}:{rel_dir}",
         priority=100,  # ahead of routine extracts so wipe runs ASAP
     )
+
+    # Surface the queued state to the SPA the moment the click lands —
+    # the worker will only emit ``phase='cancelling'`` once it actually
+    # picks the job up, which can be minutes away if a long PDF is mid-
+    # extract under _EXTRACT_LOCK. ``behind`` carries the rel_path of
+    # the file we're waiting on (if any) so the pill can render
+    # "Queued behind big.pdf" instead of just spinning.
+    behind_rel: str | None = None
+    running_q = db.execute(
+        select(Job).where(
+            Job.state == "running",
+            Job.kind.in_(("extract", "embed_text", "embed_image")),
+        )
+    ).scalars()
+    for j in running_q:
+        try:
+            payload = json.loads(j.payload)
+        except (TypeError, ValueError):
+            continue
+        running_file_id = payload.get("file_id")
+        if not isinstance(running_file_id, int) and "image_id" in payload:
+            row = db.execute(
+                select(Image.file_id).where(Image.id == int(payload["image_id"]))
+            ).first()
+            running_file_id = row[0] if row is not None else None
+        if isinstance(running_file_id, int):
+            f = db.get(File, running_file_id)
+            if f is not None:
+                behind_rel = f.rel_path
+                break
     db.commit()
+
+    events.publish(
+        "folders",
+        {
+            "type": "folder.reindex_progress",
+            "folder_id": folder_id,
+            "phase": "queued",
+            "done": 0,
+            "total": len(file_ids),
+            "detail": {"behind": behind_rel} if behind_rel else None,
+        },
+    )
 
     return ReindexOut(
         folder_id=folder_id,

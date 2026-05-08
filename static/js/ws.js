@@ -103,6 +103,11 @@ function handleEvent(event) {
                         phase: event.phase,
                         done: event.done,
                         total: event.total,
+                        // ``detail`` carries free-form context for a phase.
+                        // For phase='queued' the REST handler stashes
+                        // ``{behind: rel_path}`` so the SPA can render
+                        // "Queued behind big.pdf" instead of a bare pill.
+                        detail: event.detail || null,
                     });
                 }
                 return next;

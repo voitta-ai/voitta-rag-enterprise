@@ -73,6 +73,36 @@ def test_retry_all_failed(client: TestClient) -> None:
         assert states == ["error", "error", "error", "queued", "queued", "queued"]
 
 
+def test_cancel_all_drains_queue(client: TestClient) -> None:
+    init_db()
+    ids = []
+    for i in range(3):
+        with session_scope() as s:
+            ids.append(
+                job_queue.enqueue(
+                    s, "extract", {"file_id": i}, dedup_key=f"extract:{i}"
+                )
+            )
+
+    r = client.post("/api/jobs/cancel-all")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["cancelled_queued"] == 3
+    # No MinerU subprocess in the test env, so killed_running stays 0.
+    assert body["killed_running"] == 0
+    with session_scope() as s:
+        rows = s.execute(select(Job).where(Job.id.in_(ids))).scalars().all()
+        assert all(j.state == "done" for j in rows)
+        assert all(j.error == "cancelled" for j in rows)
+
+
+def test_cancel_all_no_op_on_quiet_queue(client: TestClient) -> None:
+    init_db()
+    r = client.post("/api/jobs/cancel-all")
+    assert r.status_code == 200
+    assert r.json() == {"cancelled_queued": 0, "killed_running": 0}
+
+
 def test_cleanup_failed_removes_error_rows(client: TestClient) -> None:
     init_db()
     for i in range(3):
