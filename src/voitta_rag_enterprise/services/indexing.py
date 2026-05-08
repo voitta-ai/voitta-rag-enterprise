@@ -198,12 +198,32 @@ def _run_extract_inner(file_id: int) -> None:
         # via the same content hash. Empty for parsers that don't emit
         # layout — keep the file off disk in that case so callers can
         # treat its absence as "no layout".
+        layout_summaries: dict[int, dict] = {}
         if result.page_layout:
+            from .layout import summaries_by_page
+
             with _stage("cas_write_page_layout", count=len(result.page_layout)):
                 cas_store.write_file_blob(
                     new_sha,
                     "page_layout.json",
                     json.dumps(result.page_layout),
+                )
+            with _stage("compute_layout_summaries"):
+                layout_summaries = summaries_by_page(result.page_layout)
+            with _stage("cas_write_layout_summaries", count=len(layout_summaries)):
+                # JSON object keys must be strings; the consumer parses
+                # them back to int via _load_layout_summaries.
+                cas_store.write_file_blob(
+                    new_sha,
+                    "layout_summaries.json",
+                    json.dumps({str(p): s for p, s in layout_summaries.items()}),
+                )
+        if result.char_to_page:
+            with _stage("cas_write_char_to_page", count=len(result.char_to_page)):
+                cas_store.write_file_blob(
+                    new_sha,
+                    "char_to_page.json",
+                    json.dumps(result.char_to_page),
                 )
 
         with _stage("cas_write_manifest"):
@@ -217,6 +237,8 @@ def _run_extract_inner(file_id: int) -> None:
                         "image_count": len(result.images),
                         "page_image_count": len(result.page_images),
                         "page_layout_block_count": len(result.page_layout),
+                        "char_to_page_anchors": len(result.char_to_page),
+                        "layout_summary_pages": len(layout_summaries),
                         "image_positions": [img.position for img in result.images],
                         "metadata": result.metadata,
                     },
@@ -865,10 +887,68 @@ def _chunked(seq: list[int], size: int):
         yield seq[i : i + size]
 
 
+def _load_char_to_page(file_cas_id: str | None) -> list[tuple[int, int]]:
+    """Pull the parser's char→page anchors back from CAS (or ``[]``)."""
+    if not file_cas_id:
+        return []
+    try:
+        raw = cas_store.read_file_blob(file_cas_id, "char_to_page.json")
+    except FileNotFoundError:
+        return []
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        logger.warning("char_to_page.json unparseable for cas=%s", file_cas_id)
+        return []
+    out: list[tuple[int, int]] = []
+    for entry in data if isinstance(data, list) else []:
+        if (
+            isinstance(entry, list | tuple)
+            and len(entry) == 2
+            and isinstance(entry[0], int)
+            and isinstance(entry[1], int)
+        ):
+            out.append((entry[0], entry[1]))
+    return out
+
+
+def _load_layout_summaries(file_cas_id: str | None) -> dict[int, dict]:
+    """Pull per-page layout summaries back from CAS (or ``{}``).
+
+    Stored as ``{"<page_int_str>": {layout_*: ...}}``; we re-parse the
+    keys to ``int``. Pages without an entry just won't get layout
+    fields attached to their chunks/images, which is the desired
+    behaviour (consumer treats missing as "unknown layout").
+    """
+    if not file_cas_id:
+        return {}
+    try:
+        raw = cas_store.read_file_blob(file_cas_id, "layout_summaries.json")
+    except FileNotFoundError:
+        return {}
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        logger.warning("layout_summaries.json unparseable for cas=%s", file_cas_id)
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[int, dict] = {}
+    for k, v in data.items():
+        try:
+            page = int(k)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(v, dict):
+            out[page] = v
+    return out
+
+
 def _embed_text_sync(file_id: int, round_token: int | None = None) -> None:
     from . import vector_store
     from .acl import allowed_user_ids_for_file
     from .embedding import get_sparse_embedder, get_text_embedder
+    from .layout import pages_for_range, primary_page_for_range
 
     with bind_context(file_id=file_id, round=round_token):
         logger.info("embed_text begin")
@@ -893,14 +973,25 @@ def _embed_text_sync(file_id: int, round_token: int | None = None) -> None:
                 ).scalars()
             )
             chunk_data = [
-                (c.id, c.text, c.chunk_index, _nearby_image_ids(s, c.id))
+                (
+                    c.id,
+                    c.text,
+                    c.chunk_index,
+                    _nearby_image_ids(s, c.id),
+                    c.char_start,
+                    c.char_end,
+                )
                 for c in chunks
             ]
             folder_id = file.folder_id
             rel_path = file.rel_path
             source_url = file.source_url
             tab = file.tab
+            file_cas_id = file.file_cas_id
             allowed_users = allowed_user_ids_for_file(s, file_id)
+
+        char_to_page = _load_char_to_page(file_cas_id)
+        layout_summaries = _load_layout_summaries(file_cas_id)
 
         text_emb = get_text_embedder()
         sparse_emb = get_sparse_embedder()
@@ -908,32 +999,51 @@ def _embed_text_sync(file_id: int, round_token: int | None = None) -> None:
             vector_store.ensure_chunks_collection(text_dim=text_emb.dim)
 
         if chunk_data:
-            texts = [t for _, t, _, _ in chunk_data]
+            texts = [t for _, t, _, _, _, _ in chunk_data]
             with _stage("embed_text.dense", count=len(texts)):
                 denses = text_emb.embed_documents(texts)
             with _stage("embed_text.sparse", count=len(texts)):
                 sparses = sparse_emb.embed_documents(texts)
-            points = [
-                vector_store.ChunkPoint(
-                    chunk_id=cid,
-                    file_id=file_id,
-                    folder_id=folder_id,
-                    file_path=rel_path,
-                    chunk_index=idx,
-                    text=text,
-                    dense=dense,
-                    sparse=sparse,
-                    nearby_image_ids=nearby,
-                    source_url=source_url,
-                    tab=tab,
-                    dense_model_version=settings.dense_version,
-                    sparse_model_version=settings.sparse_version,
-                    allowed_users=allowed_users,
+            points: list = []
+            for (cid, text, idx, nearby, c_start, c_end), dense, sparse in zip(
+                chunk_data, denses, sparses, strict=True
+            ):
+                primary_page = (
+                    primary_page_for_range(char_to_page, c_start or 0, c_end or 0)
+                    if char_to_page
+                    else None
                 )
-                for (cid, text, idx, nearby), dense, sparse in zip(
-                    chunk_data, denses, sparses, strict=True
+                pages = (
+                    pages_for_range(
+                        char_to_page, c_start or 0, c_end or (c_start or 0) + 1
+                    )
+                    if char_to_page
+                    else []
                 )
-            ]
+                summary = layout_summaries.get(primary_page) if primary_page else None
+                points.append(
+                    vector_store.ChunkPoint(
+                        chunk_id=cid,
+                        file_id=file_id,
+                        folder_id=folder_id,
+                        file_path=rel_path,
+                        chunk_index=idx,
+                        text=text,
+                        dense=dense,
+                        sparse=sparse,
+                        nearby_image_ids=nearby,
+                        source_url=source_url,
+                        tab=tab,
+                        dense_model_version=settings.dense_version,
+                        sparse_model_version=settings.sparse_version,
+                        allowed_users=allowed_users,
+                        char_start=c_start,
+                        char_end=c_end,
+                        page=primary_page,
+                        pages=pages,
+                        layout_summary=summary,
+                    )
+                )
         else:
             points = []
 
@@ -974,7 +1084,11 @@ def _embed_image_sync(image_id: int, round_token: int | None = None) -> None:
                 return
             folder_id = file.folder_id
             rel_path = file.rel_path
+            file_cas_id = file.file_cas_id
             allowed_users = allowed_user_ids_for_file(s, file_id)
+
+        layout_summaries = _load_layout_summaries(file_cas_id)
+        layout_summary = layout_summaries.get(page) if page is not None else None
 
     with bind_context(image_id=image_id, file_id=file_id):
         image_emb = get_image_embedder()
@@ -1005,6 +1119,7 @@ def _embed_image_sync(image_id: int, round_token: int | None = None) -> None:
                         image=vec,
                         image_model_version=settings.image_version,
                         allowed_users=allowed_users,
+                        layout_summary=layout_summary,
                     ),
                     file_ids=[file_id],
                 )

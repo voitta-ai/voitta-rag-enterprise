@@ -314,6 +314,7 @@ def _merge_buckets(
     images: list[ExtractedImage] = []
     page_images: list[RenderedPage] = []
     page_layout: list[dict] = []
+    char_to_page: list[tuple[int, int]] = []
     cursor = 0  # char offset into the joined markdown for the current bucket
 
     join_sep = "\n\n"
@@ -323,6 +324,9 @@ def _merge_buckets(
         # to the bucket's first page (the old, less-accurate behavior).
         page_by_name = _image_page_map(b.content_list, b.page_start)
         page_layout.extend(_layout_for_bucket(b.content_list, b.page_start))
+        char_to_page.extend(
+            _bucket_char_to_page(b.content_list, b.markdown, b.page_start, cursor)
+        )
 
         # Walk image references in the bucket's markdown — their char offsets
         # are absolute in the merged output once we add ``cursor``.
@@ -363,6 +367,7 @@ def _merge_buckets(
             cursor += len(join_sep)
 
     content = join_sep.join(parts)
+    char_to_page = _normalise_char_to_page(char_to_page, len(content))
     metadata = {
         "source_format": "pdf",
         "parser": "mineru",
@@ -372,14 +377,86 @@ def _merge_buckets(
         "parse_time_seconds": sum(b.elapsed_s for b in buckets),
         "page_images": len(page_images),
         "page_layout_blocks": len(page_layout),
+        "char_to_page_anchors": len(char_to_page),
     }
     return ParserResult(
         content=content,
         images=images,
         page_images=page_images,
         page_layout=page_layout,
+        char_to_page=char_to_page,
         metadata=metadata,
     )
+
+
+def _bucket_char_to_page(
+    content_list: list[dict],
+    bucket_md: str,
+    page_start: int,
+    cursor: int,
+) -> list[tuple[int, int]]:
+    """Locate each text/title block from ``content_list`` in ``bucket_md``
+    and emit ``(global_char_offset, absolute_page)`` anchors.
+
+    MinerU writes blocks in reading order, so we walk ``content_list`` in
+    order and search forward through ``bucket_md`` from a moving cursor.
+    Blocks whose text doesn't match (whitespace normalisation, hyphen
+    collapse, formula re-rendering, …) are silently skipped — neighbours
+    bracket their pages, and the worst case the consumer suffers is a
+    paragraph ending up ±1 page off, which the dev plan explicitly
+    accepts.
+
+    Image / table / equation blocks have no usable ``text`` to find, so
+    we skip them; the ``page_layout`` list separately records them for
+    layout-summary purposes.
+    """
+    anchors: list[tuple[int, int]] = []
+    bucket_search_pos = 0
+    last_page = page_start  # so the very start of the bucket has a page
+    anchors.append((cursor, last_page))
+    for blk in content_list:
+        if not isinstance(blk, dict):
+            continue
+        page_idx = blk.get("page_idx")
+        if not isinstance(page_idx, int):
+            continue
+        abs_page = page_start + page_idx
+        text = blk.get("text") if blk.get("type") in ("text", "title") else None
+        if not isinstance(text, str) or len(text.strip()) < 8:
+            continue
+        # MinerU sometimes wraps text in markdown decoration (## title).
+        # Strip leading hash-decoration so the find still works.
+        needle = text.strip()
+        # Cap the needle so a 4 KB paragraph doesn't pathologically scan.
+        # First 80 chars are usually unique enough across a bucket.
+        probe = needle[:80]
+        idx = bucket_md.find(probe, bucket_search_pos)
+        if idx == -1:
+            continue
+        anchors.append((cursor + idx, abs_page))
+        bucket_search_pos = idx + len(probe)
+        last_page = abs_page
+    return anchors
+
+
+def _normalise_char_to_page(
+    anchors: list[tuple[int, int]], content_len: int
+) -> list[tuple[int, int]]:
+    """Collapse adjacent anchors with the same page; drop out-of-range entries.
+
+    The result is sorted by char offset (anchors are already produced in
+    order, but we re-sort defensively in case bucket boundaries land
+    between buckets out of order). Consumers binary-search this list.
+    """
+    if not anchors:
+        return []
+    anchors_sorted = sorted({(o, p) for (o, p) in anchors if 0 <= o < content_len + 1})
+    out: list[tuple[int, int]] = []
+    for offset, page in anchors_sorted:
+        if out and out[-1][1] == page:
+            continue  # same page as previous anchor — redundant
+        out.append((offset, page))
+    return out
 
 
 def _layout_for_bucket(content_list: list[dict], page_start: int) -> list[dict]:

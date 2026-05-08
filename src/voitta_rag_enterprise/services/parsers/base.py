@@ -49,6 +49,13 @@ class ParserResult:
     # downstream consumers can lean on whatever MinerU emits without us
     # re-modeling it. Empty for parsers that don't have layout.
     page_layout: list[dict] = field(default_factory=list)
+    # Sparse char-offset → page map. Each entry ``(char_offset, page)`` says
+    # "from this char in ``content`` onward, blocks belong to ``page`` until
+    # the next entry overrides it." Lookup is a binary search to the
+    # largest offset ≤ query, returning that entry's page. Chunkers don't
+    # need to think about this; the indexer pulls a chunk's page out of
+    # the merged map at embed time. Empty for parsers that don't emit it.
+    char_to_page: list[tuple[int, int]] = field(default_factory=list)
     metadata: dict = field(default_factory=dict)
     success: bool = True
     error: str | None = None

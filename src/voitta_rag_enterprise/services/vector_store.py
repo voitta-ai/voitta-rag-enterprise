@@ -16,7 +16,7 @@ import contextlib
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
 from qdrant_client import QdrantClient
@@ -114,6 +114,7 @@ def ensure_chunks_collection(text_dim: int) -> None:
                 },
             )
             logger.info("created qdrant collection: %s (dense dim=%d)", CHUNKS, text_dim)
+        _ensure_payload_indexes(client, CHUNKS, _CHUNK_PAYLOAD_INDEXES)
 
     run_on_qdrant(_do)
 
@@ -131,8 +132,77 @@ def ensure_images_collection(image_dim: int) -> None:
                 },
             )
             logger.info("created qdrant collection: %s (dim=%d)", IMAGES, image_dim)
+        _ensure_payload_indexes(client, IMAGES, _IMAGE_PAYLOAD_INDEXES)
 
     run_on_qdrant(_do)
+
+
+# Payload indexes wanted on each collection. ``page`` + the ``layout_*``
+# fields show up in nearly every filter query the LLM might want to issue
+# ("only chunks from page 12-14", "only exhibit pages", "only pages with
+# tables"), and Qdrant scans the whole collection without an index.
+# These calls are idempotent — Qdrant returns 200 if the index already
+# exists at the same type, so we re-issue them on every startup.
+_CHUNK_PAYLOAD_INDEXES: tuple[tuple[str, str], ...] = (
+    ("page", "integer"),
+    ("layout_kind", "keyword"),
+    ("layout_has_image", "bool"),
+    ("layout_has_table", "bool"),
+    ("layout_has_equation", "bool"),
+    ("layout_column_count", "integer"),
+    ("layout_max_text_level", "integer"),
+)
+_IMAGE_PAYLOAD_INDEXES: tuple[tuple[str, str], ...] = (
+    ("page", "integer"),
+    ("layout_kind", "keyword"),
+    ("layout_has_image", "bool"),
+    ("layout_has_table", "bool"),
+)
+
+
+def _ensure_payload_indexes(
+    client: QdrantClient,
+    collection: str,
+    indexes: tuple[tuple[str, str], ...],
+) -> None:
+    """Create payload indexes if missing. Best-effort: failures log + continue.
+
+    Failure modes Qdrant can throw here include "index already exists at
+    a different type" (we never change types so won't hit that),
+    transient timeouts, or the local backend not yet supporting a given
+    schema type. None of these should block the collection from working
+    — filters still execute, just without index acceleration.
+
+    The local QdrantClient warns "Payload indexes have no effect in the
+    local Qdrant" via UserWarning; we suppress that here since it's
+    informational and would otherwise spam every test run.
+    """
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore", message="Payload indexes have no effect", category=UserWarning
+        )
+        for field_name, schema in indexes:
+            try:
+                client.create_payload_index(
+                    collection_name=collection,
+                    field_name=field_name,
+                    field_schema=schema,
+                )
+            except Exception as e:
+                # Qdrant emits a 4xx with "already exists" when re-creating
+                # the same index — we want that to be silent.
+                msg = str(e).lower()
+                if "already exists" in msg or "already present" in msg:
+                    continue
+                logger.warning(
+                    "could not create payload index %s.%s (%s): %s",
+                    collection,
+                    field_name,
+                    schema,
+                    e,
+                )
 
 
 def ensure_collections(text_dim: int, image_dim: int) -> None:
@@ -194,6 +264,20 @@ class ChunkPoint:
     dense_model_version: str
     sparse_model_version: str
     allowed_users: list[int]
+    # Char range in the file's merged markdown — gives downstream code
+    # a way to slice the original markdown back out without re-reading
+    # the chunk row from SQLite.
+    char_start: int | None = None
+    char_end: int | None = None
+    # Page anchoring. ``page`` is the chunk's primary (start-anchored)
+    # page; ``pages`` is every page the chunk touches. Both are
+    # ``None`` / empty for parsers that don't emit char_to_page.
+    page: int | None = None
+    pages: list[int] = field(default_factory=list)
+    # Flat layout-summary scalars to attach to the payload (every key
+    # starts with ``layout_``). None when no layout was captured for
+    # the primary page.
+    layout_summary: dict | None = None
 
 
 @dataclass
@@ -208,6 +292,8 @@ class ImagePoint:
     image: list[float]
     image_model_version: str
     allowed_users: list[int]
+    # See ChunkPoint.layout_summary — same shape, looked up by image.page.
+    layout_summary: dict | None = None
 
 
 def replace_chunks_for_file(file_id: int, points: list[ChunkPoint]) -> None:
@@ -240,20 +326,7 @@ def replace_chunks_for_file(file_id: int, points: list[ChunkPoint]) -> None:
                             indices=p.sparse.indices, values=p.sparse.values
                         ),
                     },
-                    payload={
-                        "chunk_id": p.chunk_id,
-                        "file_id": p.file_id,
-                        "folder_id": p.folder_id,
-                        "file_path": p.file_path,
-                        "chunk_index": p.chunk_index,
-                        "text": p.text,
-                        "nearby_image_ids": p.nearby_image_ids,
-                        "source_url": p.source_url,
-                        "tab": p.tab,
-                        "dense_model_version": p.dense_model_version,
-                        "sparse_model_version": p.sparse_model_version,
-                        "allowed_users": p.allowed_users,
-                    },
+                    payload=_chunk_payload(p),
                 )
                 for p in points
             ],
@@ -315,22 +388,62 @@ def upsert_image_point(point: ImagePoint, file_ids: list[int]) -> None:
                 qm.PointStruct(
                     id=point.point_id,
                     vector={"image": point.image},
-                    payload={
-                        "image_id": point.point_id,
-                        "image_cas_id": point.image_cas_id,
-                        "file_ids": file_ids,
-                        "folder_id": point.folder_id,
-                        "file_path": point.file_path,
-                        "anchor_chunk": point.anchor_chunk,
-                        "page": point.page,
-                        "image_model_version": point.image_model_version,
-                        "allowed_users": point.allowed_users,
-                    },
+                    payload=_image_payload(point, file_ids),
                 )
             ],
         )
 
     run_on_qdrant(_do)
+
+
+def _chunk_payload(p: ChunkPoint) -> dict:
+    """Build a flat Qdrant payload from a ``ChunkPoint``.
+
+    Layout-summary scalars are flattened into the top level (every key
+    starts with ``layout_``) so each one is independently filterable
+    via a payload index — nesting would force payload-path queries
+    that Qdrant doesn't index. Missing summary → no layout_* fields,
+    not nulls, so the payload stays compact and filters that ask for a
+    specific layout_kind don't accidentally match unrelated rows.
+    """
+    payload: dict = {
+        "chunk_id": p.chunk_id,
+        "file_id": p.file_id,
+        "folder_id": p.folder_id,
+        "file_path": p.file_path,
+        "chunk_index": p.chunk_index,
+        "text": p.text,
+        "char_start": p.char_start,
+        "char_end": p.char_end,
+        "page": p.page,
+        "pages": p.pages,
+        "nearby_image_ids": p.nearby_image_ids,
+        "source_url": p.source_url,
+        "tab": p.tab,
+        "dense_model_version": p.dense_model_version,
+        "sparse_model_version": p.sparse_model_version,
+        "allowed_users": p.allowed_users,
+    }
+    if p.layout_summary:
+        payload.update(p.layout_summary)
+    return payload
+
+
+def _image_payload(p: ImagePoint, file_ids: list[int]) -> dict:
+    payload: dict = {
+        "image_id": p.point_id,
+        "image_cas_id": p.image_cas_id,
+        "file_ids": file_ids,
+        "folder_id": p.folder_id,
+        "file_path": p.file_path,
+        "anchor_chunk": p.anchor_chunk,
+        "page": p.page,
+        "image_model_version": p.image_model_version,
+        "allowed_users": p.allowed_users,
+    }
+    if p.layout_summary:
+        payload.update(p.layout_summary)
+    return payload
 
 
 def remove_file_from_image_points(file_id: int) -> list[int]:
