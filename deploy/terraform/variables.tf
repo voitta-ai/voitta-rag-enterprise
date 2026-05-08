@@ -127,6 +127,31 @@ variable "snapshot_retention_days" {
   }
 }
 
+# ----- Monitoring -----
+
+variable "enable_monitoring" {
+  description = <<-EOT
+    Toggle uptime check + log-based error alert. When false the
+    monitoring resources are skipped; alert_email can stay blank.
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "alert_email" {
+  description = <<-EOT
+    Email address that receives uptime + error alerts when
+    enable_monitoring=true. Required in that case.
+  EOT
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.alert_email == "" || can(regex("^[^@[:space:]]+@[^@[:space:]]+\\.[^@[:space:]]+$", var.alert_email))
+    error_message = "alert_email must look like an email or be empty."
+  }
+}
+
 # ----- Image -----
 
 variable "image_repo" {
