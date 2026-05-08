@@ -47,7 +47,7 @@ GPU costs land in Tier B and are NOT included.
 git clone git@github.com:voitta-ai/voitta-rag-enterprise.git
 cd voitta-rag-enterprise
 
-cp .env.terraform.example .env.terraform
+cp deploy/terraform/.env.terraform.example .env.terraform
 $EDITOR .env.terraform
 # fill in:
 #   TF_VAR_project_id=<your project>
