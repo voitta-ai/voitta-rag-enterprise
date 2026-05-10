@@ -122,6 +122,7 @@ export const api = {
     getSync: (folderId) => req("GET", `/api/folders/${folderId}/sync`),
     putSync: (folderId, body) => req("PUT", `/api/folders/${folderId}/sync`, body),
     deleteSync: (folderId) => req("DELETE", `/api/folders/${folderId}/sync`),
+    clearSyncError: (folderId) => req("DELETE", `/api/folders/${folderId}/sync/error`),
     triggerSync: (folderId) => req("POST", `/api/folders/${folderId}/sync/trigger`),
     listGitBranches: (folderId, body) =>
         req("POST", `/api/folders/${folderId}/sync/branches`, body),

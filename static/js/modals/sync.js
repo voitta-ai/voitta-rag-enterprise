@@ -378,35 +378,66 @@ function renderSyncStatus(src) {
     const line = $("#sync-status-line");
     if (!src) { line.hidden = true; return; }
 
-    // Status / last-synced live in one row. The error message can be
-    // multi-line (the GoogleWorkspaceAccessError preflight emits one
-    // bullet per disabled API with its activation URL); we render it
-    // in its own block below the row so newlines and URLs survive.
+    // Status / last-synced live in one row, with an inline Clear
+    // button that wipes the persisted ``sync_error`` once the user
+    // has read it. The error block below is fixed-height + scrolls;
+    // entries are reversed so the most recent issue is on top
+    // (operators care about "what just broke", not "what broke first").
     line.innerHTML = "";
+
     const top = document.createElement("div");
+    top.className = "sync-status-line-top";
+    const summary = document.createElement("span");
     const parts = [`status: ${src.sync_status}`];
     if (src.last_synced_at) {
         const d = new Date(src.last_synced_at * 1000);
         parts.push(`last: ${d.toLocaleString()}`);
     }
-    top.textContent = parts.join(" · ");
+    summary.textContent = parts.join(" · ");
+    top.appendChild(summary);
+
+    if (src.sync_error) {
+        const clearBtn = document.createElement("button");
+        clearBtn.type = "button";
+        clearBtn.className = "btn btn-secondary btn-sm sync-error-clear";
+        clearBtn.textContent = "Clear errors";
+        clearBtn.title = "Wipe the stored error so the modal renders cleanly on the next open";
+        clearBtn.addEventListener("click", async () => {
+            clearBtn.disabled = true;
+            try {
+                const out = await api.clearSyncError(syncFolderId);
+                renderSyncStatus(out);
+            } catch (err) {
+                clearBtn.disabled = false;
+                alert(err.message);
+            }
+        });
+        top.appendChild(clearBtn);
+    }
     line.appendChild(top);
 
     if (src.sync_error) {
         const errBlock = document.createElement("pre");
         errBlock.className = "sync-error-block";
-        errBlock.textContent = src.sync_error;
+
+        // Reverse: connectors join multiple lines with "\n" / "; " into
+        // one ``sync_error`` string, and the most recently-appended one
+        // is at the end. Flip so newest reads first. Pure newlines are
+        // the canonical separator (preflight uses "\n", connector
+        // GoogleDriveSyncStats joins ``stats.errors`` with "; ").
+        const lines = src.sync_error.split(/\r?\n/);
+        const reversed = lines.reverse().join("\n");
+
         // Detect URLs in the message and turn them into anchors so the
         // user can click straight into the GCP "Enable API" page.
         // ``<pre>`` preserves newlines / spacing; we rebuild content
         // with link nodes interleaved.
         const urlRe = /(https?:\/\/[^\s)]+)/g;
-        errBlock.innerHTML = "";
         let last = 0;
         let m;
-        while ((m = urlRe.exec(src.sync_error)) !== null) {
+        while ((m = urlRe.exec(reversed)) !== null) {
             if (m.index > last) {
-                errBlock.appendChild(document.createTextNode(src.sync_error.slice(last, m.index)));
+                errBlock.appendChild(document.createTextNode(reversed.slice(last, m.index)));
             }
             const a = document.createElement("a");
             a.href = m[1];
@@ -416,8 +447,8 @@ function renderSyncStatus(src) {
             errBlock.appendChild(a);
             last = m.index + m[1].length;
         }
-        if (last < src.sync_error.length) {
-            errBlock.appendChild(document.createTextNode(src.sync_error.slice(last)));
+        if (last < reversed.length) {
+            errBlock.appendChild(document.createTextNode(reversed.slice(last)));
         }
         line.appendChild(errBlock);
     }

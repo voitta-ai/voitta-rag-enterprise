@@ -406,6 +406,35 @@ def delete_sync_source(
     _publish_folder_changed(folder, has_sync_source=False)
 
 
+@router.delete("/error", response_model=SyncSourceOut)
+def clear_sync_error(
+    folder_id: int,
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(current_user),
+) -> SyncSourceOut:
+    """Wipe ``sync_error`` and reset ``sync_status`` from 'error' to 'idle'.
+
+    The error message is informational once the user has read it; we
+    don't want a stale 'API not enabled' bullet from yesterday's run
+    polluting the modal after the admin actually enabled the API.
+
+    Idempotent: noop when there's no error to clear, no-op when there's
+    no source row for this folder. Either way returns the (possibly-
+    unchanged) source so the SPA can re-render from one response.
+    """
+    _check_owner(folder_id, db, user)
+    src = db.get(FolderSyncSource, folder_id)
+    if src is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No sync source for this folder")
+    if src.sync_error is not None or src.sync_status == "error":
+        src.sync_error = None
+        if src.sync_status == "error":
+            src.sync_status = "idle"
+        db.commit()
+        db.refresh(src)
+    return _to_out(src)
+
+
 class SyncTriggerOut(BaseModel):
     folder_id: int
     job_id: int

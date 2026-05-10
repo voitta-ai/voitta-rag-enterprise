@@ -484,6 +484,90 @@ def test_sync_delete_removes_source(client: TestClient, tmp_path: Path) -> None:
     assert client.get(f"/api/folders/{folder_id}/sync").json() is None
 
 
+def _make_sync_source(client: TestClient, tmp_path: Path) -> int:
+    """Set up a folder with a GitHub sync source for the error tests."""
+    src = tmp_path / "src"
+    src.mkdir()
+    folder_id = client.post("/api/folders", json={"name": src.name}).json()["id"]
+    client.put(
+        f"/api/folders/{folder_id}/sync",
+        json={
+            "source_type": "github",
+            "github": {"repo": "https://x/r", "branches": ["main"], "auth_method": "ssh"},
+        },
+    )
+    return folder_id
+
+
+def test_sync_clear_error_resets_state(client: TestClient, tmp_path: Path) -> None:
+    """The Clear-errors button calls DELETE /sync/error: wipes
+    sync_error and flips sync_status from 'error' back to 'idle' so
+    the modal renders cleanly on the next open."""
+    from voitta_rag_enterprise.db.database import session_scope
+    from voitta_rag_enterprise.db.models import FolderSyncSource
+
+    folder_id = _make_sync_source(client, tmp_path)
+
+    # Simulate a failed sync run by stamping the row directly.
+    with session_scope() as s:
+        src = s.get(FolderSyncSource, folder_id)
+        src.sync_status = "error"
+        src.sync_error = "Google Docs API not enabled\nGoogle Sheets API not enabled"
+        s.commit()
+
+    r = client.delete(f"/api/folders/{folder_id}/sync/error")
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["sync_error"] is None
+    assert out["sync_status"] == "idle"
+
+    # And it sticks: re-reading via GET shows the cleared state.
+    again = client.get(f"/api/folders/{folder_id}/sync").json()
+    assert again["sync_error"] is None
+    assert again["sync_status"] == "idle"
+
+
+def test_sync_clear_error_is_idempotent(client: TestClient, tmp_path: Path) -> None:
+    """Already-clean source: clearing the error is a no-op (no 4xx)."""
+    folder_id = _make_sync_source(client, tmp_path)
+    r = client.delete(f"/api/folders/{folder_id}/sync/error")
+    assert r.status_code == 200
+    assert r.json()["sync_error"] is None
+
+
+def test_sync_clear_error_preserves_idle_status(
+    client: TestClient, tmp_path: Path,
+) -> None:
+    """A 'syncing' / 'idle' source with a stale error message clears
+    the message but doesn't disturb the state column — only an
+    explicit 'error' status flips back to 'idle'."""
+    from voitta_rag_enterprise.db.database import session_scope
+    from voitta_rag_enterprise.db.models import FolderSyncSource
+
+    folder_id = _make_sync_source(client, tmp_path)
+    with session_scope() as s:
+        src = s.get(FolderSyncSource, folder_id)
+        src.sync_status = "syncing"
+        src.sync_error = "stale: half-written from a previous run"
+        s.commit()
+
+    out = client.delete(f"/api/folders/{folder_id}/sync/error").json()
+    assert out["sync_error"] is None
+    # Status stays 'syncing' — we only flip 'error' → 'idle'.
+    assert out["sync_status"] == "syncing"
+
+
+def test_sync_clear_error_404_when_no_source(
+    client: TestClient, tmp_path: Path,
+) -> None:
+    """Clearing on a folder with no sync source should 404."""
+    src = tmp_path / "src"
+    src.mkdir()
+    folder_id = client.post("/api/folders", json={"name": src.name}).json()["id"]
+    r = client.delete(f"/api/folders/{folder_id}/sync/error")
+    assert r.status_code == 404
+
+
 def test_unauthenticated_request_returns_401(env: None, tmp_path: Path) -> None:
     """With no auth mode set, every API call needs a Google session."""
     from voitta_rag_enterprise.main import create_app

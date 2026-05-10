@@ -858,10 +858,24 @@ input[type="text"], input[type="file"] {
 .modal-body textarea { font: 12px ui-monospace, "SF Mono", Menlo, monospace; resize: vertical; }
 .modal-body select[multiple] { padding: 4px; }
 
+/* Sync status header: ``status: error · last: …`` text on the left,
+   inline ``Clear errors`` button on the right when an error exists. */
+.sync-status-line-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--md);
+}
+.sync-error-clear {
+    flex-shrink: 0;
+}
+
 /* Sync error banner under the status line. White-on-red so it reads
    as "stop — fix this" rather than the muted hint colour the rest of
    ``.hint`` text uses. Preserves newlines so multi-API failures from
-   the preflight stack legibly. */
+   the preflight stack legibly. Fixed height + internal scroll so a
+   long history (e.g. an hourly auto-sync run that's been failing for
+   days) doesn't push the rest of the modal off-screen. */
 .sync-error-block {
     margin: 8px 0 0;
     padding: 8px 10px;
@@ -874,6 +888,8 @@ input[type="text"], input[type="file"] {
     font-size: 11px;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
+    max-height: 180px;
+    overflow-y: auto;
 }
 .sync-error-block a {
     color: #1d4ed8;
