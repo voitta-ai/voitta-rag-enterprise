@@ -40,6 +40,7 @@ def _add_file(
     size: int = 100,
     chunks: int = 0,
     images: int = 0,
+    source_url: str | None = None,
 ) -> int:
     with session_scope() as s:
         f = File(
@@ -49,6 +50,7 @@ def _add_file(
             mtime_ns=0,
             last_seen_at=0,
             state=state,
+            source_url=source_url,
         )
         s.add(f)
         s.flush()
@@ -117,6 +119,56 @@ def test_compute_aggregates_counts_and_extension_breakdown(env: None) -> None:
     assert by_ext[".md"]["in_progress"] == 1
     assert by_ext[".pdf"]["files"] == 1
     assert by_ext[".pdf"]["error"] == 1
+
+
+def test_compute_buckets_google_workspace_files_by_source_url(env: None) -> None:
+    """Drive sync exports Google Docs/Sheets/Slides/Forms as .md files;
+    grouping them by extension lumps them under a generic '.md' bucket
+    that hides the real types from the user. We classify by the
+    ``source_url`` prefix so the sidebar shows 'Google Doc' / 'Google
+    Sheet' as first-class buckets, with plain ``.md`` reserved for
+    actually-on-disk markdown."""
+    fid = _seed()
+    # Two real Google Docs exported as markdown.
+    _add_file(
+        fid, "Project/01-Intro.md", state="indexed", chunks=4,
+        source_url="https://docs.google.com/document/d/abc/edit",
+    )
+    _add_file(
+        fid, "Project/02-Plan.md", state="indexed", chunks=6,
+        source_url="https://docs.google.com/document/d/abc/edit#tab=t.1",
+    )
+    # A Google Sheet → per-sheet markdowns, each carries the same prefix.
+    _add_file(
+        fid, "Q3 Forecast/01-Sales.md", state="indexed", chunks=3,
+        source_url="https://docs.google.com/spreadsheets/d/xyz/edit",
+    )
+    # A Slides deck and a Form.
+    _add_file(
+        fid, "Pitch/01-Pitch.md", state="pending",
+        source_url="https://docs.google.com/presentation/d/123/edit",
+    )
+    _add_file(
+        fid, "Survey.md", state="indexed", chunks=1,
+        source_url="https://docs.google.com/forms/d/abc/edit",
+    )
+    # A vanilla markdown file (no source_url) — must stay under '.md'.
+    _add_file(fid, "README.md", state="indexed", chunks=2)
+
+    with session_scope() as s:
+        folder = s.get(Folder, fid)
+        out = compute_folder_stats(s, folder)
+    by_ext = out["by_extension"]
+
+    assert by_ext["Google Doc"]["files"] == 2
+    assert by_ext["Google Doc"]["chunks"] == 10
+    assert by_ext["Google Sheet"]["files"] == 1
+    assert by_ext["Google Slides"]["files"] == 1
+    assert by_ext["Google Slides"]["pending"] == 1
+    assert by_ext["Google Form"]["files"] == 1
+    # The real markdown didn't get swept into a workspace bucket.
+    assert by_ext[".md"]["files"] == 1
+    assert by_ext[".md"]["chunks"] == 2
 
 
 def test_compute_handles_no_extension_files(env: None) -> None:
