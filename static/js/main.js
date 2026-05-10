@@ -13,6 +13,7 @@ let statsCache = null; // last successful FolderStats response
 let statsTimer = null;
 const expandedNodes = new Set(); // keys: `${folder_id}:${rel_dir}`
 const ghostDirs = new Map(); // folder_id → Set<rel_dir> (created via mkdir but no files yet)
+let activeSidebarTab = "details"; // "details" | "jobs"
 
 function nodeKey(folderId, relDir) {
     return `${folderId}:${relDir}`;
@@ -24,6 +25,55 @@ connStatus.subscribe((s) => {
     el.textContent = s;
     el.className = `status-pill ${s}`;
 });
+
+// ----- Sidebar tabs -----
+//
+// Two-pane sidebar: per-folder Details on one side, the global jobs
+// queue on the other. Switching panes is purely client-side — the JS
+// just toggles ``hidden`` + the ``active`` class. No re-render is
+// triggered, so a queued WS update lands the moment the user flips back
+// to the affected tab.
+function setSidebarTab(name) {
+    if (name !== "details" && name !== "jobs") name = "details";
+    if (activeSidebarTab === name) return;
+    activeSidebarTab = name;
+
+    const detailsBtn = $("#tab-btn-details");
+    const jobsBtn = $("#tab-btn-jobs");
+    const detailsPane = $("#tab-pane-details");
+    const jobsPane = $("#tab-pane-jobs");
+
+    detailsBtn.classList.toggle("active", name === "details");
+    jobsBtn.classList.toggle("active", name === "jobs");
+    detailsBtn.setAttribute("aria-selected", String(name === "details"));
+    jobsBtn.setAttribute("aria-selected", String(name === "jobs"));
+    detailsPane.hidden = name !== "details";
+    jobsPane.hidden = name !== "jobs";
+}
+
+$("#tab-btn-details").addEventListener("click", () => setSidebarTab("details"));
+$("#tab-btn-jobs").addEventListener("click", () => setSidebarTab("jobs"));
+
+// Tiny activity indicator on the Jobs tab so the user notices when work
+// arrives while they're looking at Details. Red dot if anything errored,
+// accent dot if anything queued/running, hidden otherwise.
+function updateJobsTabIndicator() {
+    const dot = $("#tab-jobs-dot");
+    const btn = $("#tab-btn-jobs");
+    if (!dot || !btn) return;
+    let hasActive = false;
+    let hasError = false;
+    for (const j of jobs.get()) {
+        if (j.state === "error") { hasError = true; }
+        else if (j.state === "queued" || j.state === "running") { hasActive = true; }
+    }
+    dot.hidden = !(hasActive || hasError);
+    if (hasError) {
+        btn.dataset.state = "error";
+    } else {
+        delete btn.dataset.state;
+    }
+}
 
 // ----- Render scheduling -----
 //
@@ -92,6 +142,7 @@ syncProgress.subscribe(() => {
 });
 jobs.subscribe(() => {
     scheduleJobsRender();
+    updateJobsTabIndicator();
     // The tree's per-subtree status reads jobs.get() to decide between
     // "indexing" and "indexed" (see hasActiveWork in summariseSubtree). The
     // backend publishes file.upserted *before* the worker writes mark_done,

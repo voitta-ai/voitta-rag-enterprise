@@ -139,56 +139,80 @@
                 </section>
 
                 <aside class="sidebar" id="sidebar">
-                    <div class="sidebar-section sidebar-empty" id="sidebar-empty">
-                        <p class="hint-large">Select a folder to see details.</p>
+                    <!-- Tabbed sidebar: Details (per-folder stats) | Jobs (global queue).
+                         Keeps the panel one screen tall on narrow viewports while
+                         giving the user a single click to flip between "what's in
+                         this folder" and "what's the worker doing right now". -->
+                    <div class="sidebar-tabs" role="tablist">
+                        <button type="button" id="tab-btn-details"
+                            class="sidebar-tab active"
+                            role="tab" aria-selected="true"
+                            aria-controls="tab-pane-details">Details</button>
+                        <button type="button" id="tab-btn-jobs"
+                            class="sidebar-tab"
+                            role="tab" aria-selected="false"
+                            aria-controls="tab-pane-jobs">
+                            Jobs
+                            <span id="tab-jobs-dot" class="tab-dot" hidden></span>
+                        </button>
                     </div>
 
-                    <div class="sidebar-section" id="folder-detail" hidden>
-                        <h3 id="folder-name"></h3>
-                        <p id="folder-path" class="path"></p>
-                        <div class="badge-row">
-                            <span id="folder-source-badge" class="badge"></span>
-                            <span id="folder-health-badge" class="badge" hidden style="background:#fbbf24;color:#111;cursor:help;"></span>
-                            <span id="folder-reindex-badge" class="badge" hidden style="background:#3b82f6;color:#fff;"></span>
-                            <span id="folder-sync-badge" class="badge" hidden style="background:#10b981;color:#fff;"></span>
+                    <div id="tab-pane-details" class="sidebar-tab-pane" role="tabpanel"
+                         aria-labelledby="tab-btn-details">
+                        <div class="sidebar-section sidebar-empty" id="sidebar-empty">
+                            <p class="hint-large">Select a folder to see details.</p>
                         </div>
-                        <div class="kv-grid">
-                            <span class="k">Files</span><span class="v" id="kv-files">–</span>
-                            <span class="k">Indexed</span><span class="v" id="kv-indexed">–</span>
-                            <span class="k">Errors</span><span class="v" id="kv-errors">–</span>
-                            <span class="k">Unsupported</span><span class="v" id="kv-unsupported">–</span>
-                            <span class="k">In progress</span><span class="v" id="kv-in-progress">–</span>
-                            <span class="k">Pending</span><span class="v" id="kv-pending">–</span>
-                            <span class="k">Total size</span><span class="v" id="kv-bytes">–</span>
-                            <span class="k">Chunks</span><span class="v" id="kv-chunks">–</span>
-                            <span class="k">Images</span><span class="v" id="kv-images">–</span>
-                            <span class="k">Unique images</span><span class="v" id="kv-images-unique">–</span>
+
+                        <div class="sidebar-section" id="folder-detail" hidden>
+                            <h3 id="folder-name"></h3>
+                            <p id="folder-path" class="path"></p>
+                            <div class="badge-row">
+                                <span id="folder-source-badge" class="badge"></span>
+                                <span id="folder-health-badge" class="badge" hidden style="background:#fbbf24;color:#111;cursor:help;"></span>
+                                <span id="folder-reindex-badge" class="badge" hidden style="background:#3b82f6;color:#fff;"></span>
+                                <span id="folder-sync-badge" class="badge" hidden style="background:#10b981;color:#fff;"></span>
+                            </div>
+                            <div class="kv-grid">
+                                <span class="k">Files</span><span class="v" id="kv-files">–</span>
+                                <span class="k">Indexed</span><span class="v" id="kv-indexed">–</span>
+                                <span class="k">Errors</span><span class="v" id="kv-errors">–</span>
+                                <span class="k">Unsupported</span><span class="v" id="kv-unsupported">–</span>
+                                <span class="k">In progress</span><span class="v" id="kv-in-progress">–</span>
+                                <span class="k">Pending</span><span class="v" id="kv-pending">–</span>
+                                <span class="k">Total size</span><span class="v" id="kv-bytes">–</span>
+                                <span class="k">Chunks</span><span class="v" id="kv-chunks">–</span>
+                                <span class="k">Images</span><span class="v" id="kv-images">–</span>
+                                <span class="k">Unique images</span><span class="v" id="kv-images-unique">–</span>
+                            </div>
+                            <table class="stats-table" id="ext-table" hidden>
+                                <thead>
+                                    <tr>
+                                        <th>Type</th>
+                                        <th class="num">Files</th>
+                                        <th class="num">Chunks</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="ext-tbody"></tbody>
+                            </table>
+                            <p id="upload-target-hint" class="hint" hidden>
+                                Uploads go to <code id="upload-target">/</code>
+                            </p>
                         </div>
-                        <table class="stats-table" id="ext-table" hidden>
-                            <thead>
-                                <tr>
-                                    <th>Type</th>
-                                    <th class="num">Files</th>
-                                    <th class="num">Chunks</th>
-                                </tr>
-                            </thead>
-                            <tbody id="ext-tbody"></tbody>
-                        </table>
-                        <p id="upload-target-hint" class="hint" hidden>
-                            Uploads go to <code id="upload-target">/</code>
-                        </p>
                     </div>
 
-                    <div class="sidebar-section" id="jobs-card">
-                        <h3>
-                            Recent jobs
-                            <span class="header-actions-inline">
-                                <button id="btn-retry-all" class="btn-text">Retry failed</button>
-                                <button id="btn-clear-failed" class="btn-text">Clear</button>
-                                <button id="btn-kill-all" class="btn-text" title="Stop the running job and drop everything queued">Kill</button>
-                            </span>
-                        </h3>
-                        <ul id="jobs" class="job-rows"></ul>
+                    <div id="tab-pane-jobs" class="sidebar-tab-pane" role="tabpanel"
+                         aria-labelledby="tab-btn-jobs" hidden>
+                        <div class="sidebar-section" id="jobs-card">
+                            <h3>
+                                Recent jobs
+                                <span class="header-actions-inline">
+                                    <button id="btn-retry-all" class="btn-text">Retry failed</button>
+                                    <button id="btn-clear-failed" class="btn-text">Clear</button>
+                                    <button id="btn-kill-all" class="btn-text" title="Stop the running job and drop everything queued">Kill</button>
+                                </span>
+                            </h3>
+                            <ul id="jobs" class="job-rows"></ul>
+                        </div>
                     </div>
                 </aside>
             </div>

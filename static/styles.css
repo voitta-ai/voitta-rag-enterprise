@@ -634,6 +634,66 @@ input[type="text"], input[type="file"] {
 }
 .header-actions-inline { display: flex; gap: 4px; }
 
+/* Sidebar tab strip — Details vs Jobs. Two equal-width buttons; the
+   active one gets the accent fill (matching .seg-tab styling). */
+.sidebar-tabs {
+    display: flex;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    background: var(--color-bg);
+    padding: 2px;
+    gap: 2px;
+    flex-shrink: 0;
+}
+.sidebar-tab {
+    flex: 1;
+    padding: 8px 14px;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--color-text-secondary);
+    background: transparent;
+    border: none;
+    border-radius: calc(var(--radius-md) - 2px);
+    cursor: pointer;
+    transition: background var(--t), color var(--t);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+}
+.sidebar-tab:hover:not(.active) {
+    background: var(--color-bg-hover);
+    color: var(--color-text-primary);
+}
+.sidebar-tab.active {
+    background: var(--color-accent);
+    color: #fff;
+}
+/* Activity dot on the Jobs tab while jobs are queued/running/errored.
+   Small, accent-coloured pulse so the user notices motion in a tab they
+   aren't currently looking at. Goes white-on-accent when its tab is the
+   active one, so it stays visible against the new background. */
+.tab-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--color-accent);
+    display: inline-block;
+}
+.sidebar-tab.active .tab-dot { background: #fff; }
+.sidebar-tab[data-state="error"] .tab-dot { background: #dc3545; }
+.sidebar-tab.active[data-state="error"] .tab-dot { background: #fff; }
+
+/* Tab pane is a column-flex container so the inner sidebar-sections
+   stack the same way they did pre-tabs. ``hidden`` works natively. */
+.sidebar-tab-pane {
+    display: flex;
+    flex-direction: column;
+    gap: var(--md);
+    min-height: 0;
+}
+
 .sidebar-empty { text-align: center; }
 .hint, .hint-large { color: var(--color-text-secondary); }
 .hint { font-size: 11px; margin: 0; }
