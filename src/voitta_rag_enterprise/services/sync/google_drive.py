@@ -48,10 +48,10 @@ from urllib.parse import urlencode
 
 import httpx
 
-from ._gdoc_markdown import (
+from .google_workspace_exporters import safe_filename
+from .google_workspace_exporters._docs_markdown import (
     has_tabs,
     render_document_tabs,
-    safe_filename,
 )
 
 logger = logging.getLogger(__name__)
