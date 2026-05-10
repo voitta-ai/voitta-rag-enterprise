@@ -49,10 +49,12 @@ def build_default_registry() -> ExporterRegistry:
     """
     from .docs import DocumentExporter
     from .sheets import SpreadsheetExporter
+    from .slides import PresentationExporter
 
     r = ExporterRegistry()
     r.register(DocumentExporter())
     r.register(SpreadsheetExporter())
+    r.register(PresentationExporter())
     return r
 
 
