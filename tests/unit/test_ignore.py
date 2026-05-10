@@ -30,3 +30,27 @@ def test_empty_patterns_matches_nothing() -> None:
     m = IgnoreMatcher([])
     assert not m.matches("anything")
     assert not m.matches("a/b/c")
+
+
+def test_default_settings_ignore_voitta_sidecars() -> None:
+    """The defaults must hide every sidecar a sync connector writes.
+
+    Regression test for ``.voitta_sources.json`` showing up in indexed
+    Google Drive folders — the GD connector writes both sidecars after
+    every sync, and only ``.voitta_timestamps.json`` was on the ignore
+    list, so the watcher fed the other one to the parser registry.
+    """
+    from voitta_rag_enterprise.config import get_settings, reset_settings_cache
+
+    reset_settings_cache()
+    try:
+        m = IgnoreMatcher(get_settings().ignore_globs())
+    finally:
+        reset_settings_cache()
+    for name in (
+        ".voitta_sources.json",
+        ".voitta_timestamps.json",
+        ".voitta_sync.lock",
+    ):
+        assert m.matches(name), f"{name} should be ignored by default"
+        assert m.matches(f"sub/dir/{name}"), f"{name} should be ignored even nested"

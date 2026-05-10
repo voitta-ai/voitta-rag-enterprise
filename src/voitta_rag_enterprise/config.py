@@ -86,7 +86,15 @@ class Settings(BaseSettings):
     #    time also saves the egress for big mp4s.
     ignore_patterns: str = (
         ".git,node_modules,.DS_Store,__pycache__,.venv,*.tmp,*.part-*,"
-        ".git-repo,.voitta_timestamps.json,.voitta_sync.lock,"
+        ".git-repo,"
+        # Voitta sidecars written by sync connectors. ``_sources.json``
+        # carries per-file remote metadata (Drive deep-link tab URL, tab
+        # title); ``_timestamps.json`` is the per-file mtime cache the
+        # GD connector uses for change detection; ``_sync.lock`` guards
+        # concurrent syncs of the same folder. None of these belong in
+        # the index — they're internal bookkeeping that mutates on
+        # every sync and would otherwise show up in the file tree.
+        ".voitta_sources.json,.voitta_timestamps.json,.voitta_sync.lock,"
         # audio
         "*.mp3,*.m4a,*.wav,*.flac,*.ogg,*.aac,*.opus,*.wma,"
         # video
