@@ -52,6 +52,39 @@
                     </section>
                 </div>
 
+                <section class="admin-section admin-auth-providers">
+                    <header>
+                        <h4>Auth providers</h4>
+                        <span class="hint">OAuth credentials catalog. Rows tagged <em>from .env</em> reappear after restart while their env vars are set. This is a list only — login flow currently uses the .env values directly.</span>
+                    </header>
+                    <table id="admin-auth-providers-table" class="admin-table">
+                        <thead>
+                            <tr>
+                                <th>Provider</th>
+                                <th>Label</th>
+                                <th>Client ID</th>
+                                <th>Client secret</th>
+                                <th>Enabled</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                    <p id="admin-auth-providers-empty" class="hint" hidden>No providers yet. Add one below or set <code>VOITTA_GOOGLE_AUTH_CLIENT_ID</code> in <code>.env</code>.</p>
+
+                    <div class="admin-add-row admin-add-auth-provider">
+                        <select id="admin-auth-provider-type">
+                            <option value="google">Google</option>
+                            <option value="microsoft" disabled>Microsoft (coming soon)</option>
+                            <option value="github" disabled>GitHub (coming soon)</option>
+                        </select>
+                        <input id="admin-auth-provider-label" type="text" placeholder="Label (optional)">
+                        <input id="admin-auth-provider-client-id" type="text" placeholder="Client ID">
+                        <input id="admin-auth-provider-client-secret" type="text" placeholder="Client secret">
+                        <button id="admin-auth-provider-add" class="btn btn-primary btn-sm">Add</button>
+                    </div>
+                </section>
+
                 <section class="admin-section admin-users">
                     <header><h4>Users</h4><span class="hint">Add an individual address to allow them in (whether or not their domain is allowed). Toggle admin to grant access to this panel. "View as" to impersonate.</span></header>
                     <table id="admin-users-table" class="admin-table">

@@ -210,6 +210,39 @@ class ApiKey(Base):
     last_used_at: Mapped[int | None] = mapped_column(default=None)
 
 
+class AuthProvider(Base):
+    """Admin-managed list of OAuth provider credentials.
+
+    Each row is one ``(provider, client_id, client_secret)`` triple plus
+    a label and an enabled flag. Two rows for the same provider are
+    intentionally allowed (e.g. two Google clients) — the only uniqueness
+    is the primary key. Login flow currently consumes only Google rows
+    where ``enabled=True``; Microsoft / GitHub are accepted as values but
+    not yet wired anywhere.
+
+    Bootstrap: on every startup the lifespan upserts a row for the
+    ``VOITTA_GOOGLE_AUTH_CLIENT_ID``/``_SECRET`` pair so an .env-managed
+    deployment always has at least one entry. Deleting that row in the
+    UI only sticks until the next restart, by design — to truly remove
+    it, drop the env vars too.
+    """
+
+    __tablename__ = "auth_providers"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    provider: Mapped[str]  # "google" | "microsoft" | "github" | …
+    label: Mapped[str] = mapped_column(default="")
+    client_id: Mapped[str]
+    client_secret: Mapped[str] = mapped_column(default="")
+    enabled: Mapped[bool] = mapped_column(default=True)
+    # Marker for rows seeded by the .env bootstrap. Used only to log when a
+    # missing seed-row gets re-created on the next restart; not exposed
+    # to the API today.
+    source: Mapped[str] = mapped_column(default="user")  # "user" | "env"
+    created_at: Mapped[int] = mapped_column(default=_now_s)
+    updated_at: Mapped[int] = mapped_column(default=_now_s)
+
+
 class Job(Base):
     __tablename__ = "jobs"
 

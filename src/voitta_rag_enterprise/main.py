@@ -81,6 +81,26 @@ def _seed_users() -> None:
         logger.info("seeded %d user(s) from %s", added, settings.users_file)
 
 
+def _seed_auth_providers() -> None:
+    """Upsert auth-provider rows for any credentials living in .env.
+
+    Only Google is .env-bound today (``VOITTA_GOOGLE_AUTH_CLIENT_ID/_SECRET``).
+    Re-runs on every restart so a row deleted via the admin UI reappears
+    while the env vars remain set — that's the documented behaviour for
+    "what is in .env should always be in the list".
+    """
+    settings = get_settings()
+    from .services.auth_providers import upsert_env_provider
+
+    with session_scope() as s:
+        upsert_env_provider(
+            s,
+            provider="google",
+            client_id=settings.google_auth_client_id,
+            client_secret=settings.google_auth_client_secret,
+        )
+
+
 def create_app() -> FastAPI:
     """Build the unified web + MCP app.
 
@@ -104,6 +124,7 @@ def create_app() -> FastAPI:
         init_db()
         events.install_loop(asyncio.get_running_loop())
         _seed_users()
+        _seed_auth_providers()
         _startup_scan()
 
         if not settings.disable_background:

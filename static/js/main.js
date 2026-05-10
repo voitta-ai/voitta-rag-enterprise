@@ -2097,17 +2097,189 @@ function closeAdmin() {
 
 async function refreshAdmin() {
     try {
-        const [allow, users] = await Promise.all([
+        const [allow, users, providers] = await Promise.all([
             api.adminAllowlist(),
             api.adminListUsers(),
+            api.adminListAuthProviders(),
         ]);
         renderList("#admin-domains", allow.domains, "domain", api.adminRemoveDomain);
         renderList("#admin-blocked", allow.blocked, "email", api.adminUnblock);
         renderUsersTable(users);
+        renderAuthProvidersTable(providers);
     } catch (err) {
         alert(err.message);
     }
 }
+
+function renderAuthProvidersTable(providers) {
+    const tbody = $("#admin-auth-providers-table tbody");
+    const empty = $("#admin-auth-providers-empty");
+    tbody.innerHTML = "";
+    if (!providers.length) {
+        empty.hidden = false;
+        return;
+    }
+    empty.hidden = true;
+    for (const p of providers) {
+        tbody.appendChild(buildAuthProviderRow(p));
+    }
+}
+
+// One row in the auth providers table. Inputs are live-editable; changes
+// fire PATCH requests on blur (or Enter), so the admin can correct a
+// pasted client_id without an explicit "save" click. The Check button
+// rolls a credential probe through the backend; a small status pill
+// appears next to it for ~5s.
+function buildAuthProviderRow(p) {
+    const tr = document.createElement("tr");
+    tr.dataset.providerId = String(p.id);
+
+    // Provider name (read-only after creation; switching providers would
+    // be a different OAuth flow entirely).
+    const tdProvider = document.createElement("td");
+    tdProvider.textContent = p.provider;
+    if (p.source === "env") {
+        const badge = document.createElement("span");
+        badge.className = "badge-super";
+        badge.style.background = "#3b82f6";
+        badge.textContent = ".env";
+        badge.title = "Seeded from .env on startup. Deleting this row only sticks until the next restart while the env vars remain set.";
+        tdProvider.appendChild(badge);
+    }
+    tr.appendChild(tdProvider);
+
+    // Label, client_id, client_secret — inline editors.
+    const tdLabel = document.createElement("td");
+    tdLabel.appendChild(buildAuthProviderInput(p.id, "label", p.label, "Label"));
+    tr.appendChild(tdLabel);
+
+    const tdClientId = document.createElement("td");
+    tdClientId.appendChild(buildAuthProviderInput(p.id, "client_id", p.client_id, "Client ID"));
+    tr.appendChild(tdClientId);
+
+    const tdSecret = document.createElement("td");
+    tdSecret.appendChild(buildAuthProviderInput(p.id, "client_secret", p.client_secret, "Client secret"));
+    tr.appendChild(tdSecret);
+
+    // Enabled toggle.
+    const tdEnabled = document.createElement("td");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = !!p.enabled;
+    cb.title = p.enabled ? "Disable" : "Enable";
+    cb.addEventListener("change", async () => {
+        try {
+            await api.adminUpdateAuthProvider(p.id, { enabled: cb.checked });
+        } catch (err) {
+            cb.checked = !cb.checked;
+            alert(err.message);
+        }
+    });
+    tdEnabled.appendChild(cb);
+    tr.appendChild(tdEnabled);
+
+    // Actions: Check + Delete.
+    const tdActions = document.createElement("td");
+    tdActions.style.whiteSpace = "nowrap";
+    const checkBtn = document.createElement("button");
+    checkBtn.className = "btn btn-secondary btn-sm";
+    checkBtn.textContent = "Check";
+    checkBtn.title = "Probe the provider's token endpoint to verify these credentials";
+    const checkStatus = document.createElement("span");
+    checkStatus.className = "hint";
+    checkStatus.style.marginLeft = "8px";
+    checkBtn.addEventListener("click", async () => {
+        checkBtn.disabled = true;
+        checkStatus.textContent = "Checking…";
+        checkStatus.style.color = "";
+        try {
+            const r = await api.adminCheckAuthProvider(p.id);
+            checkStatus.textContent = (r.ok ? "✓ " : "✗ ") + r.message;
+            checkStatus.style.color = r.ok ? "#10b981" : "#dc3545";
+        } catch (err) {
+            checkStatus.textContent = "✗ " + (err.message || "request failed");
+            checkStatus.style.color = "#dc3545";
+        } finally {
+            checkBtn.disabled = false;
+            // Auto-clear after a beat so the row doesn't stay loud.
+            setTimeout(() => { checkStatus.textContent = ""; }, 8000);
+        }
+    });
+    const delBtn = document.createElement("button");
+    delBtn.className = "btn-remove";
+    delBtn.textContent = "×";
+    delBtn.title = p.source === "env"
+        ? "Delete (will be re-created on next restart while .env still has these values)"
+        : "Delete";
+    delBtn.style.marginLeft = "8px";
+    delBtn.addEventListener("click", async () => {
+        if (!confirm(`Delete ${p.provider} provider "${p.label || p.client_id}"?`)) return;
+        try {
+            await api.adminDeleteAuthProvider(p.id);
+            await refreshAdmin();
+        } catch (err) {
+            alert(err.message);
+        }
+    });
+    tdActions.append(checkBtn, checkStatus, delBtn);
+    tr.appendChild(tdActions);
+
+    return tr;
+}
+
+function buildAuthProviderInput(providerId, field, value, placeholder) {
+    const input = document.createElement("input");
+    input.type = "text";
+    input.value = value || "";
+    input.placeholder = placeholder;
+    input.style.width = "100%";
+    input.style.minWidth = field === "client_id" ? "240px" : "120px";
+    let original = value || "";
+    const commit = async () => {
+        if (input.value === original) return;
+        try {
+            await api.adminUpdateAuthProvider(providerId, { [field]: input.value });
+            original = input.value;
+        } catch (err) {
+            input.value = original; // revert
+            alert(err.message);
+        }
+    };
+    input.addEventListener("blur", commit);
+    input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); input.blur(); }
+        if (e.key === "Escape") { input.value = original; input.blur(); }
+    });
+    return input;
+}
+
+async function submitAddAuthProvider() {
+    const provider = $("#admin-auth-provider-type").value;
+    const label = $("#admin-auth-provider-label").value.trim();
+    const clientId = $("#admin-auth-provider-client-id").value.trim();
+    const clientSecret = $("#admin-auth-provider-client-secret").value;
+    if (!clientId) { alert("Client ID is required"); return; }
+    try {
+        await api.adminCreateAuthProvider({
+            provider,
+            label,
+            client_id: clientId,
+            client_secret: clientSecret,
+            enabled: true,
+        });
+        $("#admin-auth-provider-label").value = "";
+        $("#admin-auth-provider-client-id").value = "";
+        $("#admin-auth-provider-client-secret").value = "";
+        await refreshAdmin();
+    } catch (err) {
+        alert(err.message);
+    }
+}
+
+$("#admin-auth-provider-add").addEventListener("click", submitAddAuthProvider);
+$("#admin-auth-provider-client-secret").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); submitAddAuthProvider(); }
+});
 
 function renderList(sel, items, _kind, removeFn) {
     const ul = $(sel);

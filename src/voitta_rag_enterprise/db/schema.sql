@@ -196,3 +196,22 @@ CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state, priority DESC, id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_dedup_inflight
     ON jobs(dedup_key)
     WHERE dedup_key IS NOT NULL AND state IN ('queued', 'running');
+
+-- Admin-managed list of OAuth provider credentials. No uniqueness besides
+-- the primary key — two rows per provider are intentionally allowed.
+-- Login flow currently consumes only Google rows where enabled=1; the
+-- schema accepts microsoft/github values so the admin UI can list them
+-- without the back end going to read them.
+CREATE TABLE IF NOT EXISTS auth_providers (
+    id             INTEGER PRIMARY KEY,
+    provider       TEXT NOT NULL,                       -- "google" | "microsoft" | "github"
+    label          TEXT NOT NULL DEFAULT '',
+    client_id      TEXT NOT NULL,
+    client_secret  TEXT NOT NULL DEFAULT '',
+    enabled        INTEGER NOT NULL DEFAULT 1,
+    source         TEXT NOT NULL DEFAULT 'user',        -- "user" | "env"
+    created_at     INTEGER NOT NULL,
+    updated_at     INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_auth_providers_provider
+    ON auth_providers(provider, enabled);

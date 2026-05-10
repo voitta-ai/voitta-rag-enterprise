@@ -161,4 +161,13 @@ export const api = {
         req("PATCH", `/api/admin/users/${id}`, { is_admin }),
     adminImpersonate: (id) => req("POST", `/api/admin/impersonate/${id}`),
     adminStopImpersonate: () => req("DELETE", "/api/admin/impersonate"),
+
+    // Admin — auth providers (OAuth credentials catalog). Just a list;
+    // not wired into the login flow (yet).
+    adminListAuthProviders: () => req("GET", "/api/admin/auth-providers"),
+    adminCreateAuthProvider: (body) => req("POST", "/api/admin/auth-providers", body),
+    adminUpdateAuthProvider: (id, body) =>
+        req("PATCH", `/api/admin/auth-providers/${id}`, body),
+    adminDeleteAuthProvider: (id) => req("DELETE", `/api/admin/auth-providers/${id}`),
+    adminCheckAuthProvider: (id) => req("POST", `/api/admin/auth-providers/${id}/check`),
 };

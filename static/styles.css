@@ -1025,6 +1025,36 @@ input[type="text"], input[type="file"] {
     width: 80px;
 }
 .admin-add-user { margin-top: 8px; }
+
+/* Auth-provider section: a wider table (the actions column carries a
+   Check button + status pill + Delete) and an add-row that includes a
+   provider <select> alongside the inputs. The Actions column overrides
+   the global ``td:last-child {width:80px}`` rule because we need room
+   for the inline check status. */
+.admin-auth-providers { margin-top: 4px; }
+.admin-auth-providers .admin-table td:last-child {
+    width: auto;
+    text-align: left;
+}
+.admin-auth-providers .admin-table td input[type="text"] {
+    padding: 4px 8px;
+    border: 1px solid var(--color-border-light);
+    border-radius: 4px;
+    background: var(--color-bg);
+    color: var(--color-text);
+    font-size: 12px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+.admin-add-auth-provider { margin-top: 8px; }
+.admin-add-auth-provider select {
+    flex: 0 0 auto;
+    padding: 4px 8px;
+    font-size: 12px;
+    border: 1px solid var(--color-border-light);
+    border-radius: 4px;
+    background: var(--color-bg);
+    color: var(--color-text);
+}
 .admin-inline-check {
     display: inline-flex;
     align-items: center;
