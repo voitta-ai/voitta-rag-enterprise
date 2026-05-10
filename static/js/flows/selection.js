@@ -11,6 +11,8 @@
 // because tree rendering walks file paths. We keep them in a per-folder
 // Set so the tree builder can synthesise empty-dir nodes for them.
 
+import { scheduleFullRender } from "../render/render-loop.js";
+
 let _selectedFolderId = null;
 let _selectedRelDir = ""; // "" = folder root; otherwise "subdir/inner"
 
@@ -59,4 +61,12 @@ export function getGhostDirs() {
 export function addGhostDir(folderId, relDir) {
     if (!_ghostDirs.has(folderId)) _ghostDirs.set(folderId, new Set());
     _ghostDirs.get(folderId).add(relDir);
+}
+
+// Mutate selection + ask the render loop for a full pass. The render
+// loop will rebuild the tree, sidebar, and toolbar in a single rAF
+// callback so a click never rebuilds three times.
+export function selectNode(folderId, relDir) {
+    setSelection(folderId, relDir);
+    scheduleFullRender();
 }
