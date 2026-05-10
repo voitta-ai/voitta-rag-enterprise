@@ -48,6 +48,8 @@ def build_default_registry() -> ExporterRegistry:
     Each exporter adds a single line here when it lands.
     """
     from .docs import DocumentExporter
+    from .drawings import DrawingExporter
+    from .forms import FormExporter
     from .sheets import SpreadsheetExporter
     from .slides import PresentationExporter
 
@@ -55,6 +57,8 @@ def build_default_registry() -> ExporterRegistry:
     r.register(DocumentExporter())
     r.register(SpreadsheetExporter())
     r.register(PresentationExporter())
+    r.register(DrawingExporter())
+    r.register(FormExporter())
     return r
 
 
