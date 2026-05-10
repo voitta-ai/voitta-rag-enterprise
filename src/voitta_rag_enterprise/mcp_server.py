@@ -26,6 +26,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import re
 from contextvars import ContextVar
 from functools import lru_cache
 
@@ -51,6 +52,7 @@ from .services.embedding import (
     get_sparse_embedder,
     get_text_embedder,
 )
+from .services.file_classify import source_kind as classify_source_kind
 from .services.vector_store import (
     SearchHit,
 )
@@ -134,6 +136,15 @@ class FileInfo(BaseModel):
     # Unix epoch seconds of the last successful indexing pass. None
     # for files that have never reached state='indexed'.
     last_indexed_at: int | None = None
+    # Coarse classifier for an LLM that wants to branch on what kind of
+    # source this is — ``"google_doc"`` / ``"google_sheet"`` /
+    # ``"google_slides"`` / ``"google_form"`` / ``"google_drawing"`` for
+    # Drive exports (classified by source_url), and ``"pdf"`` / ``"docx"``
+    # / ``"pptx"`` / ``"xlsx"`` / ``"ipynb"`` / ``"markdown"`` / ``"text"``
+    # / ``"html"`` / ``"image"`` / ``"other"`` for everything else
+    # (classified by extension). See ``services/file_classify.py`` for
+    # the full table.
+    source_kind: str = "other"
 
 
 # Field-presence policy across every MCP response model: declared
@@ -167,6 +178,12 @@ class ChunkInfo(BaseModel):
     page: int | None = None
     pages: list[int] = Field(default_factory=list)
     layout: dict | None = None
+    # File-level provenance, mirrored onto every chunk hit so an LLM can
+    # deep-link to the canonical source (Google doc URL, GitHub raw URL,
+    # …) without a follow-up ``get_file`` call. ``source_kind`` is the
+    # same machine classifier carried on ``FileInfo``.
+    source_url: str | None = None
+    source_kind: str = "other"
 
 
 class ImageInfo(BaseModel):
@@ -193,6 +210,9 @@ class ImageInfo(BaseModel):
     # Per-page layout summary for the page this image sits on. None for
     # images that don't come from the PDF pipeline.
     layout: dict | None = None
+    # File-level provenance — see ChunkInfo for the rationale.
+    source_url: str | None = None
+    source_kind: str = "other"
 
 
 class PageImageInfo(BaseModel):
@@ -207,6 +227,9 @@ class PageImageInfo(BaseModel):
     width: int | None = None
     height: int | None = None
     mime: str | None = None
+    # File-level provenance — see ChunkInfo.
+    source_url: str | None = None
+    source_kind: str = "other"
 
 
 # ---------------------------------------------------------------------------
@@ -296,13 +319,13 @@ def search(
     user_id = _resolved_user_id()
     with session_scope() as s:
         effective = _mcp_search_folder_filter(s, user_id, folder_ids)
-    hits = vs_search_chunks(
-        dense=text_emb.embed_query(query),
-        sparse=sparse_emb.embed_query(query),
-        limit=limit,
-        folder_ids=effective,
-    )
-    return [_chunk_from_hit(h) for h in hits]
+        hits = vs_search_chunks(
+            dense=text_emb.embed_query(query),
+            sparse=sparse_emb.embed_query(query),
+            limit=limit,
+            folder_ids=effective,
+        )
+        return [_chunk_from_hit(h, session=s) for h in hits]
 
 
 @mcp.tool()
@@ -317,12 +340,12 @@ def search_images(
     user_id = _resolved_user_id()
     with session_scope() as s:
         effective = _mcp_search_folder_filter(s, user_id, folder_ids)
-    hits = vs_search_images(
-        vector=image_emb.embed_text(query),
-        limit=limit,
-        folder_ids=effective,
-    )
-    return [_image_from_hit(h) for h in hits]
+        hits = vs_search_images(
+            vector=image_emb.embed_text(query),
+            limit=limit,
+            folder_ids=effective,
+        )
+        return [_image_from_hit(h, session=s) for h in hits]
 
 
 @mcp.tool()
@@ -332,14 +355,7 @@ def get_file(file_id: int) -> dict:
         f = s.get(File, file_id)
         if f is None:
             raise ValueError(f"File {file_id} not found")
-        info = FileInfo(
-            id=f.id,
-            folder_id=f.folder_id,
-            rel_path=f.rel_path,
-            state=f.state,
-            source_url=f.source_url,
-            last_indexed_at=f.last_indexed_at,
-        )
+        info = _file_info(f)
         cas_id = f.file_cas_id
 
     text = ""
@@ -376,6 +392,8 @@ def get_chunk_range(
             raise ValueError(f"File {file_id} not found")
         file_cas_id = f.file_cas_id
         rel_path = f.rel_path
+        f_source_url = f.source_url
+        f_source_kind = classify_source_kind(f)
         rows = list(
             s.execute(
                 select(Chunk)
@@ -426,6 +444,8 @@ def get_chunk_range(
                 page=primary,
                 pages=pages,
                 layout=layout_summaries.get(primary) if primary else None,
+                source_url=f_source_url,
+                source_kind=f_source_kind,
             )
         )
     return out
@@ -433,7 +453,24 @@ def get_chunk_range(
 
 @mcp.tool()
 def get_chunk_images(chunk_id: int) -> list[ImageInfo]:
-    """Return the figure images linked to ``chunk_id`` (within the configured radius).
+    """Return the figure images linked to ``chunk_id``.
+
+    Three resolution paths, merged in priority order:
+
+    1. **Intra-file links** (PDF/DOCX/PPTX): the indexer creates
+       ``ChunkImageLink`` rows for every Image whose ``anchor_chunk`` is
+       within ``nearby_radius`` of this chunk. Same-file figures only.
+
+    2. **Cross-file markdown refs** (Google Workspace exports): the
+       Drive connector writes a slide thumbnail as a *sibling* File
+       row (``Pitch Deck/images/slide_12.png``) referenced from the
+       slide markdown as ``![](images/slide_12.png)``. The intra-file
+       linker can't see across File rows, so we re-resolve each
+       markdown image reference in the chunk text against the chunk
+       file's parent directory, look up the target File row, and
+       return its figures. No DB writes — the resolution is cheap
+       enough to do every query (one indexed lookup per reference,
+       and chunks typically carry 0-1).
 
     Page renders are not linked — fetch them via ``list_page_images`` /
     ``get_page_image`` instead.
@@ -443,7 +480,12 @@ def get_chunk_images(chunk_id: int) -> list[ImageInfo]:
         if chunk is None:
             raise ValueError(f"Chunk {chunk_id} not found")
         file = s.get(File, chunk.file_id)
-        rows = list(
+        chunk_text = chunk.text or ""
+
+        # (1) Intra-file links — the original path. ``score`` carries
+        # the chunk-image distance so the caller can prefer the
+        # tightest crops.
+        intra_rows = list(
             s.execute(
                 select(Image, ChunkImageLink.distance)
                 .join(ChunkImageLink, ChunkImageLink.image_id == Image.id)
@@ -451,21 +493,137 @@ def get_chunk_images(chunk_id: int) -> list[ImageInfo]:
                 .order_by(ChunkImageLink.distance)
             )
         )
-        return [
-            ImageInfo(
-                image_id=img.id,
-                file_id=img.file_id,
-                file_path=file.rel_path if file else "",
-                image_cas_id=img.image_cas_id,
-                page=img.page,
-                width=img.width,
-                height=img.height,
-                mime=img.mime,
-                kind=img.kind,
-                score=float(distance),
+        out: list[ImageInfo] = []
+        seen_image_ids: set[int] = set()
+        intra_url, intra_kind = _file_provenance(s, chunk.file_id)
+        for img, distance in intra_rows:
+            seen_image_ids.add(img.id)
+            out.append(
+                ImageInfo(
+                    image_id=img.id,
+                    file_id=img.file_id,
+                    file_path=file.rel_path if file else "",
+                    image_cas_id=img.image_cas_id,
+                    page=img.page,
+                    width=img.width,
+                    height=img.height,
+                    mime=img.mime,
+                    kind=img.kind,
+                    score=float(distance),
+                    source_url=intra_url,
+                    source_kind=intra_kind,
+                )
             )
-            for (img, distance) in rows
-        ]
+
+        # (2) Cross-file markdown image references. Only runs when the
+        # chunk actually contains a ``![...](...)`` token — cheap probe
+        # avoids work on the common PDF/DOCX path.
+        if file is not None and "![" in chunk_text:
+            for img, target in _resolve_cross_file_images(s, file, chunk_text):
+                if img.id in seen_image_ids:
+                    continue
+                seen_image_ids.add(img.id)
+                t_url, t_kind = _file_provenance(s, target.id)
+                out.append(
+                    ImageInfo(
+                        image_id=img.id,
+                        file_id=img.file_id,
+                        file_path=target.rel_path,
+                        image_cas_id=img.image_cas_id,
+                        page=img.page,
+                        width=img.width,
+                        height=img.height,
+                        mime=img.mime,
+                        kind=img.kind,
+                        # ``score`` is the chunk-image distance for the
+                        # intra-file path; cross-file refs aren't ranked,
+                        # so we use 0 ("direct reference") to keep the
+                        # field meaningful instead of None — the caller
+                        # naturally sorts these first.
+                        score=0.0,
+                        source_url=t_url,
+                        source_kind=t_kind,
+                    )
+                )
+        return out
+
+
+# Markdown image-syntax: ``![alt](path)``. We only care about the path;
+# alt text is discarded. URLs (``http(s)://...``) skipped — the linker
+# is for local sibling files written by the Drive connector, not for
+# arbitrary remote images that the LLM can't fetch through this server.
+_MD_IMAGE_REF = re.compile(r"!\[[^\]]*\]\(([^)\s]+)\)")
+
+
+def _resolve_cross_file_images(
+    session, chunk_file: File, chunk_text: str
+) -> list[tuple[Image, File]]:
+    """Resolve ``![alt](rel/path.png)`` references to sibling File rows.
+
+    Walks every markdown image reference in ``chunk_text``, resolves
+    each one against the chunk file's parent directory (i.e. the same
+    rule Markdown renderers use), looks up the corresponding File row
+    in the same folder, and returns its Image rows.
+
+    Returns ``[]`` when no references resolve — including when a
+    reference is absolute, a remote URL, points outside the folder
+    root, or names a file that exists on disk but hasn't been indexed
+    yet (image File row absent, or no Image rows on it).
+
+    De-duplicated by target file_id so a chunk that references the
+    same image twice produces one entry.
+    """
+    from pathlib import PurePosixPath
+
+    parent = PurePosixPath(chunk_file.rel_path).parent
+    seen_files: set[int] = set()
+    out: list[tuple[Image, File]] = []
+    for raw_ref in _MD_IMAGE_REF.findall(chunk_text):
+        # Skip remote URLs — only local sibling refs resolve.
+        if raw_ref.startswith(("http://", "https://", "//", "data:")):
+            continue
+        try:
+            joined = (parent / raw_ref).as_posix()
+        except (ValueError, OSError):
+            continue
+        # Normalize ``a/./b`` and ``a/../b``; reject ``..`` escapes
+        # that would walk above the folder root.
+        target_rel = PurePosixPath(joined)
+        parts = []
+        for p in target_rel.parts:
+            if p == "..":
+                if not parts:
+                    parts = None
+                    break
+                parts.pop()
+            elif p in ("", "."):
+                continue
+            else:
+                parts.append(p)
+        if parts is None:
+            continue
+        target_rel_path = "/".join(parts)
+        if not target_rel_path:
+            continue
+        target = session.execute(
+            select(File).where(
+                File.folder_id == chunk_file.folder_id,
+                File.rel_path == target_rel_path,
+            )
+        ).scalar_one_or_none()
+        if target is None or target.id in seen_files:
+            continue
+        seen_files.add(target.id)
+        images = list(
+            session.execute(
+                select(Image)
+                .where(Image.file_id == target.id, Image.kind == "figure")
+                .order_by(Image.image_index)
+            ).scalars()
+        )
+        for img in images:
+            out.append((img, target))
+    return out
 
 
 @mcp.tool()
@@ -510,6 +668,7 @@ def list_page_images(file_id: int) -> list[PageImageInfo]:
     page-rendering was enabled) return an empty list.
     """
     with session_scope() as s:
+        source_url, source_kind = _file_provenance(s, file_id)
         rows = list(
             s.execute(
                 select(Image)
@@ -525,6 +684,8 @@ def list_page_images(file_id: int) -> list[PageImageInfo]:
                 width=img.width,
                 height=img.height,
                 mime=img.mime,
+                source_url=source_url,
+                source_kind=source_kind,
             )
             for img in rows
         ]
@@ -698,17 +859,7 @@ def resolve_url(url: str) -> list[FileInfo]:
                     )
                 ).scalars()
             )
-        return [
-            FileInfo(
-                id=f.id,
-                folder_id=f.folder_id,
-                rel_path=f.rel_path,
-                state=f.state,
-                source_url=f.source_url,
-                last_indexed_at=f.last_indexed_at,
-            )
-            for f in rows
-        ]
+        return [_file_info(f) for f in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -716,11 +867,49 @@ def resolve_url(url: str) -> list[FileInfo]:
 # ---------------------------------------------------------------------------
 
 
-def _chunk_from_hit(h: SearchHit) -> ChunkInfo:
+def _file_info(file: File) -> FileInfo:
+    """Build a FileInfo with the classifier-derived ``source_kind`` filled in.
+
+    Centralized so adding a new field to the wire model is a single-site
+    change. The classifier is cheap (string-prefix match + dict lookup);
+    don't bother caching.
+    """
+    return FileInfo(
+        id=file.id,
+        folder_id=file.folder_id,
+        rel_path=file.rel_path,
+        state=file.state,
+        source_url=file.source_url,
+        last_indexed_at=file.last_indexed_at,
+        source_kind=classify_source_kind(file),
+    )
+
+
+def _file_provenance(session, file_id: int | None) -> tuple[str | None, str]:
+    """Fetch ``(source_url, source_kind)`` for ``file_id`` in one query.
+
+    Used by chunk/image hit builders to stamp file-level provenance
+    onto every wire row. Returns ``(None, "other")`` when the file row
+    is missing (e.g. stale Qdrant payload after a file deletion that
+    Qdrant hasn't propagated yet).
+    """
+    if file_id is None:
+        return (None, "other")
+    file = session.get(File, file_id)
+    if file is None:
+        return (None, "other")
+    return (file.source_url, classify_source_kind(file))
+
+
+def _chunk_from_hit(h: SearchHit, session=None) -> ChunkInfo:
     p = h.payload
+    file_id = int(p["file_id"])
+    source_url, source_kind = (None, "other")
+    if session is not None:
+        source_url, source_kind = _file_provenance(session, file_id)
     return ChunkInfo(
         chunk_id=int(p.get("chunk_id", h.id)),
-        file_id=int(p["file_id"]),
+        file_id=file_id,
         file_path=str(p.get("file_path", "")),
         chunk_index=int(p.get("chunk_index", 0)),
         text=str(p.get("text", "")),
@@ -729,24 +918,32 @@ def _chunk_from_hit(h: SearchHit) -> ChunkInfo:
         page=p.get("page"),
         pages=list(p.get("pages") or []),
         layout=_layout_from_payload(p),
+        source_url=source_url,
+        source_kind=source_kind,
     )
 
 
-def _image_from_hit(h: SearchHit) -> ImageInfo:
+def _image_from_hit(h: SearchHit, session=None) -> ImageInfo:
     """Build an ImageInfo from a Qdrant search hit. ``width`` / ``height``
     / ``mime`` are deliberately not populated: they live on the Image DB
     row, not in the Qdrant payload, and the search path doesn't read the
     DB. Callers that need them resolve via ``get_chunk_images`` /
     ``list_page_images`` — both of which read the DB and populate."""
     p = h.payload
+    file_id = int((p.get("file_ids") or [0])[0])
+    source_url, source_kind = (None, "other")
+    if session is not None:
+        source_url, source_kind = _file_provenance(session, file_id)
     return ImageInfo(
         image_id=int(p.get("image_id", h.id)),
-        file_id=int((p.get("file_ids") or [0])[0]),
+        file_id=file_id,
         file_path=str(p.get("file_path", "")),
         image_cas_id=str(p.get("image_cas_id", "")),
         page=p.get("page"),
         score=h.score,
         layout=_layout_from_payload(p),
+        source_url=source_url,
+        source_kind=source_kind,
     )
 
 

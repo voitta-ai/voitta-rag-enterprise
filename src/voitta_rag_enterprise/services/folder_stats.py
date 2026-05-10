@@ -16,55 +16,18 @@ folder id).
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..db.models import Chunk, File, Folder, Image
 from . import events
+from .file_classify import bucket_label
 from .reconcile import folder_health
 
 logger = logging.getLogger(__name__)
 
 _IN_PROGRESS_STATES = ("extracted", "embedding")
-
-
-# Workspace-file classification.
-#
-# Google Docs/Sheets/Slides/Forms get exported by the Drive connector as
-# markdown (and PNG for Drawings/Slides thumbnails); on disk they're
-# indistinguishable from any other .md / .png. From the user's
-# perspective they're a kind of *file*, not a markdown blob — they want
-# to see "47 Google Docs" alongside ".pdf" / ".pptx" in the by-extension
-# table, not 200 mystery markdown rows.
-#
-# We classify by ``source_url`` (set on the File row by the connector).
-# The URL prefixes are stable Google-side and live in this module
-# because folder_stats is the only consumer that needs the bucketing —
-# the parser path doesn't care, the file row carries the URL verbatim.
-_WORKSPACE_URL_BUCKETS: tuple[tuple[str, str], ...] = (
-    ("https://docs.google.com/document/", "Google Doc"),
-    ("https://docs.google.com/spreadsheets/", "Google Sheet"),
-    ("https://docs.google.com/presentation/", "Google Slides"),
-    ("https://docs.google.com/forms/", "Google Form"),
-    ("https://docs.google.com/drawings/", "Google Drawing"),
-)
-
-
-def _file_bucket(file: File) -> str:
-    """Return the by-extension bucket key for a file.
-
-    Google Workspace exports get their own bucket so the sidebar shows
-    "Google Doc" as a first-class type instead of lumping it under .md.
-    Everything else uses the suffix lowercased (``(no ext)`` for files
-    without one), preserving the historic format of this map.
-    """
-    if file.source_url:
-        for prefix, label in _WORKSPACE_URL_BUCKETS:
-            if file.source_url.startswith(prefix):
-                return label
-    return Path(file.rel_path).suffix.lower() or "(no ext)"
 
 
 def compute_folder_stats(session: Session, folder: Folder) -> dict:
@@ -100,7 +63,7 @@ def compute_folder_stats(session: Session, folder: Folder) -> dict:
 
     by_extension: dict[str, dict[str, int]] = {}
     for f in files:
-        ext = _file_bucket(f)
+        ext = bucket_label(f)
         es = by_extension.setdefault(
             ext,
             {

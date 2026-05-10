@@ -328,3 +328,115 @@ def test_get_file_pre_extraction_returns_empty_text(env: None, tmp_path: Path) -
     out = get_file(fid)
     assert out["text"] == ""
     assert out["file"]["state"] == "pending"
+
+
+# ---------------------------------------------------------------------------
+# source_kind / source_url plumbing through every response shape
+# ---------------------------------------------------------------------------
+
+
+def test_get_file_carries_source_kind_for_workspace(env: None, tmp_path: Path) -> None:
+    """A Drive-synced Google Doc gets ``source_kind='google_doc'`` so an
+    LLM can branch on what kind of source it's looking at."""
+    _seed_and_index(tmp_path / "drive", {"Project/01-Intro.md": "alpha"})
+    with session_scope() as s:
+        f = s.execute(select(File)).scalar_one()
+        f.source_url = "https://docs.google.com/document/d/abc/edit"
+        s.commit()
+        fid = f.id
+    out = get_file(fid)
+    assert out["file"]["source_kind"] == "google_doc"
+    assert out["file"]["source_url"].startswith("https://docs.google.com/document/")
+
+
+def test_search_hits_carry_file_provenance(env: None, tmp_path: Path) -> None:
+    """Every chunk hit ships ``source_url`` + ``source_kind`` so the LLM
+    doesn't need a follow-up ``get_file`` to deep-link to the Google
+    doc."""
+    _seed_and_index(tmp_path / "drive", {"Project/01-Intro.md": "alpha beta gamma"})
+    with session_scope() as s:
+        f = s.execute(select(File)).scalar_one()
+        f.source_url = "https://docs.google.com/document/d/abc/edit"
+        s.commit()
+    hits = search("alpha")
+    assert hits
+    h = hits[0]
+    assert h.source_kind == "google_doc"
+    assert h.source_url == "https://docs.google.com/document/d/abc/edit"
+
+
+# ---------------------------------------------------------------------------
+# Cross-file image resolution for Google Drive exports
+# ---------------------------------------------------------------------------
+
+
+def test_get_chunk_images_resolves_cross_file_markdown_refs(
+    env: None, tmp_path: Path,
+) -> None:
+    """The Drive connector writes a slide thumbnail as a sibling File
+    row, referenced from the slide's markdown as ``![](images/x.png)``.
+    The intra-file linker can't see across File rows, so this used to
+    return ``[]``. With the cross-file resolver, the slide's chunk
+    surfaces the thumbnail Image row."""
+    folder_id = _seed_and_index(
+        tmp_path / "deck",
+        {
+            "Pitch/12-Slide 12.md": "# Slide 12\n\n![](images/slide_12.png)\n\nbody",
+            "Pitch/images/slide_12.png": _png(),
+        },
+    )
+
+    # Resolve ids. The slide markdown and its thumbnail image File row
+    # were both indexed in the seed pass.
+    with session_scope() as s:
+        chunk = s.execute(
+            select(Chunk).join(File, Chunk.file_id == File.id)
+            .where(File.rel_path == "Pitch/12-Slide 12.md")
+        ).scalar_one()
+        thumbnail_img = s.execute(
+            select(Image).join(File, Image.file_id == File.id)
+            .where(File.rel_path == "Pitch/images/slide_12.png")
+        ).scalar_one()
+        chunk_id = chunk.id
+        thumbnail_image_id = thumbnail_img.id
+
+    images = get_chunk_images(chunk_id)
+    # The slide thumbnail must surface despite living in a different
+    # File row from the chunk.
+    image_ids = {i.image_id for i in images}
+    assert thumbnail_image_id in image_ids
+    # Cross-file refs are stamped score=0.0 ("direct reference") to
+    # distinguish them from intra-file links that carry chunk distance.
+    resolved = next(i for i in images if i.image_id == thumbnail_image_id)
+    assert resolved.score == 0.0
+    # And the resolved entry knows it points at the *other* file.
+    assert resolved.file_path == "Pitch/images/slide_12.png"
+
+
+def test_get_chunk_images_skips_remote_urls(env: None, tmp_path: Path) -> None:
+    """``![](https://example.com/foo.png)`` must not trigger a DB
+    lookup; only sibling-local refs resolve."""
+    _seed_and_index(
+        tmp_path / "deck",
+        {"a.md": "# Title\n\n![alt](https://example.com/foo.png)"},
+    )
+    with session_scope() as s:
+        chunk = s.execute(select(Chunk)).scalar_one()
+        chunk_id = chunk.id
+    assert get_chunk_images(chunk_id) == []
+
+
+def test_get_chunk_images_handles_dotdot_safely(env: None, tmp_path: Path) -> None:
+    """A markdown ref escaping the folder root must not resolve. We
+    normalize ``..`` and reject any path that walks above the file's
+    parent dir."""
+    _seed_and_index(
+        tmp_path / "deck",
+        {"a/b/c.md": "![](../../../etc/passwd)"},
+    )
+    with session_scope() as s:
+        chunk = s.execute(select(Chunk)).scalar_one()
+        chunk_id = chunk.id
+    # No match: even if the path normalized cleanly, no such File row
+    # exists. The contract is "no exception, empty result".
+    assert get_chunk_images(chunk_id) == []

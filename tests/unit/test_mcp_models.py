@@ -44,13 +44,17 @@ def test_chunkinfo_emits_every_field_with_defaults() -> None:
     assert set(d.keys()) == {
         "chunk_id", "file_id", "file_path", "chunk_index", "text",
         "nearby_image_ids", "score", "page", "pages", "layout",
+        "source_url", "source_kind",
     }
-    # Defaults: empty list for collections, None for scalars.
+    # Defaults: empty list for collections, None for scalars, "other"
+    # for the source_kind classifier when no provenance was passed in.
     assert d["nearby_image_ids"] == []
     assert d["pages"] == []
     assert d["score"] is None
     assert d["page"] is None
     assert d["layout"] is None
+    assert d["source_url"] is None
+    assert d["source_kind"] == "other"
 
 
 def test_chunkinfo_keeps_real_values() -> None:
@@ -75,9 +79,11 @@ def test_imageinfo_emits_every_field_with_defaults() -> None:
     assert set(d.keys()) == {
         "image_id", "file_id", "file_path", "image_cas_id",
         "page", "width", "height", "mime", "kind", "score", "layout",
+        "source_url", "source_kind",
     }
     assert d["kind"] == "figure"  # explicit default
-    for k in ("page", "width", "height", "mime", "score", "layout"):
+    assert d["source_kind"] == "other"
+    for k in ("page", "width", "height", "mime", "score", "layout", "source_url"):
         assert d[k] is None
 
 
@@ -97,16 +103,22 @@ def test_imageinfo_keeps_real_values() -> None:
 def test_fileinfo_emits_every_field_with_defaults() -> None:
     d = FileInfo(id=1, folder_id=2, rel_path="a.md", state="indexed").model_dump()
     assert set(d.keys()) == {
-        "id", "folder_id", "rel_path", "state", "source_url", "last_indexed_at",
+        "id", "folder_id", "rel_path", "state",
+        "source_url", "last_indexed_at", "source_kind",
     }
     assert d["source_url"] is None
     assert d["last_indexed_at"] is None
+    assert d["source_kind"] == "other"
 
 
 def test_pageimageinfo_emits_every_field_with_defaults() -> None:
     d = PageImageInfo(image_id=1, file_id=2, page=1).model_dump()
-    assert set(d.keys()) == {"image_id", "file_id", "page", "width", "height", "mime"}
-    for k in ("width", "height", "mime"):
+    assert set(d.keys()) == {
+        "image_id", "file_id", "page", "width", "height", "mime",
+        "source_url", "source_kind",
+    }
+    assert d["source_kind"] == "other"
+    for k in ("width", "height", "mime", "source_url"):
         assert d[k] is None
 
 
