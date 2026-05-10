@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
+import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -51,6 +53,71 @@ FINGERPRINT_SUFFIX = "-->"
 # through to view the chunk's image. ``MEDIUM`` is ~800px (smaller
 # cache footprint) but loses fine print on dense slides.
 THUMBNAIL_SIZE = "LARGE"
+
+
+# Google's Slides API caps ``getThumbnail`` at 60 "expensive read"
+# requests per minute per user. A single 134-slide deck blows past that
+# in under a minute, after which every subsequent thumbnail returns 429
+# and the producer fails. We throttle to a value comfortably below the
+# cap so a deck-after-deck sync stays inside one user's quota window
+# even when the previous deck just exhausted it.
+SLIDES_THUMBNAIL_RPM = 50
+
+
+class _RateLimiter:
+    """Process-wide token bucket: at most ``rate`` calls per ``period`` seconds.
+
+    Why a bucket instead of a simple sleep-between-calls: a bucket lets
+    bursty traffic happen freely until the cap, then queues the
+    over-cap callers so the average rate stays under ``rate / period``.
+    Empirically this is what the user perceives as "the first deck
+    runs fast, only the long ones slow down".
+
+    Single instance shared across :class:`PresentationExporter`
+    invocations because the quota is per-user, not per-deck. ``threading.Lock``
+    protects the timestamp deque from concurrent download-pool workers.
+    """
+
+    def __init__(self, rate: int, period: float = 60.0) -> None:
+        self.rate = rate
+        self.period = period
+        self._lock = threading.Lock()
+        # Sliding window: timestamps (monotonic) of the last ``rate``
+        # acquired tokens. Older than ``period`` ago = expired.
+        self._stamps: list[float] = []
+
+    def acquire(self) -> None:
+        """Block until a token is available, then record the call."""
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                cutoff = now - self.period
+                # Drop expired timestamps.
+                while self._stamps and self._stamps[0] < cutoff:
+                    self._stamps.pop(0)
+                if len(self._stamps) < self.rate:
+                    self._stamps.append(now)
+                    return
+                # We're full. Sleep until the oldest stamp expires + a
+                # tiny epsilon so the next acquire isn't right on the
+                # boundary (Google's window cutoff isn't perfectly
+                # synced with ours; a 100ms cushion eliminates the
+                # last few stragglers we saw in testing).
+                wait = self._stamps[0] + self.period + 0.1 - now
+            if wait > 0:
+                time.sleep(wait)
+
+
+# Single shared limiter — Google's per-user quota means concurrent
+# decks contend for the same window. ``module-private`` so tests can
+# reach in and reset it.
+_thumbnail_limiter = _RateLimiter(SLIDES_THUMBNAIL_RPM, period=60.0)
+
+
+def _reset_thumbnail_limiter_for_tests(rate: int = SLIDES_THUMBNAIL_RPM, period: float = 60.0) -> None:
+    """Test hook: rebuild the shared limiter with custom params."""
+    global _thumbnail_limiter
+    _thumbnail_limiter = _RateLimiter(rate, period)
 
 
 class PresentationExporter(NativeDriveExporter):
@@ -265,6 +332,11 @@ def _make_thumbnail_producer(
     """
 
     def _produce(dest: Path, drive: Any, ctx: ProducerContext) -> None:  # noqa: ARG001
+        # Block until the per-user quota window has room. Google's
+        # 'expensive read' counter ticks before we even get a 429
+        # response, so the bucket has to gate the API call (not the
+        # httpx GET on contentUrl, which is free).
+        _thumbnail_limiter.acquire()
         slides = ctx.slides()
         resp = (
             slides.presentations()

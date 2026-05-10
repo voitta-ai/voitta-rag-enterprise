@@ -452,3 +452,95 @@ def test_thumbnail_producer_raises_without_content_url(tmp_path: Path) -> None:
             drive=None,
             ctx=_producer_ctx(tmp_path, deck=deck, thumbnails=thumbnails),
         )
+
+
+# ---------------------------------------------------------------------------
+# Rate limiter
+# ---------------------------------------------------------------------------
+
+
+def test_rate_limiter_allows_under_cap() -> None:
+    """``rate`` calls inside one period don't block."""
+    import time as _time
+
+    from voitta_rag_enterprise.services.sync.google_workspace_exporters.slides import (
+        _RateLimiter,
+    )
+
+    limiter = _RateLimiter(rate=5, period=60.0)
+    started = _time.monotonic()
+    for _ in range(5):
+        limiter.acquire()
+    elapsed = _time.monotonic() - started
+    assert elapsed < 0.1, f"5 acquisitions under cap took {elapsed:.3f}s"
+
+
+def test_rate_limiter_blocks_over_cap_until_window_slides() -> None:
+    """The (rate+1)th call within ``period`` waits until the oldest
+    timestamp expires. We use a tiny window so the test is fast."""
+    import time as _time
+
+    from voitta_rag_enterprise.services.sync.google_workspace_exporters.slides import (
+        _RateLimiter,
+    )
+
+    # 3 calls per 0.5s — 4th must wait ~0.5s.
+    limiter = _RateLimiter(rate=3, period=0.5)
+    started = _time.monotonic()
+    for _ in range(4):
+        limiter.acquire()
+    elapsed = _time.monotonic() - started
+    # The 4th acquire blocks until the 1st timestamp expires (~0.5s + 0.1s
+    # cushion). Assert at least 0.4s to leave wiggle room for clock skew.
+    assert elapsed >= 0.4, f"4 acquisitions over cap took only {elapsed:.3f}s"
+    # And not absurdly long — we should be under 1s.
+    assert elapsed < 1.5, f"unexpected long block: {elapsed:.3f}s"
+
+
+def test_thumbnail_producer_acquires_a_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The producer must call ``_thumbnail_limiter.acquire()`` — without
+    that hook the per-user 60/min quota gets exhausted on big decks."""
+    calls: list[None] = []
+
+    import voitta_rag_enterprise.services.sync.google_workspace_exporters.slides as _slides
+
+    monkeypatch.setattr(
+        _slides._thumbnail_limiter, "acquire", lambda: calls.append(None),
+    )
+    # Stub the actual http get since we don't care about bytes here.
+    class _MockClient:
+        def __init__(self, *a, **k) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return None
+
+        def get(self, url: str) -> httpx.Response:
+            return httpx.Response(200, content=b"PNG", request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(_slides.httpx, "Client", _MockClient)
+
+    deck = {"slides": [_slide("p1", [_shape("T", placeholder="TITLE")])]}
+    thumbnails = {("deck1", "p1"): {"contentUrl": "https://example/x"}}
+    entry = next(
+        e
+        for e in PresentationExporter().export(
+            _drive_item("deck1", "Pitch"),
+            "Pitch",
+            _ctx(tmp_path, deck=deck, thumbnails=thumbnails),
+        )
+        if e.rel_path.endswith(".png")
+    )
+    dest = tmp_path / entry.rel_path
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    entry.producer(
+        dest,
+        drive=None,
+        ctx=_producer_ctx(tmp_path, deck=deck, thumbnails=thumbnails),
+    )
+    assert len(calls) == 1, "thumbnail producer must acquire one token"
