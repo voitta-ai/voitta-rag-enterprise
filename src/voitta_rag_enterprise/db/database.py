@@ -38,6 +38,13 @@ def get_engine() -> Engine:
             # PDF), and the watcher thread that races a fresh-file INSERT
             # into the same window otherwise hits "database is locked".
             connect_args={"check_same_thread": False, "timeout": 30},
+            # Pool sizing — see Settings.db_pool_* for the rationale.
+            # Default SQLAlchemy QueuePool is 5+10 which is too small for
+            # our watcher/worker/REST/WS concurrency under any real load.
+            pool_size=settings.db_pool_size,
+            max_overflow=settings.db_pool_max_overflow,
+            pool_recycle=settings.db_pool_recycle_seconds,
+            pool_pre_ping=settings.db_pool_pre_ping,
             future=True,
         )
         _register_pragmas(_engine)

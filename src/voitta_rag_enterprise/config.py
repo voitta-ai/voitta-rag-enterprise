@@ -175,6 +175,25 @@ class Settings(BaseSettings):
     # voitta-rag app uses; tune via env when stricter rotation is needed.
     session_max_age_seconds: int = 60 * 60 * 24 * 30
 
+    # SQLAlchemy connection pool sizing. Defaults (5 / 10) are SQLAlchemy's
+    # baked-in QueuePool defaults — too small for our profile, which races
+    # the watcher (1–2 sessions per disk event), the worker pool, REST
+    # handlers, and WS-driven refreshes against the same pool. A fresh sync
+    # that lands ~800 files exhausted 15 connections in production.
+    # 30/60 = up to 90 concurrent connections; SQLite + WAL handles that
+    # many readers cheaply (file-descriptor cost only — writes still
+    # serialize through busy_timeout). Tune via VOITTA_DB_POOL_* env.
+    db_pool_size: int = 30
+    db_pool_max_overflow: int = 60
+    # Recycle idle pool connections so a long-lived read transaction isn't
+    # left pinning the WAL from a checkpoint indefinitely. 30 min is short
+    # enough that a stuck reader can't keep the WAL ballooning, long
+    # enough that connection turnover stays cheap.
+    db_pool_recycle_seconds: int = 1800
+    # Pre-ping silently replaces a connection that's been killed
+    # underneath us (rare on SQLite, but free insurance).
+    db_pool_pre_ping: bool = True
+
     # Test/dev override: when true, the lifespan does not start the watcher
     # or the worker pool. Production leaves this false.
     disable_background: bool = False
