@@ -227,6 +227,14 @@ class GoogleDriveSyncStats:
     files_updated: int = 0
     files_removed: int = 0
     files_skipped: int = 0  # matched VOITTA_IGNORE_PATTERNS at enumerate time
+    # Files Drive listed but refused to serve at download time (404).
+    # Common causes: file trashed / permission revoked / metadata stale
+    # between ``files.list`` and ``files.get_media``. Tracked separately
+    # from ``errors`` because the sync itself succeeded — these are
+    # operational gaps in Drive, not failures the user can fix from
+    # this modal. Logged once, surfaced in the log/stats line, and the
+    # modal stays clean of them.
+    files_404: int = 0
     tabs_written: int = 0
     errors: list[str] = field(default_factory=list)
 
@@ -236,6 +244,7 @@ class GoogleDriveSyncStats:
             "files_updated": self.files_updated,
             "files_removed": self.files_removed,
             "files_skipped": self.files_skipped,
+            "files_404": self.files_404,
             "tabs_written": self.tabs_written,
             "errors": self.errors,
         }
@@ -930,17 +939,24 @@ class GoogleDriveConnector:
 
         def _materialize_one(
             entry: RemoteEntry,
-        ) -> tuple[RemoteEntry, bool, bool, str | None]:
+        ) -> tuple[RemoteEntry, bool, bool, str | None, bool]:
             """Run the producer for one entry off the main thread.
 
-            Returns ``(entry, was_unchanged, existed_before, error)``. We
-            keep stats + sidecar mutation on the main thread (single-
-            threaded as ``as_completed`` drains) to avoid a lock.
+            Returns ``(entry, was_unchanged, existed_before, error,
+            is_404)``. We keep stats + sidecar mutation on the main
+            thread (single-threaded as ``as_completed`` drains) to
+            avoid a lock.
+
+            ``is_404=True`` flags Drive's "we listed it, won't serve
+            it" race so the caller can route to ``stats.files_404``
+            instead of the user-facing ``stats.errors``. Common
+            triggers: file trashed / unshared / metadata stale
+            between ``files.list`` and ``files.get_media``.
             """
             local = folder_root / entry.rel_path
             local.parent.mkdir(parents=True, exist_ok=True)
             if self._is_unchanged(local, entry):
-                return entry, True, False, None
+                return entry, True, False, None, False
             existed_before = local.exists()
             try:
                 entry.producer(
@@ -949,17 +965,27 @@ class GoogleDriveConnector:
                     _build_dl_producer_ctx(),
                 )
             except Exception as e:
+                if _is_drive_404(e):
+                    # Don't pollute the modal's error block — log once
+                    # at info level and bucket separately.
+                    logger.info(
+                        "Drive 404 (file vanished between list/get): %s",
+                        entry.rel_path,
+                    )
+                    return entry, False, existed_before, None, True
                 logger.exception("Drive download failed: %s", entry.rel_path)
-                return entry, False, existed_before, str(e)
-            return entry, False, existed_before, None
+                return entry, False, existed_before, str(e), False
+            return entry, False, existed_before, None, False
 
         with ThreadPoolExecutor(
             max_workers=8, thread_name_prefix="gd-dl"
         ) as pool:
             futures = [pool.submit(_materialize_one, e) for e in entries]
             for i, fut in enumerate(as_completed(futures), start=1):
-                entry, was_unchanged, existed_before, err = fut.result()
-                if err is not None:
+                entry, was_unchanged, existed_before, err, is_404 = fut.result()
+                if is_404:
+                    stats.files_404 += 1
+                elif err is not None:
                     stats.errors.append(f"{entry.rel_path}: {err}")
                 else:
                     self._record_sidecar(sidecar, entry)
@@ -1251,6 +1277,21 @@ def _atomic_stream_download(downloader_factory: Any, dest: Path) -> None:
         with suppress(OSError):
             tmp.unlink(missing_ok=True)
         raise
+
+
+def _is_drive_404(error: BaseException) -> bool:
+    """True iff ``error`` is a Drive HttpError with status 404.
+
+    Used to bucket "Drive listed the file but won't serve its bytes"
+    races into ``stats.files_404`` so they don't pollute the user-
+    facing ``stats.errors`` block. We accept the exception by
+    duck-type rather than ``isinstance(HttpError, …)`` because
+    googleapiclient is heavy to import on cold paths and the
+    ``resp.status`` attribute is the only thing we read.
+    """
+    resp = getattr(error, "resp", None)
+    status_code = getattr(resp, "status", None)
+    return status_code == 404
 
 
 def _download_to(drive: Any, file_id: str, dest: Path) -> None:

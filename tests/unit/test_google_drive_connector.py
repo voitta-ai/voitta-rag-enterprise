@@ -1060,6 +1060,111 @@ async def test_progress_callback_failures_dont_break_sync(
     assert (tmp_path / "root" / "Root" / "note.txt").read_bytes() == b"hello"
 
 
+def test_is_drive_404_recognises_httperror_404() -> None:
+    """``_is_drive_404`` is the routing key between user-facing errors
+    and the silent ``files_404`` bucket. False positives here would
+    swallow real failures."""
+    from googleapiclient.errors import HttpError
+    from httplib2 import Response
+
+    from voitta_rag_enterprise.services.sync.google_drive import _is_drive_404
+
+    def _http_error(status: int) -> HttpError:
+        resp = Response({"status": status})
+        resp.status = status
+        return HttpError(resp, b'{"error": {"code": ' + str(status).encode() + b'}}')
+
+    assert _is_drive_404(_http_error(404)) is True
+    # Don't bucket other 4xx as 404 — those are real errors.
+    assert _is_drive_404(_http_error(403)) is False
+    assert _is_drive_404(_http_error(500)) is False
+    # Random non-HttpError exceptions never look like 404s.
+    assert _is_drive_404(RuntimeError("boom")) is False
+
+
+@pytest.mark.asyncio
+async def test_404_on_download_routes_to_files_404_not_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: Drive lists a file then 404s on get_media. The
+    failure must NOT land in ``stats.errors`` (which the SPA renders
+    in the red error block) — it goes into ``stats.files_404`` so
+    operators see one summary count instead of N error bullets."""
+    from googleapiclient.errors import HttpError
+    from httplib2 import Response
+
+    listings = {
+        "ROOT": [
+            {
+                "id": "ghost",
+                "name": "vanished.txt",
+                "mimeType": "application/octet-stream",
+                "size": "100",
+                "modifiedTime": "2026-05-10T00:00:00Z",
+                "md5Checksum": "abc",
+                "webViewLink": "https://drive.google.com/file/d/ghost/view",
+            },
+            {
+                "id": "alive",
+                "name": "kept.txt",
+                "mimeType": "application/octet-stream",
+                "size": "5",
+                "modifiedTime": "2026-05-10T00:00:00Z",
+                "md5Checksum": "def",
+                "webViewLink": "https://drive.google.com/file/d/alive/view",
+            },
+        ]
+    }
+    drive = _FakeDrive(
+        _FakeFiles(
+            listings,
+            export_payloads={},
+            download_payloads={"alive": b"hello"},
+        )
+    )
+
+    # Wrap MediaIoBaseDownload to raise 404 on the ghost file. The
+    # autouse fixture would otherwise install our happy-path fake; we
+    # override it for this one test.
+    class _SelectiveDownloader:
+        def __init__(self, fh, request: _FakeMediaRequest) -> None:
+            self._fh = fh
+            self._req = request
+
+        def next_chunk(self):
+            if self._req._body == b"":
+                resp = Response({"status": 404})
+                resp.status = 404
+                raise HttpError(resp, b'{"error": {"code": 404}}')
+            if self._req._consumed:
+                return None, True
+            self._fh.write(self._req._body)
+            self._req._consumed = True
+            return None, True
+
+    # Empty body for ``ghost`` triggers the 404 branch above.
+    drive._files._download_payloads["ghost"] = b""
+
+    import googleapiclient.http as _ghttp
+
+    monkeypatch.setattr(_ghttp, "MediaIoBaseDownload", _SelectiveDownloader)
+
+    connector = GoogleDriveConnector()
+    _patch_services(connector, drive, _FakeDocs({}), monkeypatch)
+
+    stats = await connector.sync(
+        folder_root=tmp_path / "root",
+        auth=_make_auth(),
+        drive_folders=[{"id": "ROOT", "name": "Root"}],
+    )
+    assert stats.files_404 == 1, f"expected 1 404, got {stats.files_404}"
+    # Critical: 404s must NOT bleed into stats.errors (which the SPA
+    # surfaces as a red block in the sync modal).
+    assert stats.errors == [], f"unexpected error entries: {stats.errors}"
+    # The other file synced cleanly.
+    assert (tmp_path / "root" / "Root" / "kept.txt").read_bytes() == b"hello"
+
+
 def test_folders_field_round_trip() -> None:
     from voitta_rag_enterprise.services.sync.google_drive import (
         coerce_folders_field,
