@@ -1,6 +1,8 @@
 // SPA entry point. Folder-list driven, with a selection-aware sidebar.
 
 import { api } from "./api.js";
+import { reconcileChildren, setIfChanged } from "./dom/reconcile.js";
+import { buildSwitch } from "./dom/switch.js";
 import { connStatus, files, folders, folderStats, jobs, reindexProgress, syncProgress } from "./store.js";
 import { connect } from "./ws.js";
 
@@ -267,28 +269,6 @@ function summariseSubtree(node, folderActive) {
 
 // ---------- Tree rendering ----------
 
-// Build a small iOS-style toggle switch. ``onChange(nextChecked)`` runs in
-// response to the underlying input firing — we stop propagation so clicking
-// the switch doesn't also select the folder row.
-function buildSwitch({ checked, disabled, title, onChange }) {
-    const wrap = document.createElement("label");
-    wrap.className = "folder-switch";
-    wrap.title = title || "";
-    wrap.addEventListener("click", (e) => e.stopPropagation());
-
-    const input = document.createElement("input");
-    input.type = "checkbox";
-    input.checked = !!checked;
-    input.disabled = !!disabled;
-    input.addEventListener("change", () => onChange(input.checked));
-
-    const track = document.createElement("span");
-    track.className = "track";
-
-    wrap.append(input, track);
-    return wrap;
-}
-
 async function toggleFolderActive(folder, active) {
     try {
         const updated = await api.setFolderActive(folder.id, active);
@@ -459,10 +439,6 @@ function onRowClick(e) {
     selectNode(Number(li.dataset.folderId), li.dataset.relDir || "");
 }
 
-function setIfChanged(el, prop, value) {
-    if (el[prop] !== value) el[prop] = value;
-}
-
 function updateTreeRow(li, { folder, displayName, depth, isOpen, hasChildren, isSelected, summary, sharedReadonly }) {
     const r = li._refs;
     const baseClass = li._isRoot ? "tree-row folder-root" : "tree-row dir";
@@ -560,32 +536,6 @@ function updateFileRow(li, { file, depth }) {
     if (r.tag.title !== tagTitle) r.tag.title = tagTitle;
 }
 
-// Align ``ul``'s children with ``targetRows`` order without unnecessary
-// moves. A node already at the right position stays put — its :hover
-// state and any in-flight click survive intact.
-function reconcileChildren(ul, targetRows, seenKeys) {
-    let cursor = ul.firstChild;
-    for (const li of targetRows) {
-        if (li === cursor) {
-            cursor = cursor.nextSibling;
-        } else {
-            ul.insertBefore(li, cursor);
-            // li is now where cursor was; cursor still points at the same
-            // logical "next" element (which moved one slot forward).
-        }
-    }
-    while (cursor) {
-        const next = cursor.nextSibling;
-        cursor.remove();
-        cursor = next;
-    }
-    // Drop cache entries that didn't appear in this render so the cache
-    // tracks the live DOM exactly.
-    for (const k of [...rowCache.keys()]) {
-        if (!seenKeys.has(k)) rowCache.delete(k);
-    }
-}
-
 function ensureEmptyRow() {
     let el = rowCache.get("empty");
     if (!el) {
@@ -604,7 +554,7 @@ function renderFolders(list) {
     const sorted = [...list].sort((a, b) => a.id - b.id);
     if (sorted.length === 0) {
         const seenKeys = new Set(["empty"]);
-        reconcileChildren(ul, [ensureEmptyRow()], seenKeys);
+        reconcileChildren(ul, [ensureEmptyRow()], seenKeys, rowCache);
         return;
     }
     rowCache.delete("empty");
@@ -628,7 +578,7 @@ function renderFolders(list) {
             folderActive: activeFolders.has(folder.id),
         });
     }
-    reconcileChildren(ul, targetRows, seenKeys);
+    reconcileChildren(ul, targetRows, seenKeys, rowCache);
 }
 
 function emitTreeRow({ targetRows, seenKeys, folder, node, relDir, displayName, depth, isRoot, folderActive }) {
@@ -1008,22 +958,7 @@ function renderExtTable(s) {
         seenKeys.add(ext);
     }
 
-    let cursor = extTbody.firstChild;
-    for (const tr of targetRows) {
-        if (tr === cursor) {
-            cursor = cursor.nextSibling;
-        } else {
-            extTbody.insertBefore(tr, cursor);
-        }
-    }
-    while (cursor) {
-        const next = cursor.nextSibling;
-        cursor.remove();
-        cursor = next;
-    }
-    for (const ext of [...extRowCache.keys()]) {
-        if (!seenKeys.has(ext)) extRowCache.delete(ext);
-    }
+    reconcileChildren(extTbody, targetRows, seenKeys, extRowCache);
 }
 
 function humanBytes(n) {
@@ -1137,22 +1072,7 @@ function renderJobs() {
         seenKeys.add(key);
     }
 
-    let cursor = ul.firstChild;
-    for (const li of targetRows) {
-        if (li === cursor) {
-            cursor = cursor.nextSibling;
-        } else {
-            ul.insertBefore(li, cursor);
-        }
-    }
-    while (cursor) {
-        const next = cursor.nextSibling;
-        cursor.remove();
-        cursor = next;
-    }
-    for (const k of [...jobRowCache.keys()]) {
-        if (!seenKeys.has(k)) jobRowCache.delete(k);
-    }
+    reconcileChildren(ul, targetRows, seenKeys, jobRowCache);
 }
 
 // ----- Toolbar / sidebar actions -----
