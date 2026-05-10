@@ -1,119 +1,90 @@
-"""``ChunkInfo`` / ``ImageInfo`` JSON shape — drop empty PDF-only fields.
+"""MCP response models — every declared field appears on the wire.
 
-The layout/page/nearby-image fields exist on the response models so PDF
-search results carry them, but every other parser leaves them empty.
-We exclude them from ``model_dump`` output so a markdown / code / docx
-chunk's response is clean.
+The previous version of these models stripped null/empty PDF-specific
+fields from ``model_dump`` while leaving the JSONSchema marking them
+required. FastMCP clients running structured-content validation rejected
+those responses (``'page' is a required property``).
+
+The new policy is the simplest one that matches the wire format to the
+schema:
+
+* Every optional field carries a default (``None`` for scalars,
+  ``Field(default_factory=...)`` for collections).
+* ``model_dump`` emits every declared field, including ``null`` /
+  ``[]`` when no value is set.
+* The advertised JSONSchema marks only the truly-mandatory fields as
+  required; every optional one is "not required, may be null/empty".
+
+These tests pin both halves of that contract so a future "trim the
+response" refactor can't silently break MCP clients again.
 """
 
 from __future__ import annotations
 
-from voitta_rag_enterprise.mcp_server import ChunkInfo, ImageInfo
+import json
 
-
-def _chunk(**overrides) -> ChunkInfo:
-    base = {
-        "chunk_id": 1,
-        "file_id": 7,
-        "file_path": "src/foo.py",
-        "chunk_index": 0,
-        "text": "def foo(): ...",
-        "score": 0.9,
-    }
-    base.update(overrides)
-    return ChunkInfo(**base)
-
-
-def _image(**overrides) -> ImageInfo:
-    base = {
-        "image_id": 11,
-        "file_id": 7,
-        "file_path": "report.pdf",
-        "image_cas_id": "abc123",
-        "page": None,
-        "width": None,
-        "height": None,
-        "mime": None,
-        "score": 0.7,
-    }
-    base.update(overrides)
-    return ImageInfo(**base)
+from voitta_rag_enterprise.mcp_server import (
+    ChunkInfo,
+    FileInfo,
+    ImageInfo,
+    PageImageInfo,
+)
 
 
 # ---------------------------------------------------------------------------
-# ChunkInfo
+# Wire format: every declared field present, with default value if unset
 # ---------------------------------------------------------------------------
 
 
-def test_chunk_dump_drops_empty_pdf_fields() -> None:
-    """A code/markdown chunk hit ships only the universally meaningful keys."""
-    d = _chunk().model_dump()
+def test_chunkinfo_emits_every_field_with_defaults() -> None:
+    d = ChunkInfo(
+        chunk_id=1, file_id=7, file_path="src/foo.py", chunk_index=0,
+        text="def foo(): ...",
+    ).model_dump()
     assert set(d.keys()) == {
-        "chunk_id", "file_id", "file_path", "chunk_index", "text", "score",
+        "chunk_id", "file_id", "file_path", "chunk_index", "text",
+        "nearby_image_ids", "score", "page", "pages", "layout",
     }
+    # Defaults: empty list for collections, None for scalars.
+    assert d["nearby_image_ids"] == []
+    assert d["pages"] == []
+    assert d["score"] is None
+    assert d["page"] is None
+    assert d["layout"] is None
 
 
-def test_chunk_dump_keeps_fields_when_set() -> None:
-    """A PDF-sourced chunk hit ships everything."""
-    d = _chunk(
-        nearby_image_ids=[3, 5],
-        page=2,
-        pages=[2, 3],
+def test_chunkinfo_keeps_real_values() -> None:
+    d = ChunkInfo(
+        chunk_id=1, file_id=7, file_path="report.pdf", chunk_index=0, text="x",
+        nearby_image_ids=[3, 5], page=2, pages=[2, 3],
         layout={"layout_kind": "page", "layout_has_image": True},
+        score=0.0,
     ).model_dump()
     assert d["nearby_image_ids"] == [3, 5]
     assert d["page"] == 2
     assert d["pages"] == [2, 3]
     assert d["layout"]["layout_kind"] == "page"
-
-
-def test_chunk_dump_drops_empty_lists_individually() -> None:
-    """Mixed: ``page`` is set but ``nearby_image_ids`` is empty — keep page,
-    drop the empty list."""
-    d = _chunk(page=4).model_dump()
-    assert d.get("page") == 4
-    assert "nearby_image_ids" not in d
-    assert "pages" not in d
-    assert "layout" not in d
-
-
-def test_chunk_dump_keeps_score_zero() -> None:
-    """``score=0.0`` is meaningful (it's a real similarity), not a missing
-    value — must not be stripped."""
-    d = _chunk(score=0.0).model_dump()
-    assert "score" in d
+    # score=0.0 is meaningful (real similarity), not "missing".
     assert d["score"] == 0.0
 
 
-def test_chunk_json_round_trip() -> None:
-    """``model_dump_json`` honours the serializer too."""
-    import json
-
-    js = _chunk().model_dump_json()
-    parsed = json.loads(js)
-    assert "page" not in parsed
-    assert "layout" not in parsed
-    assert parsed["chunk_id"] == 1
-
-
-# ---------------------------------------------------------------------------
-# ImageInfo
-# ---------------------------------------------------------------------------
-
-
-def test_image_dump_drops_empty_pdf_fields() -> None:
-    d = _image().model_dump()
+def test_imageinfo_emits_every_field_with_defaults() -> None:
+    d = ImageInfo(
+        image_id=11, file_id=7, file_path="report.pdf", image_cas_id="abc123",
+    ).model_dump()
     assert set(d.keys()) == {
-        "image_id", "file_id", "file_path", "image_cas_id", "kind", "score",
+        "image_id", "file_id", "file_path", "image_cas_id",
+        "page", "width", "height", "mime", "kind", "score", "layout",
     }
+    assert d["kind"] == "figure"  # explicit default
+    for k in ("page", "width", "height", "mime", "score", "layout"):
+        assert d[k] is None
 
 
-def test_image_dump_keeps_fields_when_set() -> None:
-    d = _image(
-        page=3,
-        width=1024,
-        height=768,
-        mime="image/png",
+def test_imageinfo_keeps_real_values() -> None:
+    d = ImageInfo(
+        image_id=11, file_id=7, file_path="report.pdf", image_cas_id="abc",
+        page=3, width=1024, height=768, mime="image/png",
         layout={"layout_kind": "figure"},
     ).model_dump()
     assert d["page"] == 3
@@ -123,8 +94,85 @@ def test_image_dump_keeps_fields_when_set() -> None:
     assert d["layout"]["layout_kind"] == "figure"
 
 
-def test_image_kind_default_is_figure() -> None:
-    """``kind`` is required-ish (has default 'figure') — present in the dump
-    so clients can rely on it without conditional access."""
-    d = _image().model_dump()
-    assert d["kind"] == "figure"
+def test_fileinfo_emits_every_field_with_defaults() -> None:
+    d = FileInfo(id=1, folder_id=2, rel_path="a.md", state="indexed").model_dump()
+    assert set(d.keys()) == {
+        "id", "folder_id", "rel_path", "state", "source_url", "last_indexed_at",
+    }
+    assert d["source_url"] is None
+    assert d["last_indexed_at"] is None
+
+
+def test_pageimageinfo_emits_every_field_with_defaults() -> None:
+    d = PageImageInfo(image_id=1, file_id=2, page=1).model_dump()
+    assert set(d.keys()) == {"image_id", "file_id", "page", "width", "height", "mime"}
+    for k in ("width", "height", "mime"):
+        assert d[k] is None
+
+
+# ---------------------------------------------------------------------------
+# Schema agreement: required-list matches the truly-mandatory fields
+# ---------------------------------------------------------------------------
+
+
+def _required(model) -> set[str]:
+    return set(model.model_json_schema().get("required", []))
+
+
+def test_chunkinfo_schema_required_is_minimal() -> None:
+    assert _required(ChunkInfo) == {
+        "chunk_id", "file_id", "file_path", "chunk_index", "text",
+    }
+
+
+def test_imageinfo_schema_required_is_minimal() -> None:
+    assert _required(ImageInfo) == {
+        "image_id", "file_id", "file_path", "image_cas_id",
+    }
+
+
+def test_fileinfo_schema_required_is_minimal() -> None:
+    assert _required(FileInfo) == {"id", "folder_id", "rel_path", "state"}
+
+
+def test_pageimageinfo_schema_required_is_minimal() -> None:
+    assert _required(PageImageInfo) == {"image_id", "file_id", "page"}
+
+
+# ---------------------------------------------------------------------------
+# Wire ↔ schema parity (the actual regression we just fixed)
+# ---------------------------------------------------------------------------
+
+
+def test_imageinfo_wire_includes_every_required_schema_field() -> None:
+    """The MCP client validator complained when ``page`` (required in
+    schema) was missing from the wire payload. This was caused by a
+    null-stripping serializer + required-without-default schema. Verify
+    the two halves agree."""
+    schema_required = _required(ImageInfo)
+    wire_keys = set(ImageInfo(
+        image_id=1, file_id=2, file_path="x.png", image_cas_id="abc",
+    ).model_dump().keys())
+    missing = schema_required - wire_keys
+    assert not missing, f"schema requires {missing} but wire omits them"
+
+
+def test_chunkinfo_wire_includes_every_required_schema_field() -> None:
+    schema_required = _required(ChunkInfo)
+    wire_keys = set(ChunkInfo(
+        chunk_id=1, file_id=2, file_path="x.md", chunk_index=0, text="hi",
+    ).model_dump().keys())
+    assert not (schema_required - wire_keys)
+
+
+def test_chunkinfo_json_round_trip_preserves_null_fields() -> None:
+    """JSON dump emits ``null`` for unset scalars and ``[]`` for unset
+    collections — no field disappears en route."""
+    js = ChunkInfo(
+        chunk_id=1, file_id=2, file_path="x.md", chunk_index=0, text="hi",
+    ).model_dump_json()
+    parsed = json.loads(js)
+    assert parsed["page"] is None
+    assert parsed["layout"] is None
+    assert parsed["nearby_image_ids"] == []
+    assert parsed["pages"] == []

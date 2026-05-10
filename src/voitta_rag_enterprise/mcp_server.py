@@ -30,7 +30,7 @@ from contextvars import ContextVar
 from functools import lru_cache
 
 from fastmcp import FastMCP
-from pydantic import BaseModel, Field, model_serializer
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -128,8 +128,21 @@ class FileInfo(BaseModel):
     folder_id: int
     rel_path: str
     state: str
-    source_url: str | None
-    last_indexed_at: int | None
+    # Source URL set by the sync connectors (Google Drive deep-link,
+    # GitHub raw URL, …). None for files indexed from a local path.
+    source_url: str | None = None
+    # Unix epoch seconds of the last successful indexing pass. None
+    # for files that have never reached state='indexed'.
+    last_indexed_at: int | None = None
+
+
+# Field-presence policy across every MCP response model: declared
+# optional fields always appear on the wire with their declared value
+# (``null``/empty for unknowns). No custom serializer strips them. The
+# JSON schema FastMCP advertises matches the wire format byte-for-byte,
+# so client-side structured-content validators don't have to special-case
+# "absent vs null". Adding a new field means giving it a default — never
+# a serializer.
 
 
 class ChunkInfo(BaseModel):
@@ -138,35 +151,22 @@ class ChunkInfo(BaseModel):
     file_path: str
     chunk_index: int
     text: str
+    # Image ids whose extracted figure overlaps this chunk's page span.
+    # Empty list for non-PDF chunks (only the PDF pipeline links chunks
+    # to figures); the field is always emitted.
     nearby_image_ids: list[int] = Field(default_factory=list)
+    # Search hit score (dense + sparse RRF). None on chunk-range / get-file
+    # responses where there's no ranking context.
     score: float | None = None
     # Page anchoring + layout summary, attached at index time. ``page``
     # is the chunk's primary (start-anchored) page; ``pages`` is every
     # page the chunk touches. ``layout`` is the per-page summary dict
     # (``layout_kind``, ``layout_has_image``/``_table``, ``layout_n_*``,
     # …) — mirror of what search filters can match on. All None / empty
-    # for chunks from non-PDF parsers (text/code/markdown/...): PDFs are
-    # the only source today. Excluded from the JSON dump when empty so a
-    # markdown chunk doesn't ship four trivially-empty fields per hit.
+    # for chunks from non-PDF parsers (text/code/markdown/...).
     page: int | None = None
     pages: list[int] = Field(default_factory=list)
     layout: dict | None = None
-
-    @model_serializer(mode="wrap")
-    def _drop_empty_pdf_fields(self, handler):
-        data = handler(self)
-        # ``page`` could legitimately be 0 (1-indexed in practice; 0 means
-        # "missing"), so we only drop on None. nearby_image_ids / pages
-        # use empty-list as the "absent" marker.
-        if data.get("page") is None:
-            data.pop("page", None)
-        if not data.get("pages"):
-            data.pop("pages", None)
-        if not data.get("nearby_image_ids"):
-            data.pop("nearby_image_ids", None)
-        if data.get("layout") is None:
-            data.pop("layout", None)
-        return data
 
 
 class ImageInfo(BaseModel):
@@ -174,35 +174,25 @@ class ImageInfo(BaseModel):
     file_id: int
     file_path: str
     image_cas_id: str
-    page: int | None
-    width: int | None
-    height: int | None
-    mime: str | None
+    # PDF page number this figure sits on. None for figures from non-PDF
+    # parsers (DOCX/PPTX images, standalone uploads) and for search hits
+    # where the indexer hasn't stored a page reference.
+    page: int | None = None
+    # Pixel dimensions + mime are stored on the Image DB row; search
+    # payloads don't carry them, so they're None on search hits and
+    # populated on metadata-direct paths (get_chunk_images, list_page_images).
+    width: int | None = None
+    height: int | None = None
+    mime: str | None = None
     # 'figure' (cropped extract) or 'page_render' (full-page raster).
     # search_images / get_chunk_images return only figures; page renders
     # are surfaced via list_page_images / get_page_image.
     kind: str = "figure"
+    # Search hit score. None on non-search paths.
     score: float | None = None
     # Per-page layout summary for the page this image sits on. None for
-    # images that don't come from the PDF pipeline (figures embedded in
-    # DOCX/PPTX, standalone uploads, ...).
+    # images that don't come from the PDF pipeline.
     layout: dict | None = None
-
-    @model_serializer(mode="wrap")
-    def _drop_empty_pdf_fields(self, handler):
-        data = handler(self)
-        if data.get("page") is None:
-            data.pop("page", None)
-        if data.get("layout") is None:
-            data.pop("layout", None)
-        # width/height/mime aren't always known at search time (see
-        # ``_image_from_hit``: search payloads don't carry them); strip
-        # them when missing so the response is "absent means unknown"
-        # instead of "explicit null".
-        for k in ("width", "height", "mime"):
-            if data.get(k) is None:
-                data.pop(k, None)
-        return data
 
 
 class PageImageInfo(BaseModel):
@@ -211,9 +201,12 @@ class PageImageInfo(BaseModel):
     image_id: int
     file_id: int
     page: int
-    width: int | None
-    height: int | None
-    mime: str | None
+    # Width / height / mime are stored on the Image row in DB; these
+    # endpoints read from there, so the values are normally populated.
+    # Kept nullable to cover legacy rows pre-dating the metadata write.
+    width: int | None = None
+    height: int | None = None
+    mime: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -740,6 +733,11 @@ def _chunk_from_hit(h: SearchHit) -> ChunkInfo:
 
 
 def _image_from_hit(h: SearchHit) -> ImageInfo:
+    """Build an ImageInfo from a Qdrant search hit. ``width`` / ``height``
+    / ``mime`` are deliberately not populated: they live on the Image DB
+    row, not in the Qdrant payload, and the search path doesn't read the
+    DB. Callers that need them resolve via ``get_chunk_images`` /
+    ``list_page_images`` — both of which read the DB and populate."""
     p = h.payload
     return ImageInfo(
         image_id=int(p.get("image_id", h.id)),
@@ -747,9 +745,6 @@ def _image_from_hit(h: SearchHit) -> ImageInfo:
         file_path=str(p.get("file_path", "")),
         image_cas_id=str(p.get("image_cas_id", "")),
         page=p.get("page"),
-        width=None,
-        height=None,
-        mime=None,
         score=h.score,
         layout=_layout_from_payload(p),
     )
