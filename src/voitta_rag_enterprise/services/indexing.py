@@ -28,7 +28,7 @@ from ..db.database import session_scope
 from ..db.models import Chunk, ChunkImageLink, File, Folder, Image, Job
 from ..logging_config import bind_context
 from . import events, job_queue
-from .chunking import ChunkInfo, anchor_chunk_for_position, chunk_markdown
+from .chunking import ChunkInfo, anchor_chunk_for_position, get_default_chunking_registry
 from .parsers.registry import get_default_registry
 
 logger = logging.getLogger(__name__)
@@ -190,8 +190,8 @@ def _run_extract_inner(file_id: int) -> None:
             page_image_shas: list[str] = [
                 cas_store.write_image_blob(p.bytes) for p in result.page_images
             ]
-        with _stage("chunk_markdown"):
-            chunks = chunk_markdown(result.content)
+        with _stage("chunk", path=str(abs_path)):
+            chunks = get_default_chunking_registry().chunk(result.content, abs_path)
         logger.info("chunked: count=%d", len(chunks))
 
         # Persist the structured layout next to text.md so it dedupes

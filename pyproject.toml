@@ -39,6 +39,7 @@ dependencies = [
     # and pay the install cost without ever loading the model.
     "sentence-transformers>=3.2",
     "transformers>=4.45",
+    "tree-sitter-language-pack>=1.8",
 ]
 
 [project.optional-dependencies]
