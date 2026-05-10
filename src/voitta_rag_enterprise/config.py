@@ -95,6 +95,12 @@ class Settings(BaseSettings):
         # the index — they're internal bookkeeping that mutates on
         # every sync and would otherwise show up in the file tree.
         ".voitta_sources.json,.voitta_timestamps.json,.voitta_sync.lock,"
+        # Sidecar dir for full Google Sheets workbooks (.xlsx) downloaded
+        # alongside the per-sheet markdown summaries. Indexer must NOT
+        # see these — the markdown is the searchable representation; the
+        # xlsx is retrieved on demand via the voitta_rag_get_workbook
+        # MCP tool. Same .voitta_* convention as the other sidecars.
+        ".voitta_workbooks,"
         # audio
         "*.mp3,*.m4a,*.wav,*.flac,*.ogg,*.aac,*.opus,*.wma,"
         # video

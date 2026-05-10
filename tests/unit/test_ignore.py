@@ -54,3 +54,9 @@ def test_default_settings_ignore_voitta_sidecars() -> None:
     ):
         assert m.matches(name), f"{name} should be ignored by default"
         assert m.matches(f"sub/dir/{name}"), f"{name} should be ignored even nested"
+
+    # The full-workbook sidecar dir must be excluded from indexing — it
+    # holds .xlsx files that pair with per-sheet markdown summaries; the
+    # xlsx itself is fetched via the MCP voitta_rag_get_workbook tool.
+    assert m.matches(".voitta_workbooks"), ".voitta_workbooks dir must be ignored"
+    assert m.matches(".voitta_workbooks/Q4.xlsx"), ".voitta_workbooks/* must be ignored"
