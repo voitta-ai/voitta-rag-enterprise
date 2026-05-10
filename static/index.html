@@ -400,6 +400,22 @@
                             Then paste its credentials below, click <strong>Save</strong>,
                             then <strong>Connect</strong>.
                         </p>
+
+                        <!-- Provider picker — populated from
+                             /api/admin/auth-providers with provider=google.
+                             Only rendered for admins (the list endpoint is
+                             admin-gated). Picking a row prefills client_id +
+                             client_secret; the user can still edit either
+                             field and Save will use whatever's in the
+                             inputs. ``Manual entry`` keeps the existing
+                             flow unchanged. -->
+                        <div id="sync-gd-provider-row" class="sync-gd-provider-row" hidden>
+                            <label>Provider</label>
+                            <select id="sync-gd-provider-picker">
+                                <option value="">— Manual entry —</option>
+                            </select>
+                        </div>
+
                         <label>OAuth client ID</label>
                         <input type="text" id="sync-gd-client-id" placeholder="123…apps.googleusercontent.com">
 

@@ -1298,6 +1298,88 @@ $("#managed-create").addEventListener("click", async () => {
 
 let syncFolderId = null;
 
+// In-memory cache of the Google providers fetched from
+// /api/admin/auth-providers. Populated when the GD sync modal opens
+// (refreshGdProviderPicker) and consulted whenever the picker fires
+// onchange — keeps the populate path synchronous so users see the
+// fields fill the instant they pick a row, with no flicker.
+//
+// Map<id, {id, label, client_id, client_secret, source}>.
+const gdGoogleProviders = new Map();
+
+async function refreshGdProviderPicker() {
+    const row = $("#sync-gd-provider-row");
+    const sel = $("#sync-gd-provider-picker");
+    sel.innerHTML = '<option value="">— Manual entry —</option>';
+    gdGoogleProviders.clear();
+
+    let providers;
+    try {
+        providers = await api.adminListAuthProviders();
+    } catch (err) {
+        // 403 = not admin → silently keep the picker hidden so the
+        // existing manual-entry flow is unchanged. Anything else, log
+        // for diagnostics but keep going.
+        if (!String(err.message || "").startsWith("403")) {
+            console.warn("provider list failed", err);
+        }
+        row.hidden = true;
+        return;
+    }
+
+    const enabledGoogle = (providers || []).filter(
+        (p) => p.provider === "google" && p.enabled,
+    );
+    if (!enabledGoogle.length) {
+        row.hidden = true;
+        return;
+    }
+
+    for (const p of enabledGoogle) {
+        gdGoogleProviders.set(p.id, p);
+        const opt = document.createElement("option");
+        opt.value = String(p.id);
+        const tail = p.source === "env" ? "  (.env)" : "";
+        opt.textContent = (p.label || p.client_id) + tail;
+        sel.append(opt);
+    }
+    row.hidden = false;
+}
+
+function applyGdProviderSelection(providerId) {
+    const pane = $("#sync-gd-pane-oauth");
+    const idInput = $("#sync-gd-client-id");
+    const secretInput = $("#sync-gd-client-secret");
+    if (!providerId) {
+        pane.classList.remove("provider-picked");
+        // Manual entry — leave whatever the user has typed alone.
+        return;
+    }
+    const p = gdGoogleProviders.get(Number(providerId));
+    if (!p) return;
+    idInput.value = p.client_id || "";
+    secretInput.value = p.client_secret || "";
+    // ``input`` events drive setGdConnState so the Connect button can
+    // unlock; fire them so picking a provider feels identical to typing
+    // the values manually.
+    idInput.dispatchEvent(new Event("input", { bubbles: true }));
+    secretInput.dispatchEvent(new Event("input", { bubbles: true }));
+    pane.classList.add("provider-picked");
+}
+
+function preselectGdProviderByClientId(clientId) {
+    const sel = $("#sync-gd-provider-picker");
+    if (!clientId) { sel.value = ""; return; }
+    for (const p of gdGoogleProviders.values()) {
+        if (p.client_id === clientId) {
+            sel.value = String(p.id);
+            $("#sync-gd-pane-oauth").classList.add("provider-picked");
+            return;
+        }
+    }
+    sel.value = ""; // existing config doesn't match a saved provider
+}
+
 function openSyncModal() {
     if (!selectedFolderId) return;
     syncFolderId = selectedFolderId;
@@ -1335,7 +1417,27 @@ function openSyncModal() {
     $("#sync-auto-hours").value = "6";
     $("#sync-auto-hours").disabled = true;
 
-    loadSyncSource();
+    // Reset picker state, then refresh + load in sequence so the
+    // pre-select-by-client_id pass in loadSyncSource sees a populated
+    // gdGoogleProviders map.
+    $("#sync-gd-provider-picker").value = "";
+    $("#sync-gd-pane-oauth").classList.remove("provider-picked");
+    refreshGdProviderPicker()
+        .finally(loadSyncSource)
+        .finally(() => {
+            // If loadSyncSource didn't match a provider (no saved config,
+            // or saved client_id that doesn't match a row) AND there's
+            // exactly one enabled Google provider, auto-pick it. Saves a
+            // click in the common single-provider case without
+            // overriding an existing sync's saved value.
+            const sel = $("#sync-gd-provider-picker");
+            const idInput = $("#sync-gd-client-id");
+            if (!sel.value && !idInput.value && gdGoogleProviders.size === 1) {
+                const onlyId = [...gdGoogleProviders.keys()][0];
+                sel.value = String(onlyId);
+                applyGdProviderSelection(onlyId);
+            }
+        });
 }
 
 function setSyncType(t) {
@@ -1507,6 +1609,7 @@ async function loadSyncSource() {
         } else if (src.source_type === "google_drive" && src.google_drive) {
             const gd = src.google_drive;
             $("#sync-gd-client-id").value = gd.client_id || "";
+            preselectGdProviderByClientId(gd.client_id || "");
             setGdFolders(gd.folders || []);
             $("#sync-gd-client-secret").placeholder = gd.has_client_secret ? "(saved — type to replace)" : "GOCSPX-…";
             $("#sync-gd-sa-json").placeholder = gd.has_service_account ? "(service account JSON saved — paste a new one to replace)" : '{"type":"service_account","client_email":"…","private_key":"…"}';
@@ -1629,6 +1732,14 @@ $("#sync-auto-enabled").addEventListener("change", () => {
 
 document.querySelectorAll('input[name="sync-gh-auth"]').forEach((el) => {
     el.addEventListener("change", () => setGhAuth(el.value));
+});
+
+// Provider picker — populating the credential fields from a saved
+// row. Manual edits afterwards are preserved (Save uses the inputs
+// verbatim); the accent border on the inputs comes from the
+// ``provider-picked`` class set in applyGdProviderSelection.
+$("#sync-gd-provider-picker").addEventListener("change", (e) => {
+    applyGdProviderSelection(e.target.value);
 });
 
 // Re-evaluate Connect-button state when the user types in the GD inputs.

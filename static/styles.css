@@ -847,6 +847,16 @@ input[type="text"], input[type="file"] {
 }
 .modal-body textarea { font: 12px ui-monospace, "SF Mono", Menlo, monospace; resize: vertical; }
 .modal-body select[multiple] { padding: 4px; }
+
+/* Provider picker on the GD sync OAuth pane: visually distinguish
+   "picked from saved providers" from manual entry by tagging the
+   following inputs while a provider is selected. The accent left-border
+   is a subtle hint that the field's value came from somewhere else. */
+.sync-gd-provider-row { margin: 0 0 4px; }
+.sync-gd-pane.provider-picked input#sync-gd-client-id,
+.sync-gd-pane.provider-picked input#sync-gd-client-secret {
+    border-left: 3px solid var(--color-accent);
+}
 .modal-body .radio-row,
 .modal-body .branches-row,
 .modal-body .check-row {
