@@ -122,7 +122,7 @@ def _walk_tab(
     tab_id = props.get("tabId") or ""
     title = props.get("title") or "Untitled"
     body = (tab.get("documentTab") or {}).get("body") or {}
-    md, refs = _render_body(body, lists=lists)
+    md, refs = render_body(body, lists=lists)
     out.append(
         RenderedTab(
             tab_id=tab_id,
@@ -156,7 +156,7 @@ class _RenderState:
         self.image_references: list[ImageReference] = []
 
 
-def _render_body(
+def render_body(
     body: dict[str, Any], lists: dict[str, Any]
 ) -> tuple[str, list[ImageReference]]:
     state = _RenderState(lists)

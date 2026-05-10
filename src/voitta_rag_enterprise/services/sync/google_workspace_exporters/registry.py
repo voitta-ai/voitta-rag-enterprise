@@ -47,8 +47,10 @@ def build_default_registry() -> ExporterRegistry:
     that wants to disable Forms support could replace this function.
     Each exporter adds a single line here when it lands.
     """
+    from .docs import DocumentExporter
+
     r = ExporterRegistry()
-    # Exporters register here in subsequent commits.
+    r.register(DocumentExporter())
     return r
 
 

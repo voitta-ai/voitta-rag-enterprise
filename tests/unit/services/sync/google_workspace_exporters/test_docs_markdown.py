@@ -8,10 +8,8 @@ from __future__ import annotations
 
 from voitta_rag_enterprise.services.sync.google_workspace_exporters._docs_markdown import (
     has_tabs,
+    render_body,
     render_document_tabs,
-)
-from voitta_rag_enterprise.services.sync.google_workspace_exporters._docs_markdown import (
-    _render_body as render_body,
 )
 
 
