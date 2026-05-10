@@ -11,6 +11,7 @@ import { renderJobs } from "./render/jobs.js";
 import { renderSidebar } from "./render/sidebar.js";
 import { updateJobsTabIndicator } from "./render/tabs.js";
 import { renderFolders } from "./render/tree.js";
+import { closeModal, openModal, setRootInfo } from "./modals/new-folder.js";
 import {
     addGhostDir,
     expand,
@@ -24,7 +25,6 @@ import { connect } from "./ws.js";
 
 const $ = (sel) => document.querySelector(sel);
 
-let rootInfo = { configured: false, root_path: null };
 
 // ----- Connection pill -----
 connStatus.subscribe((s) => {
@@ -313,33 +313,6 @@ $("#btn-kill-all").addEventListener("click", async () => {
         jobs.set(await api.recentJobs());
     } catch (err) { alert(err.message); }
 });
-
-// ----- Modal: create / picker -----
-
-function openModal() {
-    if (!rootInfo.configured) {
-        alert("Set VOITTA_ROOT_PATH in .env to create new folders.");
-        return;
-    }
-    $("#modal-backdrop").hidden = false;
-    $("#modal-root").textContent = rootInfo.root_path;
-    $("#managed-name").value = "";
-    $("#managed-name").focus();
-}
-
-function closeModal() {
-    $("#modal-backdrop").hidden = true;
-}
-
-$("#managed-create").addEventListener("click", async () => {
-    const name = $("#managed-name").value.trim();
-    if (!name) return;
-    try {
-        await api.addFolderByName(name);
-        closeModal();
-    } catch (err) { alert(err.message); }
-});
-
 
 // ----- Sync modal -----
 //
@@ -1272,7 +1245,8 @@ $("#key-reveal-dismiss").addEventListener("click", () => {
 async function bootstrap() {
     if (!(await ensureAuthenticated())) return;
     try {
-        rootInfo = await api.root();
+        const rootInfo = await api.root();
+        setRootInfo(rootInfo);
         const hint = $("#root-hint");
         hint.textContent = rootInfo.configured
             ? `Managed root: ${rootInfo.root_path}`
