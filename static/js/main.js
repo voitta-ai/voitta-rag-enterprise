@@ -3,6 +3,12 @@
 import { api } from "./api.js";
 import { reconcileChildren, setIfChanged } from "./dom/reconcile.js";
 import { buildSwitch } from "./dom/switch.js";
+import {
+    scheduleFullRender,
+    scheduleJobsRender,
+    scheduleSidebarRender,
+    setRenderers,
+} from "./render/render-loop.js";
 import { connStatus, files, folders, folderStats, jobs, reindexProgress, syncProgress } from "./store.js";
 import { connect } from "./ws.js";
 
@@ -75,51 +81,17 @@ function updateJobsTabIndicator() {
     }
 }
 
-// ----- Render scheduling -----
-//
-// Store subscribers fire synchronously on every WS event. Under heavy
-// indexing that's hundreds per second — each one used to tear down and
-// rebuild the entire tree, starving input handling and racing with
-// in-flight clicks (mousedown lands on a node that gets destroyed before
-// mouseup). We coalesce to one render per animation frame: subscribers
-// just flip a dirty flag; the rAF callback does the actual DOM work.
-//
-// Browser event-loop ordering (input → microtasks → rAF → paint) means a
-// click runs to completion before the next render fires, so the target
-// node is guaranteed alive while the handler runs.
-let fullRenderPending = false;
-let sidebarRenderPending = false;
-let jobsRenderPending = false;
-
-function scheduleFullRender() {
-    if (fullRenderPending) return;
-    fullRenderPending = true;
-    requestAnimationFrame(() => {
-        fullRenderPending = false;
-        sidebarRenderPending = false; // a full render covers the sidebar too
+// Wire the render functions into the leaf scheduler module so other
+// modules can import scheduler functions without circular imports.
+setRenderers({
+    full: () => {
         renderFolders(folders.get());
         renderSidebar();
         updateToolbarState();
-    });
-}
-
-function scheduleSidebarRender() {
-    if (sidebarRenderPending || fullRenderPending) return;
-    sidebarRenderPending = true;
-    requestAnimationFrame(() => {
-        sidebarRenderPending = false;
-        renderSidebar();
-    });
-}
-
-function scheduleJobsRender() {
-    if (jobsRenderPending) return;
-    jobsRenderPending = true;
-    requestAnimationFrame(() => {
-        jobsRenderPending = false;
-        renderJobs();
-    });
-}
+    },
+    sidebar: () => renderSidebar(),
+    jobs: () => renderJobs(),
+});
 
 // ----- Stores -----
 folders.subscribe(() => {
