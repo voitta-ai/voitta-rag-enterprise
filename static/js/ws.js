@@ -145,7 +145,13 @@ function handleEvent(event) {
             files.update((list) => list.filter(f => f.id !== event.file_id));
             return;
         case "job.started": {
-            const j = { id: event.job_id, kind: event.kind, state: "running", payload: event.payload };
+            const j = {
+                id: event.job_id,
+                kind: event.kind,
+                state: "running",
+                payload: event.payload,
+                display_path: event.display_path || null,
+            };
             jobs.update((list) => [j, ...list.filter(x => x.id !== j.id)].slice(0, 50));
             return;
         }

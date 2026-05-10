@@ -121,3 +121,70 @@ def test_dedup_collapses_after_claim(env: None) -> None:
     assert again == first
     with session_scope() as s:
         assert s.query(Job).count() == 1
+
+
+def test_claim_one_publishes_display_path_for_extract(env: None) -> None:
+    """``job.started`` events carry the file's ``rel_path`` so the SPA
+    can render ``extract #N — folder/file.md`` without round-tripping
+    back to /api/files for every claim."""
+    import asyncio
+
+    from voitta_rag_enterprise.db.models import File, Folder
+    from voitta_rag_enterprise.services import events
+
+    init_db()
+    with session_scope() as s:
+        folder = Folder(path="/tmp/x", display_name="x")
+        s.add(folder)
+        s.flush()
+        f = File(folder_id=folder.id, rel_path="docs/intro.md", state="pending")
+        s.add(f)
+        s.flush()
+        jid = job_queue.enqueue(s, "extract", {"file_id": f.id})
+        fid = f.id
+
+    async def _go() -> dict:
+        events.install_loop(asyncio.get_running_loop())
+        try:
+            async with events.subscribe(["jobs"]) as sub:
+                claimed = job_queue.claim_one()
+                assert claimed is not None
+                assert claimed.id == jid
+                await sub.wait(timeout=1.0)
+                items = sub.drain()
+                # job.started is the only event for this claim.
+                started = next(e for e in items if e["type"] == "job.started")
+                return started
+        finally:
+            events.uninstall_loop()
+
+    started = asyncio.run(_go())
+    assert started["display_path"] == "docs/intro.md"
+    assert started["payload"]["file_id"] == fid
+
+
+def test_claim_one_display_path_none_for_payload_without_file_id(env: None) -> None:
+    """Sync / reindex_folder jobs carry folder_id, not file_id —
+    display_path stays None so the SPA hides the path line."""
+    import asyncio
+
+    from voitta_rag_enterprise.services import events
+
+    init_db()
+    with session_scope() as s:
+        job_queue.enqueue(s, "sync", {"folder_id": 1})
+
+    async def _go() -> dict:
+        events.install_loop(asyncio.get_running_loop())
+        try:
+            async with events.subscribe(["jobs"]) as sub:
+                claimed = job_queue.claim_one()
+                assert claimed is not None
+                await sub.wait(timeout=1.0)
+                items = sub.drain()
+                return next(e for e in items if e["type"] == "job.started")
+        finally:
+            events.uninstall_loop()
+
+    started = asyncio.run(_go())
+    assert started["display_path"] is None

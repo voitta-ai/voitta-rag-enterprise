@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ...db.models import Job
+from ...db.models import File, Job
 from ...services import job_queue
 from ...services.acl import CurrentUser
 from ..deps import current_user, db_session
@@ -28,20 +28,33 @@ class JobOut(BaseModel):
     finished_at: int | None
     error: str | None
     dedup_key: str | None
+    # Pre-resolved human label for the job's target. For ``extract`` /
+    # ``embed_text`` / ``embed_image`` / ``delete_file`` jobs whose
+    # payload references a file, this is the file's ``rel_path`` so
+    # the SPA can render ``extract #2912 — Lucid Drive/big.json``
+    # without a per-job round-trip back to the file API.
+    display_path: str | None = None
 
 
-def _to_out(j: Job) -> JobOut:
+def _to_out(j: Job, file_paths: dict[int, str] | None = None) -> JobOut:
+    payload = json.loads(j.payload) if j.payload else {}
+    display = None
+    if file_paths is not None:
+        fid = payload.get("file_id")
+        if isinstance(fid, int):
+            display = file_paths.get(fid)
     return JobOut(
         id=j.id,
         kind=j.kind,
         state=j.state,
-        payload=json.loads(j.payload) if j.payload else {},
+        payload=payload,
         attempts=j.attempts,
         enqueued_at=j.enqueued_at,
         started_at=j.started_at,
         finished_at=j.finished_at,
         error=j.error,
         dedup_key=j.dedup_key,
+        display_path=display,
     )
 
 
@@ -51,12 +64,59 @@ def recent_jobs(
     db: Session = Depends(db_session),
     user: CurrentUser = Depends(current_user),
 ) -> list[JobOut]:
-    rows = (
+    """Return the recent jobs for the SPA's Jobs panel.
+
+    Composition: every ``running`` job plus the most recent ``limit``
+    jobs by id. The union ensures the row that's actually consuming the
+    worker is always visible — without this, a queue of 800 fresh
+    extracts would push the running job (whose id is older) off the
+    bottom of the panel and the SPA shows nothing as "running" even
+    though something definitely is.
+
+    De-duplication: if a running job already lands in the most-recent
+    window we don't emit it twice. Order: running first (so the
+    bottleneck is at the top), then queued/done by id desc within each
+    bucket — what the user actually wants to see when scanning.
+    """
+    running = (
+        db.execute(
+            select(Job).where(Job.state == "running").order_by(Job.id.desc())
+        )
+        .scalars()
+        .all()
+    )
+    recent = (
         db.execute(select(Job).order_by(Job.id.desc()).limit(limit))
         .scalars()
         .all()
     )
-    return [_to_out(j) for j in rows]
+    seen: set[int] = set()
+    ordered: list[Job] = []
+    for j in [*running, *recent]:
+        if j.id in seen:
+            continue
+        seen.add(j.id)
+        ordered.append(j)
+
+    # Resolve file_id → rel_path in one query for everything we're
+    # about to ship — beats N round-trips when the user has 30+ rows.
+    file_ids: set[int] = set()
+    for j in ordered:
+        try:
+            payload = json.loads(j.payload) if j.payload else {}
+        except json.JSONDecodeError:
+            continue
+        fid = payload.get("file_id")
+        if isinstance(fid, int):
+            file_ids.add(fid)
+    file_paths: dict[int, str] = {}
+    if file_ids:
+        rows = db.execute(
+            select(File.id, File.rel_path).where(File.id.in_(file_ids))
+        ).all()
+        file_paths = dict(rows)
+
+    return [_to_out(j, file_paths) for j in ordered]
 
 
 class RetryOut(BaseModel):

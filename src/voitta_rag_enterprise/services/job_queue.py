@@ -148,11 +148,16 @@ def claim_one() -> ClaimedJob | None:
             ),
             {"now": int(time.time())},
         ).first()
-    if row is None:
-        return None
-    claimed = ClaimedJob(
-        id=row[0], kind=row[1], payload=json.loads(row[2]), dedup_key=row[3], attempts=row[4]
-    )
+        if row is None:
+            return None
+        claimed = ClaimedJob(
+            id=row[0], kind=row[1], payload=json.loads(row[2]), dedup_key=row[3], attempts=row[4]
+        )
+        # Resolve display_path inside the same session so the SPA can
+        # render ``extract #2912 — Lucid/big.json`` when the job.started
+        # event lands. Without this the SPA only knows the file_id and
+        # would have to round-trip back to /api/files for every claim.
+        display_path = _resolve_display_path(session, claimed.payload)
     events.publish(
         "jobs",
         {
@@ -160,9 +165,27 @@ def claim_one() -> ClaimedJob | None:
             "job_id": claimed.id,
             "kind": claimed.kind,
             "payload": claimed.payload,
+            "display_path": display_path,
         },
     )
     return claimed
+
+
+def _resolve_display_path(session, payload: dict) -> str | None:
+    """Look up ``files.rel_path`` for a job payload's ``file_id`` field.
+
+    Used to enrich ``job.started`` events with a human-readable target
+    so the Jobs panel doesn't reduce every running job to a bare
+    ``extract #2912``. Returns None for jobs whose payload doesn't
+    reference a file (sync, reindex_folder, etc.) — those are
+    surfaced under their folder context elsewhere.
+    """
+    fid = payload.get("file_id") if isinstance(payload, dict) else None
+    if not isinstance(fid, int):
+        return None
+    return session.execute(
+        text("SELECT rel_path FROM files WHERE id = :id"), {"id": fid}
+    ).scalar()
 
 
 def mark_done(job_id: int) -> None:

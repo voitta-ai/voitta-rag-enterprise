@@ -795,6 +795,16 @@ input[type="text"], input[type="file"] {
 }
 .job-rows .col { display: flex; flex-direction: column; flex: 1; min-width: 0; }
 .job-rows .meta { color: var(--color-text-tertiary); font-size: 11px; }
+.job-rows .path {
+    /* Filename / rel-path under the kind label. Mono so long paths
+       wrap on slashes legibly; secondary colour so the bottleneck file
+       doesn't shout louder than the kind line. */
+    color: var(--color-text-secondary);
+    font-size: 11px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    word-break: break-all;
+    overflow-wrap: anywhere;
+}
 .job-rows .err { color: var(--color-error); font-size: 11px; word-break: break-word; }
 .job-rows .retry {
     background: transparent;
