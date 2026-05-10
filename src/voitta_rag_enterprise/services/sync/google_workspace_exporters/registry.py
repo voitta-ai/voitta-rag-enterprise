@@ -48,9 +48,11 @@ def build_default_registry() -> ExporterRegistry:
     Each exporter adds a single line here when it lands.
     """
     from .docs import DocumentExporter
+    from .sheets import SpreadsheetExporter
 
     r = ExporterRegistry()
     r.register(DocumentExporter())
+    r.register(SpreadsheetExporter())
     return r
 
 
