@@ -25,35 +25,73 @@ connStatus.subscribe((s) => {
     el.className = `status-pill ${s}`;
 });
 
+// ----- Render scheduling -----
+//
+// Store subscribers fire synchronously on every WS event. Under heavy
+// indexing that's hundreds per second — each one used to tear down and
+// rebuild the entire tree, starving input handling and racing with
+// in-flight clicks (mousedown lands on a node that gets destroyed before
+// mouseup). We coalesce to one render per animation frame: subscribers
+// just flip a dirty flag; the rAF callback does the actual DOM work.
+//
+// Browser event-loop ordering (input → microtasks → rAF → paint) means a
+// click runs to completion before the next render fires, so the target
+// node is guaranteed alive while the handler runs.
+let fullRenderPending = false;
+let sidebarRenderPending = false;
+let jobsRenderPending = false;
+
+function scheduleFullRender() {
+    if (fullRenderPending) return;
+    fullRenderPending = true;
+    requestAnimationFrame(() => {
+        fullRenderPending = false;
+        sidebarRenderPending = false; // a full render covers the sidebar too
+        renderFolders(folders.get());
+        renderSidebar();
+        updateToolbarState();
+    });
+}
+
+function scheduleSidebarRender() {
+    if (sidebarRenderPending || fullRenderPending) return;
+    sidebarRenderPending = true;
+    requestAnimationFrame(() => {
+        sidebarRenderPending = false;
+        renderSidebar();
+    });
+}
+
+function scheduleJobsRender() {
+    if (jobsRenderPending) return;
+    jobsRenderPending = true;
+    requestAnimationFrame(() => {
+        jobsRenderPending = false;
+        renderJobs();
+    });
+}
+
 // ----- Stores -----
-folders.subscribe((list) => {
-    renderFolders(list);
-    renderSidebar();
-    updateToolbarState();
+folders.subscribe(() => {
+    scheduleFullRender();
 });
 files.subscribe(() => {
-    renderFolders(folders.get());
-    renderSidebar();
-    // The Sync / Config button visibility depends on whether the folder is
-    // empty, which is computed from the files store — re-evaluate on change.
-    updateToolbarState();
+    // Toolbar visibility depends on whether the selected folder has files,
+    // which is computed from this store — handled inside scheduleFullRender.
+    scheduleFullRender();
     scheduleStatsRefresh();
 });
 reindexProgress.subscribe(() => {
-    // Progress events arrive at ~5/s during a wipe — re-render the
-    // sidebar (which is the only place the badge lives) and the folder
-    // list (so the row's status pill can flip if we ever surface it
-    // there too). Cheap: both renders are O(folder count).
-    renderSidebar();
-    renderFolders(folders.get());
+    // Progress events arrive at ~5/s during a wipe. The badge lives in
+    // the sidebar only — the tree doesn't read progress state — so we
+    // skip the tree rebuild entirely.
+    scheduleSidebarRender();
 });
 syncProgress.subscribe(() => {
-    // Same cadence as reindex; identical re-render strategy.
-    renderSidebar();
-    renderFolders(folders.get());
+    scheduleSidebarRender();
 });
 jobs.subscribe(() => {
-    renderJobs();
+    scheduleJobsRender();
     // The tree's per-subtree status reads jobs.get() to decide between
     // "indexing" and "indexed" (see hasActiveWork in summariseSubtree). The
     // backend publishes file.upserted *before* the worker writes mark_done,
@@ -61,7 +99,7 @@ jobs.subscribe(() => {
     // still 'running' — and a moment later the job goes to 'done' but
     // nothing re-renders the tree. Re-render on jobs changes too so the
     // status flips to green without needing a manual expand/collapse.
-    renderFolders(folders.get());
+    scheduleFullRender();
     // A job finishing usually means chunks/images counts moved.
     scheduleStatsRefresh();
 });
