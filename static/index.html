@@ -375,7 +375,16 @@
 
                 <div id="sync-form-google_drive" hidden>
                     <p class="hint" style="margin:0 0 6px;">
-                        Multi-tab Google Docs are rendered tab-by-tab as markdown so each tab is searchable on its own.
+                        Native Workspace files are rendered to indexable markdown:
+                        Docs → one .md per tab (with inline images);
+                        Sheets → one .md per sheet (capped at 100 rows) plus the
+                        full workbook stashed under <code>.voitta_workbooks/</code>;
+                        Slides → one .md per slide with thumbnail and speaker notes;
+                        Drawings → PNG; Forms → text. The connector needs read scopes
+                        for Drive / Docs / Sheets / Slides / Forms — enable each of
+                        those APIs in your GCP project. Existing OAuth connections
+                        will be prompted to re-consent the first time they sync after
+                        upgrading.
                     </p>
 
                     <!-- Auth-mode tabs. The two flows have different Google
