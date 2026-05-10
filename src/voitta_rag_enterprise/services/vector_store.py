@@ -482,6 +482,51 @@ def remove_file_from_image_points(file_id: int) -> list[int]:
     return run_on_qdrant(_do)
 
 
+def delete_orphan_image_points(known_image_ids: set[int]) -> int:
+    """Remove image points whose ``image_id`` payload is not in ``known_image_ids``.
+
+    Backfill for the pre-fix re-extract leak where ``_commit_indexing``
+    deleted Image DB rows without touching Qdrant. The CAS-dedup path
+    then attached new file_ids to the orphan point instead of writing a
+    fresh one, leaving Qdrant points whose ``image_id`` no longer
+    matches any DB row.
+
+    Caller supplies the canonical set of Image row IDs (cheap to query —
+    a single ``SELECT id FROM images``). We scroll the entire image
+    collection in batches and delete every point whose payload
+    ``image_id`` is absent from the set.
+
+    Returns the count of deleted points. Safe to run at startup or on
+    demand; idempotent on subsequent runs.
+    """
+
+    def _do() -> int:
+        client = get_client()
+        if not client.collection_exists(IMAGES):
+            return 0
+        deleted = 0
+        offset = None
+        while True:
+            res, offset = client.scroll(
+                IMAGES,
+                limit=1024,
+                with_payload=True,
+                offset=offset,
+            )
+            stale_ids = [
+                p.id for p in res
+                if (p.payload or {}).get("image_id") not in known_image_ids
+            ]
+            if stale_ids:
+                client.delete(IMAGES, points_selector=qm.PointIdsList(points=stale_ids))
+                deleted += len(stale_ids)
+            if offset is None:
+                break
+        return deleted
+
+    return run_on_qdrant(_do)
+
+
 def delete_chunks_for_file(file_id: int) -> None:
     def _do() -> None:
         client = get_client()

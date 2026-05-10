@@ -545,3 +545,132 @@ def test_list_page_images_returns_empty_for_textonly_markdown(
     with session_scope() as s:
         fid = s.execute(select(File)).scalar_one().id
     assert list_page_images(fid) == []
+
+
+# ---------------------------------------------------------------------------
+# Re-extract leaves Qdrant clean (no orphan image points)
+# ---------------------------------------------------------------------------
+
+
+def test_re_extract_replaces_image_points_in_qdrant(
+    env: None, tmp_path: Path,
+) -> None:
+    """A file with an image, extracted, then re-extracted (same bytes,
+    new mtime → forced re-pipeline) must leave Qdrant with exactly ONE
+    image point for that file — keyed by the *new* image_id, not the
+    old one.
+
+    Before this fix, _commit_indexing dropped the old Image DB row but
+    not its Qdrant point; the embed step's CAS-dedup path then attached
+    the new file_id to the stale point instead of writing a fresh one.
+    Net effect: search returned image_ids that no longer existed in DB
+    and get_image() 404'd.
+    """
+    from voitta_rag_enterprise.services import vector_store
+
+    # Seed the target image first, then unrelated images. SQLite's
+    # INTEGER PRIMARY KEY without AUTOINCREMENT hands the next row
+    # max(id)+1, so re-extracting the *first* file gets a fresh id only
+    # if there are other Image rows with higher ids alive. Without this
+    # setup, the test would pass even with the bug, because old_id and
+    # new_id would coincide.
+    target_png = io.BytesIO()
+    PILImage.new("RGB", (8, 8), (200, 100, 50)).save(target_png, format="PNG")
+    target_bytes = target_png.getvalue()
+    _seed_and_index(tmp_path / "src", {"figure.png": target_bytes})
+    _seed_and_index(
+        tmp_path / "other",
+        {"unrelated_a.png": _png(), "unrelated_b.png": _png()},
+    )
+
+    with session_scope() as s:
+        file = s.execute(
+            select(File).where(File.rel_path == "figure.png")
+        ).scalar_one()
+        old_image = s.execute(
+            select(Image).where(Image.file_id == file.id)
+        ).scalar_one()
+        file_id = file.id
+        old_image_id = old_image.id
+    cas_for_target = cas_store.hash_bytes(target_bytes)
+
+    pt = vector_store.find_image_point_by_cas(cas_for_target)
+    assert pt is not None
+    assert pt["id"] == old_image_id
+
+    # Force a re-extract by nulling the file's CAS sha (same trick the
+    # operator hit in production) and resetting state to pending.
+    with session_scope() as s:
+        f = s.get(File, file_id)
+        f.file_cas_id = None
+        f.state = "pending"
+    asyncio.run(run_extract({"file_id": file_id}))
+
+    # Post re-extract: exactly one image point for our target file, keyed
+    # by the NEW image_id (the other-folder Image rows were untouched).
+    with session_scope() as s:
+        new_image = s.execute(
+            select(Image).where(Image.file_id == file_id)
+        ).scalar_one()
+        new_image_id = new_image.id
+        assert new_image_id != old_image_id, (
+            "auto-id didn't advance — test setup broken"
+        )
+
+    pt_after = vector_store.find_image_point_by_cas(cas_for_target)
+    assert pt_after is not None
+    assert pt_after["id"] == new_image_id, (
+        f"expected fresh point at new image_id={new_image_id}, "
+        f"got stale point at id={pt_after['id']}"
+    )
+
+    # The old point must be gone, not lingering.
+    client = vector_store.get_client()
+    res = client.retrieve(vector_store.IMAGES, ids=[old_image_id])
+    assert res == [], f"orphan point at old image_id={old_image_id} still present"
+
+
+def test_delete_orphan_image_points_removes_stale_rows(
+    env: None, tmp_path: Path,
+) -> None:
+    """The startup sweep finds Qdrant image points whose ``image_id``
+    payload no longer matches any Image DB row, and deletes them.
+    Idempotent: a second run is a no-op.
+    """
+    from voitta_rag_enterprise.services import vector_store
+
+    _seed_and_index(tmp_path / "src", {"figure.png": _png()})
+
+    with session_scope() as s:
+        image_row = s.execute(select(Image)).scalar_one()
+        live_image_id = image_row.id
+
+    # Manually delete the DB row to simulate the orphan state — the
+    # point is still in Qdrant.
+    with session_scope() as s:
+        s.execute(select(Image)).scalar_one()
+        from sqlalchemy import delete as sa_delete
+        s.execute(sa_delete(Image))
+
+    # Sweep with no known ids → every point is an orphan.
+    deleted = vector_store.delete_orphan_image_points(set())
+    assert deleted >= 1
+
+    # Idempotent: the point is gone, second run finds nothing.
+    deleted_again = vector_store.delete_orphan_image_points(set())
+    assert deleted_again == 0
+
+
+def test_delete_orphan_image_points_keeps_known_rows(
+    env: None, tmp_path: Path,
+) -> None:
+    """Sweep with the full set of live Image IDs must not delete any
+    point. Guards against an off-by-one in the payload-lookup."""
+    from voitta_rag_enterprise.services import vector_store
+
+    _seed_and_index(tmp_path / "src", {"figure.png": _png()})
+
+    with session_scope() as s:
+        live_ids = {iid for (iid,) in s.execute(select(Image.id)).all()}
+    deleted = vector_store.delete_orphan_image_points(live_ids)
+    assert deleted == 0

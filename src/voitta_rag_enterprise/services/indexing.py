@@ -572,6 +572,25 @@ def _commit_indexing(
             ).all()
         ]
 
+    # Scrub orphan Qdrant image points from the prior extract of this
+    # file. Image DB rows were just deleted, but their Qdrant points
+    # (keyed by the now-stale image_id) were not — and the embed step's
+    # CAS-dedup path would re-attach our file_id to that orphan instead
+    # of writing a fresh point at the new image_id. Net symptom: search
+    # returns image_ids that don't exist in the DB anymore.
+    #
+    # ``remove_file_from_image_points`` strips this file_id from every
+    # image point's ``file_ids``; points that empty get deleted. After
+    # this, ``_embed_image_sync`` either finds a still-shared point
+    # (cross-file CAS reuse) and attaches us correctly, or finds none
+    # and creates a fresh point at the new image_id.
+    #
+    # Chunks don't need this — ``replace_chunks_for_file`` is already
+    # an atomic delete-by-file_id + upsert.
+    from . import vector_store
+
+    vector_store.remove_file_from_image_points(file_id)
+
     publish_file_upserted(_committed_file_id)
     return new_round, image_ids
 

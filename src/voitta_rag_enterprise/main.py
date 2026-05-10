@@ -154,6 +154,33 @@ def create_app() -> FastAPI:
                     extracts_repaired,
                 )
 
+            # Orphan image-point sweep. The pre-fix _commit_indexing path
+            # left Qdrant image points stranded when a file was re-extracted
+            # (DB row gone, point survives with stale image_id payload).
+            # One-shot startup cleanup; idempotent after the fix landed.
+            try:
+                from sqlalchemy import select as _select
+
+                from .db.database import session_scope as _ss
+                from .db.models import Image as _Image
+                from .services.vector_store import (
+                    delete_orphan_image_points,
+                )
+
+                with _ss() as _s:
+                    known_ids = {
+                        iid for (iid,) in _s.execute(_select(_Image.id)).all()
+                    }
+                deleted = delete_orphan_image_points(known_ids)
+                if deleted:
+                    logger.warning(
+                        "deleted %d orphan image point(s) from Qdrant "
+                        "(stale image_id payloads from a pre-fix re-extract)",
+                        deleted,
+                    )
+            except Exception:  # pragma: no cover — never fail boot for this
+                logger.exception("orphan-image-point sweep failed at startup")
+
             # Index health: warn if any folder has files marked indexed in
             # SQLite but no chunk points in Qdrant (the Qdrant store was
             # wiped or moved). The user has to Reindex to repopulate; we
