@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from voitta_rag_enterprise.db.database import init_db, session_scope
-from voitta_rag_enterprise.db.models import Job
+from voitta_rag_enterprise.db.models import File, Folder, Job
 from voitta_rag_enterprise.services import job_queue
 
 
@@ -118,3 +118,117 @@ def test_cleanup_failed_removes_error_rows(client: TestClient) -> None:
     assert r.json()["retried"] == 3
     with session_scope() as s:
         assert s.execute(select(Job).where(Job.state == "error")).scalars().all() == []
+
+
+def _make_file_row(folder_root_name: str, rel_path: str = "a.md") -> int:
+    """Create a Folder + File row and return the file_id. Used by the
+    cancel-orphan tests below."""
+    init_db()
+    with session_scope() as s:
+        folder = Folder(path=f"/tmp/{folder_root_name}", display_name=folder_root_name)
+        s.add(folder)
+        s.flush()
+        file = File(
+            folder_id=folder.id,
+            rel_path=rel_path,
+            size_bytes=10,
+            mtime_ns=0,
+            state="pending",
+        )
+        s.add(file)
+        s.flush()
+        return file.id
+
+
+def test_cancel_all_stamps_file_rows_for_extract_jobs(client: TestClient) -> None:
+    """Regression: cancel-all on queued extracts must flip the
+    associated file row to ``state='error'`` so the file doesn't become
+    an orphan that no code path will re-enqueue.
+
+    Before this fix, the live demo accumulated 792 stranded ``pending``
+    files after a single cancel-all operation."""
+    fid_a = _make_file_row("a")
+    fid_b = _make_file_row("b")
+    with session_scope() as s:
+        job_queue.enqueue(s, "extract", {"file_id": fid_a}, dedup_key=f"extract:{fid_a}")
+        job_queue.enqueue(s, "extract", {"file_id": fid_b}, dedup_key=f"extract:{fid_b}")
+
+    r = client.post("/api/jobs/cancel-all")
+    assert r.status_code == 200, r.text
+    assert r.json()["cancelled_queued"] == 2
+
+    with session_scope() as s:
+        rows = s.execute(select(File).where(File.id.in_([fid_a, fid_b]))).scalars().all()
+        assert {f.state for f in rows} == {"error"}
+        assert {f.error for f in rows} == {"cancelled by user"}
+        # embed_round is bumped so a stale embed decrement can't flip the
+        # row back to ``indexed`` after this cancel.
+        assert all(f.embed_round and f.embed_round >= 1 for f in rows)
+
+
+def test_cancel_one_queued_stamps_file_row(client: TestClient) -> None:
+    """Same regression for the per-job cancel button when the job is
+    still queued (not running)."""
+    fid = _make_file_row("c")
+    with session_scope() as s:
+        jid = job_queue.enqueue(
+            s, "extract", {"file_id": fid}, dedup_key=f"extract:{fid}"
+        )
+    r = client.post(f"/api/jobs/{jid}/cancel")
+    assert r.status_code == 200, r.text
+
+    with session_scope() as s:
+        f = s.get(File, fid)
+        assert f.state == "error"
+        assert f.error == "cancelled by user"
+
+
+def test_cancel_all_leaves_non_file_jobs_alone(client: TestClient) -> None:
+    """A queued ``sync`` or ``reindex_folder`` job has no file_id; cancel
+    should still flip the job to done without trying to mark a phantom
+    file."""
+    init_db()
+    with session_scope() as s:
+        job_queue.enqueue(s, "sync", {"folder_id": 1}, dedup_key="sync:1")
+
+    r = client.post("/api/jobs/cancel-all")
+    assert r.status_code == 200
+    # No file rows existed; the cancel just flips the job.
+    with session_scope() as s:
+        assert s.execute(
+            select(Job).where(Job.dedup_key == "sync:1")
+        ).scalar_one().state == "done"
+
+
+def test_reconcile_re_enqueues_stranded_pending(client: TestClient) -> None:
+    """Reconcile sweep catches files left in ``pending`` with no live
+    extract job — the orphan profile produced by a prior cancel-all."""
+    from voitta_rag_enterprise.services.indexing import reconcile_abandoned_extracts
+
+    fid_stranded = _make_file_row("s1")
+    fid_with_job = _make_file_row("s2")
+    with session_scope() as s:
+        # Only fid_with_job has a live extract — fid_stranded is orphaned.
+        job_queue.enqueue(
+            s, "extract", {"file_id": fid_with_job},
+            dedup_key=f"extract:{fid_with_job}",
+        )
+
+    repaired = reconcile_abandoned_extracts()
+    assert repaired == 1
+
+    with session_scope() as s:
+        # Stranded file now has a fresh queued extract job.
+        live = s.execute(
+            select(Job).where(
+                Job.kind == "extract",
+                Job.state == "queued",
+                Job.dedup_key == f"extract:{fid_stranded}",
+            )
+        ).scalars().all()
+        assert len(live) == 1
+        # The file that already had a live job is untouched (no duplicate).
+        existing = s.execute(
+            select(Job).where(Job.dedup_key == f"extract:{fid_with_job}")
+        ).scalars().all()
+        assert len(existing) == 1

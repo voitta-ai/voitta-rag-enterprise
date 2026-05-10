@@ -223,11 +223,15 @@ def cancel_all(
     from ...services.parsers import pdf_parser
 
     cancelled = 0
+    cancelled_file_ids: list[int] = []
     queued = db.execute(select(Job).where(Job.state == "queued")).scalars().all()
     for job in queued:
         job.state = "done"
         job.error = "cancelled"
         cancelled += 1
+        fid = _mark_file_cancelled_from_queued(db, job)
+        if fid is not None:
+            cancelled_file_ids.append(fid)
 
     killed = 0
     # Kill any live MinerU subprocess; this unblocks an in-flight
@@ -240,7 +244,61 @@ def cancel_all(
             killed = 1
 
     db.commit()
+
+    # Publish file.upserted for every file whose state we just flipped to
+    # 'error', so the SPA's by-extension counters reflect the cancel
+    # without waiting for a refresh. Without this, files stayed in
+    # 'pending' on the UI even though their job had been killed.
+    if cancelled_file_ids:
+        from ...services.indexing import publish_file_upserted
+
+        for fid in cancelled_file_ids:
+            publish_file_upserted(fid)
+
     return CancelAllOut(cancelled_queued=cancelled, killed_running=killed)
+
+
+# File-touching job kinds: cancelling these from the 'queued' state must
+# also flip the file row to 'error' so the SPA doesn't show a phantom
+# 'pending' file with no live job. delete_file is intentionally excluded
+# (the file is already being torn down; resurrecting it as 'error' would
+# be confusing).
+_FILE_JOB_KINDS = {"extract", "embed_text", "embed_image"}
+
+
+def _mark_file_cancelled_from_queued(db: Session, job: Job) -> int | None:
+    """Mirror the running-branch file stamping for a cancelled queued job.
+
+    Without this, cancelling a queued extract leaves the file row in
+    ``state='pending'`` with no active job pointing at it — orphaned
+    forever because the scanner only re-enqueues on mtime/size change.
+
+    Returns the affected file_id (for SPA publishing), or None if this
+    job has no associated file row.
+    """
+    if job.kind not in _FILE_JOB_KINDS:
+        return None
+    try:
+        payload = json.loads(job.payload) if job.payload else {}
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    fid = payload.get("file_id")
+    if not isinstance(fid, int):
+        return None
+    f = db.get(File, fid)
+    if f is None:
+        return None
+    # Match the running-branch treatment in cancel_job: bump embed_round so
+    # a late embed decrement can't flip the row back to 'indexed' on us;
+    # zero pending_embeds so reconcile won't pick it back up; stamp the
+    # error message so the SPA shows a clear retryable state.
+    f.embed_round = (f.embed_round or 0) + 1
+    f.state = "error"
+    f.error = "cancelled by user"
+    f.pending_embeds = 0
+    return fid
 
 
 class CancelOneOut(BaseModel):
@@ -298,6 +356,10 @@ def cancel_job(
 
     note: str | None = None
     file_to_publish: int | None = None
+    if not was_running:
+        # Queued branch: stamp the file row so it doesn't become an orphan.
+        # The running branch has its own, richer treatment below.
+        file_to_publish = _mark_file_cancelled_from_queued(db, job)
     if was_running:
         try:
             payload = json.loads(job.payload) if job.payload else {}

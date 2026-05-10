@@ -1392,6 +1392,12 @@ def reconcile_abandoned_extracts() -> int:
     Files where ``pending_embeds=0`` and a CAS row exists take a fast path
     below: snap straight to ``indexed`` instead of cycling through a
     no-op re-extract.
+
+    We also re-enqueue *pending* files that have no live extract job.
+    Without this, a cancel-all from a previous run leaves files sitting
+    in ``state='pending'`` forever: their dedup'd extract is in 'done'
+    state so a new one would be admitted, but nothing actually calls
+    enqueue() because the scanner only re-enqueues on mtime/size change.
     """
     repaired_ids: list[int] = []
     with session_scope() as s:
@@ -1402,8 +1408,6 @@ def reconcile_abandoned_extracts() -> int:
                 )
             ).scalars()
         )
-        if not candidates:
-            return 0
         # Build set of file_ids referenced by any live (queued/running)
         # extract or embed job — those don't need our help.
         live_files: set[int] = set()
@@ -1461,6 +1465,26 @@ def reconcile_abandoned_extracts() -> int:
             f.error = None
             # Re-enqueue an extract job; reclaim_abandoned_jobs already ran
             # so this won't dedup against the dead one.
+            job_queue.enqueue(
+                s, "extract", {"file_id": f.id}, dedup_key=f"extract:{f.id}"
+            )
+            repaired_ids.append(f.id)
+
+        # Pending-orphan sweep: files left in 'pending' with no live extract
+        # job. Happens when a cancel-all from a previous run dropped every
+        # queued extract; the file row keeps its 'pending' state but no
+        # code path re-enqueues it (scanner only re-enqueues on mtime/size
+        # change). Without this, a hand-rolled `cancel-all` mid-sync leaves
+        # hundreds of files in permanent limbo.
+        stranded_pending = list(
+            s.execute(select(File).where(File.state == "pending")).scalars()
+        )
+        for f in stranded_pending:
+            if f.id in live_files:
+                continue
+            logger.warning(
+                "reconcile: re-enqueueing stranded pending file_id=%d", f.id
+            )
             job_queue.enqueue(
                 s, "extract", {"file_id": f.id}, dedup_key=f"extract:{f.id}"
             )
