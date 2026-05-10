@@ -12,11 +12,11 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ...config import get_settings
-from ...db.models import Chunk, File, Folder, FolderSyncSource, Image, Job
+from ...db.models import File, Folder, FolderSyncSource, Image, Job
 from ...services import events, job_queue
 from ...services.indexing import file_event_payload, publish_file_upserted
 from ...services.acl import (
