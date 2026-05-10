@@ -28,6 +28,7 @@ from voitta_rag_enterprise.mcp_server import (
     get_chunk_range,
     get_file,
     get_image,
+    get_workbook,
     list_indexed_folders,
     resolve_url,
     search,
@@ -231,6 +232,84 @@ def test_resolve_url_exact_and_prefix(env: None, tmp_path: Path) -> None:
 
     miss = resolve_url("https://nope.example")
     assert miss == []
+
+
+import base64
+
+import pytest
+
+
+def test_get_workbook_returns_xlsx_bytes(env: None, tmp_path: Path) -> None:
+    """A per-sheet markdown file → workbook lookup → base64 xlsx bytes."""
+    init_db()
+    src = tmp_path / "src"
+    src.mkdir()
+    # Lay out the on-disk shape SpreadsheetExporter produces.
+    md_rel = "MyDir/Q4 Plan/01-Sales.md"
+    md_path = src / md_rel
+    md_path.parent.mkdir(parents=True, exist_ok=True)
+    md_path.write_text("# Sales\n\n| Region | Q4 |\n")
+    xlsx_path = src / ".voitta_workbooks" / "MyDir" / "Q4 Plan.xlsx"
+    xlsx_path.parent.mkdir(parents=True, exist_ok=True)
+    xlsx_path.write_bytes(b"XLSX-BYTES")
+    with session_scope() as s:
+        folder = Folder(path=str(src), display_name="src")
+        s.add(folder)
+        s.flush()
+        f = File(folder_id=folder.id, rel_path=md_rel, state="indexed", last_seen_at=0)
+        s.add(f)
+        s.flush()
+        fid = f.id
+
+    out = get_workbook(fid)
+    assert out["filename"] == "Q4 Plan.xlsx"
+    assert out["mime"] == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    assert base64.b64decode(out["data_base64"]) == b"XLSX-BYTES"
+    assert out["size_bytes"] == len(b"XLSX-BYTES")
+
+
+def test_get_workbook_404_when_xlsx_absent(env: None, tmp_path: Path) -> None:
+    """A markdown file without an accompanying xlsx (older sync) errors
+    with a clear message rather than silently returning empty bytes."""
+    init_db()
+    src = tmp_path / "src"
+    src.mkdir()
+    md_path = src / "Q4/01-Sales.md"
+    md_path.parent.mkdir(parents=True, exist_ok=True)
+    md_path.write_text("body")
+    with session_scope() as s:
+        folder = Folder(path=str(src), display_name="src")
+        s.add(folder)
+        s.flush()
+        f = File(folder_id=folder.id, rel_path="Q4/01-Sales.md", state="indexed", last_seen_at=0)
+        s.add(f)
+        s.flush()
+        fid = f.id
+    with pytest.raises(FileNotFoundError, match="Workbook xlsx not found"):
+        get_workbook(fid)
+
+
+def test_get_workbook_rejects_non_md_file(env: None, tmp_path: Path) -> None:
+    init_db()
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "x.png").write_bytes(b"\x89PNG")
+    with session_scope() as s:
+        folder = Folder(path=str(src), display_name="src")
+        s.add(folder)
+        s.flush()
+        f = File(folder_id=folder.id, rel_path="x.png", state="indexed", last_seen_at=0)
+        s.add(f)
+        s.flush()
+        fid = f.id
+    with pytest.raises(ValueError, match="not a Sheets-derived markdown"):
+        get_workbook(fid)
+
+
+def test_get_workbook_unknown_file_id_raises(env: None) -> None:
+    init_db()
+    with pytest.raises(ValueError, match="not found"):
+        get_workbook(99999)
 
 
 def test_get_file_pre_extraction_returns_empty_text(env: None, tmp_path: Path) -> None:

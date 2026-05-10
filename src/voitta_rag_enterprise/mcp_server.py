@@ -632,6 +632,63 @@ def get_page_layout(file_id: int, page: int) -> list[dict]:
 
 
 @mcp.tool()
+def get_workbook(file_id: int) -> dict:
+    """Return the full ``.xlsx`` workbook for a Sheets-derived markdown
+    summary as base64-encoded bytes.
+
+    Per-sheet markdown summaries cap at 100 rows; this tool is the
+    escape hatch for callers that need the full grid. The workbook
+    lives under ``<folder>/.voitta_workbooks/<rel>/...xlsx`` (excluded
+    from indexing) and is written by the Sheets exporter on every
+    sync.
+
+    ``file_id`` is the id of any per-sheet ``.md`` file produced by
+    the SpreadsheetExporter. The tool walks back to the workbook stem
+    (the parent directory) and serves the matching xlsx. Raises if
+    the file isn't a Sheets-derived markdown or the xlsx isn't on
+    disk (e.g. an older sync from before this feature shipped — the
+    user should re-sync the folder).
+    """
+    from pathlib import Path
+
+    from .db.models import Folder
+
+    with session_scope() as s:
+        f = s.get(File, file_id)
+        if f is None:
+            raise ValueError(f"File {file_id} not found")
+        rel_path = Path(f.rel_path)
+        folder = s.get(Folder, f.folder_id)
+        if folder is None:
+            raise ValueError(f"File {file_id} has no folder")
+        folder_path = Path(folder.path)
+
+    # Per-sheet md path: ``<some-dir>/<workbook stem>/NN-<sheet>.md``.
+    # Workbook xlsx: ``.voitta_workbooks/<some-dir>/<workbook stem>.xlsx``.
+    if rel_path.suffix.lower() != ".md" or rel_path.parent == Path(""):
+        raise ValueError(
+            f"File {file_id} ({rel_path}) is not a Sheets-derived markdown file"
+        )
+    workbook_rel = rel_path.parent  # e.g. "MyFolder/Q4 Plan"
+    xlsx_path = folder_path / ".voitta_workbooks" / workbook_rel.with_suffix(".xlsx")
+    if not xlsx_path.exists():
+        raise FileNotFoundError(
+            f"Workbook xlsx not found at {xlsx_path}. The folder may need to be "
+            f"re-synced — pre-exporter syncs didn't write the .voitta_workbooks "
+            f"sidecar."
+        )
+
+    data = xlsx_path.read_bytes()
+    return {
+        "file_id": file_id,
+        "filename": xlsx_path.name,
+        "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "data_base64": base64.b64encode(data).decode("ascii"),
+        "size_bytes": len(data),
+    }
+
+
+@mcp.tool()
 def resolve_url(url: str) -> list[FileInfo]:
     """Reverse-lookup an external URL (set by sync connectors) → matching files."""
     with session_scope() as s:
