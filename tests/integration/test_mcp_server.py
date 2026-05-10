@@ -30,6 +30,7 @@ from voitta_rag_enterprise.mcp_server import (
     get_image,
     get_workbook,
     list_indexed_folders,
+    list_page_images,
     resolve_url,
     search,
     search_images,
@@ -440,3 +441,107 @@ def test_get_chunk_images_handles_dotdot_safely(env: None, tmp_path: Path) -> No
     # No match: even if the path normalized cleanly, no such File row
     # exists. The contract is "no exception, empty result".
     assert get_chunk_images(chunk_id) == []
+
+
+# ---------------------------------------------------------------------------
+# File-level image-ref resolution (the "chunks-without-the-image-line" gap)
+# ---------------------------------------------------------------------------
+
+
+def test_get_chunk_images_falls_back_to_file_level_refs(
+    env: None, tmp_path: Path,
+) -> None:
+    """A Google Doc exports as one markdown file with N chunks, but only
+    the chunks that contain a ``![](images/X.png)`` line resolve via the
+    text-scan path. The intermediate chunks must still surface the doc's
+    inline images via the file-level fallback so an LLM reading chunk
+    #15 of a 21-chunk doc isn't told 'no figures here'."""
+    folder_id = _seed_and_index(
+        tmp_path / "drive",
+        {
+            # Use a body long enough to split into multiple chunks. The
+            # default chunker is char-based; we don't depend on the exact
+            # cut as long as the body chunk has no '![](' token.
+            "Doc/01-Intro.md": (
+                "![](images/figure_a.png)\n\n"
+                + ("Lorem ipsum dolor sit amet, consectetur adipiscing elit. " * 200)
+            ),
+            "Doc/images/figure_a.png": _png(),
+        },
+    )
+
+    with session_scope() as s:
+        # Find a chunk in the markdown that does NOT contain ``![](``.
+        body_chunk = s.execute(
+            select(Chunk)
+            .join(File, Chunk.file_id == File.id)
+            .where(File.rel_path == "Doc/01-Intro.md")
+            .where(~Chunk.text.like("%![](%"))
+        ).scalars().first()
+        assert body_chunk is not None, "expected a body chunk without an image ref"
+        body_chunk_id = body_chunk.id
+        # And the target image's id.
+        figure_img = s.execute(
+            select(Image).join(File, Image.file_id == File.id)
+            .where(File.rel_path == "Doc/images/figure_a.png")
+        ).scalar_one()
+        figure_image_id = figure_img.id
+
+    images = get_chunk_images(body_chunk_id)
+    assert images, "body chunk should surface the file's figures via fallback"
+    # The fallback marks file-level results with score=None (vs 0.0 for
+    # direct in-chunk refs, vs float for intra-file linker hits).
+    surfaced = [i for i in images if i.image_id == figure_image_id]
+    assert surfaced
+    assert surfaced[0].score is None
+
+
+def test_list_page_images_falls_back_for_workspace_files(
+    env: None, tmp_path: Path,
+) -> None:
+    """A Slides slide file has no ``kind='page_render'`` Image rows (those
+    only come from the PDF pipeline), yet the slide's thumbnail IS in
+    the index as a sibling File row. list_page_images now surfaces those
+    cross-file refs so an LLM asking for the slide's visual gets the
+    thumbnail back."""
+    _seed_and_index(
+        tmp_path / "deck",
+        {
+            "Pitch/01-Slide 1.md": "# Slide 1\n\n![](images/slide_1.png)",
+            "Pitch/images/slide_1.png": _png(),
+        },
+    )
+    with session_scope() as s:
+        slide = s.execute(
+            select(File).where(File.rel_path == "Pitch/01-Slide 1.md")
+        ).scalar_one()
+        thumb = s.execute(
+            select(File).where(File.rel_path == "Pitch/images/slide_1.png")
+        ).scalar_one()
+        slide_file_id = slide.id
+        thumb_image_id = s.execute(
+            select(Image).where(Image.file_id == thumb.id)
+        ).scalar_one().id
+
+    pages = list_page_images(slide_file_id)
+    assert len(pages) == 1
+    p = pages[0]
+    assert p.image_id == thumb_image_id
+    # Synthetic 1-indexed appearance order — first ref in the markdown.
+    assert p.page == 1
+    # Carries the target's source_kind (here, an .image — no source_url
+    # is set on the PNG by this test helper, so source_kind falls back
+    # to the extension classifier).
+    assert p.source_kind == "image"
+
+
+def test_list_page_images_returns_empty_for_textonly_markdown(
+    env: None, tmp_path: Path,
+) -> None:
+    """A markdown file with no image references and no page renders
+    returns an empty list — the fallback resolver must not invent
+    matches."""
+    _seed_and_index(tmp_path / "src", {"plain.md": "just words, no images"})
+    with session_scope() as s:
+        fid = s.execute(select(File)).scalar_one().id
+    assert list_page_images(fid) == []

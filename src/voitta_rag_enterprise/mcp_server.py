@@ -515,37 +515,58 @@ def get_chunk_images(chunk_id: int) -> list[ImageInfo]:
                 )
             )
 
-        # (2) Cross-file markdown image references. Only runs when the
-        # chunk actually contains a ``![...](...)`` token — cheap probe
-        # avoids work on the common PDF/DOCX path.
+        # (2) Cross-file markdown image references within this chunk's
+        # text. Only runs when the chunk actually contains a
+        # ``![...](...)`` token — cheap probe avoids work on the common
+        # PDF/DOCX path.
         if file is not None and "![" in chunk_text:
-            for img, target in _resolve_cross_file_images(s, file, chunk_text):
+            for img, target in _resolve_image_refs(s, file, chunk_text):
                 if img.id in seen_image_ids:
                     continue
                 seen_image_ids.add(img.id)
-                t_url, t_kind = _file_provenance(s, target.id)
-                out.append(
-                    ImageInfo(
-                        image_id=img.id,
-                        file_id=img.file_id,
-                        file_path=target.rel_path,
-                        image_cas_id=img.image_cas_id,
-                        page=img.page,
-                        width=img.width,
-                        height=img.height,
-                        mime=img.mime,
-                        kind=img.kind,
-                        # ``score`` is the chunk-image distance for the
-                        # intra-file path; cross-file refs aren't ranked,
-                        # so we use 0 ("direct reference") to keep the
-                        # field meaningful instead of None — the caller
-                        # naturally sorts these first.
-                        score=0.0,
-                        source_url=t_url,
-                        source_kind=t_kind,
-                    )
-                )
+                out.append(_image_info_for_ref(s, img, target, score=0.0))
+
+        # (3) File-level fallback. When the chunk produced nothing from
+        # paths (1) and (2), surface the file's other inline images.
+        # Rationale: a Google Doc with 21 chunks and 3 inline images
+        # only has the ``![](...)`` line in 3 chunks; without this
+        # fallback the other 18 chunks return ``[]`` even though the
+        # document has figures the LLM might want to look at. Marked
+        # with ``score=None`` so the caller can distinguish "directly
+        # referenced by this chunk" (score=0) from "elsewhere in this
+        # file" (score=None) from "intra-file linked with distance"
+        # (score=float).
+        if file is not None and not out:
+            for img, target in _file_image_refs(s, file):
+                if img.id in seen_image_ids:
+                    continue
+                seen_image_ids.add(img.id)
+                out.append(_image_info_for_ref(s, img, target, score=None))
         return out
+
+
+def _image_info_for_ref(session, img: Image, target: File, *, score: float | None) -> ImageInfo:
+    """Build an ImageInfo for a cross-file referenced image.
+
+    The image lives on ``target`` File row (a sibling of the chunk's
+    file); the caller resolves provenance against ``target`` so the
+    response carries the target's URL/kind, not the referencing file's.
+    """
+    t_url, t_kind = _file_provenance(session, target.id)
+    return ImageInfo(
+        image_id=img.id,
+        file_id=img.file_id,
+        file_path=target.rel_path,
+        image_cas_id=img.image_cas_id,
+        page=img.page,
+        width=img.width,
+        height=img.height,
+        mime=img.mime,
+        kind=img.kind,
+        score=score,
+        source_url=t_url,
+        source_kind=t_kind,
+    )
 
 
 # Markdown image-syntax: ``![alt](path)``. We only care about the path;
@@ -555,30 +576,33 @@ def get_chunk_images(chunk_id: int) -> list[ImageInfo]:
 _MD_IMAGE_REF = re.compile(r"!\[[^\]]*\]\(([^)\s]+)\)")
 
 
-def _resolve_cross_file_images(
-    session, chunk_file: File, chunk_text: str
+def _resolve_image_refs(
+    session, owner_file: File, text: str
 ) -> list[tuple[Image, File]]:
-    """Resolve ``![alt](rel/path.png)`` references to sibling File rows.
+    """Resolve every ``![alt](rel/path.png)`` in ``text`` to sibling Image rows.
 
-    Walks every markdown image reference in ``chunk_text``, resolves
-    each one against the chunk file's parent directory (i.e. the same
-    rule Markdown renderers use), looks up the corresponding File row
-    in the same folder, and returns its Image rows.
+    Walks markdown image references in document order, resolves each
+    against ``owner_file``'s parent directory (Markdown's usual rule),
+    looks up the matching File row in the same folder, and returns its
+    figure-kind Image rows.
 
-    Returns ``[]`` when no references resolve — including when a
-    reference is absolute, a remote URL, points outside the folder
-    root, or names a file that exists on disk but hasn't been indexed
-    yet (image File row absent, or no Image rows on it).
+    ``text`` can be either a chunk's body (called from
+    :func:`get_chunk_images`) or the file's whole markdown
+    (:func:`_file_image_refs`); the function doesn't care which.
 
-    De-duplicated by target file_id so a chunk that references the
-    same image twice produces one entry.
+    Returns ``[]`` when no references resolve — when a reference is
+    a remote URL, walks above the folder root, or names a file that
+    isn't indexed yet (target File row absent, or zero figure rows).
+
+    De-duplicated by target file_id so a doc referencing the same
+    image twice yields one entry.
     """
     from pathlib import PurePosixPath
 
-    parent = PurePosixPath(chunk_file.rel_path).parent
+    parent = PurePosixPath(owner_file.rel_path).parent
     seen_files: set[int] = set()
     out: list[tuple[Image, File]] = []
-    for raw_ref in _MD_IMAGE_REF.findall(chunk_text):
+    for raw_ref in _MD_IMAGE_REF.findall(text):
         # Skip remote URLs — only local sibling refs resolve.
         if raw_ref.startswith(("http://", "https://", "//", "data:")):
             continue
@@ -607,7 +631,7 @@ def _resolve_cross_file_images(
             continue
         target = session.execute(
             select(File).where(
-                File.folder_id == chunk_file.folder_id,
+                File.folder_id == owner_file.folder_id,
                 File.rel_path == target_rel_path,
             )
         ).scalar_one_or_none()
@@ -624,6 +648,40 @@ def _resolve_cross_file_images(
         for img in images:
             out.append((img, target))
     return out
+
+
+@lru_cache(maxsize=128)
+def _read_cas_text(cas_id: str) -> str:
+    """Cached read of a file's stored markdown.
+
+    Multiple chunk-image lookups against the same Workspace document
+    re-read the same CAS blob; cache by sha. Returns empty string for
+    a missing blob — the resolver just produces no results.
+    """
+    try:
+        raw = cas_store.read_file_blob(cas_id, "text.md")
+    except FileNotFoundError:
+        return ""
+    return raw.decode("utf-8", errors="replace")
+
+
+def _file_image_refs(session, file: File) -> list[tuple[Image, File]]:
+    """Resolve every image reference in ``file``'s stored markdown.
+
+    Lifts the resolver from per-chunk to per-file: scans the file's
+    full text once and returns every sibling-image reference. Used as
+    a fallback when a chunk's own text has no image markdown but the
+    file does (e.g. a 21-chunk Doc with 3 inline images: only 3 chunks
+    carry the ``![](...)`` line, the rest get the same images via this
+    file-level fallback). Also feeds ``list_page_images`` for
+    Workspace files that have no PDF-style page renders.
+    """
+    if file.file_cas_id is None:
+        return []
+    text = _read_cas_text(file.file_cas_id)
+    if not text:
+        return []
+    return _resolve_image_refs(session, file, text)
 
 
 @mcp.tool()
@@ -660,15 +718,30 @@ def get_image(image_id: int, max_size: int = 420) -> dict:
 
 @mcp.tool()
 def list_page_images(file_id: int) -> list[PageImageInfo]:
-    """List per-page renders for ``file_id``, in page order.
+    """List visual representations of ``file_id``, in document order.
 
-    Returns layout-context rasters (typically WebP, ~1024px on the long
-    edge). Use the returned ``image_id`` with ``get_page_image`` to fetch
-    bytes. Files that weren't rendered (non-PDF, or PDFs indexed before
-    page-rendering was enabled) return an empty list.
+    Two paths, in priority order:
+
+    1. **Per-page renders** (PDF pipeline): ``kind="page_render"`` rows
+       written by the PDF parser — full-page WebPs (~1024px long edge)
+       used as layout context.
+
+    2. **Cross-file inline images** (Google Workspace exports): each
+       ``![](images/<name>.png)`` reference in the file's markdown is
+       resolved against the sibling File row in the same folder, and
+       its figure-kind Image rows are returned in document-text order
+       with a synthetic 1-indexed ``page`` (= appearance index in the
+       markdown). This is how Slides thumbnails surface for an LLM
+       that asks "what's the picture for slide N" — the slide's
+       File row references its own ``images/slide_N.png`` sibling.
+
+    Use the returned ``image_id`` with :func:`get_image` to fetch
+    bytes. Returns ``[]`` for files that produce neither — a vanilla
+    markdown file with no image refs, an unindexed file, etc.
     """
     with session_scope() as s:
         source_url, source_kind = _file_provenance(s, file_id)
+        # (1) PDF page-renders path
         rows = list(
             s.execute(
                 select(Image)
@@ -676,19 +749,45 @@ def list_page_images(file_id: int) -> list[PageImageInfo]:
                 .order_by(Image.page, Image.image_index)
             ).scalars()
         )
-        return [
-            PageImageInfo(
-                image_id=img.id,
-                file_id=img.file_id,
-                page=img.page or 0,
-                width=img.width,
-                height=img.height,
-                mime=img.mime,
-                source_url=source_url,
-                source_kind=source_kind,
+        if rows:
+            return [
+                PageImageInfo(
+                    image_id=img.id,
+                    file_id=img.file_id,
+                    page=img.page or 0,
+                    width=img.width,
+                    height=img.height,
+                    mime=img.mime,
+                    source_url=source_url,
+                    source_kind=source_kind,
+                )
+                for img in rows
+            ]
+
+        # (2) Cross-file referenced images. ``page`` is synthetic: it's
+        # the 1-indexed appearance order in the markdown, not a real
+        # paginator output. Workspace files don't have a page concept
+        # anyway, and the order is stable across re-renders because the
+        # Drive connector writes refs in slide/section order.
+        f = s.get(File, file_id)
+        if f is None:
+            return []
+        out: list[PageImageInfo] = []
+        for i, (img, target) in enumerate(_file_image_refs(s, f), start=1):
+            t_url, t_kind = _file_provenance(s, target.id)
+            out.append(
+                PageImageInfo(
+                    image_id=img.id,
+                    file_id=img.file_id,
+                    page=i,
+                    width=img.width,
+                    height=img.height,
+                    mime=img.mime,
+                    source_url=t_url,
+                    source_kind=t_kind,
+                )
             )
-            for img in rows
-        ]
+        return out
 
 
 @mcp.tool()
