@@ -9,21 +9,29 @@ import {
     scheduleSidebarRender,
     setRenderers,
 } from "./render/render-loop.js";
+import {
+    addGhostDir,
+    expand,
+    getSelectedFolderId,
+    getSelectedRelDir,
+    isExpanded,
+    nodeKey,
+    setSelection,
+    toggleExpanded,
+} from "./flows/selection.js";
+import {
+    activeFolderIds,
+    buildTree,
+    summariseSubtree,
+    userStateLabel,
+} from "./flows/tree-model.js";
 import { connStatus, files, folders, folderStats, jobs, reindexProgress, syncProgress } from "./store.js";
 import { connect } from "./ws.js";
 
 const $ = (sel) => document.querySelector(sel);
 
-let selectedFolderId = null;
-let selectedRelDir = ""; // "" = folder root; otherwise "subdir/inner"
 let rootInfo = { configured: false, root_path: null };
-const expandedNodes = new Set(); // keys: `${folder_id}:${rel_dir}`
-const ghostDirs = new Map(); // folder_id → Set<rel_dir> (created via mkdir but no files yet)
 let activeSidebarTab = "details"; // "details" | "jobs"
-
-function nodeKey(folderId, relDir) {
-    return `${folderId}:${relDir}`;
-}
 
 // ----- Connection pill -----
 connStatus.subscribe((s) => {
@@ -130,114 +138,6 @@ jobs.subscribe(() => {
     // status flips to green without needing a manual expand/collapse.
     scheduleFullRender();
 });
-
-function aggregateStatus(folderFiles) {
-    if (folderFiles.length === 0) return "none";
-    if (folderFiles.some((f) => f.state === "error")) return "error";
-    if (folderFiles.every((f) => f.state === "indexed" || f.state === "unsupported")) return "indexed";
-    return "indexing";
-}
-
-// Collapse the indexer's internal substate vocabulary into a small set of
-// user-facing labels. ``unsupported`` is its own bucket so we can show it
-// differently from a real failure — and from a still-in-progress file.
-function userStateLabel(state) {
-    if (state === "indexed" || state === "error" || state === "deleted" || state === "unsupported") return state;
-    return "indexing";
-}
-
-// ---------- Tree model ----------
-
-function buildTree(folderFiles, folderId) {
-    /* Returns { dirs: Map<name, node>, files: [] } */
-    const root = { dirs: new Map(), files: [] };
-    for (const f of folderFiles) {
-        if (f.state === "deleted") continue;
-        const parts = f.rel_path.split("/").filter(Boolean);
-        let node = root;
-        for (let i = 0; i < parts.length - 1; i++) {
-            const part = parts[i];
-            if (!node.dirs.has(part)) node.dirs.set(part, { dirs: new Map(), files: [] });
-            node = node.dirs.get(part);
-        }
-        node.files.push(f);
-    }
-    // Merge in any ghost (mkdir-created) directories.
-    const ghosts = ghostDirs.get(folderId);
-    if (ghosts) {
-        for (const relDir of ghosts) {
-            const parts = relDir.split("/").filter(Boolean);
-            let node = root;
-            for (const part of parts) {
-                if (!node.dirs.has(part)) node.dirs.set(part, { dirs: new Map(), files: [] });
-                node = node.dirs.get(part);
-            }
-        }
-    }
-    return root;
-}
-
-function activeFolderIds() {
-    /* Map queued + running jobs back to folder ids so the per-row "indexing"
-       pill only lights up on folders with work actually in flight.
-       Previously the check was global ("any job running anywhere?") which
-       made every folder containing a stale non-terminal file (left behind
-       by a past abandoned job) flash to 'indexing' the moment another
-       folder's reindex started — the bug the user filed.
-
-       Job payload shapes (see services/job_queue.py + scanner / indexing):
-       - extract / embed_text / delete_file: {file_id}
-       - reindex_folder / sync:               {folder_id}
-       embed_image runs inline within extract, never queued separately. */
-    const fileFolder = new Map();
-    for (const f of files.get()) fileFolder.set(f.id, f.folder_id);
-    const out = new Set();
-    for (const j of jobs.get()) {
-        if (j.state !== "queued" && j.state !== "running") continue;
-        const p = j.payload || {};
-        if (p.folder_id != null) {
-            out.add(p.folder_id);
-        } else if (p.file_id != null) {
-            const fid = fileFolder.get(p.file_id);
-            if (fid != null) out.add(fid);
-        }
-    }
-    return out;
-}
-
-function summariseSubtree(node, folderActive) {
-    /* Aggregates file totals across the subtree rooted at node.
-
-       ``folderActive`` is true when the queue currently has at least one
-       job touching this subtree's folder. We require BOTH that signal AND
-       a non-terminal file in the subtree to render 'indexing' — neither
-       alone is sufficient (queue empty → stragglers; folder active but all
-       this subtree's files are indexed → another subtree is the one moving). */
-    let total = 0, indexed = 0, unsupported = 0, errored = 0, pending = 0, embedding = 0;
-    function walk(n) {
-        for (const f of n.files) {
-            total++;
-            if (f.state === "indexed") indexed++;
-            else if (f.state === "unsupported") unsupported++;
-            else if (f.state === "error") errored++;
-            else if (f.state === "extracted" || f.state === "embedding" || f.pending_embeds > 0) embedding++;
-            else pending++;
-        }
-        for (const child of n.dirs.values()) walk(child);
-    }
-    walk(node);
-    let status = "none";
-    if (total > 0) {
-        if (errored > 0) status = "error";
-        else if (indexed + unsupported === total) status = "indexed";
-        else if (folderActive && (embedding > 0 || pending > 0)) status = "indexing";
-        // No active jobs for this folder but some files aren't terminal —
-        // they're stragglers, not work in flight. Reading 'indexing' here
-        // is a lie; treat the subtree as done so the UI matches the queue.
-        else status = "indexed";
-    }
-    return { total, indexed, unsupported, errored, status };
-}
 
 // ---------- Tree rendering ----------
 
@@ -401,8 +301,7 @@ function onChevronClick(e) {
     if (e.currentTarget.classList.contains("leaf")) return;
     const folderId = Number(li.dataset.folderId);
     const relDir = li.dataset.relDir || "";
-    const key = nodeKey(folderId, relDir);
-    if (expandedNodes.has(key)) expandedNodes.delete(key); else expandedNodes.add(key);
+    toggleExpanded(folderId, relDir);
     renderFolders(folders.get());
 }
 
@@ -531,7 +430,7 @@ function renderFolders(list) {
     }
     rowCache.delete("empty");
     const allFiles = files.get();
-    const activeFolders = activeFolderIds();
+    const activeFolders = activeFolderIds(files.get(), jobs.get());
     const targetRows = [];
     const seenKeys = new Set();
 
@@ -555,10 +454,9 @@ function renderFolders(list) {
 
 function emitTreeRow({ targetRows, seenKeys, folder, node, relDir, displayName, depth, isRoot, folderActive }) {
     const summary = summariseSubtree(node, !!folderActive);
-    const key = nodeKey(folder.id, relDir);
     const hasChildren = node.dirs.size > 0 || node.files.length > 0;
-    const isOpen = expandedNodes.has(key);
-    const isSelected = folder.id === selectedFolderId && relDir === selectedRelDir;
+    const isOpen = isExpanded(folder.id, relDir);
+    const isSelected = folder.id === getSelectedFolderId() && relDir === getSelectedRelDir();
     const sharedReadonly = isRoot && folder.shared && !folder.owned;
 
     const cacheKey = isRoot ? `root:${folder.id}` : `dir:${folder.id}:${relDir}`;
@@ -599,8 +497,7 @@ function emitTreeRow({ targetRows, seenKeys, folder, node, relDir, displayName, 
 }
 
 function selectNode(folderId, relDir) {
-    selectedFolderId = folderId;
-    selectedRelDir = relDir;
+    setSelection(folderId, relDir);
     renderFolders(folders.get());
     renderSidebar();
     // First-load fetch only when the WS hasn't already pushed a snapshot
@@ -610,8 +507,8 @@ function selectNode(folderId, relDir) {
 }
 
 function updateToolbarState() {
-    const folder = folders.get().find((f) => f.id === selectedFolderId);
-    const isRoot = !!folder && selectedRelDir === "";
+    const folder = folders.get().find((f) => f.id === getSelectedFolderId());
+    const isRoot = !!folder && getSelectedRelDir() === "";
     // Read-only = a shared folder owned by someone else. Owner-only mutations
     // (upload, mkdir, reindex, sync, remove) are disabled; viewers can still
     // expand the tree and read files.
@@ -654,18 +551,17 @@ function updateToolbarState() {
 }
 
 async function createSubfolder() {
-    const folder = folders.get().find((f) => f.id === selectedFolderId);
+    const folder = folders.get().find((f) => f.id === getSelectedFolderId());
     if (!folder) return;
     const name = prompt("Subfolder name:");
     if (!name?.trim()) return;
-    const target = selectedRelDir
-        ? `${selectedRelDir}/${name.trim()}`
+    const target = getSelectedRelDir()
+        ? `${getSelectedRelDir()}/${name.trim()}`
         : name.trim();
     try {
         await api.mkdir(folder.id, target);
-        if (!ghostDirs.has(folder.id)) ghostDirs.set(folder.id, new Set());
-        ghostDirs.get(folder.id).add(target);
-        expandedNodes.add(nodeKey(folder.id, selectedRelDir));
+        addGhostDir(folder.id, target);
+        expand(folder.id, getSelectedRelDir());
         renderFolders(folders.get());
     } catch (err) {
         alert(err.message);
@@ -675,7 +571,7 @@ async function createSubfolder() {
 // ----- Sidebar -----
 
 function renderSidebar() {
-    const folder = folders.get().find((f) => f.id === selectedFolderId);
+    const folder = folders.get().find((f) => f.id === getSelectedFolderId());
     const empty = $("#sidebar-empty");
     const detail = $("#folder-detail");
 
@@ -688,19 +584,19 @@ function renderSidebar() {
     empty.hidden = true;
     detail.hidden = false;
 
-    const displayName = selectedRelDir
-        ? `${folder.display_name}/${selectedRelDir}`
+    const displayName = getSelectedRelDir()
+        ? `${folder.display_name}/${getSelectedRelDir()}`
         : folder.display_name;
     $("#folder-name").textContent = displayName;
-    $("#folder-path").textContent = selectedRelDir
-        ? `${folder.path}/${selectedRelDir}`
+    $("#folder-path").textContent = getSelectedRelDir()
+        ? `${folder.path}/${getSelectedRelDir()}`
         : folder.path;
     $("#folder-source-badge").textContent = folder.source_type;
 
     // Subtree-scoped counts (fall back to whole folder when relDir is empty).
     const allFolderFiles = files.get().filter((x) => x.folder_id === folder.id && x.state !== "deleted");
-    const subtreeFiles = selectedRelDir
-        ? allFolderFiles.filter((f) => f.rel_path.startsWith(`${selectedRelDir}/`))
+    const subtreeFiles = getSelectedRelDir()
+        ? allFolderFiles.filter((f) => f.rel_path.startsWith(`${getSelectedRelDir()}/`))
         : allFolderFiles;
     const total = subtreeFiles.length;
     const indexed = subtreeFiles.filter((x) => x.state === "indexed").length;
@@ -850,7 +746,7 @@ function renderSidebar() {
     renderExtTable(s);
 
     $("#upload-target-hint").hidden = false;
-    $("#upload-target").textContent = selectedRelDir ? `/${selectedRelDir}/` : "/";
+    $("#upload-target").textContent = getSelectedRelDir() ? `/${getSelectedRelDir()}/` : "/";
 }
 
 // ----- Per-extension table -----
@@ -1060,7 +956,7 @@ $("#btn-new-subfolder").addEventListener("click", createSubfolder);
 $("#btn-upload").addEventListener("click", () => $("#upload-input").click());
 $("#upload-input").addEventListener("change", async (e) => {
     const selected = Array.from(e.target.files);
-    if (!selected.length || !selectedFolderId) return;
+    if (!selected.length || !getSelectedFolderId()) return;
 
     const wrap = $("#upload-progress");
     const fill = $("#upload-progress-fill");
@@ -1102,9 +998,9 @@ $("#upload-input").addEventListener("change", async (e) => {
 
     try {
         const { failures } = await api.uploadBatch(
-            selectedFolderId,
+            getSelectedFolderId(),
             selected,
-            selectedRelDir,
+            getSelectedRelDir(),
             {
                 concurrency: 3,
                 onFileProgress: (idx, _file, p) => {
@@ -1145,21 +1041,21 @@ $("#upload-input").addEventListener("change", async (e) => {
 });
 
 $("#btn-reindex").addEventListener("click", async () => {
-    if (!selectedFolderId) return;
-    const folder = folders.get().find((f) => f.id === selectedFolderId);
+    if (!getSelectedFolderId()) return;
+    const folder = folders.get().find((f) => f.id === getSelectedFolderId());
     if (!folder) return;
     const allFolderFiles = files.get().filter(
         (x) => x.folder_id === folder.id && x.state !== "deleted",
     );
-    const subtreeFiles = selectedRelDir
-        ? allFolderFiles.filter((f) => f.rel_path.startsWith(`${selectedRelDir}/`))
+    const subtreeFiles = getSelectedRelDir()
+        ? allFolderFiles.filter((f) => f.rel_path.startsWith(`${getSelectedRelDir()}/`))
         : allFolderFiles;
     if (subtreeFiles.length === 0) {
         alert("No files to reindex in this subtree.");
         return;
     }
-    const where = selectedRelDir
-        ? `${folder.display_name}/${selectedRelDir}`
+    const where = getSelectedRelDir()
+        ? `${folder.display_name}/${getSelectedRelDir()}`
         : folder.display_name;
     const ok = confirm(
         `Hard re-index ${subtreeFiles.length} file(s) under "${where}"?\n\n` +
@@ -1170,7 +1066,7 @@ $("#btn-reindex").addEventListener("click", async () => {
     );
     if (!ok) return;
     try {
-        const r = await api.reindexFolder(selectedFolderId, selectedRelDir);
+        const r = await api.reindexFolder(getSelectedFolderId(), getSelectedRelDir());
         if (r.scheduled === 0) alert("No files were scheduled.");
     } catch (err) {
         alert(err.message);
@@ -1178,14 +1074,13 @@ $("#btn-reindex").addEventListener("click", async () => {
 });
 
 $("#btn-remove").addEventListener("click", async () => {
-    if (!selectedFolderId) return;
-    const folder = folders.get().find((f) => f.id === selectedFolderId);
+    if (!getSelectedFolderId()) return;
+    const folder = folders.get().find((f) => f.id === getSelectedFolderId());
     if (!folder) return;
     if (!confirm(`Delete folder "${folder.display_name}"?\n\nThe folder and all its files will be permanently removed from disk.`)) return;
     try {
-        await api.deleteFolder(selectedFolderId);
-        selectedFolderId = null;
-        selectedRelDir = "";
+        await api.deleteFolder(getSelectedFolderId());
+        setSelection(null, "");
     } catch (err) {
         alert(err.message);
     }
@@ -1338,8 +1233,8 @@ function preselectGdProviderByClientId(clientId) {
 }
 
 function openSyncModal() {
-    if (!selectedFolderId) return;
-    syncFolderId = selectedFolderId;
+    if (!getSelectedFolderId()) return;
+    syncFolderId = getSelectedFolderId();
     const folder = folders.get().find((f) => f.id === syncFolderId);
     if (!folder) return;
 
