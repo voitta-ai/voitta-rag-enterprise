@@ -41,3 +41,12 @@ export const syncProgress = createStore(new Map());
 // Empty map at boot; the SPA fetches the snapshot for the selected folder
 // on first render so the panel doesn't flash empty values.
 export const folderStats = createStore(new Map());
+// folder_id → { sync_status, sync_error, last_synced_at }. Snapshot of the
+// terminal fields on a folder's sync source row. Backend emits
+// ``folder.sync_source_changed`` at each sync state transition (start,
+// success, failure, error-cleared); the sync modal subscribes so an open
+// modal updates the moment the status changes — no close+reopen needed,
+// and edits in another tab propagate too. Distinct from ``syncProgress``
+// (which carries the per-phase listing/downloading counters that come
+// from the connector).
+export const syncSources = createStore(new Map());

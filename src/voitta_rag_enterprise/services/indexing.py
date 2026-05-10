@@ -585,6 +585,31 @@ async def run_sync(payload: dict) -> None:
             raise
 
 
+def _publish_sync_source_changed(folder_id: int) -> None:
+    """Push the current sync-source status to subscribed clients.
+
+    The sidebar's badge already follows ``folder.sync_progress`` for the
+    in-progress phases. This event covers the *terminal* fields the modal
+    renders — ``sync_status`` / ``sync_error`` / ``last_synced_at`` — so an
+    open modal updates the moment a job finishes (or errors, or starts in
+    another tab), without needing the user to close + reopen it.
+    """
+    with session_scope() as s:
+        from ..db.models import FolderSyncSource
+
+        src = s.get(FolderSyncSource, folder_id)
+        if src is None:
+            return
+        event = {
+            "type": "folder.sync_source_changed",
+            "folder_id": folder_id,
+            "sync_status": src.sync_status,
+            "sync_error": src.sync_error,
+            "last_synced_at": src.last_synced_at,
+        }
+    events.publish("folders", event)
+
+
 async def _run_sync_inner(folder_id: int) -> None:
     from .sync import get_connector
     from .sync.github import GitAuth, coerce_branches_field
@@ -638,6 +663,7 @@ async def _run_sync_inner(folder_id: int) -> None:
         source.sync_status = "syncing"
         source.sync_error = None
 
+    _publish_sync_source_changed(folder_id)
     logger.info("sync begin folder=%s type=%s", folder_path, source_type)
     connector = get_connector(source_type)
 
@@ -687,6 +713,7 @@ async def _run_sync_inner(folder_id: int) -> None:
             src = s2.get(FolderSyncSource, folder_id)
             if src is not None:
                 src.sync_status = "error"
+        _publish_sync_source_changed(folder_id)
         # Final event so the SPA's badge clears even on failure.
         _on_progress("done", 0, 0, None)
         raise
@@ -705,6 +732,7 @@ async def _run_sync_inner(folder_id: int) -> None:
             src.sync_error = "; ".join(stats.errors) if stats.errors else None
             src.last_synced_at = int(time.time())
 
+    _publish_sync_source_changed(folder_id)
     # Final clear-the-badge event. The GD connector already emits "done"
     # on success, but other connectors may not — this guarantees the SPA
     # drops the sync pill no matter which connector ran.
@@ -720,6 +748,7 @@ def _mark_sync_error(folder_id: int, message: str) -> None:
             return
         src.sync_status = "error"
         src.sync_error = message[:4000]
+    _publish_sync_source_changed(folder_id)
 
 
 async def run_delete_file(payload: dict) -> None:

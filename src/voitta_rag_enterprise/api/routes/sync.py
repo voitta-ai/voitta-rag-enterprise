@@ -432,6 +432,16 @@ def clear_sync_error(
             src.sync_status = "idle"
         db.commit()
         db.refresh(src)
+        events.publish(
+            "folders",
+            {
+                "type": "folder.sync_source_changed",
+                "folder_id": folder_id,
+                "sync_status": src.sync_status,
+                "sync_error": src.sync_error,
+                "last_synced_at": src.last_synced_at,
+            },
+        )
     return _to_out(src)
 
 

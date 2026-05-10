@@ -1,6 +1,6 @@
 // WebSocket connection manager with backoff reconnect.
 
-import { connStatus, folders, files, jobs, reindexProgress, syncProgress, folderStats } from "./store.js";
+import { connStatus, folders, files, jobs, reindexProgress, syncProgress, syncSources, folderStats } from "./store.js";
 
 const MAX_BACKOFF_MS = 30_000;
 const TOPICS = ["folders", "files", "jobs", "stats"];
@@ -79,6 +79,21 @@ function handleEvent(event) {
             folderStats.update((map) => {
                 const next = new Map(map);
                 next.set(event.folder_id, event.stats);
+                return next;
+            });
+            return;
+        case "folder.sync_source_changed":
+            // Terminal sync-source fields (status, error, last_synced_at).
+            // Backend coalesces by folder_id; we mirror the same shape on
+            // the client so the sync modal can re-render its status line
+            // in-place without a REST refetch.
+            syncSources.update((map) => {
+                const next = new Map(map);
+                next.set(event.folder_id, {
+                    sync_status: event.sync_status,
+                    sync_error: event.sync_error,
+                    last_synced_at: event.last_synced_at,
+                });
                 return next;
             });
             return;

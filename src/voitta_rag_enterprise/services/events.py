@@ -64,6 +64,10 @@ _COALESCE_KEYS: dict[str, str] = {
     # commits on one folder during heavy indexing collapses to one
     # delivered event with the freshest counts.
     "folder.stats_changed": "folder_id",
+    # Sync-source status snapshot (sync_status / sync_error /
+    # last_synced_at). Emitted at each sync state transition; the modal
+    # and sidebar only care about the latest, so coalesce by folder.
+    "folder.sync_source_changed": "folder_id",
 }
 
 
@@ -87,6 +91,9 @@ def _event_key(event: dict[str, Any]) -> tuple[str, Any] | None:
     if etype == "folder.stats_changed":
         fid = event.get("folder_id")
         return ("folder.stats_changed", fid) if fid is not None else None
+    if etype == "folder.sync_source_changed":
+        fid = event.get("folder_id")
+        return ("folder.sync_source_changed", fid) if fid is not None else None
     jid = event.get("job_id")
     return (etype, jid) if jid is not None else None
 

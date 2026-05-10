@@ -18,7 +18,7 @@
 
 import { api } from "../api.js";
 import { getSelectedFolderId } from "../flows/selection.js";
-import { folders } from "../store.js";
+import { folders, syncSources } from "../store.js";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -800,4 +800,29 @@ $("#sync-delete").addEventListener("click", async () => {
     } catch (err) {
         alert(err.message);
     }
+});
+
+// Live status updates while the modal is open.
+//
+// Without this, the modal renders a snapshot taken at open time: a sync
+// job that completes (or errors out, or has its error cleared from
+// another tab) while the user is looking at the form leaves the status
+// line stuck on the stale value until close+reopen. The backend emits
+// folder.sync_source_changed at every state transition; mirror it into
+// the status line so the user sees "syncing → idle" / "→ error" live.
+//
+// Only the status row at the top is touched — the form inputs the user
+// may be editing are left alone. We pass the cached form fields (auto-
+// sync, etc.) from the last loadSyncSource through so renderSyncStatus
+// sees a complete-enough shape, even though it only consults
+// sync_status / sync_error / last_synced_at.
+syncSources.subscribe((map) => {
+    if (syncFolderId == null) return;
+    const entry = map.get(syncFolderId);
+    if (!entry) return;
+    renderSyncStatus({
+        sync_status: entry.sync_status,
+        sync_error: entry.sync_error,
+        last_synced_at: entry.last_synced_at,
+    });
 });
