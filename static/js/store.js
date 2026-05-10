@@ -34,3 +34,10 @@ export const reindexProgress = createStore(new Map());
 // two can coexist on the same folder card without overwriting each other
 // (e.g. user triggers sync, watcher fires reindex on extracted files).
 export const syncProgress = createStore(new Map());
+// folder_id → FolderStats payload (chunks_total, images_total, bytes_total,
+// by_extension, index_health, …). Backend pushes ``folder.stats_changed``
+// every time the indexer commits any artifact under the folder, so the
+// sidebar reads from this store instead of polling /api/folders/{id}/stats.
+// Empty map at boot; the SPA fetches the snapshot for the selected folder
+// on first render so the panel doesn't flash empty values.
+export const folderStats = createStore(new Map());

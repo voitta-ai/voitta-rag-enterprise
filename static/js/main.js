@@ -1,7 +1,7 @@
 // SPA entry point. Folder-list driven, with a selection-aware sidebar.
 
 import { api } from "./api.js";
-import { connStatus, files, folders, jobs, reindexProgress, syncProgress } from "./store.js";
+import { connStatus, files, folders, folderStats, jobs, reindexProgress, syncProgress } from "./store.js";
 import { connect } from "./ws.js";
 
 const $ = (sel) => document.querySelector(sel);
@@ -9,8 +9,6 @@ const $ = (sel) => document.querySelector(sel);
 let selectedFolderId = null;
 let selectedRelDir = ""; // "" = folder root; otherwise "subdir/inner"
 let rootInfo = { configured: false, root_path: null };
-let statsCache = null; // last successful FolderStats response
-let statsTimer = null;
 const expandedNodes = new Set(); // keys: `${folder_id}:${rel_dir}`
 const ghostDirs = new Map(); // folder_id → Set<rel_dir> (created via mkdir but no files yet)
 let activeSidebarTab = "details"; // "details" | "jobs"
@@ -129,7 +127,6 @@ files.subscribe(() => {
     // Toolbar visibility depends on whether the selected folder has files,
     // which is computed from this store — handled inside scheduleFullRender.
     scheduleFullRender();
-    scheduleStatsRefresh();
 });
 reindexProgress.subscribe(() => {
     // Progress events arrive at ~5/s during a wipe. The badge lives in
@@ -138,6 +135,13 @@ reindexProgress.subscribe(() => {
     scheduleSidebarRender();
 });
 syncProgress.subscribe(() => {
+    scheduleSidebarRender();
+});
+folderStats.subscribe(() => {
+    // Backend pushes folder.stats_changed coalesced per folder_id.
+    // The sidebar is the only consumer (chunks / images / bytes /
+    // by_extension / health badge), so a sidebar-only render is enough
+    // — no need to rebuild the tree.
     scheduleSidebarRender();
 });
 jobs.subscribe(() => {
@@ -151,8 +155,6 @@ jobs.subscribe(() => {
     // nothing re-renders the tree. Re-render on jobs changes too so the
     // status flips to green without needing a manual expand/collapse.
     scheduleFullRender();
-    // A job finishing usually means chunks/images counts moved.
-    scheduleStatsRefresh();
 });
 
 function aggregateStatus(folderFiles) {
@@ -677,10 +679,11 @@ function emitTreeRow({ targetRows, seenKeys, folder, node, relDir, displayName, 
 function selectNode(folderId, relDir) {
     selectedFolderId = folderId;
     selectedRelDir = relDir;
-    statsCache = null;
     renderFolders(folders.get());
     renderSidebar();
-    refreshStats();
+    // First-load fetch only when the WS hasn't already pushed a snapshot
+    // for this folder; subsequent mutations flow over folder.stats_changed.
+    ensureFolderStats(folderId);
     updateToolbarState();
 }
 
@@ -800,8 +803,13 @@ function renderSidebar() {
     const kvInProgress = $("#kv-in-progress");
     if (kvInProgress) kvInProgress.textContent = inProgress;
 
-    // Folder-level stats from /api/folders/{id}/stats — independent of subdir.
-    const s = statsCache && statsCache.folder_id === folder.id ? statsCache : null;
+    // Folder-level stats live in the ``folderStats`` store, fed by
+    // ``folder.stats_changed`` over the WS. ``ensureFolderStats`` does
+    // the first-load REST fetch on demand so the panel never shows "…"
+    // for longer than the round-trip; subsequent updates flow over the
+    // socket and the subscriber re-runs ``renderSidebar`` automatically.
+    const s = folderStats.get().get(folder.id) || null;
+    if (!s) ensureFolderStats(folder.id);
     $("#kv-bytes").textContent = s ? humanBytes(s.bytes_total) : "…";
     $("#kv-chunks").textContent = s ? s.chunks_total : "…";
     $("#kv-images").textContent = s ? s.images_total : "…";
@@ -917,55 +925,105 @@ function renderSidebar() {
         syncBadge.hidden = true;
     }
 
-    const extTable = $("#ext-table");
-    const extTbody = $("#ext-tbody");
-    extTbody.innerHTML = "";
-    // Sort by file count desc; falls back to ext name for stable order.
-    const exts = s
-        ? Object.entries(s.by_extension).sort((a, b) => b[1].files - a[1].files || a[0].localeCompare(b[0]))
-        : [];
-    extTable.hidden = exts.length === 0;
-    for (const [ext, e] of exts) {
-        const tr = document.createElement("tr");
-        // Row class drives color coding:
-        //   error      → any file under this ext failed
-        //   unsupported → every file is unsupported (no parser)
-        //   pending    → none indexed yet but work is moving
-        //   indexed    → at least some chunks landed
-        let rowClass = "";
-        const tooltipBits = [];
-        if (e.error > 0) {
-            rowClass = "ext-error";
-            tooltipBits.push(`${e.error} error`);
-        } else if (e.indexed === 0 && e.unsupported === e.files) {
-            rowClass = "ext-unsupported";
-            tooltipBits.push(`${e.unsupported} unsupported (no parser)`);
-        } else if (e.indexed === 0 && e.pending > 0) {
-            rowClass = "ext-pending";
-            tooltipBits.push(`${e.pending} pending`);
-        } else if (e.indexed > 0) {
-            rowClass = "ext-indexed";
-        }
-        if (e.indexed) tooltipBits.push(`${e.indexed} indexed`);
-        if (e.unsupported && rowClass !== "ext-unsupported") tooltipBits.push(`${e.unsupported} unsupported`);
-        if (e.pending && rowClass !== "ext-pending") tooltipBits.push(`${e.pending} pending`);
-        tr.className = rowClass;
-        tr.title = tooltipBits.join(" · ");
-        const tdExt = document.createElement("td");
-        tdExt.className = "ext";
-        tdExt.textContent = ext;
-        const tdFiles = document.createElement("td");
-        tdFiles.className = "num";
-        tdFiles.textContent = e.files;
-        const tdChunks = document.createElement("td");
-        tdChunks.className = "num";
-        tdChunks.textContent = e.chunks;
-        tr.append(tdExt, tdFiles, tdChunks);
-        extTbody.append(tr);
-    }
+    renderExtTable(s);
 
     $("#upload-target-hint").hidden = false;
     $("#upload-target").textContent = selectedRelDir ? `/${selectedRelDir}/` : "/";
+}
+
+// ----- Per-extension table -----
+//
+// Keyed reconciliation: keep one ``<tr>`` per extension alive across
+// renders, only mutate the cells that changed. The previous version
+// did ``innerHTML = ""`` on every WS event, which flickered the table
+// during heavy indexing. Same pattern as the folder tree and jobs list.
+const extRowCache = new Map();
+
+function buildExtRow(ext) {
+    const tr = document.createElement("tr");
+    tr.dataset.ext = ext;
+    const tdExt = document.createElement("td");
+    tdExt.className = "ext";
+    tdExt.textContent = ext;
+    const tdFiles = document.createElement("td");
+    tdFiles.className = "num";
+    const tdChunks = document.createElement("td");
+    tdChunks.className = "num";
+    tr.append(tdExt, tdFiles, tdChunks);
+    tr._refs = { tdFiles, tdChunks };
+    return tr;
+}
+
+function updateExtRow(tr, ext, e) {
+    // Row class drives color coding:
+    //   error      → any file under this ext failed
+    //   unsupported → every file is unsupported (no parser)
+    //   pending    → none indexed yet but work is moving
+    //   indexed    → at least some chunks landed
+    let rowClass = "";
+    const tooltipBits = [];
+    if (e.error > 0) {
+        rowClass = "ext-error";
+        tooltipBits.push(`${e.error} error`);
+    } else if (e.indexed === 0 && e.unsupported === e.files) {
+        rowClass = "ext-unsupported";
+        tooltipBits.push(`${e.unsupported} unsupported (no parser)`);
+    } else if (e.indexed === 0 && e.pending > 0) {
+        rowClass = "ext-pending";
+        tooltipBits.push(`${e.pending} pending`);
+    } else if (e.indexed > 0) {
+        rowClass = "ext-indexed";
+    }
+    if (e.indexed) tooltipBits.push(`${e.indexed} indexed`);
+    if (e.unsupported && rowClass !== "ext-unsupported") tooltipBits.push(`${e.unsupported} unsupported`);
+    if (e.pending && rowClass !== "ext-pending") tooltipBits.push(`${e.pending} pending`);
+    setIfChanged(tr, "className", rowClass);
+    const title = tooltipBits.join(" · ");
+    if (tr.title !== title) tr.title = title;
+    setIfChanged(tr._refs.tdFiles, "textContent", String(e.files));
+    setIfChanged(tr._refs.tdChunks, "textContent", String(e.chunks));
+}
+
+function renderExtTable(s) {
+    const extTable = $("#ext-table");
+    const extTbody = $("#ext-tbody");
+    // Sort by file count desc; falls back to ext name for stable order.
+    const exts = s
+        ? Object.entries(s.by_extension).sort(
+            (a, b) => b[1].files - a[1].files || a[0].localeCompare(b[0]),
+        )
+        : [];
+    extTable.hidden = exts.length === 0;
+
+    const targetRows = [];
+    const seenKeys = new Set();
+    for (const [ext, e] of exts) {
+        let tr = extRowCache.get(ext);
+        if (!tr) {
+            tr = buildExtRow(ext);
+            extRowCache.set(ext, tr);
+        }
+        updateExtRow(tr, ext, e);
+        targetRows.push(tr);
+        seenKeys.add(ext);
+    }
+
+    let cursor = extTbody.firstChild;
+    for (const tr of targetRows) {
+        if (tr === cursor) {
+            cursor = cursor.nextSibling;
+        } else {
+            extTbody.insertBefore(tr, cursor);
+        }
+    }
+    while (cursor) {
+        const next = cursor.nextSibling;
+        cursor.remove();
+        cursor = next;
+    }
+    for (const ext of [...extRowCache.keys()]) {
+        if (!seenKeys.has(ext)) extRowCache.delete(ext);
+    }
 }
 
 function humanBytes(n) {
@@ -977,25 +1035,32 @@ function humanBytes(n) {
     return `${v.toFixed(v >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
-async function refreshStats() {
-    if (!selectedFolderId) return;
-    const id = selectedFolderId;
-    try {
-        const s = await api.folderStats(id);
-        if (id === selectedFolderId) {
-            statsCache = s;
-            renderSidebar();
-        }
-    } catch (err) {
-        // Folder might have been deleted; surface only the first error.
-        console.warn("stats fetch failed", err);
-    }
-}
+// Tracks folder ids we've kicked a first-load fetch for so we don't
+// fan out 60 identical REST calls when the rAF render loop fires
+// before the first WS event lands.
+const _statsInFlight = new Set();
 
-function scheduleStatsRefresh() {
-    if (!selectedFolderId) return;
-    if (statsTimer) clearTimeout(statsTimer);
-    statsTimer = setTimeout(() => { statsTimer = null; refreshStats(); }, 400);
+async function ensureFolderStats(folderId) {
+    if (_statsInFlight.has(folderId)) return;
+    if (folderStats.get().has(folderId)) return;
+    _statsInFlight.add(folderId);
+    try {
+        const s = await api.folderStats(folderId);
+        // The store's set-by-key is mutate-Map-then-update so the
+        // subscriber sees a fresh Map identity and re-renders.
+        folderStats.update((map) => {
+            const next = new Map(map);
+            next.set(folderId, s);
+            return next;
+        });
+    } catch (err) {
+        // 404 just means the folder was removed mid-render. Other
+        // failures are logged once so the console doesn't drown if
+        // the stats endpoint is down.
+        console.warn("stats first-load failed", err);
+    } finally {
+        _statsInFlight.delete(folderId);
+    }
 }
 
 // ----- Jobs -----

@@ -344,7 +344,7 @@ def _mark_state(file_id: int, *, state: str, error: str | None = None) -> None:
 
 
 def publish_file_upserted(file_id: int) -> None:
-    """Publish ``file.upserted`` for the SPA so its files store stays in sync.
+    """Publish ``file.upserted`` + ``folder.stats_changed`` for the SPA.
 
     Single source of truth — every call site that mutates a ``File`` row
     must call this (or ``events.publish('files', {'type': 'file.deleted',
@@ -352,7 +352,16 @@ def publish_file_upserted(file_id: int) -> None:
     a fresh session so the payload reflects the committed state, not
     whatever the caller happens to have in memory. No-op if the row
     vanished between the mutation and this call.
+
+    The same hook publishes ``folder.stats_changed`` so the sidebar's
+    chunk/image/byte counters stay in lockstep with the files store.
+    Both events go out in the same session — they reflect the same
+    committed snapshot. ``events.py`` coalesces the snapshots per
+    folder_id, so a 200-file extract burst produces one delivered
+    stats event per folder, not 200.
     """
+    from .folder_stats import publish_folder_stats
+
     with session_scope() as s:
         file = s.get(File, file_id)
         if file is None:
@@ -364,6 +373,7 @@ def publish_file_upserted(file_id: int) -> None:
                 "file": file_event_payload(file),
             },
         )
+        publish_folder_stats(s, file.folder_id)
 
 
 def file_event_payload(file: File) -> dict:
@@ -1199,12 +1209,21 @@ def wipe_file_data(file_id: int) -> None:
 
 def _delete_file_sync(file_id: int) -> None:
     """Worker handler: delete the file row plus every artifact under it."""
+    from .folder_stats import publish_folder_stats
+
+    # Capture folder_id before deleting so the post-delete stats publish
+    # can find the folder row.
+    folder_id: int | None = None
     wipe_file_data(file_id)
     with session_scope() as s:
         file = s.get(File, file_id)
         if file is not None:
+            folder_id = file.folder_id
             s.delete(file)
     events.publish("files", {"type": "file.deleted", "file_id": file_id})
+    if folder_id is not None:
+        with session_scope() as s:
+            publish_folder_stats(s, folder_id)
 
 
 def _decrement_pending_embeds(file_id: int, round_token: int | None = None) -> None:

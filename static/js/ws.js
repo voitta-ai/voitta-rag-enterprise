@@ -1,6 +1,6 @@
 // WebSocket connection manager with backoff reconnect.
 
-import { connStatus, folders, files, jobs, reindexProgress, syncProgress } from "./store.js";
+import { connStatus, folders, files, jobs, reindexProgress, syncProgress, folderStats } from "./store.js";
 
 const MAX_BACKOFF_MS = 30_000;
 const TOPICS = ["folders", "files", "jobs", "stats"];
@@ -64,6 +64,23 @@ function handleEvent(event) {
         case "folder.removed":
             folders.update((list) => list.filter(f => f.id !== event.folder_id));
             files.update((list) => list.filter(f => f.folder_id !== event.folder_id));
+            folderStats.update((map) => {
+                if (!map.has(event.folder_id)) return map;
+                const next = new Map(map);
+                next.delete(event.folder_id);
+                return next;
+            });
+            return;
+        case "folder.stats_changed":
+            // Per-folder snapshot. Backend coalesces by folder_id so a
+            // 200-file extract burst delivers one event with the freshest
+            // counts, not 200. We swap a fresh Map so the subscriber's
+            // identity check fires.
+            folderStats.update((map) => {
+                const next = new Map(map);
+                next.set(event.folder_id, event.stats);
+                return next;
+            });
             return;
         case "folder.sync_progress":
             // Backend connector + worker emit these during the listing /

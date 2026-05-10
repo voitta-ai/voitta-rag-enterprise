@@ -582,98 +582,20 @@ def folder_stats(
     db: Session = Depends(db_session),
     user: CurrentUser = Depends(current_user),
 ) -> FolderStats:
+    """Per-folder snapshot consumed by the SPA's Details panel.
+
+    The same payload shape is also published over the ``folders`` WS
+    topic as ``folder.stats_changed`` whenever the indexer commits any
+    artifact under a folder. SPAs use this REST endpoint for first-load
+    only; subsequent updates flow over the WS so chunks / images counts
+    stay in lockstep with the live file states.
+    """
+    from ...services.folder_stats import compute_folder_stats
+
     folder = db.get(Folder, folder_id)
     if folder is None or not user_can_see_folder(db, folder_id, user.id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Folder not found")
-
-    files = list(
-        db.execute(
-            select(File).where(File.folder_id == folder_id, File.state != "deleted")
-        ).scalars()
-    )
-    _IN_PROGRESS_STATES = ("extracted", "embedding")
-    files_total = len(files)
-    files_indexed = sum(1 for f in files if f.state == "indexed")
-    files_error = sum(1 for f in files if f.state == "error")
-    files_unsupported = sum(1 for f in files if f.state == "unsupported")
-    files_in_progress = sum(1 for f in files if f.state in _IN_PROGRESS_STATES)
-    files_pending = sum(
-        1
-        for f in files
-        if f.state == "pending"
-    )
-    bytes_total = sum(f.size_bytes or 0 for f in files)
-    file_ids = [f.id for f in files]
-
-    # Per-extension chunk counts: one COUNT-grouped-by query and a join-back
-    # in Python so we don't have to pull every chunk row.
-    chunks_by_file: dict[int, int] = {}
-    if file_ids:
-        chunks_by_file = dict(
-            db.execute(
-                select(Chunk.file_id, func.count(Chunk.id))
-                .where(Chunk.file_id.in_(file_ids))
-                .group_by(Chunk.file_id)
-            ).all()
-        )
-
-    by_extension: dict[str, ExtensionStats] = {}
-    for f in files:
-        ext = Path(f.rel_path).suffix.lower() or "(no ext)"
-        es = by_extension.setdefault(ext, ExtensionStats())
-        es.files += 1
-        if f.state == "indexed":
-            es.indexed += 1
-        elif f.state == "error":
-            es.error += 1
-        elif f.state == "unsupported":
-            es.unsupported += 1
-        elif f.state in _IN_PROGRESS_STATES:
-            es.in_progress += 1
-        else:
-            es.pending += 1
-        es.chunks += chunks_by_file.get(f.id, 0)
-
-    chunks_total = sum(chunks_by_file.values())
-    images_total = (
-        db.execute(
-            select(func.count(Image.id)).where(Image.file_id.in_(file_ids))
-        ).scalar_one()
-        if file_ids
-        else 0
-    )
-    images_unique = (
-        db.execute(
-            select(func.count(func.distinct(Image.image_cas_id))).where(
-                Image.file_id.in_(file_ids)
-            )
-        ).scalar_one()
-        if file_ids
-        else 0
-    )
-
-    from ...services.reconcile import folder_health
-
-    health = folder_health(db, folder)
-
-    return FolderStats(
-        folder_id=folder_id,
-        files_total=files_total,
-        files_indexed=files_indexed,
-        files_error=files_error,
-        files_unsupported=files_unsupported,
-        files_in_progress=files_in_progress,
-        files_pending=files_pending,
-        chunks_total=int(chunks_total),
-        images_total=int(images_total),
-        images_unique=int(images_unique),
-        bytes_total=bytes_total,
-        by_extension=by_extension,
-        index_health=IndexHealth(
-            status=health.status,
-            qdrant_chunk_points=health.qdrant_chunk_points,
-        ),
-    )
+    return FolderStats(**compute_folder_stats(db, folder))
 
 
 class GrantBody(BaseModel):

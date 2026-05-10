@@ -104,6 +104,54 @@ async def test_file_upserted_coalesces_per_file_id(env: None) -> None:
 
 
 @pytest.mark.asyncio
+async def test_folder_stats_changed_coalesces_per_folder_id(env: None) -> None:
+    """A burst of stats updates on the same folder collapses to one
+    delivered event with the freshest counts. The events broker is
+    what makes per-commit publishing cheap enough to fire from the
+    indexer's hot path."""
+    events.install_loop(asyncio.get_running_loop())
+    try:
+        async with events.subscribe(["folders"]) as sub:
+            for i in range(50):
+                events.publish(
+                    "folders",
+                    {
+                        "type": "folder.stats_changed",
+                        "folder_id": 7,
+                        "stats": {"chunks_total": i},
+                    },
+                )
+            await sub.wait(timeout=1.0)
+            items = sub.drain()
+            assert len(items) == 1
+            assert items[0]["stats"]["chunks_total"] == 49  # latest wins
+    finally:
+        events.uninstall_loop()
+
+
+@pytest.mark.asyncio
+async def test_folder_stats_changed_keeps_distinct_folders_separate(env: None) -> None:
+    events.install_loop(asyncio.get_running_loop())
+    try:
+        async with events.subscribe(["folders"]) as sub:
+            for fid in range(3):
+                events.publish(
+                    "folders",
+                    {
+                        "type": "folder.stats_changed",
+                        "folder_id": fid,
+                        "stats": {"chunks_total": fid},
+                    },
+                )
+            await sub.wait(timeout=1.0)
+            items = sub.drain()
+            ids = {e["folder_id"] for e in items}
+            assert ids == {0, 1, 2}
+    finally:
+        events.uninstall_loop()
+
+
+@pytest.mark.asyncio
 async def test_distinct_files_are_not_coalesced(env: None) -> None:
     events.install_loop(asyncio.get_running_loop())
     try:

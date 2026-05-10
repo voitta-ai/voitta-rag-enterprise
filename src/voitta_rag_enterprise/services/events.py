@@ -60,15 +60,20 @@ _COALESCE_KEYS: dict[str, str] = {
     "job.started": "job_id",
     "job.finished": "job_id",
     "folder.upserted": "folder_id_from_payload",
+    # Per-folder stats snapshots: only the latest matters. A burst of
+    # commits on one folder during heavy indexing collapses to one
+    # delivered event with the freshest counts.
+    "folder.stats_changed": "folder_id",
 }
 
 
 def _event_key(event: dict[str, Any]) -> tuple[str, Any] | None:
     """Return the dedup key for ``event`` or ``None`` if it must be appended.
 
-    Files and folders are keyed by their nested id; jobs are keyed by the
-    flat ``job_id`` field. Anything not in :data:`_COALESCE_KEYS` returns
-    None and is treated as a discrete event.
+    Files / folders are keyed by their nested id; jobs by the flat
+    ``job_id`` field; ``folder.stats_changed`` by the flat ``folder_id``
+    field. Anything not in :data:`_COALESCE_KEYS` returns None and is
+    treated as a discrete event.
     """
     etype = event.get("type")
     if etype not in _COALESCE_KEYS:
@@ -79,6 +84,9 @@ def _event_key(event: dict[str, Any]) -> tuple[str, Any] | None:
     if etype == "folder.upserted":
         fid = (event.get("folder") or {}).get("id")
         return ("folder.upserted", fid) if fid is not None else None
+    if etype == "folder.stats_changed":
+        fid = event.get("folder_id")
+        return ("folder.stats_changed", fid) if fid is not None else None
     jid = event.get("job_id")
     return (etype, jid) if jid is not None else None
 
