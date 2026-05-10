@@ -54,9 +54,56 @@ def test_text_parser_covers_common_code_extensions() -> None:
         "x.php", "x.rb", "x.swift", "x.kt", "x.scala", "x.lua", "x.r",
         "x.dart", "x.ex", "x.hs", "x.cs", "x.vue", "x.svelte", "x.scss",
         "x.bash", "x.zsh", "x.ini", "x.conf", "x.tex", "x.patch",
+        # build / template / infra extensions added for git-project coverage
+        "MANIFEST.in", "config.tpl", "values.tmpl", "vars.example",
+        "main.tf", "vars.tfvars", "infra.hcl",
+        "schema.proto", "service.thrift", "query.graphql",
+        "rules.bzl", "BUILD.bazel",
+        "msgs.po", "kernel.cu",
     ]
     for name in must_match:
         assert parser.can_parse(Path(name)), f"{name} should be parseable"
+
+
+def test_text_parser_matches_extensionless_project_files() -> None:
+    """Files like LICENSE / Dockerfile / Makefile have no usable extension.
+
+    Real git projects are full of them; before adding ``filenames`` matching
+    they were silently skipped because ``Path('LICENSE').suffix`` is ``''``.
+    """
+    parser = TextParser()
+    must_match = [
+        "LICENSE", "LICENCE", "NOTICE", "AUTHORS", "CHANGELOG", "README",
+        "Makefile", "GNUmakefile", "Dockerfile", "Containerfile",
+        "Procfile", "Vagrantfile", "Jenkinsfile", "Gemfile", "Rakefile",
+        "Pipfile", "BUILD", "BUILD.bazel", "WORKSPACE",
+        "Cargo.lock", "Pipfile.lock", "poetry.lock", "uv.lock", "yarn.lock",
+        ".gitignore", ".gitattributes", ".dockerignore",
+        ".editorconfig", ".npmrc", ".python-version", ".env",
+        ".flake8", ".eslintrc", ".prettierrc",
+    ]
+    for name in must_match:
+        assert parser.can_parse(Path(name)), f"{name} should be parseable"
+
+
+def test_text_parser_still_rejects_binary_extensions() -> None:
+    """The permissive name list mustn't pull in binary blobs."""
+    parser = TextParser()
+    must_not_match = ["x.png", "x.pdf", "x.docx", "x.xlsx", "x.mp4", "x.zip"]
+    for name in must_not_match:
+        assert not parser.can_parse(Path(name)), f"{name} should NOT be parseable"
+
+
+def test_text_parser_matches_extensionless_file_in_subdir(tmp_path: Path) -> None:
+    """``filenames`` lookup works regardless of the parent path."""
+    parser = TextParser()
+    p = tmp_path / "subproject" / "LICENSE"
+    p.parent.mkdir(parents=True)
+    p.write_text("MIT License\n\nPermission is hereby granted, ...")
+    assert parser.can_parse(p)
+    r = parser.parse(p)
+    assert r.success
+    assert "MIT License" in r.content
 
 
 def test_image_file_parser_returns_one_image(tmp_path: Path) -> None:
