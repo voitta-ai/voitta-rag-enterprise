@@ -141,6 +141,7 @@ export const api = {
     retryAllFailed: () => req("POST", "/api/jobs/retry-failed"),
     cleanupFailedJobs: () => req("DELETE", "/api/jobs/cleanup-failed"),
     cancelAllJobs: () => req("POST", "/api/jobs/cancel-all"),
+    cancelJob: (id) => req("POST", `/api/jobs/${id}/cancel`),
     search: (query, modes = ["chunks"], folderIds = null, limit = 10) =>
         req("POST", "/api/search", { query, modes, folder_ids: folderIds, limit }),
 

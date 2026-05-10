@@ -49,6 +49,30 @@ function buildJobRow(jobId) {
     const tag = document.createElement("span");
     tag.className = "status-tag";
 
+    const cancel = document.createElement("button");
+    cancel.className = "cancel";
+    cancel.textContent = "✕";
+    cancel.title = "Cancel this job";
+    cancel.hidden = true;
+    cancel.addEventListener("click", async () => {
+        if (!confirm(
+            "Cancel this job?\n\n" +
+            "Queued jobs are dropped immediately. A running embed/sync " +
+            "is marked cancelled in the UI but the worker thread keeps " +
+            "running silently in the background until its current pass " +
+            "completes (Python has no clean interrupt for that).\n\n" +
+            "PDF parses are killed at the subprocess level."
+        )) return;
+        cancel.disabled = true;
+        try {
+            const out = await api.cancelJob(jobId);
+            if (out.note) alert(out.note);
+        } catch (e) {
+            cancel.disabled = false;
+            alert(e.message);
+        }
+    });
+
     const retry = document.createElement("button");
     retry.className = "retry";
     retry.textContent = "↻";
@@ -58,8 +82,8 @@ function buildJobRow(jobId) {
         try { await api.retryJob(jobId); } catch (e) { alert(e.message); }
     });
 
-    li.append(col, tag, retry);
-    li._refs = { top, path, err, tag, retry };
+    li.append(col, tag, cancel, retry);
+    li._refs = { top, path, err, tag, cancel, retry };
     return li;
 }
 
@@ -88,6 +112,13 @@ function updateJobRow(li, j) {
 
     setIfChanged(r.tag, "className", `status-tag ${j.state}`);
     setIfChanged(r.tag, "textContent", j.state);
+
+    // Cancel button: visible while the job can still be aborted. Done /
+    // error rows hide it (terminal). Reset disabled when the row
+    // re-enters a cancellable state — happens after the retry path.
+    const showCancel = j.state === "queued" || j.state === "running";
+    if (r.cancel.hidden === showCancel) r.cancel.hidden = !showCancel;
+    if (showCancel && r.cancel.disabled) r.cancel.disabled = false;
 
     const showRetry = j.state === "error";
     if (r.retry.hidden === showRetry) r.retry.hidden = !showRetry;

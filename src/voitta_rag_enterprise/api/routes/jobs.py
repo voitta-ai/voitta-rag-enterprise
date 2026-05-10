@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
@@ -240,3 +241,127 @@ def cancel_all(
 
     db.commit()
     return CancelAllOut(cancelled_queued=cancelled, killed_running=killed)
+
+
+class CancelOneOut(BaseModel):
+    job_id: int
+    state: str
+    note: str | None = None  # human-readable side effect summary
+
+
+@router.post("/{job_id}/cancel", response_model=CancelOneOut)
+def cancel_job(
+    job_id: int,
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(current_user),
+) -> CancelOneOut:
+    """Cancel a single queued or running job.
+
+    Behaviour by current state:
+
+    * ``queued`` — flip to ``state='done'``, ``error='cancelled'``.
+      The job will never run.
+    * ``running`` — same flip, plus best-effort interrupt:
+        - ``extract`` PDF runs: kill the MinerU subprocess so the
+          worker thread's ``readline`` returns empty and the parse
+          aborts; file lands in ``state='error'``.
+        - ``extract`` non-PDF / ``embed_*`` / ``sync``: bump the
+          file's ``embed_round`` (when applicable) so the in-flight
+          embed's ``_decrement_pending_embeds`` no-ops on completion,
+          and mark the file as ``error`` with ``cancelled by user`` so
+          the SPA stops showing it as in-progress. The worker thread
+          keeps running silently until its current sequential pass
+          finishes — Python has no clean interrupt for an embedder
+          forward pass that's already entered native code. The
+          ``note`` field surfaces this caveat to the SPA.
+    * ``done`` / ``error`` — 400, already terminal.
+
+    No-op race with worker pool draining the same row is fine: the
+    UPDATE just lands on a ``done`` row.
+    """
+    from ...services.parsers import pdf_parser
+
+    job = db.get(Job, job_id)
+    if job is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Job not found")
+    if job.state not in ("queued", "running"):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"Cannot cancel job in state {job.state!r} (only queued / running)",
+        )
+
+    was_running = job.state == "running"
+    job_kind = job.kind
+    job.state = "done"
+    job.error = "cancelled"
+    job.finished_at = int(time.time())
+
+    note: str | None = None
+    file_to_publish: int | None = None
+    if was_running:
+        try:
+            payload = json.loads(job.payload) if job.payload else {}
+        except json.JSONDecodeError:
+            payload = {}
+
+        # PDF parse path: a SIGKILL on the MinerU daemon unblocks the
+        # extract handler immediately. Everything else only gets a
+        # state-flip — surface that asymmetry so the SPA can warn.
+        killed_pdf = False
+        if (
+            job_kind == "extract"
+            and pdf_parser._DAEMON is not None
+            and pdf_parser._DAEMON._proc is not None
+            and pdf_parser._DAEMON._proc.poll() is None
+        ):
+            pdf_parser._DAEMON._kill("user cancel")
+            killed_pdf = True
+
+        # Bump the file's ``embed_round`` so a stale decrement landing
+        # after this cancel doesn't flip the row to ``indexed``. Same
+        # mechanism the reindex pipeline uses (see _commit_indexing).
+        # Stamp the file as ``error`` so the file row's UI state matches
+        # the job's. ``pending_embeds=0`` keeps reconcile from picking
+        # the row back up later.
+        fid = payload.get("file_id") if isinstance(payload, dict) else None
+        if isinstance(fid, int):
+            f = db.get(File, fid)
+            if f is not None:
+                f.embed_round = (f.embed_round or 0) + 1
+                f.state = "error"
+                f.error = "cancelled by user"
+                f.pending_embeds = 0
+                file_to_publish = fid
+
+        if killed_pdf:
+            note = "MinerU subprocess killed; file marked as error."
+        elif file_to_publish is not None or job_kind in ("embed_text", "embed_image"):
+            note = (
+                "Job marked cancelled. The worker thread is still running "
+                "the current pass and will finish silently in the "
+                "background; the file is already marked as error so it "
+                "won't show as in-progress."
+            )
+
+    db.commit()
+
+    # Publish job.finished + file.upserted so the SPA flips both rows
+    # immediately, without waiting for the next /recent or /files poll.
+    from ...services import events
+
+    events.publish(
+        "jobs",
+        {
+            "type": "job.finished",
+            "job_id": job_id,
+            "kind": job_kind,
+            "state": "done",
+            "error": "cancelled",
+        },
+    )
+    if file_to_publish is not None:
+        from ...services.indexing import publish_file_upserted
+
+        publish_file_upserted(file_to_publish)
+
+    return CancelOneOut(job_id=job_id, state="done", note=note)

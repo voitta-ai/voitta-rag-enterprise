@@ -817,6 +817,21 @@ input[type="text"], input[type="file"] {
 }
 .job-rows .retry:hover { background: var(--color-accent); color: #fff; }
 
+/* Per-job cancel — danger-coloured to mirror the destructive intent.
+   Same shape as .retry so they align when both happen to be visible
+   (rare but possible: an error row plus a freshly-queued retry). */
+.job-rows .cancel {
+    background: transparent;
+    border: 1px solid #dc2626;
+    color: #dc2626;
+    border-radius: var(--radius-sm);
+    font-size: 11px;
+    padding: 2px 8px;
+    cursor: pointer;
+}
+.job-rows .cancel:hover:not(:disabled) { background: #dc2626; color: #fff; }
+.job-rows .cancel:disabled { opacity: 0.5; cursor: not-allowed; }
+
 #upload-card .btn,
 #upload-card input { margin-top: 8px; }
 

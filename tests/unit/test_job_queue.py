@@ -163,6 +163,96 @@ def test_claim_one_publishes_display_path_for_extract(env: None) -> None:
     assert started["payload"]["file_id"] == fid
 
 
+def test_cancel_endpoint_marks_queued_done_with_reason(env: None, app) -> None:
+    """A queued job → flip to done + error='cancelled'. Doesn't run."""
+    from fastapi.testclient import TestClient
+
+    init_db()
+    with session_scope() as s:
+        jid = job_queue.enqueue(s, "extract", {"file_id": 1})
+
+    with TestClient(app) as c:
+        r = c.post(f"/api/jobs/{jid}/cancel")
+        assert r.status_code == 200, r.text
+        out = r.json()
+        assert out["job_id"] == jid
+        assert out["state"] == "done"
+        assert out["note"] is None  # queued path is silent
+
+    with session_scope() as s:
+        j = s.get(Job, jid)
+        assert j.state == "done"
+        assert j.error == "cancelled"
+
+
+def test_cancel_endpoint_running_marks_file_as_error(env: None, app) -> None:
+    """Cancelling a running extract bumps the file's embed_round, marks
+    the file ``state='error'``, and clears pending_embeds so the row
+    won't get picked up by reconcile later."""
+    from fastapi.testclient import TestClient
+
+    from voitta_rag_enterprise.db.models import File, Folder
+
+    init_db()
+    with session_scope() as s:
+        folder = Folder(path="/tmp/x", display_name="x")
+        s.add(folder)
+        s.flush()
+        f = File(folder_id=folder.id, rel_path="big.json", state="extracted", pending_embeds=1, embed_round=1)
+        s.add(f)
+        s.flush()
+        jid = job_queue.enqueue(s, "embed_text", {"file_id": f.id, "round": 1})
+        # Move the job into running state to simulate an in-flight embed.
+        j = s.get(Job, jid)
+        j.state = "running"
+        j.started_at = 1
+        fid = f.id
+
+    with TestClient(app) as c:
+        r = c.post(f"/api/jobs/{jid}/cancel")
+        assert r.status_code == 200, r.text
+        out = r.json()
+        assert out["state"] == "done"
+        # Running embed_text → caveat note about background completion.
+        assert "silently in the background" in (out["note"] or "")
+
+    with session_scope() as s:
+        j = s.get(Job, jid)
+        assert j.state == "done"
+        assert j.error == "cancelled"
+        f = s.get(File, fid)
+        assert f.state == "error"
+        assert f.error == "cancelled by user"
+        assert f.pending_embeds == 0
+        # embed_round bumped — stale decrement from the still-running
+        # embed thread will no-op when it eventually returns.
+        assert f.embed_round == 2
+
+
+def test_cancel_endpoint_rejects_terminal_states(env: None, app) -> None:
+    from fastapi.testclient import TestClient
+
+    init_db()
+    with session_scope() as s:
+        jid = job_queue.enqueue(s, "extract", {"file_id": 1})
+        s.get(Job, jid).state = "done"
+        s.get(Job, jid).finished_at = 1
+
+    with TestClient(app) as c:
+        r = c.post(f"/api/jobs/{jid}/cancel")
+        assert r.status_code == 400
+        assert "done" in r.json()["detail"]
+
+
+def test_cancel_endpoint_404_for_unknown_job(env: None, app) -> None:
+    from fastapi.testclient import TestClient
+
+    init_db()
+    with TestClient(app) as c:
+        r = c.post("/api/jobs/9999/cancel")
+        assert r.status_code == 404
+
+
 def test_claim_one_display_path_none_for_payload_without_file_id(env: None) -> None:
     """Sync / reindex_folder jobs carry folder_id, not file_id —
     display_path stays None so the SPA hides the path line."""
