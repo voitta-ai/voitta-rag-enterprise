@@ -2095,6 +2095,25 @@ function closeAdmin() {
     $("#admin-backdrop").hidden = true;
 }
 
+// Admin modal tabs — Sign-in gate / Users / OAuth providers. Pure DOM
+// toggle; refreshAdmin always pulls all three sections regardless of
+// which tab is visible, so flipping tabs is instant.
+function setAdminTab(name) {
+    if (!["access", "users", "oauth"].includes(name)) name = "access";
+    for (const t of ["access", "users", "oauth"]) {
+        const btn = $(`#admin-tab-btn-${t}`);
+        const pane = $(`#admin-tab-pane-${t}`);
+        if (!btn || !pane) continue;
+        const active = t === name;
+        btn.classList.toggle("active", active);
+        btn.setAttribute("aria-selected", String(active));
+        pane.hidden = !active;
+    }
+}
+$("#admin-tab-btn-access").addEventListener("click", () => setAdminTab("access"));
+$("#admin-tab-btn-users").addEventListener("click", () => setAdminTab("users"));
+$("#admin-tab-btn-oauth").addEventListener("click", () => setAdminTab("oauth"));
+
 async function refreshAdmin() {
     try {
         const [allow, users, providers] = await Promise.all([

@@ -32,74 +32,119 @@
                 <button id="admin-close" class="btn-text" aria-label="Close">×</button>
             </div>
             <div class="modal-body admin-body">
-                <div class="admin-grid">
-                    <section class="admin-section">
-                        <header><h4>Allowed domains</h4><span class="hint">Anyone with a Google account in this domain can sign in.</span></header>
-                        <ul id="admin-domains" class="admin-list"></ul>
-                        <div class="admin-add-row">
-                            <input id="admin-domain-input" type="text" placeholder="customer.com" />
-                            <button id="admin-domain-add" class="btn btn-primary btn-sm">Add</button>
-                        </div>
-                    </section>
+                <!-- Tab strip — three buckets: who's allowed in (sign-in
+                     gate), who's a user (existing rows + admin flag),
+                     and OAuth credential catalog. Reuses .seg-tabs
+                     styling for visual consistency with the GD modal. -->
+                <div class="seg-tabs admin-tabs" role="tablist">
+                    <button type="button" id="admin-tab-btn-access"
+                        class="seg-tab active" role="tab" aria-selected="true"
+                        aria-controls="admin-tab-pane-access">Sign-in gate</button>
+                    <button type="button" id="admin-tab-btn-users"
+                        class="seg-tab" role="tab" aria-selected="false"
+                        aria-controls="admin-tab-pane-users">Users</button>
+                    <button type="button" id="admin-tab-btn-oauth"
+                        class="seg-tab" role="tab" aria-selected="false"
+                        aria-controls="admin-tab-pane-oauth">OAuth providers</button>
+                </div>
 
-                    <section class="admin-section">
-                        <header><h4>Blocked</h4><span class="hint">Trumps everything, including super-admins.</span></header>
-                        <ul id="admin-blocked" class="admin-list"></ul>
-                        <div class="admin-add-row">
-                            <input id="admin-block-input" type="email" placeholder="rogue@customer.com" />
-                            <button id="admin-block-add" class="btn btn-secondary btn-sm">Block</button>
+                <!-- Tab: Sign-in gate (allowed domains + blocked emails) -->
+                <div id="admin-tab-pane-access" class="admin-tab-pane" role="tabpanel">
+                    <div class="admin-grid">
+                        <section class="admin-section">
+                            <header><h4>Allowed domains</h4><span class="hint">Anyone with a Google account in this domain can sign in.</span></header>
+                            <ul id="admin-domains" class="admin-list"></ul>
+                            <div class="admin-add-row">
+                                <input id="admin-domain-input" type="text" placeholder="customer.com" />
+                                <button id="admin-domain-add" class="btn btn-primary btn-sm">Add</button>
+                            </div>
+                        </section>
+
+                        <section class="admin-section">
+                            <header><h4>Blocked</h4><span class="hint">Trumps everything, including super-admins.</span></header>
+                            <ul id="admin-blocked" class="admin-list"></ul>
+                            <div class="admin-add-row">
+                                <input id="admin-block-input" type="email" placeholder="rogue@customer.com" />
+                                <button id="admin-block-add" class="btn btn-secondary btn-sm">Block</button>
+                            </div>
+                        </section>
+                    </div>
+                </div>
+
+                <!-- Tab: Users -->
+                <div id="admin-tab-pane-users" class="admin-tab-pane" role="tabpanel" hidden>
+                    <section class="admin-section admin-users">
+                        <header><h4>Users</h4><span class="hint">Add an individual address to allow them in (whether or not their domain is allowed). Toggle admin to grant access to this panel. "View as" to impersonate.</span></header>
+                        <table id="admin-users-table" class="admin-table">
+                            <thead><tr><th>Email</th><th>Name</th><th>Admin</th><th></th></tr></thead>
+                            <tbody></tbody>
+                        </table>
+                        <div class="admin-add-row admin-add-user">
+                            <input id="admin-newuser-input" type="email" placeholder="new-user@customer.com" />
+                            <label class="admin-inline-check">
+                                <input id="admin-newuser-admin" type="checkbox" />
+                                Admin
+                            </label>
+                            <button id="admin-newuser-add" class="btn btn-primary btn-sm">Add</button>
                         </div>
                     </section>
                 </div>
 
-                <section class="admin-section admin-auth-providers">
-                    <header>
-                        <h4>Auth providers</h4>
-                        <span class="hint">OAuth credentials catalog. Rows tagged <em>from .env</em> reappear after restart while their env vars are set. This is a list only — login flow currently uses the .env values directly.</span>
-                    </header>
-                    <table id="admin-auth-providers-table" class="admin-table">
-                        <thead>
-                            <tr>
-                                <th>Provider</th>
-                                <th>Label</th>
-                                <th>Client ID</th>
-                                <th>Client secret</th>
-                                <th>Enabled</th>
-                                <th></th>
-                            </tr>
-                        </thead>
-                        <tbody></tbody>
-                    </table>
-                    <p id="admin-auth-providers-empty" class="hint" hidden>No providers yet. Add one below or set <code>VOITTA_GOOGLE_AUTH_CLIENT_ID</code> in <code>.env</code>.</p>
+                <!-- Tab: OAuth providers -->
+                <div id="admin-tab-pane-oauth" class="admin-tab-pane" role="tabpanel" hidden>
+                    <section class="admin-section admin-auth-providers">
+                        <header>
+                            <h4>OAuth providers</h4>
+                            <span class="hint">Credentials catalog. Rows tagged <em>from .env</em> reappear after restart while their env vars are set. This is a list only — login flow currently uses the .env values directly.</span>
+                        </header>
+                        <table id="admin-auth-providers-table" class="admin-table">
+                            <thead>
+                                <tr>
+                                    <th>Provider</th>
+                                    <th>Label</th>
+                                    <th>Client ID</th>
+                                    <th>Client secret</th>
+                                    <th>Enabled</th>
+                                    <th></th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                        <p id="admin-auth-providers-empty" class="hint" hidden>No providers yet. Add one below or set <code>VOITTA_GOOGLE_AUTH_CLIENT_ID</code> in <code>.env</code>.</p>
 
-                    <div class="admin-add-row admin-add-auth-provider">
-                        <select id="admin-auth-provider-type">
-                            <option value="google">Google</option>
-                            <option value="microsoft" disabled>Microsoft (coming soon)</option>
-                            <option value="github" disabled>GitHub (coming soon)</option>
-                        </select>
-                        <input id="admin-auth-provider-label" type="text" placeholder="Label (optional)">
-                        <input id="admin-auth-provider-client-id" type="text" placeholder="Client ID">
-                        <input id="admin-auth-provider-client-secret" type="text" placeholder="Client secret">
-                        <button id="admin-auth-provider-add" class="btn btn-primary btn-sm">Add</button>
-                    </div>
-                </section>
-
-                <section class="admin-section admin-users">
-                    <header><h4>Users</h4><span class="hint">Add an individual address to allow them in (whether or not their domain is allowed). Toggle admin to grant access to this panel. "View as" to impersonate.</span></header>
-                    <table id="admin-users-table" class="admin-table">
-                        <thead><tr><th>Email</th><th>Name</th><th>Admin</th><th></th></tr></thead>
-                        <tbody></tbody>
-                    </table>
-                    <div class="admin-add-row admin-add-user">
-                        <input id="admin-newuser-input" type="email" placeholder="new-user@customer.com" />
-                        <label class="admin-inline-check">
-                            <input id="admin-newuser-admin" type="checkbox" />
-                            Admin
-                        </label>
-                        <button id="admin-newuser-add" class="btn btn-primary btn-sm">Add</button>
-                    </div>
-                </section>
+                        <!-- Add-form rendered as a labeled vertical card so
+                             field intent is unambiguous and the row never
+                             pushes the modal wider than the table above it. -->
+                        <details class="admin-add-card admin-add-auth-provider" open>
+                            <summary><strong>Add provider</strong></summary>
+                            <div class="admin-form-grid">
+                                <label>
+                                    Provider
+                                    <select id="admin-auth-provider-type">
+                                        <option value="google">Google</option>
+                                        <option value="microsoft" disabled>Microsoft (coming soon)</option>
+                                        <option value="github" disabled>GitHub (coming soon)</option>
+                                    </select>
+                                </label>
+                                <label>
+                                    Label
+                                    <input id="admin-auth-provider-label" type="text" placeholder="e.g. Production Google">
+                                </label>
+                                <label class="span-2">
+                                    Client ID
+                                    <input id="admin-auth-provider-client-id" type="text" placeholder="123…apps.googleusercontent.com">
+                                </label>
+                                <label class="span-2">
+                                    Client secret
+                                    <input id="admin-auth-provider-client-secret" type="text" placeholder="GOCSPX-…">
+                                </label>
+                            </div>
+                            <div class="actions actions-right">
+                                <button id="admin-auth-provider-add" class="btn btn-primary btn-sm">Add provider</button>
+                            </div>
+                        </details>
+                    </section>
+                </div>
             </div>
         </div>
     </div>

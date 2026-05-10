@@ -1026,12 +1026,28 @@ input[type="text"], input[type="file"] {
 }
 .admin-add-user { margin-top: 8px; }
 
+/* Admin tab strip: reuses .seg-tab from the GD modal but laid out
+   full-width so all three buckets get equal real estate. The
+   ``.admin-tabs`` selector adds the ``display:flex`` override (the
+   default seg-tabs is inline-flex). */
+.admin-tabs {
+    display: flex;
+    width: 100%;
+    margin-bottom: 14px;
+}
+.admin-tabs .seg-tab { flex: 1; }
+.admin-tab-pane {
+    display: flex;
+    flex-direction: column;
+    gap: var(--md);
+    min-width: 0;
+}
+
 /* Auth-provider section: a wider table (the actions column carries a
-   Check button + status pill + Delete) and an add-row that includes a
-   provider <select> alongside the inputs. The Actions column overrides
+   Check button + status pill + Delete). The Actions column overrides
    the global ``td:last-child {width:80px}`` rule because we need room
    for the inline check status. */
-.admin-auth-providers { margin-top: 4px; }
+.admin-auth-providers { margin-top: 0; }
 .admin-auth-providers .admin-table td:last-child {
     width: auto;
     text-align: left;
@@ -1045,15 +1061,60 @@ input[type="text"], input[type="file"] {
     font-size: 12px;
     font-family: ui-monospace, "SF Mono", Menlo, monospace;
 }
-.admin-add-auth-provider { margin-top: 8px; }
-.admin-add-auth-provider select {
-    flex: 0 0 auto;
-    padding: 4px 8px;
+
+/* Add-provider card: a collapsible, labeled form. Rendered as a 2x2
+   grid so each field has room to breathe and the credentials sit on
+   their own lines (full-width). Never wider than the table above it. */
+.admin-add-card {
+    margin-top: 14px;
+    padding: 12px 14px;
+    border: 1px solid var(--color-border-light);
+    border-radius: var(--radius-md);
+    background: var(--color-bg);
+}
+.admin-add-card > summary {
+    cursor: pointer;
     font-size: 12px;
+    color: var(--color-text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 10px;
+    user-select: none;
+}
+.admin-add-card > summary strong {
+    color: var(--color-text-primary);
+    font-weight: 600;
+}
+.admin-form-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px 14px;
+    margin-bottom: 12px;
+}
+.admin-form-grid label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 11px;
+    color: var(--color-text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    min-width: 0;
+}
+.admin-form-grid label.span-2 { grid-column: span 2; }
+.admin-form-grid input[type="text"],
+.admin-form-grid select {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 6px 10px;
     border: 1px solid var(--color-border-light);
     border-radius: 4px;
-    background: var(--color-bg);
+    background: var(--color-bg-elevated);
     color: var(--color-text);
+    font-size: 13px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    text-transform: none;
+    letter-spacing: 0;
 }
 .admin-inline-check {
     display: inline-flex;
