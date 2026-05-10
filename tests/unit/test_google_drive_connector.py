@@ -254,6 +254,15 @@ def _patch_services(
     monkeypatch.setattr(
         connector, "_sync_access_token", lambda *a, **k: "fake-token"
     )
+    # The preflight runs five real ``execute()`` calls against the
+    # production-side service stubs to validate that each Workspace API
+    # is enabled. Our fakes here don't model that behaviour (they're
+    # narrowly scoped per-test), so we no-op the preflight — every test
+    # in this module is exercising the post-preflight code path.
+    # Dedicated preflight coverage lives in ``test_google_drive_preflight``.
+    import voitta_rag_enterprise.services.sync.google_drive as _gd
+
+    monkeypatch.setattr(_gd, "preflight_workspace_apis", lambda **kwargs: None)
 
 
 # ---------------------------------------------------------------------------

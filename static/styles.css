@@ -848,6 +848,28 @@ input[type="text"], input[type="file"] {
 .modal-body textarea { font: 12px ui-monospace, "SF Mono", Menlo, monospace; resize: vertical; }
 .modal-body select[multiple] { padding: 4px; }
 
+/* Sync error banner under the status line. White-on-red so it reads
+   as "stop — fix this" rather than the muted hint colour the rest of
+   ``.hint`` text uses. Preserves newlines so multi-API failures from
+   the preflight stack legibly. */
+.sync-error-block {
+    margin: 8px 0 0;
+    padding: 8px 10px;
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    border-left: 3px solid #dc2626;
+    border-radius: 4px;
+    color: #7f1d1d;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 11px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+.sync-error-block a {
+    color: #1d4ed8;
+    text-decoration: underline;
+}
+
 /* Provider picker on the GD sync OAuth pane: visually distinguish
    "picked from saved providers" from manual entry by tagging the
    following inputs while a provider is selected. The accent left-border

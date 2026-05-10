@@ -1641,13 +1641,50 @@ async function loadSyncSource() {
 function renderSyncStatus(src) {
     const line = $("#sync-status-line");
     if (!src) { line.hidden = true; return; }
+
+    // Status / last-synced live in one row. The error message can be
+    // multi-line (the GoogleWorkspaceAccessError preflight emits one
+    // bullet per disabled API with its activation URL); we render it
+    // in its own block below the row so newlines and URLs survive.
+    line.innerHTML = "";
+    const top = document.createElement("div");
     const parts = [`status: ${src.sync_status}`];
     if (src.last_synced_at) {
         const d = new Date(src.last_synced_at * 1000);
         parts.push(`last: ${d.toLocaleString()}`);
     }
-    if (src.sync_error) parts.push(`error: ${src.sync_error}`);
-    line.textContent = parts.join(" · ");
+    top.textContent = parts.join(" · ");
+    line.appendChild(top);
+
+    if (src.sync_error) {
+        const errBlock = document.createElement("pre");
+        errBlock.className = "sync-error-block";
+        errBlock.textContent = src.sync_error;
+        // Detect URLs in the message and turn them into anchors so the
+        // user can click straight into the GCP "Enable API" page.
+        // ``<pre>`` preserves newlines / spacing; we rebuild content
+        // with link nodes interleaved.
+        const urlRe = /(https?:\/\/[^\s)]+)/g;
+        errBlock.innerHTML = "";
+        let last = 0;
+        let m;
+        while ((m = urlRe.exec(src.sync_error)) !== null) {
+            if (m.index > last) {
+                errBlock.appendChild(document.createTextNode(src.sync_error.slice(last, m.index)));
+            }
+            const a = document.createElement("a");
+            a.href = m[1];
+            a.target = "_blank";
+            a.rel = "noopener";
+            a.textContent = m[1];
+            errBlock.appendChild(a);
+            last = m.index + m[1].length;
+        }
+        if (last < src.sync_error.length) {
+            errBlock.appendChild(document.createTextNode(src.sync_error.slice(last)));
+        }
+        line.appendChild(errBlock);
+    }
     line.hidden = false;
 }
 

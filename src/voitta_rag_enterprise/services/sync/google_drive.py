@@ -96,6 +96,31 @@ NATIVE_FOLDER = "application/vnd.google-apps.folder"
 # default ignore_patterns so the indexer never sees these files.
 WORKBOOKS_DIR = ".voitta_workbooks"
 
+
+class GoogleWorkspaceAccessError(RuntimeError):
+    """Raised when one or more Workspace APIs aren't usable.
+
+    Carries a list of ``(api_name, activation_url)`` tuples so the SPA
+    can render an actionable message — typically the GCP "Enable API"
+    URL Google itself returns inside the 403 body.
+
+    ``scope_problem=True`` flags the distinct case where the OAuth
+    token doesn't carry enough scopes (request returned 403 with
+    ``ACCESS_TOKEN_SCOPE_INSUFFICIENT`` / ``insufficient_scope``).
+    The fix in that case is reconnect, not "enable API in GCP".
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        disabled_apis: list[tuple[str, str]] | None = None,
+        scope_problem: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.disabled_apis = disabled_apis or []
+        self.scope_problem = scope_problem
+
 # MIME-level blocklist: applied alongside ``VOITTA_IGNORE_PATTERNS`` so we
 # also catch items the filename globs can miss. Meet recordings, voice
 # memos, and other audio/video files frequently land in Drive with no
@@ -629,6 +654,26 @@ class GoogleDriveConnector:
         _emit("connecting")
         access_token = self._sync_access_token(auth) if auth.refresh_token else None
         drive, docs = self._build_services(auth, access_token)
+
+        # Preflight every Workspace API the exporter pool will call. If
+        # the project hasn't enabled the Sheets / Slides / Forms APIs
+        # (or the OAuth refresh_token predates the scope expansion), we
+        # discover that NOW with five cheap probes — instead of after
+        # listing 50,000 files only to fail-burst the entire materialise
+        # pool with 403 SERVICE_DISABLED. All-or-nothing: if any API is
+        # missing, the sync stops with a single clear error message
+        # carrying the GCP "Enable API" URL for each disabled service.
+        _emit("validating")
+        sheets_svc = self._build_sheets_for_thread(auth, access_token)
+        slides_svc = self._build_slides_for_thread(auth, access_token)
+        forms_svc = self._build_forms_for_thread(auth, access_token)
+        preflight_workspace_apis(
+            drive=drive,
+            docs=docs,
+            sheets=sheets_svc,
+            slides=slides_svc,
+            forms=forms_svc,
+        )
 
         # Same ignore matcher the watcher uses, so policy is consistent
         # whether files arrive over Drive or via local fs. Matching here
@@ -1213,6 +1258,196 @@ def _download_to(drive: Any, file_id: str, dest: Path) -> None:
         lambda: drive.files().get_media(fileId=file_id, supportsAllDrives=True),
         dest,
     )
+
+
+# A bogus id Google's APIs reject with 404 NOT_FOUND when the API is
+# enabled (the most informative "API works" signal you can get without
+# side-effects) and 403 SERVICE_DISABLED when the API isn't enabled in
+# the project. The string is illegal under every Workspace ID format
+# (UUIDs, file ids), so we won't accidentally hit a real resource.
+_PREFLIGHT_BOGUS_ID = "voitta-preflight-bogus-id-0000"
+
+
+# Probe definitions: ``(human_label, build_request_callable)``. The
+# callable takes the connector instance + ExportContext and returns
+# the request (so it builds the per-API service the same way the rest
+# of the connector does). API-name strings match what Google uses in
+# its activation URL: ``docs.googleapis.com``, etc.
+_PREFLIGHT_PROBES: tuple[tuple[str, str, str], ...] = (
+    ("Google Drive", "drive.googleapis.com", "drive"),
+    ("Google Docs", "docs.googleapis.com", "docs"),
+    ("Google Sheets", "sheets.googleapis.com", "sheets"),
+    ("Google Slides", "slides.googleapis.com", "slides"),
+    ("Google Forms", "forms.googleapis.com", "forms"),
+)
+
+
+def _is_service_disabled(error: Any) -> bool:
+    """True iff the googleapiclient ``HttpError`` indicates the API is
+    not enabled in the GCP project. Google returns 403 with
+    ``reason=SERVICE_DISABLED`` and an ``activationUrl`` pointing at
+    the API library page.
+    """
+    try:
+        from googleapiclient.errors import HttpError
+    except ImportError:
+        return False
+    if not isinstance(error, HttpError):
+        return False
+    if error.resp.status != 403:
+        return False
+    body = (error.content or b"").decode("utf-8", errors="replace")
+    return "SERVICE_DISABLED" in body
+
+
+def _is_scope_insufficient(error: Any) -> bool:
+    """True iff the error is a 401/403 caused by missing OAuth scopes.
+
+    Google's various code paths return either:
+    * 401 ``invalid_token`` with ``error_description=insufficient_scope``,
+    * 403 ``ACCESS_TOKEN_SCOPE_INSUFFICIENT`` (the modern code), or
+    * 403 ``insufficientPermissions`` (legacy on some Drive endpoints).
+    All three mean the same thing: re-consent OAuth.
+    """
+    try:
+        from googleapiclient.errors import HttpError
+    except ImportError:
+        return False
+    if not isinstance(error, HttpError):
+        return False
+    if error.resp.status not in (401, 403):
+        return False
+    body = (error.content or b"").decode("utf-8", errors="replace")
+    return (
+        "ACCESS_TOKEN_SCOPE_INSUFFICIENT" in body
+        or "insufficient_scope" in body
+        or "insufficientPermissions" in body
+    )
+
+
+def _extract_activation_url(api_name: str, error: Any) -> str:
+    """Pull Google's ``activationUrl`` out of the 403 body when present;
+    otherwise build the standard ``console.cloud.google.com/apis/library``
+    URL by hand. Either way, the returned URL is the one-click "enable
+    this API" page for the project."""
+    import json as _json
+
+    try:
+        from googleapiclient.errors import HttpError
+    except ImportError:
+        return f"https://console.cloud.google.com/apis/library/{api_name}"
+    if isinstance(error, HttpError) and error.content:
+        try:
+            body = _json.loads(error.content.decode("utf-8", errors="replace"))
+            details = (body.get("error") or {}).get("details") or []
+            for d in details:
+                url = (d.get("metadata") or {}).get("activationUrl")
+                if url:
+                    return url
+        except (ValueError, AttributeError):
+            pass
+    return f"https://console.cloud.google.com/apis/library/{api_name}"
+
+
+def _run_preflight_probe(service: Any, api_id: str) -> Any:
+    """Issue one bogus-id call against ``service`` for API ``api_id``.
+
+    Returns the ``HttpError`` if the call failed, or ``None`` on
+    unexpected success (the bogus id should never resolve to a real
+    resource — but defensively we return None and the caller treats
+    that as "API works").
+    """
+    from googleapiclient.errors import HttpError
+
+    try:
+        if api_id == "drive":
+            service.files().get(
+                fileId=_PREFLIGHT_BOGUS_ID, supportsAllDrives=True
+            ).execute()
+        elif api_id == "docs":
+            service.documents().get(documentId=_PREFLIGHT_BOGUS_ID).execute()
+        elif api_id == "sheets":
+            service.spreadsheets().get(spreadsheetId=_PREFLIGHT_BOGUS_ID).execute()
+        elif api_id == "slides":
+            service.presentations().get(presentationId=_PREFLIGHT_BOGUS_ID).execute()
+        elif api_id == "forms":
+            service.forms().get(formId=_PREFLIGHT_BOGUS_ID).execute()
+        else:
+            raise ValueError(f"unknown api id {api_id!r}")
+        return None
+    except HttpError as e:
+        return e
+
+
+def preflight_workspace_apis(
+    *,
+    drive: Any,
+    docs: Any,
+    sheets: Any,
+    slides: Any,
+    forms: Any,
+) -> None:
+    """Probe every Workspace API once with a deliberately bogus id.
+
+    Each enabled API returns 404 NOT_FOUND for an unknown resource;
+    each *disabled* API returns 403 SERVICE_DISABLED. We catch the
+    distinction here and raise :class:`GoogleWorkspaceAccessError` if
+    anything is missing — all-or-nothing, per the documented contract.
+
+    The current OAuth scope set covers all five APIs at once, so a
+    scope-insufficient response on any probe means the user's
+    refresh_token predates the scope expansion and they need to
+    reconnect. We surface that distinctly.
+
+    Five Drive API round-trips on every sync; cheap (parallel-ish via
+    underlying httplib2 keepalive) and the one-shot diagnostic is worth
+    the cost vs. discovering API-not-enabled mid-sync after listing
+    50,000 files.
+    """
+    services = {
+        "drive": drive,
+        "docs": docs,
+        "sheets": sheets,
+        "slides": slides,
+        "forms": forms,
+    }
+    disabled: list[tuple[str, str]] = []
+    scope_problem = False
+    scope_evidence_api = ""
+    for label, api_name, api_id in _PREFLIGHT_PROBES:
+        err = _run_preflight_probe(services[api_id], api_id)
+        if err is None:
+            # Bogus id surprisingly resolved (impossible in practice).
+            # Treat as "API enabled, move on".
+            continue
+        if _is_service_disabled(err):
+            disabled.append((label, _extract_activation_url(api_name, err)))
+            continue
+        if _is_scope_insufficient(err):
+            scope_problem = True
+            scope_evidence_api = label
+            # Stop probing — re-consent fixes every subsequent probe.
+            break
+        # Anything else (404 NOT_FOUND, 400 INVALID_ARGUMENT) means the
+        # API responded — it's enabled, just rejected our bogus id.
+        # The whole point of the preflight: that's the success signal.
+
+    if scope_problem:
+        raise GoogleWorkspaceAccessError(
+            f"OAuth token is missing required scopes (detected on "
+            f"{scope_evidence_api}). Reconnect Google Drive in the sync "
+            f"modal to grant access to Docs / Sheets / Slides / Forms.",
+            scope_problem=True,
+        )
+    if disabled:
+        names = ", ".join(label for label, _ in disabled)
+        details = "\n".join(f"  • {label}: {url}" for label, url in disabled)
+        raise GoogleWorkspaceAccessError(
+            f"The following Google Cloud APIs are not enabled in the "
+            f"project this OAuth client belongs to: {names}. Enable each "
+            f"in the GCP console, then retry sync:\n{details}",
+            disabled_apis=disabled,
+        )
 
 
 def _drive_view_url(file_id: str, mime: str) -> str:
