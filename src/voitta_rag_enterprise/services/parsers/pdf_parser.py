@@ -43,6 +43,7 @@ from typing import ClassVar
 import fitz  # PyMuPDF — used only to count/split pages, not to extract text.
 
 from ...config import get_settings
+from ..indexing_caps import get_caps
 from ..gpu_lock import gpu_lock
 from .base import BaseParser, ExtractedImage, ParserResult, RenderedPage
 
@@ -82,7 +83,7 @@ class PdfParser(BaseParser):
         if page_count <= 0:
             return ParserResult.failure(f"could not open pdf: {file_path}")
 
-        bucket_size = settings.pdf_pages_per_bucket
+        bucket_size = get_caps().pdf_pages_per_bucket
         threshold = int(bucket_size * 1.2)
         use_buckets = page_count > threshold
         logger.info(
@@ -172,7 +173,7 @@ def _parse_bucket(
     """
     out_root.mkdir(parents=True, exist_ok=True)
     pdf_name = bucket_path.stem
-    timeout_s = get_settings().pdf_parse_timeout_s
+    timeout_s = get_caps().pdf_parse_timeout_s
 
     started = time.perf_counter()
     with gpu_lock("mineru.parse"):
@@ -259,11 +260,11 @@ def _render_pages(pdf_path: Path, page_start: int) -> list[RenderedPage]:
     crops + the full markdown already; these renders only carry layout
     cues, so quality 75 at ~1024px is plenty.
     """
-    settings = get_settings()
-    if not settings.pdf_render_pages:
+    if not get_settings().pdf_render_pages:
         return []
-    long_edge = max(64, int(settings.pdf_page_render_long_edge_px))
-    quality = max(1, min(100, int(settings.pdf_page_render_webp_quality)))
+    caps = get_caps()
+    long_edge = max(64, int(caps.pdf_page_render_long_edge_px))
+    quality = max(1, min(100, int(caps.pdf_page_render_webp_quality)))
     try:
         from PIL import Image as PILImage
     except ImportError:

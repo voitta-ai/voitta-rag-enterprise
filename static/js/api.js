@@ -172,4 +172,9 @@ export const api = {
         req("PATCH", `/api/admin/auth-providers/${id}`, body),
     adminDeleteAuthProvider: (id) => req("DELETE", `/api/admin/auth-providers/${id}`),
     adminCheckAuthProvider: (id) => req("POST", `/api/admin/auth-providers/${id}/check`),
+
+    // Admin — indexing caps. GET returns {values, defaults, bounds};
+    // PATCH accepts a partial dict of integer overrides.
+    adminGetIndexingCaps: () => req("GET", "/api/admin/indexing-caps"),
+    adminUpdateIndexingCaps: (partial) => req("PATCH", "/api/admin/indexing-caps", partial),
 };

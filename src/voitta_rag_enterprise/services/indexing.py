@@ -130,11 +130,43 @@ def _run_extract_inner(file_id: int) -> None:
     except OSError as e:
         _mark_error(file_id, f"stat failed: {e}")
         return
-    if stat.st_size > settings.max_file_bytes:
+    from .indexing_caps import DATA_EXTENSIONS, get_caps
+
+    caps = get_caps()
+    if stat.st_size > caps.max_file_bytes:
         logger.warning(
-            "size %d exceeds limit %d", stat.st_size, settings.max_file_bytes
+            "size %d exceeds limit %d", stat.st_size, caps.max_file_bytes
         )
-        _mark_error(file_id, "size exceeds VOITTA_MAX_FILE_BYTES")
+        _mark_state(
+            file_id,
+            state="unsupported",
+            error=f"size {stat.st_size} exceeds max_file_bytes {caps.max_file_bytes}",
+        )
+        return
+
+    # Data-file extension cap: a 142 MB JSON produced 81 719 chunks in the
+    # wild and dominated the index without being useful as RAG content. We
+    # park oversized data files in ``unsupported`` so they show up on the
+    # by-extension sidebar with a clear reason instead of being silently
+    # chunk-bombs. ``data_file_max_bytes = 0`` disables the special case.
+    ext = abs_path.suffix.lower()
+    if (
+        caps.data_file_max_bytes > 0
+        and ext in DATA_EXTENSIONS
+        and stat.st_size > caps.data_file_max_bytes
+    ):
+        logger.info(
+            "data-file %s size %d exceeds data_file_max_bytes %d — marking unsupported",
+            ext, stat.st_size, caps.data_file_max_bytes,
+        )
+        _mark_state(
+            file_id,
+            state="unsupported",
+            error=(
+                f"{ext} size {stat.st_size} exceeds data_file_max_bytes "
+                f"{caps.data_file_max_bytes}"
+            ),
+        )
         return
 
     try:

@@ -1,8 +1,11 @@
-// Admin modal — three tabs:
+// Admin modal — four tabs:
 // - Sign-in gate: allowed domains, blocked emails
 // - Users: pre-create + admin flag + impersonation
 // - OAuth providers: catalog of (label, client_id, client_secret) rows
 //   seeded from .env on startup, editable inline.
+// - Data file caps: runtime-tunable indexing limits (max file bytes,
+//   xlsx rows/cols, ipynb output chars, PDF rendering knobs, …) backed by
+//   /admin/indexing_caps.json.
 //
 // Self-contained: opens itself when the Admin button is clicked, wires
 // its own close + tab + form-submit handlers at module load.
@@ -20,12 +23,14 @@ export function closeAdmin() {
     $("#admin-backdrop").hidden = true;
 }
 
-// Admin modal tabs — Sign-in gate / Users / OAuth providers. Pure DOM
-// toggle; refreshAdmin always pulls all three sections regardless of
+// Admin modal tabs — Sign-in gate / Users / OAuth providers / Data caps.
+// Pure DOM toggle; refreshAdmin always pulls every section regardless of
 // which tab is visible, so flipping tabs is instant.
+const ADMIN_TABS = ["access", "users", "oauth", "caps"];
+
 function setAdminTab(name) {
-    if (!["access", "users", "oauth"].includes(name)) name = "access";
-    for (const t of ["access", "users", "oauth"]) {
+    if (!ADMIN_TABS.includes(name)) name = "access";
+    for (const t of ADMIN_TABS) {
         const btn = $(`#admin-tab-btn-${t}`);
         const pane = $(`#admin-tab-pane-${t}`);
         if (!btn || !pane) continue;
@@ -38,15 +43,17 @@ function setAdminTab(name) {
 
 async function refreshAdmin() {
     try {
-        const [allow, users, providers] = await Promise.all([
+        const [allow, users, providers, caps] = await Promise.all([
             api.adminAllowlist(),
             api.adminListUsers(),
             api.adminListAuthProviders(),
+            api.adminGetIndexingCaps(),
         ]);
         renderList("#admin-domains", allow.domains, "domain", api.adminRemoveDomain);
         renderList("#admin-blocked", allow.blocked, "email", api.adminUnblock);
         renderUsersTable(users);
         renderAuthProvidersTable(providers);
+        renderCapsTable(caps);
     } catch (err) {
         alert(err.message);
     }
@@ -222,6 +229,191 @@ async function submitAddAuthProvider() {
 }
 
 // ---------------------------------------------------------------------------
+// Data file caps
+// ---------------------------------------------------------------------------
+
+// Layout/copy for every cap row. Order is the rendering order. Keep this
+// in sync with the dataclass on the server — unknown keys returned by
+// the API are still rendered below as a fallback so a new field added
+// server-side surfaces immediately, just without the curated label.
+const CAPS_FIELDS = [
+    { key: "max_file_bytes", label: "Max file size (global)",
+      hint: "Scanner skips files larger than this. Applies to every extension.",
+      type: "bytes" },
+    { key: "data_file_max_bytes", label: "Data file size cap",
+      hint: "Per-extension cap for .json/.jsonl/.ndjson/.csv/.tsv/.xml/.yaml/.yml. Oversized data files are parked in 'unsupported' instead of being chunked. 0 disables this.",
+      type: "bytes" },
+    { key: "xlsx_max_rows", label: "XLSX max rows per sheet",
+      hint: "Rows beyond this are not rendered into markdown.", type: "int" },
+    { key: "xlsx_max_cols", label: "XLSX max columns per sheet",
+      hint: "Columns beyond this are dropped from each row.", type: "int" },
+    { key: "ipynb_max_output_chars", label: "IPYNB output chars per cell",
+      hint: "Each code-cell's text output is truncated to this length.", type: "int" },
+    { key: "pdf_pages_per_bucket", label: "PDF pages per bucket",
+      hint: "Above this many pages, MinerU runs in bucketed mode.", type: "int" },
+    { key: "pdf_parse_timeout_s", label: "PDF parse timeout (s)",
+      hint: "Per-bucket wall-clock budget before the MinerU subprocess is killed.",
+      type: "int" },
+    { key: "pdf_page_render_long_edge_px", label: "PDF page render long-edge (px)",
+      hint: "Pixel dimension for per-page WebP layout previews.", type: "int" },
+    { key: "pdf_page_render_webp_quality", label: "PDF page render WebP quality",
+      hint: "1–100; higher = larger files. 75 is a good balance.", type: "int" },
+];
+
+const _BYTES_UNITS = [
+    { label: "B", factor: 1 },
+    { label: "KB", factor: 1024 },
+    { label: "MB", factor: 1024 ** 2 },
+    { label: "GB", factor: 1024 ** 3 },
+];
+
+function _fmtBytes(n) {
+    if (!Number.isFinite(n) || n < 1024) return `${n} B`;
+    for (let i = _BYTES_UNITS.length - 1; i >= 0; i--) {
+        const u = _BYTES_UNITS[i];
+        if (n >= u.factor) {
+            const v = n / u.factor;
+            // Trim insignificant zeros: 5.00 → 5, 1.50 → 1.5.
+            return `${v.toFixed(v < 10 ? 2 : 1).replace(/\.?0+$/, "")} ${u.label}`;
+        }
+    }
+    return `${n} B`;
+}
+
+// Accept either a bare integer (bytes) or "<n><unit>" where unit is B/KB/MB/GB.
+// Returns NaN for unparseable input. Used for both the value column and the
+// range cell so the table renders the same units the user types.
+function _parseBytes(s) {
+    if (typeof s === "number") return s;
+    if (s == null) return NaN;
+    const trimmed = String(s).trim();
+    if (!trimmed) return NaN;
+    const m = trimmed.match(/^([\d.]+)\s*([a-z]*)$/i);
+    if (!m) return NaN;
+    const v = Number(m[1]);
+    if (!Number.isFinite(v)) return NaN;
+    const unit = (m[2] || "B").toUpperCase();
+    const u = _BYTES_UNITS.find((x) => x.label === unit || (unit === "" && x.label === "B"));
+    if (!u) return NaN;
+    return Math.round(v * u.factor);
+}
+
+function renderCapsTable(caps) {
+    const tbody = $("#admin-caps-table tbody");
+    if (!tbody) return;
+    tbody.innerHTML = "";
+    const { values, defaults, bounds } = caps;
+
+    // Render the curated list first, then any leftover keys we didn't know
+    // about (defensive — server can add a field without a UI deploy).
+    const seen = new Set();
+    for (const field of CAPS_FIELDS) {
+        if (!(field.key in values)) continue;
+        tbody.appendChild(buildCapsRow(field, values[field.key], defaults[field.key], bounds[field.key]));
+        seen.add(field.key);
+    }
+    for (const key of Object.keys(values)) {
+        if (seen.has(key)) continue;
+        tbody.appendChild(buildCapsRow(
+            { key, label: key, hint: "", type: "int" },
+            values[key], defaults[key], bounds[key],
+        ));
+    }
+}
+
+function buildCapsRow(field, value, defaultValue, bound) {
+    const tr = document.createElement("tr");
+
+    // Label + hint stack.
+    const tdLabel = document.createElement("td");
+    tdLabel.style.maxWidth = "320px";
+    const labelDiv = document.createElement("div");
+    labelDiv.textContent = field.label;
+    labelDiv.style.fontWeight = "500";
+    tdLabel.appendChild(labelDiv);
+    if (field.hint) {
+        const hint = document.createElement("div");
+        hint.className = "hint";
+        hint.style.marginTop = "2px";
+        hint.textContent = field.hint;
+        tdLabel.appendChild(hint);
+    }
+    tr.appendChild(tdLabel);
+
+    // Editable value cell.
+    const tdValue = document.createElement("td");
+    const input = document.createElement("input");
+    input.type = "text";
+    input.style.width = "140px";
+    input.value = field.type === "bytes" ? _fmtBytes(value) : String(value);
+    let original = input.value;
+    const commit = async () => {
+        if (input.value === original) return;
+        const parsed = field.type === "bytes" ? _parseBytes(input.value) : Number(input.value);
+        if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < 0) {
+            alert(`Invalid value for ${field.label}: ${input.value}`);
+            input.value = original;
+            return;
+        }
+        try {
+            const out = await api.adminUpdateIndexingCaps({ [field.key]: parsed });
+            // Server may clamp — reflect the final value in the input.
+            const finalVal = out.values[field.key];
+            input.value = field.type === "bytes" ? _fmtBytes(finalVal) : String(finalVal);
+            original = input.value;
+        } catch (err) {
+            input.value = original;
+            alert(err.message);
+        }
+    };
+    input.addEventListener("blur", commit);
+    input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); input.blur(); }
+        if (e.key === "Escape") { input.value = original; input.blur(); }
+    });
+    tdValue.appendChild(input);
+    tr.appendChild(tdValue);
+
+    // Default + range cells (read-only, dim).
+    const tdDefault = document.createElement("td");
+    tdDefault.className = "hint";
+    tdDefault.textContent = field.type === "bytes" ? _fmtBytes(defaultValue) : String(defaultValue);
+    tr.appendChild(tdDefault);
+
+    const tdRange = document.createElement("td");
+    tdRange.className = "hint";
+    if (Array.isArray(bound)) {
+        const [lo, hi] = bound;
+        tdRange.textContent = field.type === "bytes"
+            ? `${_fmtBytes(lo)} – ${_fmtBytes(hi)}`
+            : `${lo} – ${hi}`;
+    }
+    tr.appendChild(tdRange);
+
+    // Reset button — pushes the shipped default through the API. Same
+    // commit path so any clamping the server might do still applies.
+    const tdReset = document.createElement("td");
+    const resetBtn = document.createElement("button");
+    resetBtn.className = "btn btn-secondary btn-sm";
+    resetBtn.textContent = "Reset";
+    resetBtn.title = "Restore the shipped default";
+    resetBtn.addEventListener("click", async () => {
+        try {
+            const out = await api.adminUpdateIndexingCaps({ [field.key]: defaultValue });
+            const finalVal = out.values[field.key];
+            input.value = field.type === "bytes" ? _fmtBytes(finalVal) : String(finalVal);
+            original = input.value;
+        } catch (err) {
+            alert(err.message);
+        }
+    });
+    tdReset.appendChild(resetBtn);
+    tr.appendChild(tdReset);
+
+    return tr;
+}
+
+// ---------------------------------------------------------------------------
 // Allowlist / blocklist (renderList) and Users
 // ---------------------------------------------------------------------------
 
@@ -354,6 +546,7 @@ async function submitAddUser() {
 $("#admin-tab-btn-access").addEventListener("click", () => setAdminTab("access"));
 $("#admin-tab-btn-users").addEventListener("click", () => setAdminTab("users"));
 $("#admin-tab-btn-oauth").addEventListener("click", () => setAdminTab("oauth"));
+$("#admin-tab-btn-caps").addEventListener("click", () => setAdminTab("caps"));
 
 $("#admin-auth-provider-add").addEventListener("click", submitAddAuthProvider);
 $("#admin-auth-provider-client-secret").addEventListener("keydown", (e) => {

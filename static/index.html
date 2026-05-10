@@ -46,6 +46,9 @@
                     <button type="button" id="admin-tab-btn-oauth"
                         class="seg-tab" role="tab" aria-selected="false"
                         aria-controls="admin-tab-pane-oauth">OAuth providers</button>
+                    <button type="button" id="admin-tab-btn-caps"
+                        class="seg-tab" role="tab" aria-selected="false"
+                        aria-controls="admin-tab-pane-caps">Data file caps</button>
                 </div>
 
                 <!-- Tab: Sign-in gate (allowed domains + blocked emails) -->
@@ -112,6 +115,8 @@
                         </table>
                         <p id="admin-auth-providers-empty" class="hint" hidden>No providers yet. Add one below or set <code>VOITTA_GOOGLE_AUTH_CLIENT_ID</code> in <code>.env</code>.</p>
 
+
+
                         <!-- Add-form rendered as a labeled vertical card so
                              field intent is unambiguous and the row never
                              pushes the modal wider than the table above it. -->
@@ -143,6 +148,34 @@
                                 <button id="admin-auth-provider-add" class="btn btn-primary btn-sm">Add provider</button>
                             </div>
                         </details>
+                    </section>
+                </div>
+
+                <!-- Tab: Data file caps — runtime-tunable indexing limits.
+                     Persisted in <data_dir>/admin/indexing_caps.json. -->
+                <div id="admin-tab-pane-caps" class="admin-tab-pane" role="tabpanel" hidden>
+                    <section class="admin-section admin-caps">
+                        <header>
+                            <h4>Indexing caps</h4>
+                            <span class="hint">
+                                Per-format limits applied at extract time. Saved overrides live in
+                                <code>&lt;data_dir&gt;/admin/indexing_caps.json</code> and take effect
+                                on the next file the worker processes — no restart needed.
+                                Bytes accept human suffixes (e.g. <code>5MB</code>, <code>1GB</code>).
+                            </span>
+                        </header>
+                        <table id="admin-caps-table" class="admin-table">
+                            <thead>
+                                <tr>
+                                    <th>Setting</th>
+                                    <th>Value</th>
+                                    <th>Default</th>
+                                    <th>Range</th>
+                                    <th></th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
                     </section>
                 </div>
             </div>

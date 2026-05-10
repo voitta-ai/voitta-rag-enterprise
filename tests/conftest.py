@@ -21,6 +21,9 @@ def env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None]:
     from voitta_rag_enterprise.config import reset_settings_cache
     from voitta_rag_enterprise.db.database import reset_engine_cache
     from voitta_rag_enterprise.services.embedding import reset_embedder_caches
+    from voitta_rag_enterprise.services.indexing_caps import (
+        invalidate_cache as reset_indexing_caps_cache,
+    )
     from voitta_rag_enterprise.services.vector_store import reset_client_cache
 
     for k in list(os.environ):
@@ -35,11 +38,13 @@ def env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None]:
     reset_engine_cache()
     reset_embedder_caches()
     reset_client_cache()
+    reset_indexing_caps_cache()
     yield
     reset_settings_cache()
     reset_engine_cache()
     reset_embedder_caches()
     reset_client_cache()
+    reset_indexing_caps_cache()
 
 
 @pytest.fixture

@@ -86,9 +86,11 @@ def scan_folder(
     if ignore is None:
         ignore = _ignore_from_settings()
     if max_file_bytes is None:
-        from ..config import get_settings
+        from .indexing_caps import get_caps
 
-        max_file_bytes = get_settings().max_file_bytes
+        # Admin-tunable override; falls back to the Settings default
+        # baked into the IndexingCaps dataclass when no override exists.
+        max_file_bytes = get_caps().max_file_bytes
 
     root = Path(folder.path)
     if not root.exists() or not root.is_dir():

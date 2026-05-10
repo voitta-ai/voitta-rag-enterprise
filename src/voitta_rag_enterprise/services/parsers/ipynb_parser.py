@@ -32,13 +32,8 @@ import json
 from pathlib import Path
 from typing import Any, ClassVar
 
+from ..indexing_caps import get_caps
 from .base import BaseParser, ParserResult
-
-# Per-cell cap on text-stream output we fold back into the content. Outputs
-# can be enormous (a long-running cell printing every iteration); we keep
-# the head of each cell's stream so a search query lands on it but a stuck-
-# in-a-loop notebook can't blow up the chunker.
-_MAX_OUTPUT_CHARS_PER_CELL = 2000
 
 
 def _coerce_source(source: Any) -> str:
@@ -133,7 +128,7 @@ class IpynbParser(BaseParser):
                 out.append(f"```{lang}\n{src}\n```")
                 outputs = cell.get("outputs")
                 if isinstance(outputs, list):
-                    text = _text_outputs(outputs, _MAX_OUTPUT_CHARS_PER_CELL)
+                    text = _text_outputs(outputs, get_caps().ipynb_max_output_chars)
                     if text:
                         out.append(f"```text\n{text}\n```")
             elif ctype == "raw":

@@ -19,15 +19,10 @@ from typing import ClassVar
 from openpyxl import load_workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
+from ..indexing_caps import get_caps
 from .base import BaseParser, ParserResult
 
 logger = logging.getLogger(__name__)
-
-# Cap row/column scans on absurdly large sheets so a runaway export doesn't
-# DoS the indexer. 50k rows by 64 cols of typical text is a few MB of markdown,
-# which is more than the chunker would ever index meaningfully anyway.
-_MAX_ROWS = 50_000
-_MAX_COLS = 64
 
 
 class XlsxParser(BaseParser):
@@ -43,12 +38,15 @@ class XlsxParser(BaseParser):
         except Exception as e:
             return ParserResult.failure(f"xlsx open failed: {e}")
 
+        caps = get_caps()
+        max_rows = caps.xlsx_max_rows
+        max_cols = caps.xlsx_max_cols
         sections: list[str] = []
         try:
             for sheet in wb.worksheets:
                 if sheet.sheet_state != "visible":
                     continue
-                rendered = _render_sheet(sheet)
+                rendered = _render_sheet(sheet, max_rows=max_rows, max_cols=max_cols)
                 if rendered.strip():
                     sections.append(f"## Sheet: {sheet.title}\n\n{rendered}")
         finally:
@@ -57,7 +55,7 @@ class XlsxParser(BaseParser):
         return ParserResult(content="\n\n".join(sections))
 
 
-def _render_sheet(sheet: Worksheet) -> str:
+def _render_sheet(sheet: Worksheet, *, max_rows: int, max_cols: int) -> str:
     """Render a worksheet as a pipe-style markdown table.
 
     Trims trailing blank rows/columns so a sheet with five real rows but
@@ -68,9 +66,9 @@ def _render_sheet(sheet: Worksheet) -> str:
     """
     rows: list[list[str]] = []
     for row_index, raw in enumerate(sheet.iter_rows(values_only=True)):
-        if row_index >= _MAX_ROWS:
+        if row_index >= max_rows:
             break
-        row = [_cell_to_str(c) for c in raw[:_MAX_COLS]]
+        row = [_cell_to_str(c) for c in raw[:max_cols]]
         rows.append(row)
 
     rows = _trim_trailing_blank(rows)

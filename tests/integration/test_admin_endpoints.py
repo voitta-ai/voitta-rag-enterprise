@@ -39,6 +39,8 @@ def test_non_admin_gets_403(app: FastAPI) -> None:
             ("/api/admin/blocklist", "post"),
             ("/api/admin/users", "get"),
             ("/api/admin/impersonate/1", "post"),
+            ("/api/admin/indexing-caps", "get"),
+            ("/api/admin/indexing-caps", "patch"),
         ]:
             resp = c.request(method, path, json={})
             assert resp.status_code == 403, f"{method} {path} → {resp.status_code}"
@@ -155,3 +157,26 @@ def test_super_admin_flag_surfaced_in_user_listing(
         users = c.get("/api/admin/users").json()
         boss = next(u for u in users if u["email"] == "boss@example.com")
         assert boss["is_super_admin"] is True
+
+
+def test_admin_can_read_and_patch_indexing_caps(app: FastAPI) -> None:
+    """Sanity-check the indexing-caps endpoints end-to-end: GET returns
+    values + defaults + bounds, PATCH applies a clamped update."""
+    _make_admin(app, "boss@example.com")
+    with TestClient(app) as c:
+        out = c.get("/api/admin/indexing-caps").json()
+        assert "values" in out and "defaults" in out and "bounds" in out
+        assert out["values"]["xlsx_max_rows"] == out["defaults"]["xlsx_max_rows"]
+
+        # Apply an override; respect the BOUNDS upper limit if we pick a
+        # ridiculous value.
+        patched = c.patch(
+            "/api/admin/indexing-caps", json={"xlsx_max_rows": 12_345}
+        ).json()
+        assert patched["values"]["xlsx_max_rows"] == 12_345
+
+        # Re-GET to confirm persistence and that the rest of the snapshot
+        # is unchanged.
+        again = c.get("/api/admin/indexing-caps").json()
+        assert again["values"]["xlsx_max_rows"] == 12_345
+        assert again["values"]["pdf_pages_per_bucket"] == out["values"]["pdf_pages_per_bucket"]

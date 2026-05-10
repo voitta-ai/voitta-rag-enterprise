@@ -31,6 +31,7 @@ from sqlalchemy.orm import Session
 from ...db.models import AuthProvider, User
 from ...services import admin_store
 from ...services import auth_providers as auth_providers_svc
+from ...services import indexing_caps
 from ...services.acl import CurrentUser
 from ..deps import admin_user, db_session
 
@@ -495,3 +496,54 @@ async def check_auth_provider(
         client_secret=row.client_secret,
     )
     return _AuthProviderCheckOut(ok=result.ok, message=result.message)
+
+
+# ---------------------------------------------------------------------------
+# Indexing caps — admin-tunable per-format / per-file limits.
+# ---------------------------------------------------------------------------
+
+
+class IndexingCapsOut(BaseModel):
+    values: dict[str, int]
+    defaults: dict[str, int]
+    bounds: dict[str, list[int]]
+
+
+@router.get("/indexing-caps", response_model=IndexingCapsOut)
+def get_indexing_caps(_: CurrentUser = Depends(admin_user)) -> IndexingCapsOut:
+    """Return current cap values plus defaults + bounds for the UI.
+
+    The values reflect the override JSON merged over the shipped defaults
+    (and ``Settings``-sourced env defaults for fields that have both).
+    The UI renders each row with min/max ``input`` attributes pulled from
+    ``bounds`` and a "reset" button that posts the matching ``defaults``
+    entry back.
+    """
+    return IndexingCapsOut(
+        values=indexing_caps.as_dict(),
+        defaults=indexing_caps.defaults_dict(),
+        bounds=indexing_caps.bounds_dict(),
+    )
+
+
+@router.patch("/indexing-caps", response_model=IndexingCapsOut)
+def update_indexing_caps(
+    body: dict[str, int],
+    me: CurrentUser = Depends(admin_user),
+) -> IndexingCapsOut:
+    """Merge ``body`` (partial) into the persisted override and re-cache.
+
+    Unknown keys are dropped; out-of-bounds values are clamped to the
+    declared range in :data:`indexing_caps.BOUNDS`. Non-integer values
+    return 400.
+    """
+    try:
+        indexing_caps.update(body)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
+    logger.info("admin: %s updated indexing caps: keys=%s", me.email, sorted(body))
+    return IndexingCapsOut(
+        values=indexing_caps.as_dict(),
+        defaults=indexing_caps.defaults_dict(),
+        bounds=indexing_caps.bounds_dict(),
+    )
