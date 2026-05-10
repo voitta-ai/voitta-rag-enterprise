@@ -31,6 +31,7 @@ def build_default_registry() -> ParserRegistry:
     # for callers that only want, say, the text parser.
     from .docx_parser import DocxParser
     from .image_parser import ImageFileParser
+    from .ipynb_parser import IpynbParser
     from .pdf_parser import PdfParser
     from .pptx_parser import PptxParser
     from .svg_parser import SvgParser
@@ -38,6 +39,10 @@ def build_default_registry() -> ParserRegistry:
     from .xlsx_parser import XlsxParser
 
     r = ParserRegistry()
+    # IpynbParser before TextParser so .ipynb is claimed by the structured
+    # parser even though TextParser doesn't currently include it — keeps
+    # the precedence intentional in case the text list grows.
+    r.register(IpynbParser())
     r.register(TextParser())
     r.register(PdfParser())
     r.register(DocxParser())
