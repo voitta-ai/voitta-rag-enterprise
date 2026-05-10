@@ -482,6 +482,59 @@ def remove_file_from_image_points(file_id: int) -> list[int]:
     return run_on_qdrant(_do)
 
 
+def _delete_orphans_for_collection(
+    collection: str,
+    id_key: str,
+    known_ids: set[int],
+) -> int:
+    """Scroll ``collection`` in batches; delete points whose ``payload[id_key]``
+    is missing from ``known_ids``.
+
+    Shared body for the chunk / image orphan sweeps. Same algorithm
+    either way:
+
+    1. Scroll up to 1024 points + their payload.
+    2. Bucket point.ids by whether their payload's id_key value is in
+       ``known_ids``.
+    3. Delete the orphans in one bulk call; continue scrolling.
+
+    Caller is expected to supply ``known_ids`` from a fresh SQL query
+    (``SELECT id FROM chunks`` / ``SELECT id FROM images``) and to
+    decide whether they tolerate the (vanishingly small) race where a
+    just-inserted row's id isn't yet in the set. We use this at
+    startup where there's no in-flight writer, so the race is moot.
+    """
+
+    def _do() -> int:
+        client = get_client()
+        if not client.collection_exists(collection):
+            return 0
+        deleted = 0
+        offset = None
+        while True:
+            res, offset = client.scroll(
+                collection,
+                limit=1024,
+                with_payload=True,
+                offset=offset,
+            )
+            stale_ids = [
+                p.id for p in res
+                if (p.payload or {}).get(id_key) not in known_ids
+            ]
+            if stale_ids:
+                client.delete(
+                    collection,
+                    points_selector=qm.PointIdsList(points=stale_ids),
+                )
+                deleted += len(stale_ids)
+            if offset is None:
+                break
+        return deleted
+
+    return run_on_qdrant(_do)
+
+
 def delete_orphan_image_points(known_image_ids: set[int]) -> int:
     """Remove image points whose ``image_id`` payload is not in ``known_image_ids``.
 
@@ -491,40 +544,27 @@ def delete_orphan_image_points(known_image_ids: set[int]) -> int:
     fresh one, leaving Qdrant points whose ``image_id`` no longer
     matches any DB row.
 
-    Caller supplies the canonical set of Image row IDs (cheap to query —
-    a single ``SELECT id FROM images``). We scroll the entire image
-    collection in batches and delete every point whose payload
-    ``image_id`` is absent from the set.
-
-    Returns the count of deleted points. Safe to run at startup or on
-    demand; idempotent on subsequent runs.
+    Caller supplies the canonical set of Image row IDs. Returns the
+    count of deleted points. Safe to run at startup or on demand;
+    idempotent on subsequent runs.
     """
+    return _delete_orphans_for_collection(IMAGES, "image_id", known_image_ids)
 
-    def _do() -> int:
-        client = get_client()
-        if not client.collection_exists(IMAGES):
-            return 0
-        deleted = 0
-        offset = None
-        while True:
-            res, offset = client.scroll(
-                IMAGES,
-                limit=1024,
-                with_payload=True,
-                offset=offset,
-            )
-            stale_ids = [
-                p.id for p in res
-                if (p.payload or {}).get("image_id") not in known_image_ids
-            ]
-            if stale_ids:
-                client.delete(IMAGES, points_selector=qm.PointIdsList(points=stale_ids))
-                deleted += len(stale_ids)
-            if offset is None:
-                break
-        return deleted
 
-    return run_on_qdrant(_do)
+def delete_orphan_chunk_points(known_chunk_ids: set[int]) -> int:
+    """Remove chunk points whose ``chunk_id`` payload is not in ``known_chunk_ids``.
+
+    Symmetric to :func:`delete_orphan_image_points`. Chunks already
+    flow through ``replace_chunks_for_file`` (atomic delete-by-file_id
+    + upsert), so in normal operation no chunk orphans accumulate. We
+    sweep them on startup anyway as defense in depth — anything that
+    bypasses ``replace_chunks_for_file`` (a Qdrant delete that failed
+    mid-flight, a manual sqlite edit, a wipe-file path that didn't
+    propagate to Qdrant) gets cleaned up here.
+
+    Returns the count of deleted points. Idempotent on subsequent runs.
+    """
+    return _delete_orphans_for_collection(CHUNKS, "chunk_id", known_chunk_ids)
 
 
 def delete_chunks_for_file(file_id: int) -> None:

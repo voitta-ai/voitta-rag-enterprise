@@ -674,3 +674,43 @@ def test_delete_orphan_image_points_keeps_known_rows(
         live_ids = {iid for (iid,) in s.execute(select(Image.id)).all()}
     deleted = vector_store.delete_orphan_image_points(live_ids)
     assert deleted == 0
+
+
+def test_delete_orphan_chunk_points_removes_stale_rows(
+    env: None, tmp_path: Path,
+) -> None:
+    """Symmetric to the image-sweep test: a Chunk DB row deleted out of
+    band leaves the matching Qdrant chunk point as an orphan; the
+    sweep removes it."""
+    from voitta_rag_enterprise.services import vector_store
+
+    _seed_and_index(tmp_path / "src", {"d.md": "alpha beta gamma"})
+
+    # Sanity: there's at least one Qdrant chunk point.
+    client = vector_store.get_client()
+    pre = client.count(vector_store.CHUNKS).count
+    assert pre >= 1
+
+    # Drop every Chunk DB row directly — Qdrant points remain.
+    from sqlalchemy import delete as sa_delete
+    with session_scope() as s:
+        s.execute(sa_delete(Chunk))
+
+    deleted = vector_store.delete_orphan_chunk_points(set())
+    assert deleted == pre
+
+    # Idempotent: a second run finds nothing.
+    assert vector_store.delete_orphan_chunk_points(set()) == 0
+
+
+def test_delete_orphan_chunk_points_keeps_known_rows(
+    env: None, tmp_path: Path,
+) -> None:
+    """Sweep with the full set of live Chunk IDs must not delete anything."""
+    from voitta_rag_enterprise.services import vector_store
+
+    _seed_and_index(tmp_path / "src", {"d.md": "alpha beta gamma"})
+
+    with session_scope() as s:
+        live_ids = {cid for (cid,) in s.execute(select(Chunk.id)).all()}
+    assert vector_store.delete_orphan_chunk_points(live_ids) == 0
