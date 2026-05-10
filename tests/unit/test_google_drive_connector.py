@@ -85,8 +85,98 @@ class _FakeDocs:
     def documents(self):
         return self
 
-    def get(self, *, documentId: str, includeTabsContent: bool):
+    def get(self, *, documentId: str, includeTabsContent: bool):  # noqa: ARG002
         return _FakeRequest(self._docs[documentId])
+
+
+class _FakeSheets:
+    """``spreadsheets.get`` + ``spreadsheets.values.get`` for the
+    SpreadsheetExporter integration. Configured with ``meta`` keyed by
+    spreadsheet id (returned by ``get``) and ``values`` keyed by
+    ``(spreadsheetId, range)``."""
+
+    def __init__(
+        self,
+        meta: dict[str, dict[str, Any]] | None = None,
+        values: dict[tuple[str, str], dict[str, Any]] | None = None,
+    ) -> None:
+        self._meta = meta or {}
+        self._values = values or {}
+
+    def spreadsheets(self):
+        outer = self
+
+        class _Spreadsheets:
+            def get(self, *, spreadsheetId: str, fields: str = "") -> _FakeRequest:  # noqa: ARG002
+                return _FakeRequest(outer._meta.get(spreadsheetId, {}))
+
+            def values(self):
+                class _Values:
+                    def get(
+                        self,
+                        *,
+                        spreadsheetId: str,
+                        range: str,  # noqa: A002
+                        valueRenderOption: str = "",  # noqa: ARG002
+                        dateTimeRenderOption: str = "",  # noqa: ARG002
+                    ) -> _FakeRequest:
+                        return _FakeRequest(
+                            outer._values.get((spreadsheetId, range), {"values": []})
+                        )
+
+                return _Values()
+
+        return _Spreadsheets()
+
+
+class _FakeSlides:
+    """``presentations.get`` + ``pages.getThumbnail`` for the
+    PresentationExporter integration."""
+
+    def __init__(
+        self,
+        decks: dict[str, dict[str, Any]] | None = None,
+        thumbnails: dict[tuple[str, str], dict[str, Any]] | None = None,
+    ) -> None:
+        self._decks = decks or {}
+        self._thumbnails = thumbnails or {}
+
+    def presentations(self):
+        outer = self
+
+        class _Presentations:
+            def get(self, *, presentationId: str) -> _FakeRequest:
+                return _FakeRequest(outer._decks.get(presentationId, {}))
+
+            def pages(self):
+                class _Pages:
+                    def getThumbnail(
+                        self,
+                        *,
+                        presentationId: str,
+                        pageObjectId: str,
+                        thumbnailProperties_thumbnailSize: str = "",  # noqa: ARG002
+                    ) -> _FakeRequest:
+                        return _FakeRequest(
+                            outer._thumbnails.get((presentationId, pageObjectId), {})
+                        )
+
+                return _Pages()
+
+        return _Presentations()
+
+
+class _FakeForms:
+    """``forms.get`` for the FormExporter integration."""
+
+    def __init__(self, forms: dict[str, dict[str, Any]] | None = None) -> None:
+        self._forms = forms or {}
+
+    def forms(self):
+        return self
+
+    def get(self, *, formId: str) -> _FakeRequest:
+        return _FakeRequest(self._forms.get(formId, {}))
 
 
 class _FakeDrive:
@@ -123,24 +213,43 @@ def _patch_services(
     drive: _FakeDrive,
     docs: _FakeDocs,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    sheets: _FakeSheets | None = None,
+    slides: _FakeSlides | None = None,
+    forms: _FakeForms | None = None,
 ) -> None:
+    """Patch every per-thread service builder so production code paths
+    reach the fakes instead of trying to mint real Google credentials.
+
+    Tests that don't exercise a particular Workspace API can leave its
+    arg as ``None`` — the corresponding builder still gets patched (to
+    return an empty fake) so the lazy factory inside the connector
+    doesn't blow up if some unrelated code path triggers it.
+    """
+    sheets = sheets or _FakeSheets()
+    slides = slides or _FakeSlides()
+    forms = forms or _FakeForms()
     monkeypatch.setattr(
         connector, "_build_services", lambda *a, **k: (drive, docs)
     )
-    # The parallel docs.get pool builds its own ``docs`` Resource per
-    # worker thread (production code uses per-thread credentials to dodge
-    # googleapiclient's thread-unsafety) — the tests need to return the
-    # fake from this hook too, otherwise the pool path tries to mint real
-    # credentials and falls back to docx export every time.
+    # Per-thread builders for the materialise pool and the download
+    # pool. googleapiclient's Resource isn't thread-safe in production,
+    # but the fakes here are pure-Python dicts — sharing one object
+    # across the pool is fine.
     monkeypatch.setattr(
         connector, "_build_docs_for_thread", lambda *a, **k: docs
     )
-    # The download pool builds its own ``drive`` Resource per worker
-    # thread (same per-thread pattern as docs.get) — return the fake
-    # here so producers reach the test ``_FakeFiles`` instead of trying
-    # to mint real credentials.
     monkeypatch.setattr(
         connector, "_build_drive_for_thread", lambda *a, **k: drive
+    )
+    monkeypatch.setattr(
+        connector, "_build_sheets_for_thread", lambda *a, **k: sheets
+    )
+    monkeypatch.setattr(
+        connector, "_build_slides_for_thread", lambda *a, **k: slides
+    )
+    monkeypatch.setattr(
+        connector, "_build_forms_for_thread", lambda *a, **k: forms
     )
     monkeypatch.setattr(
         connector, "_sync_access_token", lambda *a, **k: "fake-token"
@@ -153,38 +262,61 @@ def _patch_services(
 
 
 @pytest.mark.asyncio
-async def test_native_types_export_to_expected_extensions(
+async def test_sheets_render_per_sheet_md_plus_full_workbook_xlsx(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A Sheet lands as one .md per sheet under ``<stem>/`` plus the
+    full workbook xlsx under ``.voitta_workbooks/``."""
     listings = {
         "ROOT": [
             {
                 "id": "sheet1",
                 "name": "Q4",
                 "mimeType": NATIVE_SHEET,
-                "modifiedTime": "2026-01-01T00:00:00Z",
+                "modifiedTime": "2026-05-10T00:00:00Z",
                 "webViewLink": "https://docs.google.com/spreadsheets/d/sheet1/edit",
             },
-            {
-                "id": "slides1",
-                "name": "Pitch",
-                "mimeType": NATIVE_SLIDES,
-                "modifiedTime": "2026-01-01T00:00:00Z",
-                "webViewLink": "https://docs.google.com/presentation/d/slides1/edit",
-            },
         ]
+    }
+    sheets_meta = {
+        "sheet1": {
+            "sheets": [
+                {
+                    "properties": {
+                        "sheetId": 0,
+                        "title": "Sales",
+                        "gridProperties": {"rowCount": 3, "columnCount": 2},
+                    }
+                },
+                {
+                    "properties": {
+                        "sheetId": 7,
+                        "title": "Marketing",
+                        "gridProperties": {"rowCount": 2, "columnCount": 2},
+                    }
+                },
+            ]
+        }
+    }
+    sheets_values = {
+        ("sheet1", "'Sales'!A1:ZZ100"): {"values": [["Region", "Q4"], ["EU", "1000"]]},
+        ("sheet1", "'Marketing'!A1:ZZ100"): {"values": [["Channel"], ["Email"]]},
     }
     drive = _FakeDrive(
         _FakeFiles(
             listings,
-            export_payloads={"sheet1": b"xlsx-bytes", "slides1": b"pptx-bytes"},
+            export_payloads={"sheet1": b"XLSX-BYTES"},
             download_payloads={},
         )
     )
-    docs = _FakeDocs({})
-
     connector = GoogleDriveConnector()
-    _patch_services(connector, drive, docs, monkeypatch)
+    _patch_services(
+        connector,
+        drive,
+        _FakeDocs({}),
+        monkeypatch,
+        sheets=_FakeSheets(meta=sheets_meta, values=sheets_values),
+    )
 
     stats = await connector.sync(
         folder_root=tmp_path / "root",
@@ -193,12 +325,106 @@ async def test_native_types_export_to_expected_extensions(
     )
     assert stats.errors == []
     root = (tmp_path / "root").resolve()
-    assert (root / "Root" / "Q4.xlsx").read_bytes() == b"xlsx-bytes"
-    assert (root / "Root" / "Pitch.pptx").read_bytes() == b"pptx-bytes"
+    sales_md = (root / "Root" / "Q4" / "01-Sales.md").read_text()
+    marketing_md = (root / "Root" / "Q4" / "02-Marketing.md").read_text()
+    assert "| Region | Q4 |" in sales_md
+    assert "| EU | 1000 |" in sales_md
+    assert "| Channel |" in marketing_md
+    # Full workbook lands under the sidecar dir.
+    xlsx_path = root / ".voitta_workbooks" / "Root" / "Q4.xlsx"
+    assert xlsx_path.read_bytes() == b"XLSX-BYTES"
+
     sidecar = json.loads((root / ".voitta_sources.json").read_text())
-    assert sidecar["Root/Q4.xlsx"]["url"] == "https://docs.google.com/spreadsheets/d/sheet1/edit"
-    # Non-tab files don't carry a `tab` key.
-    assert "tab" not in sidecar["Root/Q4.xlsx"]
+    # Per-sheet sidecar entries deep-link by gid.
+    assert "#gid=0" in sidecar["Root/Q4/01-Sales.md"]["url"]
+    assert sidecar["Root/Q4/01-Sales.md"]["tab"] == "Sales"
+    # Full xlsx is in the sidecar too — clients can discover it.
+    assert ".voitta_workbooks/Root/Q4.xlsx" in sidecar
+
+
+@pytest.mark.asyncio
+async def test_slides_render_per_slide_md_plus_thumbnail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Slides deck lands as one .md per slide plus per-slide PNG."""
+    import httpx
+
+    captured: dict[str, Any] = {}
+
+    class _MockClient:
+        def __init__(self, *a, **k) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return None
+
+        def get(self, url: str) -> httpx.Response:
+            captured["url"] = url
+            return httpx.Response(200, content=b"PNG", request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(
+        "voitta_rag_enterprise.services.sync.google_workspace_exporters.slides.httpx.Client",
+        _MockClient,
+    )
+
+    listings = {
+        "ROOT": [
+            {
+                "id": "deck1",
+                "name": "Pitch",
+                "mimeType": NATIVE_SLIDES,
+                "modifiedTime": "2026-05-10T00:00:00Z",
+                "webViewLink": "https://docs.google.com/presentation/d/deck1/edit",
+            }
+        ]
+    }
+    decks = {
+        "deck1": {
+            "slides": [
+                {
+                    "objectId": "p1",
+                    "pageElements": [
+                        {
+                            "shape": {
+                                "placeholder": {"type": "TITLE"},
+                                "text": {"textElements": [{"textRun": {"content": "Intro"}}]},
+                            }
+                        },
+                        {
+                            "shape": {
+                                "text": {"textElements": [{"textRun": {"content": "Welcome."}}]},
+                            }
+                        },
+                    ],
+                }
+            ]
+        }
+    }
+    thumbnails = {("deck1", "p1"): {"contentUrl": "https://lh3.googleusercontent.com/x"}}
+    drive = _FakeDrive(_FakeFiles(listings, export_payloads={}, download_payloads={}))
+    connector = GoogleDriveConnector()
+    _patch_services(
+        connector, drive, _FakeDocs({}), monkeypatch,
+        slides=_FakeSlides(decks=decks, thumbnails=thumbnails),
+    )
+
+    stats = await connector.sync(
+        folder_root=tmp_path / "root",
+        auth=_make_auth(),
+        drive_folders=[{"id": "ROOT", "name": "Root"}],
+    )
+    assert stats.errors == []
+    root = (tmp_path / "root").resolve()
+    md = (root / "Root" / "Pitch" / "01-Intro.md").read_text()
+    assert "# Slide 1: Intro" in md
+    assert "Welcome." in md
+    png = (root / "Root" / "Pitch" / "images" / "slide_1.png").read_bytes()
+    assert png == b"PNG"
+    sidecar = json.loads((root / ".voitta_sources.json").read_text())
+    assert "#slide=id.p1" in sidecar["Root/Pitch/01-Intro.md"]["url"]
 
 
 @pytest.mark.asyncio
@@ -287,16 +513,19 @@ async def test_multi_tab_doc_writes_one_md_per_tab(
 
 
 @pytest.mark.asyncio
-async def test_doc_without_tabs_falls_back_to_docx_export(
+async def test_doc_without_tabs_renders_a_single_md(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A doc returned by ``documents.get`` with no tabs structure (legacy
+    docs created before the tabs feature) renders to a single
+    ``<stem>.md`` directly. No docx fallback exists in the new path."""
     listings = {
         "ROOT": [
             {
                 "id": "doc2",
                 "name": "Plain",
                 "mimeType": NATIVE_DOC,
-                "modifiedTime": "2026-01-03T00:00:00Z",
+                "modifiedTime": "2026-05-10T00:00:00Z",
                 "webViewLink": "https://docs.google.com/document/d/doc2/edit",
             }
         ]
@@ -304,12 +533,24 @@ async def test_doc_without_tabs_falls_back_to_docx_export(
     drive = _FakeDrive(
         _FakeFiles(
             listings,
-            export_payloads={"doc2": b"docx-bytes"},
+            export_payloads={},
             download_payloads={},
         )
     )
-    # Empty `tabs` array → fallback to docx export.
-    docs = _FakeDocs({"doc2": {"tabs": []}})
+    # No ``tabs`` key — Docs API surfaces ``body`` directly.
+    docs = _FakeDocs({
+        "doc2": {
+            "body": {
+                "content": [
+                    {
+                        "paragraph": {
+                            "elements": [{"textRun": {"content": "legacy body", "textStyle": {}}}]
+                        }
+                    }
+                ]
+            }
+        }
+    })
     connector = GoogleDriveConnector()
     _patch_services(connector, drive, docs, monkeypatch)
 
@@ -319,9 +560,13 @@ async def test_doc_without_tabs_falls_back_to_docx_export(
         drive_folders=[{"id": "ROOT", "name": "Root"}],
     )
     assert stats.errors == []
+    # No tabs → no per-tab markdown counted in tabs_written.
     assert stats.tabs_written == 0
     root = (tmp_path / "root").resolve()
-    assert (root / "Root" / "Plain.docx").read_bytes() == b"docx-bytes"
+    md = (root / "Root" / "Plain.md").read_text()
+    assert "legacy body" in md
+    sidecar = json.loads((root / ".voitta_sources.json").read_text())
+    assert sidecar["Root/Plain.md"]["url"].startswith("https://docs.google.com/document/d/doc2/edit")
 
 
 @pytest.mark.asyncio
@@ -377,10 +622,12 @@ async def test_unsupported_native_type_is_skipped(
 ) -> None:
     listings = {
         "ROOT": [
+            # ``vnd.google-apps.site`` has no registered exporter — the
+            # connector must drop it silently.
             {
-                "id": "form1",
-                "name": "Survey",
-                "mimeType": "application/vnd.google-apps.form",
+                "id": "site1",
+                "name": "Wiki",
+                "mimeType": "application/vnd.google-apps.site",
                 "modifiedTime": "2026-01-01T00:00:00Z",
             },
             {
@@ -411,8 +658,8 @@ async def test_unsupported_native_type_is_skipped(
     )
     root = (tmp_path / "root").resolve()
     assert (root / "Root" / "kept.dat").exists()
-    # The form should not have produced any local file.
-    assert not list(root.rglob("Survey*"))
+    # The unsupported native type produced no on-disk file.
+    assert not list(root.rglob("Wiki*"))
 
 
 @pytest.mark.asyncio

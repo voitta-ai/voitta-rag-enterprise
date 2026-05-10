@@ -170,12 +170,16 @@ def _entries_for_tab(
     # Snapshot the body so the producer's closure doesn't keep the whole
     # document tree alive — just the bytes it'll write.
     body_text = tab.markdown
+    # ``tab`` annotation is only useful when this output really is one of
+    # several tabs — a single-tab (or no-tabs-structure) doc produces one
+    # md file that's the doc itself, not a "tab", so suppressing it here
+    # keeps the connector's tabs_written counter honest.
     out: list[RemoteEntry] = [
         RemoteEntry(
             rel_path=md_rel,
             url=md_url,
             fingerprint=md_fingerprint,
-            tab=tab.display_name,
+            tab=None if only_tab else tab.display_name,
             producer=_make_markdown_producer(body_text, md_fingerprint),
         )
     ]
@@ -201,7 +205,10 @@ def _entries_for_tab(
                 rel_path=f"{img_dir_rel}/{ref.rel_path}",
                 url=md_url,  # belongs to the same doc/tab
                 fingerprint=f"{modified_time}#{ref.inline_object_id}",
-                tab=tab.display_name,
+                # Images aren't tabs; their RemoteEntry should not be
+                # counted in tabs_written. The associated tab info is
+                # already on the markdown entry.
+                tab=None,
                 producer=_make_image_producer(content_uri, access_token),
             )
         )

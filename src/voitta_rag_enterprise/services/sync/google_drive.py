@@ -5,20 +5,29 @@ shared-with-me folder) onto disk under the registered folder root. The
 watcher then picks up new/changed/deleted files and the indexing pipeline
 takes over — same contract as the GitHub connector.
 
-Native Google types are exported on the way down:
+Native Google types are routed through the
+:mod:`google_workspace_exporters` registry: each exporter is responsible
+for converting one Drive file into one or more on-disk files plus a
+sidecar deep-link. The registry's MIME map is the only place that
+knows about specific Workspace types — adding Notion / Confluence /
+etc. is a new exporter module + one line in
+``build_default_registry``.
 
-* ``application/vnd.google-apps.spreadsheet``  → ``.xlsx``
-* ``application/vnd.google-apps.presentation`` → ``.pptx``
-* ``application/vnd.google-apps.document``     → ``.docx`` *unless* the doc
-  has tabs (the post-2024 multi-tab feature). In that case we call the Docs
-  API with ``includeTabsContent=true`` and write **one markdown file per
-  tab** under a same-named directory. Each tab file gets its own row in
-  ``.voitta_sources.json`` carrying the deep-link tab URL and the tab
-  display name, so chunks indexed from each tab carry a ``tab`` payload all
-  the way through to Qdrant.
+Cross-cutting:
 
-Other Google-native types (forms, sites, drawings, scripts, fusion tables)
-are skipped with a debug log — they have no useful textual export.
+* Tab markdown / sheet markdown / slide markdown / form markdown are
+  written with a leading ``<!--voitta-fingerprint:...-->`` line so the
+  next sync can short-circuit unchanged outputs without re-fetching.
+* Inline images (Docs) and slide thumbnails (Slides) are written as
+  separate :class:`RemoteEntry` objects with their own fingerprints so
+  re-syncs only re-download bytes that actually changed.
+* The full Sheets workbook is exported to
+  ``.voitta_workbooks/<rel>.xlsx`` — that dir is excluded from indexing
+  (see ``ignore_patterns`` default) and retrievable on demand via the
+  ``voitta_rag_get_workbook`` MCP tool.
+* ``vnd.google-apps.*`` types with no registered exporter (Sites, Apps
+  Script, Fusion Tables, Jamboard) are skipped with a debug log — no
+  useful textual export.
 
 Authentication
 --------------
@@ -27,7 +36,10 @@ Two modes, mirroring voitta-rag:
 * **OAuth** — ``gd_client_id`` + ``gd_client_secret`` saved on the source
   row; the user clicks Connect, the unified callback (api/routes/sync.py)
   stores ``gd_refresh_token``. Access tokens are refreshed on demand and
-  cached in-process.
+  cached in-process. New scopes (``spreadsheets.readonly``,
+  ``presentations.readonly``, ``forms.body.readonly``) ride alongside
+  ``drive.readonly`` so Workspace exporters can call each app's API
+  directly. Existing connections will need a one-time re-consent.
 * **Service account** — ``gd_service_account_json`` (the entire key file
   as a string). Useful for headless / server-side deployments.
 """
@@ -48,22 +60,29 @@ from urllib.parse import urlencode
 
 import httpx
 
-from .google_workspace_exporters import safe_filename
-from .google_workspace_exporters._docs_markdown import (
-    has_tabs,
-    render_document_tabs,
+from .google_workspace_exporters import (
+    ExportContext,
+    ProducerContext,
+    RemoteEntry,
+    get_default_registry,
+    safe_filename,
 )
 
 logger = logging.getLogger(__name__)
 
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
-# We need both readonly Drive (list/download/export) and readonly Docs (tab
-# walking). Asking for both up-front avoids a re-consent flow when a user's
-# folder has multi-tab Docs.
+# Native Workspace exporters need read access to each app's structural
+# API: Docs for tab walking, Sheets for per-sheet markdown summaries,
+# Slides for slide thumbnails + speaker notes, Forms for form
+# structure. Asking for all of them up-front avoids a re-consent flow
+# the moment a user's folder happens to contain a Sheet or a Slide.
 GOOGLE_SCOPES = (
     "https://www.googleapis.com/auth/drive.readonly "
-    "https://www.googleapis.com/auth/documents.readonly"
+    "https://www.googleapis.com/auth/documents.readonly "
+    "https://www.googleapis.com/auth/spreadsheets.readonly "
+    "https://www.googleapis.com/auth/presentations.readonly "
+    "https://www.googleapis.com/auth/forms.body.readonly"
 )
 
 # Native Google types we know how to export. Anything else under
@@ -73,20 +92,9 @@ NATIVE_SHEET = "application/vnd.google-apps.spreadsheet"
 NATIVE_SLIDES = "application/vnd.google-apps.presentation"
 NATIVE_FOLDER = "application/vnd.google-apps.folder"
 
-DOCX_MIME = (
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-)
-EXPORT_MAP: dict[str, tuple[str, str]] = {
-    NATIVE_SHEET: (
-        ".xlsx",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    ),
-    NATIVE_SLIDES: (
-        ".pptx",
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    ),
-    # NATIVE_DOC is handled specially in `_materialize_doc`.
-}
+# Sidecar dir for full Sheets workbook exports — also a member of the
+# default ignore_patterns so the indexer never sees these files.
+WORKBOOKS_DIR = ".voitta_workbooks"
 
 # MIME-level blocklist: applied alongside ``VOITTA_IGNORE_PATTERNS`` so we
 # also catch items the filename globs can miss. Meet recordings, voice
@@ -206,27 +214,6 @@ class GoogleDriveSyncStats:
             "tabs_written": self.tabs_written,
             "errors": self.errors,
         }
-
-
-@dataclass
-class _RemoteEntry:
-    """One materialised local file we expect to write for a remote item."""
-
-    rel_path: str
-    url: str
-    tab: str | None
-    # Deferring the actual fetch keeps listing cheap and lets the connector
-    # short-circuit on (size, mtime, fingerprint) before touching the network.
-    # The second arg is a per-thread ``drive`` Resource — the download phase
-    # runs producers from a thread pool and googleapiclient's Resource is
-    # NOT thread-safe (it shares ``httplib2.Http`` connection state). Tab
-    # producers ignore the arg since they only write text to disk.
-    producer: Callable[[Path, Any], None]
-    # Stable identity for change detection. For binary downloads this is the
-    # Drive ``md5Checksum``; for exports/tabs we use ``modifiedTime`` since
-    # exports have no md5.
-    fingerprint: str
-    size_hint: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -559,6 +546,35 @@ class GoogleDriveConnector:
         creds = self._build_credentials(auth, access_token)
         return build("drive", "v3", credentials=creds, cache_discovery=False)
 
+    # The following per-thread builders mirror ``_build_drive_for_thread``
+    # for each Workspace API the exporters might need. Built lazily by
+    # the per-thread factory in ``_sync_sync`` so a folder of pure plain
+    # binaries doesn't pay for discovery on APIs nothing will use.
+
+    def _build_sheets_for_thread(
+        self, auth: GoogleDriveAuth, access_token: str | None
+    ) -> Any:
+        from googleapiclient.discovery import build
+
+        creds = self._build_credentials(auth, access_token)
+        return build("sheets", "v4", credentials=creds, cache_discovery=False)
+
+    def _build_slides_for_thread(
+        self, auth: GoogleDriveAuth, access_token: str | None
+    ) -> Any:
+        from googleapiclient.discovery import build
+
+        creds = self._build_credentials(auth, access_token)
+        return build("slides", "v1", credentials=creds, cache_discovery=False)
+
+    def _build_forms_for_thread(
+        self, auth: GoogleDriveAuth, access_token: str | None
+    ) -> Any:
+        from googleapiclient.discovery import build
+
+        creds = self._build_credentials(auth, access_token)
+        return build("forms", "v1", credentials=creds, cache_discovery=False)
+
     def _sync_access_token(self, auth: GoogleDriveAuth) -> str:
         """Synchronous token refresh for use from ``_sync_sync`` (worker thread)."""
         key = (auth.client_id, auth.refresh_token)
@@ -623,13 +639,12 @@ class GoogleDriveConnector:
         ignore = _ignore_from_settings()
 
         stats = GoogleDriveSyncStats()
-        entries: list[_RemoteEntry] = []
-        # Google Docs need a per-doc ``documents.get`` round-trip to find
-        # out whether the doc has tabs. We can't do that during the
-        # listing recursion without blocking on each call serially —
-        # 300ms x ~250 docs is most of the pain users feel. Defer them
-        # here and process via a thread pool below.
-        pending_docs: list[tuple[dict[str, Any], str]] = []
+        entries: list[RemoteEntry] = []
+        # Native Workspace files (Docs/Sheets/Slides/Drawings/Forms)
+        # need a per-file structural API call to materialise — collect
+        # them during listing and fan out through a thread pool below
+        # so the per-file round-trip doesn't dominate listing time.
+        pending_native: list[tuple[dict[str, Any], str]] = []
         # Each picked Drive folder is mirrored under its own subdirectory so
         # multi-folder syncs can't collide on same-named children. The
         # subdirectory is the folder's display name (set by the picker UI),
@@ -697,7 +712,7 @@ class GoogleDriveConnector:
                     drive, docs, folder_id, unique, entries, stats, ignore,
                     on_page=tick,
                     skipped_counter=skipped_during_listing,
-                    pending_docs=pending_docs,
+                    pending_native=pending_native,
                 )
             except Exception as e:
                 logger.exception("Drive enumeration failed for %s", folder_id)
@@ -718,67 +733,96 @@ class GoogleDriveConnector:
                 },
             )
 
-        # Phase 2: fan out the docs.get calls accumulated during listing.
-        # Each one is independent so they're embarrassingly parallel; we
-        # cap concurrency at 4 to stay well under Drive's default per-user
-        # rate limits (10 RPS sustained, bursts tolerated). googleapiclient's
-        # Resource is NOT thread-safe — ``_thread_local_docs`` gives each
-        # worker its own service so concurrent requests don't share an
+        # Phase 2: fan out the per-file structural API calls accumulated
+        # during listing. Every native Workspace type (Doc / Sheet /
+        # Slides / Drawing / Form) needs at least one round-trip to
+        # render, and they're embarrassingly parallel. Cap concurrency
+        # at 4 to stay well under Drive's per-user RPS budget;
+        # googleapiclient's Resource is NOT thread-safe — each pool
+        # worker gets its own per-API services via the per-thread
+        # builders below so concurrent requests don't share an
         # httplib2.Http and trip Drive's timeout / SSL-error responses.
-        # Empirically this drops listing time on a 250-doc Meet Recordings
-        # tree from ~80s to ~10s with zero timeout fallbacks.
-        if pending_docs:
+        if pending_native:
             import threading
             from concurrent.futures import ThreadPoolExecutor, as_completed
 
-            n_docs = len(pending_docs)
+            n_native = len(pending_native)
             _emit(
                 "fetching_docs",
                 0,
-                n_docs,
+                n_native,
                 {"items_seen": len(entries)},
             )
 
             tl = threading.local()
 
-            def _docs_for_this_thread() -> Any:
-                # Build at most one ``docs`` Resource per worker thread,
-                # reuse for every task that thread runs. Costs one
-                # discovery call per worker (~50ms) instead of one per
-                # task (~50ms x N), AND keeps each worker's connection
-                # isolated from the others.
-                if not hasattr(tl, "docs"):
-                    tl.docs = self._build_docs_for_thread(auth, access_token)
-                return tl.docs
+            def _per_thread_factory(name: str, builder: Callable[..., Any]) -> Callable[[], Any]:
+                """Produce a callable that returns a thread-local Resource.
 
-            def _materialize_one(item: dict, rel_here: str):
-                return self._materialize_doc(
-                    drive, _docs_for_this_thread(), item, rel_here
+                ``getattr(tl, name)`` lazily caches the per-API service
+                on the worker thread the first time the exporter asks
+                for it. Discovery cost (~50ms / API) thus pays off
+                across every task the thread runs, not per-task.
+                """
+
+                def _get() -> Any:
+                    cached = getattr(tl, name, None)
+                    if cached is None:
+                        cached = builder(auth, access_token)
+                        setattr(tl, name, cached)
+                    return cached
+
+                return _get
+
+            registry = get_default_registry()
+            native_emit_every = max(1, n_native // 50)
+
+            def _materialize_one(
+                item: dict, rel_here: str
+            ) -> tuple[str, list[RemoteEntry]]:
+                exporter = registry.find(item["mimeType"])
+                if exporter is None:
+                    return rel_here, []
+                ctx = ExportContext(
+                    folder_root=folder_root,
+                    docs=_per_thread_factory("docs", self._build_docs_for_thread),
+                    sheets=_per_thread_factory("sheets", self._build_sheets_for_thread),
+                    slides=_per_thread_factory("slides", self._build_slides_for_thread),
+                    forms=_per_thread_factory("forms", self._build_forms_for_thread),
+                    drive_thread_local=_per_thread_factory(
+                        "drive", self._build_drive_for_thread
+                    ),
+                    access_token=access_token,
                 )
+                return rel_here, exporter.export(item, rel_here, ctx)
 
-            doc_emit_every = max(1, n_docs // 50)
             with ThreadPoolExecutor(
-                max_workers=4, thread_name_prefix="gd-docs"
+                max_workers=4, thread_name_prefix="gd-native"
             ) as pool:
                 futures = {
                     pool.submit(_materialize_one, item, rel_here): rel_here
-                    for (item, rel_here) in pending_docs
+                    for (item, rel_here) in pending_native
                 }
                 for completed, fut in enumerate(as_completed(futures), start=1):
                     rel = futures[fut]
                     try:
-                        doc_entries, n_tabs = fut.result()
+                        _, native_entries = fut.result()
                     except Exception as e:
-                        logger.exception("Drive doc fetch failed for %s", rel)
+                        logger.exception("Drive native materialize failed for %s", rel)
                         stats.errors.append(f"{rel}: {e}")
                     else:
-                        entries.extend(doc_entries)
-                        stats.tabs_written += n_tabs
-                    if completed == n_docs or completed % doc_emit_every == 0:
+                        entries.extend(native_entries)
+                        # Per-tab markdown files contribute to tabs_written
+                        # so the SPA's "tabs" stat keeps its meaning.
+                        stats.tabs_written += sum(
+                            1 for e in native_entries
+                            if e.tab is not None and e.rel_path.endswith(".md")
+                        )
+                    if completed == n_native or completed % native_emit_every == 0:
                         _emit(
                             "fetching_docs",
                             completed,
-                            n_docs,
+                            n_native,
                             {"items_seen": len(entries)},
                         )
 
@@ -811,14 +855,37 @@ class GoogleDriveConnector:
 
         tl_dl = threading.local()
 
-        def _drive_for_dl_thread() -> Any:
-            if not hasattr(tl_dl, "drive"):
-                tl_dl.drive = self._build_drive_for_thread(auth, access_token)
-            return tl_dl.drive
+        def _per_thread_dl(name: str, builder: Callable[..., Any]) -> Callable[[], Any]:
+            def _get() -> Any:
+                cached = getattr(tl_dl, name, None)
+                if cached is None:
+                    cached = builder(auth, access_token)
+                    setattr(tl_dl, name, cached)
+                return cached
+
+            return _get
+
+        def _build_dl_producer_ctx() -> ProducerContext:
+            """Producer context for the download phase.
+
+            Producers (e.g. SpreadsheetExporter's per-sheet markdown
+            writer, SlidesExporter's thumbnail fetcher) ask for the
+            services they need; everything is lazy so a sync of pure
+            plain binaries never hits the Sheets / Slides / Forms
+            discovery endpoints.
+            """
+            return ProducerContext(
+                folder_root=folder_root,
+                docs=_per_thread_dl("docs", self._build_docs_for_thread),
+                sheets=_per_thread_dl("sheets", self._build_sheets_for_thread),
+                slides=_per_thread_dl("slides", self._build_slides_for_thread),
+                forms=_per_thread_dl("forms", self._build_forms_for_thread),
+                access_token=access_token,
+            )
 
         def _materialize_one(
-            entry: _RemoteEntry,
-        ) -> tuple[_RemoteEntry, bool, bool, str | None]:
+            entry: RemoteEntry,
+        ) -> tuple[RemoteEntry, bool, bool, str | None]:
             """Run the producer for one entry off the main thread.
 
             Returns ``(entry, was_unchanged, existed_before, error)``. We
@@ -831,7 +898,11 @@ class GoogleDriveConnector:
                 return entry, True, False, None
             existed_before = local.exists()
             try:
-                entry.producer(local, _drive_for_dl_thread())
+                entry.producer(
+                    local,
+                    _per_thread_dl("drive", self._build_drive_for_thread)(),
+                    _build_dl_producer_ctx(),
+                )
             except Exception as e:
                 logger.exception("Drive download failed: %s", entry.rel_path)
                 return entry, False, existed_before, str(e)
@@ -858,7 +929,11 @@ class GoogleDriveConnector:
                     _emit("downloading", i, total_entries)
 
         _emit("cleaning", 0, 0)
-        # Drop locals not on remote (skip our own sidecars).
+        # Drop locals not on remote (skip our own sidecars). Files under
+        # ``.voitta_workbooks/`` are added to ``expected_paths`` directly
+        # by SpreadsheetExporter, so the orphan-detection pass treats
+        # them like any other entry — no separate keep entry needed for
+        # the dir itself.
         keep = {".voitta_sources.json", ".voitta_timestamps.json"}
         for path in list(folder_root.rglob("*")):
             if not path.is_file():
@@ -895,12 +970,12 @@ class GoogleDriveConnector:
         docs: Any,
         folder_id: str,
         rel_prefix: str,
-        out: list[_RemoteEntry],
+        out: list[RemoteEntry],
         stats: GoogleDriveSyncStats,
         ignore: Any,  # IgnoreMatcher
         on_page: Callable[[], None] | None = None,
         skipped_counter: list[int] | None = None,
-        pending_docs: list[tuple[dict[str, Any], str]] | None = None,
+        pending_native: list[tuple[dict[str, Any], str]] | None = None,
     ) -> None:
         """Recursive Drive listing.
 
@@ -933,7 +1008,7 @@ class GoogleDriveConnector:
                     drive, docs, item, rel_prefix, out, stats, ignore,
                     on_page=on_page,
                     skipped_counter=skipped_counter,
-                    pending_docs=pending_docs,
+                    pending_native=pending_native,
                 )
             if on_page is not None:
                 on_page()
@@ -947,16 +1022,19 @@ class GoogleDriveConnector:
         docs: Any,
         item: dict[str, Any],
         rel_prefix: str,
-        out: list[_RemoteEntry],
+        out: list[RemoteEntry],
         stats: GoogleDriveSyncStats,
         ignore: Any,  # IgnoreMatcher
         on_page: Callable[[], None] | None = None,
         skipped_counter: list[int] | None = None,
-        pending_docs: list[tuple[dict[str, Any], str]] | None = None,
+        pending_native: list[tuple[dict[str, Any], str]] | None = None,
     ) -> None:
         name = item["name"]
         mime = item["mimeType"]
         rel_here = f"{rel_prefix}/{name}" if rel_prefix else name
+
+        registry = get_default_registry()
+        is_native_known = registry.find(mime) is not None
 
         # Apply two skip layers BEFORE we recurse / produce:
         #   1. VOITTA_IGNORE_PATTERNS — filename globs (covers ``*.mp4``,
@@ -966,9 +1044,9 @@ class GoogleDriveConnector:
         #   2. MIME blocklist — catches Drive items the filename globs miss
         #      (Meet recordings often have no extension or names like
         #      ``Recording 2026-04-12``; Drive still tags them ``video/mp4``).
-        # Native Google docs/sheets/slides stay un-skippable — they're
-        # rendered to .md / .xlsx / .pptx which the parsers handle.
-        skippable = mime not in (NATIVE_FOLDER, NATIVE_DOC) and mime not in EXPORT_MAP
+        # Native Google types we have an exporter for stay un-skippable —
+        # they get rendered into per-file markdown the parsers handle.
+        skippable = mime != NATIVE_FOLDER and not is_native_known
         if skippable and (ignore.matches(rel_here) or _is_blocked_mime(mime)):
             logger.debug(
                 "skipping ignored file: %s (mime=%s)", rel_here, mime
@@ -988,55 +1066,23 @@ class GoogleDriveConnector:
                 drive, docs, item["id"], rel_here, out, stats, ignore,
                 on_page=on_page,
                 skipped_counter=skipped_counter,
-                pending_docs=pending_docs,
+                pending_native=pending_native,
             )
             return
 
-        if mime == NATIVE_DOC:
-            # Defer the docs.get call. Each Google Doc costs one
-            # ``documents.get(includeTabsContent=true)`` round-trip and
-            # those are independent — we collect them all here, then run
-            # them through a thread pool after listing finishes (see
-            # _sync_sync). Used to dominate listing time on Meet
-            # Recordings folders (~300ms x N docs serially); now N is
-            # capped by the pool's concurrency budget.
-            if pending_docs is not None:
-                pending_docs.append((item, rel_here))
-            else:
-                # Defensive fallback for any caller still using the old
-                # serial path (tests, future direct callers).
-                doc_entries, n_tabs = self._materialize_doc(
-                    drive, docs, item, rel_here
-                )
-                out.extend(doc_entries)
-                stats.tabs_written += n_tabs
-            return
-
-        if mime in EXPORT_MAP:
-            suffix, export_mime = EXPORT_MAP[mime]
-            url = item.get("webViewLink") or _drive_view_url(item["id"], mime)
-            file_id = item["id"]
-
-            def _producer(
-                dest: Path,
-                drive: Any,
-                _id: str = file_id,
-                _m: str = export_mime,
-            ) -> None:
-                _export_to(drive, _id, _m, dest)
-
-            out.append(
-                _RemoteEntry(
-                    rel_path=rel_here + suffix,
-                    url=url,
-                    tab=None,
-                    producer=_producer,
-                    fingerprint=item.get("modifiedTime", ""),
-                )
-            )
+        if is_native_known:
+            # Native Workspace types (Doc / Sheet / Slides / Drawing /
+            # Form) need a structural API call to materialise — that's
+            # one round-trip per file, embarrassingly parallel, so we
+            # defer to the thread pool below.
+            if pending_native is not None:
+                pending_native.append((item, rel_here))
             return
 
         if mime.startswith("application/vnd.google-apps."):
+            # A native type with no registered exporter (Sites, Apps
+            # Script, Fusion Tables, Jamboard, ...). Drop quietly —
+            # there's no useful textual export.
             logger.debug("skipping unsupported google-native type: %s (%s)", mime, name)
             return
 
@@ -1045,11 +1091,16 @@ class GoogleDriveConnector:
         size = int(item.get("size") or 0)
         file_id = item["id"]
 
-        def _bin_producer(dest: Path, drive: Any, _id: str = file_id) -> None:
+        def _bin_producer(
+            dest: Path,
+            drive: Any,
+            ctx: ProducerContext,  # noqa: ARG001
+            _id: str = file_id,
+        ) -> None:
             _download_to(drive, _id, dest)
 
         out.append(
-            _RemoteEntry(
+            RemoteEntry(
                 rel_path=rel_here,
                 url=url,
                 tab=None,
@@ -1059,96 +1110,9 @@ class GoogleDriveConnector:
             )
         )
 
-    def _materialize_doc(
-        self,
-        drive: Any,
-        docs: Any,
-        item: dict[str, Any],
-        rel_here: str,
-    ) -> tuple[list[_RemoteEntry], int]:
-        """Decide between a single ``.docx`` and one ``.md`` per tab.
-
-        Returns ``(new_entries, tabs_written)`` instead of mutating shared
-        state — this keeps the function safe to call concurrently from a
-        thread pool. The Docs API gives us the full structure in one call
-        so we render all tabs from that single response (no extra round-
-        trips per tab), but we still need one ``documents.get`` per doc
-        because Drive doesn't expose a ``hasTabs`` flag in ``files.list``
-        — that's exactly the pile of API calls we want to fan out.
-        """
-        doc_id = item["id"]
-        try:
-            document = (
-                docs.documents()
-                .get(documentId=doc_id, includeTabsContent=True)
-                .execute()
-            )
-        except Exception as e:
-            # Falling back to a ``.docx`` export is better than skipping the
-            # file entirely — the user still gets the primary tab indexed.
-            logger.warning(
-                "docs.get failed for %s (%s); falling back to docx export",
-                rel_here,
-                e,
-            )
-            document = None
-
-        web_url = item.get("webViewLink") or _drive_view_url(doc_id, NATIVE_DOC)
-        modified_time = item.get("modifiedTime", "")
-        out: list[_RemoteEntry] = []
-
-        if document is not None and has_tabs(document):
-            tabs = render_document_tabs(document)
-            if tabs:
-                base_dir = rel_here  # use the doc title as a directory
-                for index, tab in enumerate(tabs, start=1):
-                    fname = f"{index:02d}-{safe_filename(tab.title)}.md"
-                    rel = f"{base_dir}/{fname}"
-                    body = tab.markdown
-                    tab_url = f"{web_url.split('?')[0]}?tab={tab.tab_id}"
-                    fingerprint = f"{modified_time}#{tab.tab_id}"
-
-                    def _tab_producer(
-                        dest: Path,
-                        _drive: Any = None,
-                        _b: str = body,
-                        _fp: str = fingerprint,
-                    ) -> None:
-                        # Drive arg is unused — tabs are pure local writes,
-                        # but the producer signature is uniform so the pool
-                        # can call any entry without special-casing.
-                        write_tab_with_fingerprint(dest, _fp, _b)
-
-                    out.append(
-                        _RemoteEntry(
-                            rel_path=rel,
-                            url=tab_url,
-                            tab=tab.display_name,
-                            producer=_tab_producer,
-                            fingerprint=fingerprint,
-                        )
-                    )
-                return out, len(tabs)
-            logger.info("doc %s reported tabs but none rendered", rel_here)
-
-        # No tabs: export as docx, single file.
-        def _docx_producer(dest: Path, drive: Any, _id: str = doc_id) -> None:
-            _export_to(drive, _id, DOCX_MIME, dest)
-
-        out.append(
-            _RemoteEntry(
-                rel_path=rel_here + ".docx",
-                url=web_url,
-                tab=None,
-                producer=_docx_producer,
-                fingerprint=modified_time,
-            )
-        )
-        return out, 0
-
     # -- diffing helpers ----------------------------------------------------
 
-    def _is_unchanged(self, local: Path, entry: _RemoteEntry) -> bool:
+    def _is_unchanged(self, local: Path, entry: RemoteEntry) -> bool:
         """True when ``local`` already matches ``entry`` and we can skip downloading.
 
         For markdown tab files we read the inline fingerprint comment we
@@ -1181,7 +1145,7 @@ class GoogleDriveConnector:
         return False
 
     def _record_sidecar(
-        self, sidecar: dict[str, dict[str, str]], entry: _RemoteEntry
+        self, sidecar: dict[str, dict[str, str]], entry: RemoteEntry
     ) -> None:
         record: dict[str, str] = {"url": entry.url}
         if entry.tab:
@@ -1244,44 +1208,11 @@ def _atomic_stream_download(downloader_factory: Any, dest: Path) -> None:
         raise
 
 
-def _export_to(drive: Any, file_id: str, export_mime: str, dest: Path) -> None:
-    _atomic_stream_download(
-        lambda: drive.files().export_media(fileId=file_id, mimeType=export_mime),
-        dest,
-    )
-
-
 def _download_to(drive: Any, file_id: str, dest: Path) -> None:
     _atomic_stream_download(
         lambda: drive.files().get_media(fileId=file_id, supportsAllDrives=True),
         dest,
     )
-
-
-def write_tab_with_fingerprint(dest: Path, fingerprint: str, body: str) -> None:
-    """Write a tab markdown file with the inline fingerprint header.
-
-    ``GoogleDriveConnector._is_unchanged`` reads the first line back to
-    skip re-rendering tabs whose Docs ``modifiedTime + tabId`` haven't
-    moved since the previous sync.
-
-    Same atomic-write pattern as ``_atomic_stream_download``, including
-    the per-call uuid suffix to avoid two parallel writers colliding on
-    the same ``.part`` path when the same tab is reachable through
-    overlapping picked folders.
-    """
-    import os
-    import uuid
-
-    header = f"{FINGERPRINT_PREFIX}{fingerprint}{FINGERPRINT_SUFFIX}\n"
-    tmp = dest.with_name(f"{dest.name}.part-{uuid.uuid4().hex[:8]}")
-    try:
-        tmp.write_text(header + body, encoding="utf-8")
-        os.replace(tmp, dest)
-    except Exception:
-        with suppress(OSError):
-            tmp.unlink(missing_ok=True)
-        raise
 
 
 def _drive_view_url(file_id: str, mime: str) -> str:
