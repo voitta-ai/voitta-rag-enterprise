@@ -30,7 +30,7 @@ from contextvars import ContextVar
 from functools import lru_cache
 
 from fastmcp import FastMCP
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_serializer
 from sqlalchemy import select
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -145,10 +145,28 @@ class ChunkInfo(BaseModel):
     # page the chunk touches. ``layout`` is the per-page summary dict
     # (``layout_kind``, ``layout_has_image``/``_table``, ``layout_n_*``,
     # …) — mirror of what search filters can match on. All None / empty
-    # for chunks indexed before the layout pipeline shipped.
+    # for chunks from non-PDF parsers (text/code/markdown/...): PDFs are
+    # the only source today. Excluded from the JSON dump when empty so a
+    # markdown chunk doesn't ship four trivially-empty fields per hit.
     page: int | None = None
     pages: list[int] = Field(default_factory=list)
     layout: dict | None = None
+
+    @model_serializer(mode="wrap")
+    def _drop_empty_pdf_fields(self, handler):
+        data = handler(self)
+        # ``page`` could legitimately be 0 (1-indexed in practice; 0 means
+        # "missing"), so we only drop on None. nearby_image_ids / pages
+        # use empty-list as the "absent" marker.
+        if data.get("page") is None:
+            data.pop("page", None)
+        if not data.get("pages"):
+            data.pop("pages", None)
+        if not data.get("nearby_image_ids"):
+            data.pop("nearby_image_ids", None)
+        if data.get("layout") is None:
+            data.pop("layout", None)
+        return data
 
 
 class ImageInfo(BaseModel):
@@ -166,8 +184,25 @@ class ImageInfo(BaseModel):
     kind: str = "figure"
     score: float | None = None
     # Per-page layout summary for the page this image sits on. None for
-    # images indexed before the layout pipeline shipped.
+    # images that don't come from the PDF pipeline (figures embedded in
+    # DOCX/PPTX, standalone uploads, ...).
     layout: dict | None = None
+
+    @model_serializer(mode="wrap")
+    def _drop_empty_pdf_fields(self, handler):
+        data = handler(self)
+        if data.get("page") is None:
+            data.pop("page", None)
+        if data.get("layout") is None:
+            data.pop("layout", None)
+        # width/height/mime aren't always known at search time (see
+        # ``_image_from_hit``: search payloads don't carry them); strip
+        # them when missing so the response is "absent means unknown"
+        # instead of "explicit null".
+        for k in ("width", "height", "mime"):
+            if data.get(k) is None:
+                data.pop(k, None)
+        return data
 
 
 class PageImageInfo(BaseModel):
