@@ -349,9 +349,17 @@
                     </div>
                     <div id="sync-gh-token" hidden>
                         <label>Username</label>
-                        <input type="text" id="sync-gh-username" placeholder="x-access-token or your GitHub username">
+                        <input type="text" id="sync-gh-username" placeholder="x-access-token or your GitHub username"
+                            autocomplete="off" spellcheck="false"
+                            data-1p-ignore data-lpignore="true" data-form-type="other">
                         <label>Token</label>
-                        <input type="password" id="sync-gh-pat" placeholder="ghp_…">
+                        <!-- type=text on purpose — see comment on
+                             #sync-gd-client-secret. PATs aren't login
+                             passwords; saving them in browser password
+                             stores creates real cross-site leakage risk. -->
+                        <input type="text" id="sync-gh-pat" placeholder="ghp_…"
+                            autocomplete="off" spellcheck="false"
+                            data-1p-ignore data-lpignore="true" data-form-type="other">
                     </div>
 
                     <div class="branches-row">
@@ -420,7 +428,15 @@
                         <input type="text" id="sync-gd-client-id" placeholder="123…apps.googleusercontent.com">
 
                         <label>OAuth client secret</label>
-                        <input type="password" id="sync-gd-client-secret" placeholder="GOCSPX-…">
+                        <!-- ``type=text`` is intentional, not a typo. ``type=password``
+                             triggers Chrome / Safari password-manager save prompts the
+                             moment a value lands here (programmatic fill counts), and
+                             this isn't a login password — it's a config value the
+                             admin sees in plaintext on the Admin → OAuth providers
+                             tab anyway. -->
+                        <input type="text" id="sync-gd-client-secret" placeholder="GOCSPX-…"
+                            autocomplete="off" spellcheck="false"
+                            data-1p-ignore data-lpignore="true" data-form-type="other">
 
                         <div class="actions actions-right" style="margin-top:8px;">
                             <button type="button" id="sync-gd-connect" class="btn btn-secondary btn-sm" disabled title="Save client_id and client_secret first">Connect</button>
