@@ -33,6 +33,12 @@ locals {
       VOITTA_GOOGLE_AUTH_CLIENT_ID     = var.google_oauth_client_id
       VOITTA_GOOGLE_AUTH_CLIENT_SECRET = var.google_oauth_client_secret
       VOITTA_SESSION_SECRET            = var.session_secret
+      # Public base URL the API is reachable at. Signed asset URLs
+      # (CAD projections, on-demand renders) are prefixed with this so
+      # remote MCP clients can fetch them directly. Empty until DNS is
+      # wired (matches Caddy's plain-HTTP bring-up state); becomes
+      # "https://<domain>" once ``var.domain`` is set.
+      VOITTA_PUBLIC_BASE_URL = var.domain == "" ? "" : "https://${var.domain}"
     },
     var.extra_env,
   )

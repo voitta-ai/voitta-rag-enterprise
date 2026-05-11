@@ -44,6 +44,12 @@ class Settings(BaseSettings):
     # Network
     port: int = 8000
     mcp_port: int = 8001
+    # Public base URL the API is reachable at (e.g. https://enterprise.voitta.ai).
+    # Signed asset URLs returned to MCP clients are prefixed with this so the
+    # client can fetch them directly; leave unset for local dev (relative
+    # ``/api/assets/<token>`` paths). No trailing slash — joined as
+    # ``<base>/api/assets/<token>``.
+    public_base_url: str | None = None
 
     # Workers. Hard default = 1.
     #
@@ -218,6 +224,19 @@ class Settings(BaseSettings):
 
     def resolved_qdrant_path(self) -> Path:
         return self.qdrant_path or (self.data_dir / "qdrant")
+
+    def asset_url(self, token: str) -> str:
+        """Build the public URL for a signed asset token.
+
+        With ``VOITTA_PUBLIC_BASE_URL`` set, returns an absolute URL
+        the MCP client can fetch directly. Without it, returns the
+        path only — fine for local dev where the MCP proxy adds the
+        host, but breaks remote clients that don't know our hostname.
+        """
+        path = f"/api/assets/{token}"
+        if not self.public_base_url:
+            return path
+        return self.public_base_url.rstrip("/") + path
 
     def resolved_workers(self) -> int:
         # Default to a single worker so indexing is strictly serial; opt

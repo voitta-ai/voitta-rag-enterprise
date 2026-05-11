@@ -6,6 +6,41 @@ can search by component name. Renders are produced on demand by
 ``services.cad_render`` — the parser itself only describes what's
 available.
 
+Placement semantics — why bucket entries are deduped to topmost
+
+``XCAFDoc_ShapeTool::GetShape(label)`` returns different geometry
+depending on what the label *is*:
+
+* Assembly / sub-assembly label → a ``TopoDS_Compound`` whose
+  descendant locations are *chained from that label downward*
+  (correctly positioned for that subtree).
+* Component / instance label → the referenced prototype with the
+  instance's *local* Location applied — relative to its direct
+  parent assembly only.
+* Leaf shape → as-is.
+
+So if a bucket ends up holding both an assembly label and one of
+its descendant component labels (e.g. ``Runway A`` and
+``Runway A :: p400`` both routed to the ``Runway A`` bucket), the
+descendant's instance-local Location gets composed on top of the
+ancestor's already-correctly-placed copy — the descendant renders
+twice, the second time at the wrong place. Same family of bug we
+hit on FCStd by double-applying leaf Placement.
+
+The fix is to dedupe each bucket's ``entry_paths`` down to the
+*topmost* labels — any path that's a strict descendant of another
+path in the same bucket is dropped, because ``GetShape`` on the
+ancestor already covers it. The synthetic "Whole assembly" slug
+likewise uses the document's free-shape entries (the labels
+``GetFreeShapes`` returns), not the union of every bucket's
+entries.
+
+FreeCAD-exported STEP files dodge the issue structurally because
+the exporter flattens LinkGroups into a single level under the
+root — there's no ancestor assembly label for descendants to
+collide with. SolidWorks / NX / Creo / FreeCAD-Assembly3 exports
+that preserve real subassemblies need the dedupe.
+
 Why this design
 
 The reference pipelines we modeled this on:
@@ -146,6 +181,35 @@ def _label_entry(label) -> str:
     return str(s.ToCString())
 
 
+def _dedupe_to_topmost(entries: list[str]) -> list[str]:
+    """Drop any entry that's a strict descendant of another entry.
+
+    XCAF entries are colon-separated paths (``0:1:1:3``). Entry ``X``
+    is a descendant of ``Y`` iff ``X != Y and X.startswith(Y + ':')``.
+    ``GetShape`` on the ancestor returns a compound with descendant
+    locations chained correctly — adding the descendant again would
+    apply its instance-local Location a second time on top of the
+    already-positioned copy.
+
+    Order is preserved relative to the input so the rendered compound
+    stays deterministic between re-indexes of the same file.
+    """
+    # Walk shortest-first so each surviving entry can be its own
+    # ``starts_with`` ancestor check against the kept set. Track
+    # first-occurrence indices so the final return preserves the
+    # input's order without leaking duplicates.
+    by_depth = sorted(range(len(entries)), key=lambda i: entries[i].count(":"))
+    kept: set[str] = set()
+    kept_indices: set[int] = set()
+    for idx in by_depth:
+        e = entries[idx]
+        if any(e == k or e.startswith(k + ":") for k in kept):
+            continue
+        kept.add(e)
+        kept_indices.add(idx)
+    return [entries[i] for i in range(len(entries)) if i in kept_indices]
+
+
 def _route_name(name: str) -> tuple[str | None, str | None]:
     """Return ``(group, part)`` from one of the FreeCAD naming
     conventions, or ``(None, fallback)`` for unrouted names."""
@@ -248,6 +312,13 @@ def _bucket_labels(
             bucket.entry_paths.append(entry)
             if name not in bucket.parts:
                 bucket.parts.append(name)
+
+    # Dedupe each bucket's entry paths to topmost labels only — see
+    # the module docstring for the placement semantics this prevents
+    # from going wrong. Counts / part lists are deliberately *not*
+    # deduped: the BOM still wants the per-instance enumeration.
+    for c in components.values():
+        c.entry_paths = _dedupe_to_topmost(c.entry_paths)
 
     return components
 
@@ -430,21 +501,40 @@ class CadStepParser(BaseParser):
                 )
             )
 
-        # Synthesize a "Whole assembly" component that aggregates every
-        # other component's entry paths. Gives the LLM a single slug
-        # to render the entire model without picking a sub-component.
-        # The render handler tessellates the full compound; heavy on
-        # big files but the user-visible cost is one request, not 27.
-        whole = Component(name="Whole assembly")
-        for c in components.values():
-            whole.entry_paths.extend(c.entry_paths)
-            for p in c.parts:
-                if p not in whole.parts:
-                    whole.parts.append(p)
-            for k, v in c.hardware.items():
-                whole.hardware[k] += v
-        if whole.entry_paths:
-            components["Whole assembly"] = whole
+        # Synthesize a "Whole assembly" component from the document's
+        # free-shape entries — *not* by unioning every bucket. Reason:
+        # ``GetShape`` on a free-shape entry already returns a fully-
+        # positioned compound with every descendant's location chained
+        # correctly; unioning bucket entries would re-add descendants
+        # that the ancestor already covers, applying their instance-
+        # local Location a second time (the same family of double-
+        # apply bug FCStd hit on leaf Placement).
+        #
+        # Skip the synthetic slug when the file has a single named
+        # root that's already its own bucket — that bucket *is* the
+        # whole assembly; emitting another slug for it just clutters
+        # the menu. Same logic as FCStd's ``_has_only_one_apppart_root``.
+        free_entries: list[str] = []
+        for i in range(1, top_labels.Length() + 1):
+            free_entries.append(_label_entry(top_labels.Value(i)))
+        free_entries = _dedupe_to_topmost(free_entries)
+
+        if free_entries:
+            single_root_in_buckets = (
+                len(free_entries) == 1
+                and any(c.entry_paths == free_entries for c in components.values())
+            )
+            if not single_root_in_buckets:
+                whole = Component(
+                    name="Whole assembly", entry_paths=list(free_entries)
+                )
+                for c in components.values():
+                    for p in c.parts:
+                        if p not in whole.parts:
+                            whole.parts.append(p)
+                    for k, v in c.hardware.items():
+                        whole.hardware[k] += v
+                components["Whole assembly"] = whole
 
         content, slug_map = build_markdown(
             file_stem=file_path.stem,

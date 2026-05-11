@@ -24,6 +24,7 @@ from voitta_rag_enterprise.services.parsers.cad_step_parser import (  # noqa: E4
     CadStepParser,
     _bucket_labels,
     _clean_part_name,
+    _dedupe_to_topmost,
     _route_name,
     _slugify,
 )
@@ -72,6 +73,32 @@ def test_clean_part_name_keeps_space_separated_numbers() -> None:
     """``Bearing 60206`` (no instance suffix) must NOT be mangled —
     60206 is the real part number, not a counter."""
     assert _clean_part_name("Bearing 60206") == "Bearing 60206"
+
+
+def test_dedupe_to_topmost_drops_descendants() -> None:
+    """An XCAF entry like ``0:1:1`` covers ``0:1:1:3`` via
+    ``GetShape``'s chained-location semantics; the descendant must be
+    dropped or the leaf's local Location gets re-applied on top of
+    the ancestor's already-positioned compound."""
+    entries = ["0:1:1:3", "0:1:1", "0:1:1:5", "0:1:2:7"]
+    out = _dedupe_to_topmost(entries)
+    # Order preserved relative to input; only the topmost entries
+    # under each ancestor survive.
+    assert out == ["0:1:1", "0:1:2:7"]
+
+
+def test_dedupe_to_topmost_keeps_unrelated_siblings() -> None:
+    """Sibling entries — same depth, different last segment — share
+    no ancestor relationship; both must be kept."""
+    entries = ["0:1:1:3", "0:1:1:4", "0:1:2:9"]
+    assert _dedupe_to_topmost(entries) == entries
+
+
+def test_dedupe_to_topmost_handles_duplicates() -> None:
+    """Exact duplicates collapse to one without breaking dedupe of
+    actual descendants."""
+    entries = ["0:1:1", "0:1:1", "0:1:1:3"]
+    assert _dedupe_to_topmost(entries) == ["0:1:1"]
 
 
 def test_slugify_collision_resolution() -> None:

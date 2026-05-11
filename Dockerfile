@@ -57,6 +57,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libjpeg62-turbo \
         poppler-utils \
         fonts-liberation \
+        # CAD render path (cad_step_parser / cad_fcstd_parser → OCP + VTK).
+        # The cadquery-ocp pip wheel is self-contained (bundles OpenCASCADE
+        # 7.x), but the vtk wheel dlopens the host's OpenGL stack at runtime:
+        #   - libegl1 + libgl1-mesa-dri: EGL surface with Mesa Gallium
+        #     llvmpipe — VTK's preferred software-OpenGL path on a no-GPU
+        #     host, and what production headless renders actually use.
+        #   - libosmesa6: belt-and-braces fallback. VTK ≥ 9.3 ships a
+        #     bundled OSMesa, but the apt build links cleanly when EGL is
+        #     absent (e.g. cut-down container hosts).
+        # Keep these in the slim image — they total ~30 MB and the render
+        # endpoint silently degrades to "no renderer found" otherwise.
+        libegl1 \
+        libgl1-mesa-dri \
+        libosmesa6 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

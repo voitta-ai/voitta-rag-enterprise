@@ -28,11 +28,21 @@ exist for the human author, not the LLM.
 Placement composition
 
 A part's world transform is the matrix product of every
-``App::Part``'s ``Placement`` along the path from root to leaf, with
-the leaf's own ``Placement`` applied last. We compose them at parse
-time and store the resulting world transform alongside each brp
-reference, so the render handler doesn't need to redo the tree walk
-to position parts correctly.
+``App::Part``'s ``Placement`` along the path from root to its
+*immediate parent App::Part*. The leaf Part::Feature's own
+``Placement`` is **not** included — FreeCAD bakes a feature's
+Placement into the saved shape's OCC ``Location`` (see
+``Part::Feature::onChanged`` in upstream FreeCAD), so reading the
+``.brp`` back already gives us geometry positioned in the parent
+App::Part's coordinate frame. Adding the leaf placement on top
+would double-apply it.
+
+Composition runs at **render time**, not parse time: the asset spec
+written to CAS stores only the brp paths grouped by slug. Document.xml
+is re-parsed on every render request (~50 ms on a 3 MB file with 670
+features — negligible vs the ~1.5 s tessellate+render cost). This
+keeps the transform formula a code-only concern; fixing a placement
+bug no longer requires re-indexing every FCStd ever uploaded.
 """
 
 from __future__ import annotations
@@ -195,20 +205,34 @@ def _matmul4(a: tuple[float, ...], b: tuple[float, ...]) -> tuple[float, ...]:
 
 
 def _world_transform(by_name: dict[str, _Obj], leaf_name: str) -> tuple[float, ...]:
-    """Walk leaf → ... → root, accumulating placements.
+    """Walk parent → ... → root, accumulating App::Part placements.
 
-    FreeCAD applies a child's placement *relative to its parent*, so
-    the world transform is ``parent_world * child_local``. Walking up
-    we build a list of placements; left-to-right matrix multiply
-    composes them correctly.
+    The leaf Part::Feature's own ``Placement`` is intentionally
+    excluded: FreeCAD bakes a feature's Placement into the underlying
+    TopoDS_Shape's OCC ``Location`` (see ``Part::Feature::onChanged`` →
+    ``shape.setTransform(Placement.toMatrix())``), and that location
+    is preserved in the saved ``.brp``. Including the leaf placement
+    here would double-apply it when the render path composes our
+    transform with the shape's existing location.
     """
     chain: list[tuple[float, ...]] = []
-    cursor = by_name.get(leaf_name)
+    leaf = by_name.get(leaf_name)
+    if leaf is None:
+        return (1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0,
+                0.0, 0.0, 0.0, 1.0)
+    cursor = by_name.get(leaf.parent) if leaf.parent else None
     while cursor is not None:
         chain.append(_placement_to_matrix(cursor.placement))
         cursor = by_name.get(cursor.parent) if cursor.parent else None
-    # chain = [leaf, parent, grandparent, ..., root]
-    # world = root * ... * grandparent * parent * leaf
+    if not chain:
+        return (1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0,
+                0.0, 0.0, 0.0, 1.0)
+    # chain = [parent, grandparent, ..., root]
+    # world = root * ... * grandparent * parent
     out = chain[-1]
     for m in reversed(chain[:-1]):
         out = _matmul4(out, m)
@@ -228,9 +252,11 @@ class Component:
     name: str
     parts: list[str] = field(default_factory=list)
     hardware: Counter = field(default_factory=Counter)
-    # Members are stored as (brp_zip_path, world_transform_row_major_4x4)
-    # tuples — render path knows how to fetch + position each.
-    members: list[tuple[str, tuple[float, ...]]] = field(default_factory=list)
+    # Zip-internal brp paths only. World transforms are *not* stored
+    # here — they're composed at render time from a fresh Document.xml
+    # parse. Stuffing them in this list bound transform-formula bugs
+    # to the cached asset spec; recomputing keeps it a code-only fix.
+    members: list[str] = field(default_factory=list)
 
 
 def _route_label(label: str) -> tuple[str | None, str | None]:
@@ -349,15 +375,16 @@ def _component_size(c: Component) -> int:
 def build_markdown(
     file_stem: str,
     components: dict[str, Component],
-) -> tuple[str, dict[str, tuple[str, list[tuple[str, tuple[float, ...]]]]]]:
+) -> tuple[str, dict[str, tuple[str, list[str]]]]:
     """Return (markdown, slug_map) where slug_map is
-    ``{slug → (component_name, members)}``."""
+    ``{slug → (component_name, [brp_path, ...])}``. Transforms are
+    composed at render time, not stored here."""
     ordered = sorted(
         components.values(),
         key=lambda c: (-_component_size(c), c.name.lower()),
     )
     seen: set[str] = set()
-    slug_map: dict[str, tuple[str, list[tuple[str, tuple[float, ...]]]]] = {}
+    slug_map: dict[str, tuple[str, list[str]]] = {}
     for c in ordered:
         slug = _slugify(c.name, seen)
         slug_map[slug] = (c.name, list(c.members))
@@ -405,20 +432,17 @@ def build_markdown(
 
 
 def _emit_asset_specs(
-    slug_map: dict[str, tuple[str, list[tuple[str, tuple[float, ...]]]]],
+    slug_map: dict[str, tuple[str, list[str]]],
 ) -> list[AssetSpec]:
     specs: list[AssetSpec] = []
     for slug, (comp_name, members) in slug_map.items():
-        # Members are stored as a list of {brp, transform} dicts in
-        # the schema; the render handler reads them back to position
-        # each brp in world coordinates.
-        members_payload = [
-            {
-                "brp": brp_path,
-                "transform": list(transform),
-            }
-            for brp_path, transform in members
-        ]
+        # Each member carries only the zip-internal brp path. The
+        # render handler re-parses Document.xml on every request and
+        # composes world transforms from the current parser logic.
+        # Dict-of-one shape is kept (rather than a bare list of strings)
+        # so future per-member metadata (color, material, hide flag)
+        # can be added without invalidating cached specs.
+        members_payload = [{"brp": brp_path} for brp_path in members]
         specs.append(
             AssetSpec(
                 asset_type="cad_projection",
@@ -503,12 +527,11 @@ class CadFCStdParser(BaseParser):
         for root in assemblies:
             label = root.label or root.name
             parts, hardware, feats = _collect_members(by_name, root.name)
-            members = []
+            members: list[str] = []
             for zip_path, fobj in feats:
                 if zip_path not in brp_set:
                     continue  # silently skip features missing their brp
-                tform = _world_transform(by_name, fobj.name)
-                members.append((zip_path, tform))
+                members.append(zip_path)
                 members_collected.add(fobj.name)
             comp = Component(
                 name=label,
@@ -523,7 +546,7 @@ class CadFCStdParser(BaseParser):
         # for documents created by importing flat geometry.
         orphan_parts: list[str] = []
         orphan_hw: Counter = Counter()
-        orphan_members: list[tuple[str, tuple[float, ...]]] = []
+        orphan_members: list[str] = []
         for o in by_name.values():
             if o.type != "Part::Feature":
                 continue
@@ -532,8 +555,7 @@ class CadFCStdParser(BaseParser):
             zip_path = f"{o.name}.Shape.brp"
             if zip_path not in brp_set:
                 continue
-            tform = _world_transform(by_name, o.name)
-            orphan_members.append((zip_path, tform))
+            orphan_members.append(zip_path)
             label = o.label or o.name
             group, part = _route_label(label)
             if group is not None:
@@ -556,11 +578,15 @@ class CadFCStdParser(BaseParser):
         # the menu. With multiple roots or none, the synthetic slug
         # is the only way to render everything in one shot.
         if single_root is None:
-            whole_members: list[tuple[str, tuple[float, ...]]] = []
+            whole_members: list[str] = []
+            seen_brp: set[str] = set()
             whole_parts: list[str] = []
             whole_hw: Counter = Counter()
             for c in components.values():
-                whole_members.extend(c.members)
+                for brp in c.members:
+                    if brp not in seen_brp:
+                        seen_brp.add(brp)
+                        whole_members.append(brp)
                 for p in c.parts:
                     if p not in whole_parts:
                         whole_parts.append(p)

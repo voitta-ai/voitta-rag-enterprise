@@ -102,6 +102,9 @@ class CadProjectionHandler(AssetHandler):
     ) -> AssetResponse:
         if not slug:
             raise ValueError("cad_projection requires a slug (component name)")
+        from ..config import get_settings
+
+        settings = get_settings()
         urls: dict[str, str] = {}
         expires_at = 0
         for proj in _VIEWS:
@@ -112,7 +115,7 @@ class CadProjectionHandler(AssetHandler):
                 params={**params, "__variant__": proj},
                 user_id=user_id,
             )
-            urls[proj] = f"/api/assets/{token}"
+            urls[proj] = settings.asset_url(token)
             expires_at = exp
         return AssetResponse(
             asset_type=self.asset_type,
@@ -297,11 +300,25 @@ def _render_fcstd_component(
 ) -> bytes:
     """FCStd render path.
 
-    Each ``member`` is ``{"brp": "<zip-internal path>", "transform":
-    [16 floats row-major]}``. We extract every brp from the FCStd zip
-    (which is just a renamed .zip), load it via ``BRepTools_Read``,
-    apply its world transform, accumulate into a TopoDS_Compound,
-    tessellate, and hand off to the same polydata + VTK path STEP uses.
+    Each ``member`` is ``{"brp": "<zip-internal path>"}``. World
+    transforms are *not* stored in the asset spec — they're composed
+    here from a fresh Document.xml parse. The trade is ~50 ms / render
+    on a ~3 MB Document.xml (negligible vs tessellate+render) in
+    exchange for transform-formula bugs being code-only fixes that
+    don't require re-indexing every FCStd ever uploaded.
+
+    Pipeline:
+    1. Parse Document.xml → ``_Obj`` map (parent links resolved).
+    2. For every requested brp, derive the Part::Feature name
+       (``<name>.Shape.brp`` → ``<name>``) and walk the App::Part
+       parent chain to compose the world transform. Leaf Placement
+       is intentionally excluded — it's baked into the brp's OCC
+       Location by FreeCAD's ``Feature::onChanged``.
+    3. Outlier-filter on translation magnitude (1.5×IQR fence).
+    4. Extract surviving brps, load via ``BRepTools.Read``, apply
+       transform via ``BRepBuilderAPI_Transform``, accumulate into
+       a ``TopoDS_Compound``.
+    5. Tessellate + hand off to the same polydata + VTK path STEP uses.
 
     Outlier rejection
     -----------------
@@ -311,16 +328,14 @@ def _render_fcstd_component(
     moving them far away rather than removing them. These features
     are invisible in FreeCAD's own viewer (because the user worked
     around them) but visible to us, and they dominate the bounding
-    box. We filter members whose translation is past the 1.5×IQR
-    fence on translation magnitude — a standard box-plot outlier
-    rule that conservatively catches genuine outliers (typically
+    box. The 1.5×IQR fence on translation magnitude is a standard
+    box-plot outlier rule that catches genuine outliers (typically
     1-2 orders of magnitude past the median) without affecting
     normal assemblies.
     """
     if time.perf_counter() > deadline:
         raise TimeoutError("fcstd render: deadline exceeded before start")
 
-    import math
     import os
     import tempfile
     import zipfile
@@ -331,27 +346,57 @@ def _render_fcstd_component(
     from OCP.gp import gp_Trsf
     from OCP.TopoDS import TopoDS_Compound, TopoDS_Shape
 
-    members = _filter_outlier_members(members)
+    from .parsers.cad_fcstd_parser import _parse_document_xml, _world_transform
+
+    # Step 1: parse Document.xml from the FCStd zip.
+    with zipfile.ZipFile(fcstd_path) as z:
+        zip_names = set(z.namelist())
+        if "Document.xml" not in zip_names:
+            raise KeyError("fcstd render: Document.xml missing from archive")
+        xml_raw = z.read("Document.xml")
+    by_name = _parse_document_xml(xml_raw)
+    if not by_name:
+        raise KeyError("fcstd render: Document.xml empty or malformed")
+    if time.perf_counter() > deadline:
+        raise TimeoutError("fcstd render: Document.xml parse exceeded deadline")
+
+    # Step 2: compose transforms. Map each requested brp to a feature
+    # name (strip ``.Shape.brp``) and resolve via ``_world_transform``.
+    # Members missing from by_name are dropped silently — usually
+    # means the asset spec is stale vs the current file.
+    enriched: list[dict] = []
+    for member in members:
+        brp = member.get("brp") if isinstance(member, dict) else None
+        if not brp or brp not in zip_names:
+            continue
+        feature_name = brp[:-len(".Shape.brp")] if brp.endswith(".Shape.brp") else None
+        if not feature_name or feature_name not in by_name:
+            continue
+        tform = _world_transform(by_name, feature_name)
+        enriched.append({"brp": brp, "transform": list(tform)})
+
+    if not enriched:
+        raise KeyError("fcstd render: no members resolvable from current Document.xml")
+
+    # Step 3: outlier filter.
+    survivors = _filter_outlier_members(enriched)
 
     builder = BRep_Builder()
     compound = TopoDS_Compound()
     builder.MakeCompound(compound)
     loaded = 0
 
-    # Extract every needed brp once to a tempdir, then load. Letting
-    # BRepTools.Read pull from disk is simpler than threading the zip
-    # bytes through OCP's stream interface.
+    # Step 4: extract + apply transforms. Letting BRepTools.Read pull
+    # from disk is simpler than threading the zip bytes through OCP's
+    # stream interface.
     with tempfile.TemporaryDirectory(prefix="fcstd-render-") as tmp:
         with zipfile.ZipFile(fcstd_path) as z:
-            zip_names = set(z.namelist())
-            for i, member in enumerate(members):
+            for i, member in enumerate(survivors):
                 if time.perf_counter() > deadline:
                     raise TimeoutError(
-                        f"fcstd render: loading brps exceeded deadline ({i}/{len(members)})"
+                        f"fcstd render: loading brps exceeded deadline ({i}/{len(survivors)})"
                     )
-                brp = member.get("brp")
-                if not brp or brp not in zip_names:
-                    continue
+                brp = member["brp"]
                 target = os.path.join(tmp, f"{i}.brp")
                 with z.open(brp) as src, open(target, "wb") as dst:
                     dst.write(src.read())
@@ -359,22 +404,18 @@ def _render_fcstd_component(
                 ok = BRepTools.Read_s(shape, target, builder)
                 if not ok or shape.IsNull():
                     continue
-                # Apply world transform if non-identity.
-                tf = member.get("transform")
-                if tf and len(tf) == 16:
-                    trsf = gp_Trsf()
-                    # OCC takes a 3x4 affine (rotation + translation);
-                    # FCStd placements are rigid (rotation + translation),
-                    # which OCC supports via SetValues(...).
-                    trsf.SetValues(
-                        tf[0], tf[1], tf[2], tf[3],
-                        tf[4], tf[5], tf[6], tf[7],
-                        tf[8], tf[9], tf[10], tf[11],
-                    )
-                    transformed = BRepBuilderAPI_Transform(shape, trsf, True).Shape()
-                    builder.Add(compound, transformed)
-                else:
-                    builder.Add(compound, shape)
+                tf = member["transform"]
+                trsf = gp_Trsf()
+                # OCC takes a 3x4 affine (rotation + translation);
+                # FCStd placements are rigid, which OCC supports via
+                # SetValues(...). The 4th row is implicitly (0,0,0,1).
+                trsf.SetValues(
+                    tf[0], tf[1], tf[2], tf[3],
+                    tf[4], tf[5], tf[6], tf[7],
+                    tf[8], tf[9], tf[10], tf[11],
+                )
+                transformed = BRepBuilderAPI_Transform(shape, trsf, True).Shape()
+                builder.Add(compound, transformed)
                 loaded += 1
 
     if loaded == 0:
@@ -532,6 +573,54 @@ def _robust_bbox_for_framing(polydata) -> tuple[float, ...] | None:
             float(lo[2]), float(hi[2]))
 
 
+def _view_aligned_extents(
+    polydata, view_position: tuple[float, float, float], up: tuple[float, float, float],
+) -> tuple[float, float] | None:
+    """Project vertex cloud onto the camera image plane (right × up)
+    and return the (u_extent, v_extent) 5-95 percentile spread.
+
+    The plain world-AABB ``max(ext_x, ext_y, ext_z)`` heuristic
+    over-estimates the on-screen size of tilted views: an L-shaped
+    rig viewed iso (1,-1,1) has a much smaller silhouette than its
+    longest world-axis extent. Projecting first gives the actual
+    pixels-worth of model the camera will see, so framing is tight
+    and consistent across front/top/side/iso.
+    """
+    import numpy as np
+    from vtk.util import numpy_support  # type: ignore
+
+    pts = polydata.GetPoints()
+    if pts is None or pts.GetNumberOfPoints() < 10:
+        return None
+    arr = numpy_support.vtk_to_numpy(pts.GetData())
+    if arr.shape[0] < 10:
+        return None
+
+    # Camera looks from ``view_position`` toward the focal point —
+    # forward is the negated normalized position vector.
+    forward = -np.asarray(view_position, dtype=np.float64)
+    n = np.linalg.norm(forward)
+    if n < 1e-9:
+        return None
+    forward /= n
+
+    up_vec = np.asarray(up, dtype=np.float64)
+    # Orthogonalize up against forward so right ⟂ up regardless of
+    # whether the caller supplied a clean basis.
+    up_vec = up_vec - forward * np.dot(up_vec, forward)
+    un = np.linalg.norm(up_vec)
+    if un < 1e-9:
+        return None
+    up_vec /= un
+    right = np.cross(forward, up_vec)
+
+    u = arr @ right
+    v = arr @ up_vec
+    u_lo, u_hi = np.percentile(u, [5, 95])
+    v_lo, v_hi = np.percentile(v, [5, 95])
+    return float(u_hi - u_lo), float(v_hi - v_lo)
+
+
 _RENDER_BACKEND_LOGGED = False
 
 
@@ -623,13 +712,17 @@ def _render_polydata(polydata, *, projection: str, size: int) -> bytes:
     else:
         import math
 
+        # World-AABB centre — used as the focal point. The view-
+        # aligned extent below sizes the frame; the focal point
+        # just decides what's in the middle of it.
         cx = (bbox[0] + bbox[1]) / 2.0
         cy = (bbox[2] + bbox[3]) / 2.0
         cz = (bbox[4] + bbox[5]) / 2.0
         ext_x = bbox[1] - bbox[0]
         ext_y = bbox[3] - bbox[2]
         ext_z = bbox[5] - bbox[4]
-        max_ext = max(ext_x, ext_y, ext_z, 1.0)
+        world_max_ext = max(ext_x, ext_y, ext_z, 1.0)
+
         # Normalize the view direction — the raw vectors in _VIEWS
         # are convenient triples like (1, -1, 1) for ISO, which have
         # magnitude > 1 and would otherwise push the camera too far.
@@ -637,28 +730,38 @@ def _render_polydata(polydata, *, projection: str, size: int) -> bytes:
         mag = math.sqrt(dx * dx + dy * dy + dz * dz) or 1.0
         dx, dy, dz = dx / mag, dy / mag, dz / mag
 
+        # View-aligned extents (u along camera-right, v along
+        # camera-up) — the actual on-screen size of the model in
+        # this projection. Falls back to ``world_max_ext`` when the
+        # mesh is too small for stable percentile stats.
+        ext_uv = _view_aligned_extents(polydata, cfg["position"], cfg["up"])
+        if ext_uv is None:
+            screen_ext = world_max_ext
+        else:
+            screen_ext = max(ext_uv[0], ext_uv[1], 1.0)
+
         if cfg["ortho"]:
             # Orthographic — distance doesn't change scale, just
-            # avoid clipping. Set parallel scale to half the longest
-            # extent so the model fills the frame edge-to-edge.
-            dist = max_ext * 2.0
+            # avoid clipping. Parallel scale = half the projected
+            # extent divided by fill (90% frame fill = 5% padding
+            # each side).
+            fill = 0.90
+            dist = world_max_ext * 2.0
             cam.SetFocalPoint(cx, cy, cz)
             cam.SetPosition(cx + dx * dist, cy + dy * dist, cz + dz * dist)
-            cam.SetParallelScale(max_ext * 0.55)  # 90% frame fill
+            cam.SetParallelScale((screen_ext / 2.0) / fill)
         else:
-            # Perspective. Solve for the distance that puts a
-            # ``max_ext``-sized object at ~80% of the vertical FOV.
+            # Perspective. Solve for the distance that puts the
+            # projected ``screen_ext`` at ~88% of the vertical FOV.
             #
             #   visible_at_distance = 2 * dist * tan(yfov/2)
-            #   we want visible = max_ext / fill_fraction
+            #   we want visible = screen_ext / fill
             #
-            # With yfov = 30°, fill_fraction = 0.85:
-            #   dist = max_ext / (0.85 * 2 * tan(15°))
-            #        ≈ max_ext / 0.4555
-            #        ≈ 2.2 * max_ext
+            # With yfov = 30°, fill = 0.88:
+            #   dist = screen_ext / (0.88 * 2 * tan(15°))
             half_fov = math.radians(15.0)
-            fill = 0.85
-            dist = max_ext / (fill * 2.0 * math.tan(half_fov))
+            fill = 0.88
+            dist = screen_ext / (fill * 2.0 * math.tan(half_fov))
             cam.SetFocalPoint(cx, cy, cz)
             cam.SetPosition(cx + dx * dist, cy + dy * dist, cz + dz * dist)
     ren.ResetCameraClippingRange()

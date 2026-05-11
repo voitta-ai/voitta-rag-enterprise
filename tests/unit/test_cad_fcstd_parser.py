@@ -21,6 +21,7 @@ from voitta_rag_enterprise.services.parsers.cad_fcstd_parser import (
     _placement_to_matrix,
     _route_label,
     _slugify,
+    _world_transform,
 )
 
 
@@ -259,8 +260,9 @@ def test_parser_failure_on_missing_document_xml(tmp_path: Path) -> None:
 
 def test_parser_carries_brp_members_on_assetspecs(tmp_path: Path) -> None:
     """Each AssetSpec carries the brp-member list under the
-    ``x-fcstd-members`` schema key — the render handler reads these
-    back to know which brp blobs to load."""
+    ``x-fcstd-members`` schema key as ``[{"brp": "..."}]`` — no
+    transforms. Render path composes transforms from a fresh
+    Document.xml parse on every request."""
     fp = _make_fcstd(tmp_path, [
         {
             "name": "root", "type": "App::Part", "label": "Comp",
@@ -275,13 +277,79 @@ def test_parser_carries_brp_members_on_assetspecs(tmp_path: Path) -> None:
     spec = next(s for s in r.on_demand_assets if s.slug == "comp")
     members = spec.params_schema["x-fcstd-members"]
     assert len(members) == 1
-    assert members[0]["brp"] == "f1.Shape.brp"
-    # Transform: root has translation (1,2,3), f1 has (10,20,30).
-    # World = root * f1 = translation (11, 22, 33)
-    tf = members[0]["transform"]
-    assert math.isclose(tf[3], 11.0)
-    assert math.isclose(tf[7], 22.0)
-    assert math.isclose(tf[11], 33.0)
+    assert members[0] == {"brp": "f1.Shape.brp"}
+    assert "transform" not in members[0]
+
+
+def test_world_transform_excludes_leaf_placement() -> None:
+    """``_world_transform`` returns the parent-chain product only.
+    Leaf Placement is excluded because FreeCAD bakes it into the
+    saved shape's OCC Location (``Feature::onChanged`` →
+    ``shape.setTransform(Placement.toMatrix())``); including it here
+    would double-apply at render time when
+    ``BRepBuilderAPI_Transform(shape, T, copy=True)`` composes T
+    over the shape's existing Location."""
+    raw = dedent("""\
+        <?xml version='1.0' encoding='utf-8'?>
+        <Document>
+          <Objects>
+            <Object type="App::Part" name="root"/>
+            <Object type="App::Part" name="mid"/>
+            <Object type="Part::Feature" name="leaf"/>
+          </Objects>
+          <ObjectData>
+            <Object name="root">
+              <Properties Count="2">
+                <Property name="Placement" type="App::PropertyPlacement"><PropertyPlacement Px="1" Py="2" Pz="3" Q0="0" Q1="0" Q2="0" Q3="1"/></Property>
+                <Property name="Group" type="App::PropertyLinkList"><LinkList><Link value="mid"/></LinkList></Property>
+              </Properties>
+            </Object>
+            <Object name="mid">
+              <Properties Count="2">
+                <Property name="Placement" type="App::PropertyPlacement"><PropertyPlacement Px="100" Py="200" Pz="300" Q0="0" Q1="0" Q2="0" Q3="1"/></Property>
+                <Property name="Group" type="App::PropertyLinkList"><LinkList><Link value="leaf"/></LinkList></Property>
+              </Properties>
+            </Object>
+            <Object name="leaf">
+              <Properties Count="1">
+                <Property name="Placement" type="App::PropertyPlacement"><PropertyPlacement Px="9999" Py="9999" Pz="9999" Q0="0" Q1="0" Q2="0" Q3="1"/></Property>
+              </Properties>
+            </Object>
+          </ObjectData>
+        </Document>
+    """).encode("utf-8")
+    by_name = _parse_document_xml(raw)
+    tf = _world_transform(by_name, "leaf")
+    # Parent chain only: root * mid translation = (1+100, 2+200, 3+300).
+    # Leaf's 9999 placement MUST NOT leak in.
+    assert math.isclose(tf[3], 101.0)
+    assert math.isclose(tf[7], 202.0)
+    assert math.isclose(tf[11], 303.0)
+
+
+def test_world_transform_unparented_leaf_is_identity() -> None:
+    """A leaf with no App::Part parent gets identity — its own
+    Placement is carried by the shape's OCC Location."""
+    raw = dedent("""\
+        <?xml version='1.0' encoding='utf-8'?>
+        <Document>
+          <Objects>
+            <Object type="Part::Feature" name="orphan"/>
+          </Objects>
+          <ObjectData>
+            <Object name="orphan">
+              <Properties Count="1">
+                <Property name="Placement" type="App::PropertyPlacement"><PropertyPlacement Px="50" Py="60" Pz="70" Q0="0" Q1="0" Q2="0" Q3="1"/></Property>
+              </Properties>
+            </Object>
+          </ObjectData>
+        </Document>
+    """).encode("utf-8")
+    by_name = _parse_document_xml(raw)
+    tf = _world_transform(by_name, "orphan")
+    # Identity: 1 on the diagonal, 0 translation.
+    assert tf[0] == 1.0 and tf[5] == 1.0 and tf[10] == 1.0
+    assert tf[3] == 0.0 and tf[7] == 0.0 and tf[11] == 0.0
 
 
 def test_parser_extension_matches() -> None:

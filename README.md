@@ -77,7 +77,26 @@ The dense (`intfloat/e5-base-v2`), sparse (`Qdrant/bm25`), and image (`google/si
 make mcp                    # listens on $VOITTA_MCP_PORT (8001)
 ```
 
-Exposes 8 tools: `search`, `search_images`, `get_file`, `get_chunk_range`, `get_chunk_images`, `get_image`, `list_indexed_folders`, `resolve_url`. ACL identity comes from the `X-User-Name` header.
+Exposes 12 tools:
+
+- **Search & retrieval** — `search`, `search_images`, `get_file`, `get_chunk_range`, `get_chunk_images`, `get_image`, `list_indexed_folders`, `resolve_url`.
+- **Page-level views** — `list_page_images`, `get_page_image` (per-page WebP renders for PDFs + cross-file Workspace slide thumbnails).
+- **On-demand assets** — `list_assets`, `request_asset` (mint signed URLs for CAD projections and other parser-declared derived views; URLs are absolute when `VOITTA_PUBLIC_BASE_URL` is set, otherwise relative paths).
+
+ACL identity comes from the `X-User-Name` header.
+
+## CAD support
+
+STEP (`.step` / `.stp`) and FreeCAD native (`.FCStd`) files are indexed into a component tree and rendered on demand:
+
+- **Parsing.** `cadquery-ocp` (PyPI wheel — ~500 MB, bundles OpenCASCADE 7.x) reads both formats via `STEPCAFControl_Reader` and `BRepTools.Read_s`. No FreeCAD install required; `.FCStd` is opened directly as a zip, `Document.xml` for the App::Part tree and per-feature `<name>.Shape.brp` blobs for geometry.
+- **Tessellation.** `BRepMesh_IncrementalMesh` with linear 0.5 mm / angular 0.5 rad tolerances — same defaults as Creality Print, loose enough for big assemblies to finish quickly, tight enough that 320 px previews stay sharp.
+- **Rendering.** Headless VTK (the PyPI wheel) writes PNGs through `vtkRenderWindow` with `SetOffScreenRendering(1)`. The wheel dlopens the host's OpenGL: EGL + Mesa Gallium llvmpipe in production, OSMesa fallback otherwise. With a GPU available (e.g. `g2-standard-8`) VTK picks the hardware path automatically.
+- **Slugs.** Each App::Part becomes a renderable component; a synthetic `whole-assembly` slug rolls up everything when there's no single-root container.
+- **Camera framing.** Robust 5–95 percentile bbox + view-aligned u/v extent projection so iso/front/top/side all fill the frame consistently. Outlier feature placements (broken FreeCAD Mirror history, "deleted by moving 150 m away") are dropped via a 1.5×IQR fence on translation magnitude before framing.
+- **On-demand contract.** Render is never done at index time — `request_asset(file_id=N, asset_type="cad_projection", slug=...)` mints four signed URLs (front, top, side, iso) good for ~7 days. Per-render cost is dominated by tessellation + VTK; a 670-part assembly renders in ~1.5 s on CPU.
+
+Code: [`services/parsers/cad_step_parser.py`](./src/voitta_rag_enterprise/services/parsers/cad_step_parser.py), [`services/parsers/cad_fcstd_parser.py`](./src/voitta_rag_enterprise/services/parsers/cad_fcstd_parser.py), [`services/cad_render.py`](./src/voitta_rag_enterprise/services/cad_render.py). Outside of `cadquery-ocp` and `vtk` (both in core deps), the CAD path needs no extra apt packages beyond the EGL/Mesa stack already in the Dockerfile.
 
 ## Common ops
 
@@ -101,6 +120,7 @@ All settings carry the `VOITTA_` env-var prefix. See [.env.example](./.env.examp
 | `VOITTA_SINGLE_USER`         | Collapse to a `root` user (no ACL filtering)                  |
 | `VOITTA_DEV_USER`            | Authenticate every request as this email (no proxy needed)    |
 | `VOITTA_DISABLE_BACKGROUND`  | Skip watcher + workers (useful for tests)                     |
+| `VOITTA_PUBLIC_BASE_URL`     | Public origin for signed asset URLs (e.g. `https://rag.customer.com`). Set in prod so MCP clients receive absolute URLs; leave empty in local dev. |
 
 ## Deploying on GCP
 
@@ -189,7 +209,8 @@ For per-customer deployment instructions including the manual GCP-console OAuth 
 
 Built by GitHub Actions on tag and published to GHCR. Customers consume it by tag — they do not build anything.
 
-- Base: `python:3.12-slim` + system deps for MinerU, cairo, poppler, and OSMesa (CAD render: `libosmesa6`).
+- Base: `python:3.12-slim` + apt deps for MinerU (cairo, poppler, fonts) and headless CAD rendering (`libegl1`, `libgl1-mesa-dri`, `libosmesa6` — the EGL + Mesa Gallium llvmpipe path VTK uses when no GPU is attached).
+- Python deps: `cadquery-ocp` for OpenCASCADE 7.x bindings (~500 MB wheel) and `vtk` for the offscreen renderer (~80 MB wheel) ship in core — no extras flag.
 - Models baked into the image at build time: e5-base, SigLIP-2, fastembed BM25, and MinerU's pipeline weights. This makes the image ~6–8 GB but gives instant cold-start and works in egress-restricted environments.
 - Pinned by version tag (`v0.x.y`); the customer's tfvars references a specific tag.
 
