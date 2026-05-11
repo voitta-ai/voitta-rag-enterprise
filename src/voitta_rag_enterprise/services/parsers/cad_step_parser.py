@@ -430,6 +430,22 @@ class CadStepParser(BaseParser):
                 )
             )
 
+        # Synthesize a "Whole assembly" component that aggregates every
+        # other component's entry paths. Gives the LLM a single slug
+        # to render the entire model without picking a sub-component.
+        # The render handler tessellates the full compound; heavy on
+        # big files but the user-visible cost is one request, not 27.
+        whole = Component(name="Whole assembly")
+        for c in components.values():
+            whole.entry_paths.extend(c.entry_paths)
+            for p in c.parts:
+                if p not in whole.parts:
+                    whole.parts.append(p)
+            for k, v in c.hardware.items():
+                whole.hardware[k] += v
+        if whole.entry_paths:
+            components["Whole assembly"] = whole
+
         content, slug_map = build_markdown(
             file_stem=file_path.stem,
             components=components,

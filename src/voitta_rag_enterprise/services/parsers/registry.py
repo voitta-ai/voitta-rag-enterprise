@@ -29,6 +29,7 @@ class ParserRegistry:
 def build_default_registry() -> ParserRegistry:
     # Local imports keep heavy parser dependencies out of the import path
     # for callers that only want, say, the text parser.
+    from .cad_fcstd_parser import CadFCStdParser
     from .cad_step_parser import CadStepParser
     from .docx_parser import DocxParser
     from .image_parser import ImageFileParser
@@ -52,6 +53,7 @@ def build_default_registry() -> ParserRegistry:
     r.register(SvgParser())
     r.register(ImageFileParser())
     r.register(CadStepParser())
+    r.register(CadFCStdParser())
     return r
 
 

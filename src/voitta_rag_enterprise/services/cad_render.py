@@ -138,9 +138,7 @@ class CadProjectionHandler(AssetHandler):
             )
         size = int(params.get("size", 320))
 
-        # File-id → on-disk STEP path. We never read the bytes
-        # ourselves; OCP opens the file directly so its UTF-8 / latin-1
-        # detection runs the way both FreeCAD and Creality use it.
+        # File-id → on-disk path + cas-id.
         from ..db.database import session_scope
         from ..db.models import File, Folder
 
@@ -154,14 +152,12 @@ class CadProjectionHandler(AssetHandler):
             abs_path = f"{folder.path}/{f.rel_path}"
             cas_id = f.file_cas_id
 
-        # Look up the slug's XCAF entry paths from the menu the parser
-        # persisted at extract time. This is what guarantees that
-        # "what's rendered matches what's indexed": the slug maps to
-        # a frozen list of label entry paths, the entries resolve
-        # deterministically against the freshly-parsed STEP, and any
-        # mismatch is a hard 404.
-        entry_paths = _entry_paths_for_slug(cas_id, slug)
-        if not entry_paths:
+        # Find the spec matching this slug. Two render code paths
+        # share the same asset_type: STEP (carries ``x-entry-paths``)
+        # and FCStd (carries ``x-fcstd-members``). The presence of one
+        # vs the other tells us which loader to invoke.
+        spec_schema = _spec_schema_for_slug(cas_id, slug)
+        if spec_schema is None:
             raise KeyError(
                 f"slug {slug!r} not in current asset menu for file {file_id}"
             )
@@ -170,32 +166,40 @@ class CadProjectionHandler(AssetHandler):
 
         timeout_s = getattr(get_caps(), "cad_render_timeout_s", 30)
         started = time.perf_counter()
+        deadline = started + timeout_s
 
-        png = _render_subshape(
-            step_path=abs_path,
-            entry_paths=entry_paths,
-            projection=variant,
-            size=size,
-            deadline=started + timeout_s,
-        )
+        if "x-fcstd-members" in spec_schema:
+            png = _render_fcstd_component(
+                fcstd_path=abs_path,
+                members=spec_schema["x-fcstd-members"],
+                projection=variant,
+                size=size,
+                deadline=deadline,
+            )
+        elif "x-entry-paths" in spec_schema:
+            png = _render_subshape(
+                step_path=abs_path,
+                entry_paths=[str(e) for e in spec_schema["x-entry-paths"]],
+                projection=variant,
+                size=size,
+                deadline=deadline,
+            )
+        else:
+            raise KeyError(
+                f"slug {slug!r} carries no recognized render hint "
+                f"(neither x-entry-paths nor x-fcstd-members)"
+            )
         return RenderedAsset(body=png, mime="image/png")
 
 
-def _entry_paths_for_slug(cas_id: str | None, slug: str) -> list[str]:
-    """Resolve a slug to its XCAF entry paths from the file's
-    on-demand-assets menu.
-
-    Returns the list verbatim from ``params_schema['x-entry-paths']``
-    of the matching AssetSpec, or an empty list if the slug isn't in
-    the menu (file re-indexed, slug retired, etc.)."""
+def _spec_schema_for_slug(cas_id: str | None, slug: str) -> dict | None:
+    """Return the full ``params_schema`` for ``slug``, or None if no
+    matching asset spec is found in the file's menu."""
     specs = load_assets_for_file(cas_id)
     for spec in specs:
         if spec.asset_type == "cad_projection" and spec.slug == slug:
-            schema = spec.params_schema or {}
-            paths = schema.get("x-entry-paths") or []
-            if isinstance(paths, list):
-                return [str(p) for p in paths]
-    return []
+            return spec.params_schema or {}
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -283,6 +287,112 @@ def _render_subshape(
     return _render_polydata(poly, projection=projection, size=size)
 
 
+def _render_fcstd_component(
+    *,
+    fcstd_path: str,
+    members: list[dict],
+    projection: str,
+    size: int,
+    deadline: float,
+) -> bytes:
+    """FCStd render path.
+
+    Each ``member`` is ``{"brp": "<zip-internal path>", "transform":
+    [16 floats row-major]}``. We extract every brp from the FCStd zip
+    (which is just a renamed .zip), load it via ``BRepTools_Read``,
+    apply its world transform, accumulate into a TopoDS_Compound,
+    tessellate, and hand off to the same polydata + VTK path STEP uses.
+
+    Outlier rejection
+    -----------------
+    Real FreeCAD assemblies often contain a handful of features
+    whose Placement is wildly off — leftover construction history,
+    broken Mirror/Pattern operations, parts the user "deleted" by
+    moving them far away rather than removing them. These features
+    are invisible in FreeCAD's own viewer (because the user worked
+    around them) but visible to us, and they dominate the bounding
+    box. We filter members whose translation is past the 1.5×IQR
+    fence on translation magnitude — a standard box-plot outlier
+    rule that conservatively catches genuine outliers (typically
+    1-2 orders of magnitude past the median) without affecting
+    normal assemblies.
+    """
+    if time.perf_counter() > deadline:
+        raise TimeoutError("fcstd render: deadline exceeded before start")
+
+    import math
+    import os
+    import tempfile
+    import zipfile
+    from OCP.BRep import BRep_Builder
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_Transform
+    from OCP.BRepMesh import BRepMesh_IncrementalMesh
+    from OCP.BRepTools import BRepTools
+    from OCP.gp import gp_Trsf
+    from OCP.TopoDS import TopoDS_Compound, TopoDS_Shape
+
+    members = _filter_outlier_members(members)
+
+    builder = BRep_Builder()
+    compound = TopoDS_Compound()
+    builder.MakeCompound(compound)
+    loaded = 0
+
+    # Extract every needed brp once to a tempdir, then load. Letting
+    # BRepTools.Read pull from disk is simpler than threading the zip
+    # bytes through OCP's stream interface.
+    with tempfile.TemporaryDirectory(prefix="fcstd-render-") as tmp:
+        with zipfile.ZipFile(fcstd_path) as z:
+            zip_names = set(z.namelist())
+            for i, member in enumerate(members):
+                if time.perf_counter() > deadline:
+                    raise TimeoutError(
+                        f"fcstd render: loading brps exceeded deadline ({i}/{len(members)})"
+                    )
+                brp = member.get("brp")
+                if not brp or brp not in zip_names:
+                    continue
+                target = os.path.join(tmp, f"{i}.brp")
+                with z.open(brp) as src, open(target, "wb") as dst:
+                    dst.write(src.read())
+                shape = TopoDS_Shape()
+                ok = BRepTools.Read_s(shape, target, builder)
+                if not ok or shape.IsNull():
+                    continue
+                # Apply world transform if non-identity.
+                tf = member.get("transform")
+                if tf and len(tf) == 16:
+                    trsf = gp_Trsf()
+                    # OCC takes a 3x4 affine (rotation + translation);
+                    # FCStd placements are rigid (rotation + translation),
+                    # which OCC supports via SetValues(...).
+                    trsf.SetValues(
+                        tf[0], tf[1], tf[2], tf[3],
+                        tf[4], tf[5], tf[6], tf[7],
+                        tf[8], tf[9], tf[10], tf[11],
+                    )
+                    transformed = BRepBuilderAPI_Transform(shape, trsf, True).Shape()
+                    builder.Add(compound, transformed)
+                else:
+                    builder.Add(compound, shape)
+                loaded += 1
+
+    if loaded == 0:
+        raise KeyError("fcstd render: no brp members loaded")
+    if time.perf_counter() > deadline:
+        raise TimeoutError("fcstd render: brp accumulation exceeded deadline")
+
+    BRepMesh_IncrementalMesh(compound, 0.5, False, 0.5, True)
+    if time.perf_counter() > deadline:
+        raise TimeoutError("fcstd render: tessellation exceeded deadline")
+
+    poly = _compound_to_polydata(compound)
+    if time.perf_counter() > deadline:
+        raise TimeoutError("fcstd render: polydata build exceeded deadline")
+
+    return _render_polydata(poly, projection=projection, size=size)
+
+
 def _compound_to_polydata(compound):
     """Walk every face of ``compound``, collect triangle vertices +
     indices into numpy buffers, build a vtkPolyData in one pass.
@@ -357,12 +467,109 @@ def _compound_to_polydata(compound):
     return pd
 
 
+def _filter_outlier_members(members: list[dict]) -> list[dict]:
+    """Drop members whose translation magnitude is past the 1.5×IQR
+    fence — standard box-plot outlier rejection.
+
+    Small assemblies (< ~10 members) skip filtering: too few samples
+    to define IQR meaningfully. With more members we compute Q1, Q3,
+    IQR, and drop anything beyond ``Q3 + 1.5×IQR``. Below-Q1 features
+    can't be outliers in magnitude space (min is 0).
+
+    The 1.5× fence is conservative — catches the genuine "150m off"
+    placements we see from broken FreeCAD Mirror/Pattern history
+    without touching normal spread.
+    """
+    import math
+
+    if len(members) < 10:
+        return members
+    mags: list[tuple[float, dict]] = []
+    for m in members:
+        tf = m.get("transform")
+        if not tf or len(tf) < 12:
+            mags.append((0.0, m))
+            continue
+        tx, ty, tz = tf[3], tf[7], tf[11]
+        mags.append((math.sqrt(tx * tx + ty * ty + tz * tz), m))
+    sorted_mags = sorted(v for v, _ in mags)
+    q1 = sorted_mags[len(sorted_mags) // 4]
+    q3 = sorted_mags[(3 * len(sorted_mags)) // 4]
+    fence = q3 + 1.5 * (q3 - q1)
+    kept = [m for v, m in mags if v <= fence]
+    dropped = len(members) - len(kept)
+    if dropped:
+        logger.info(
+            "cad_render: dropped %d/%d outlier member(s) past 1.5×IQR "
+            "translation-magnitude fence (q3=%.1f, fence=%.1f)",
+            dropped, len(members), q3, fence,
+        )
+    return kept
+
+
+def _robust_bbox_for_framing(polydata) -> tuple[float, ...] | None:
+    """Return (xmin, xmax, ymin, ymax, zmin, zmax) using percentile
+    clipping per axis. Robust against outlier vertices that would
+    otherwise dominate the bbox.
+
+    Falls back to None for empty / tiny meshes so the caller can use
+    VTK's default ``ResetCamera`` instead.
+    """
+    import numpy as np
+    from vtk.util import numpy_support  # type: ignore
+
+    pts = polydata.GetPoints()
+    if pts is None or pts.GetNumberOfPoints() < 10:
+        return None
+    arr = numpy_support.vtk_to_numpy(pts.GetData())
+    if arr.shape[0] < 10:
+        return None
+    # 5th-95th percentile per axis. Cheap on a few million points.
+    lo = np.percentile(arr, 5, axis=0)
+    hi = np.percentile(arr, 95, axis=0)
+    return (float(lo[0]), float(hi[0]),
+            float(lo[1]), float(hi[1]),
+            float(lo[2]), float(hi[2]))
+
+
+_RENDER_BACKEND_LOGGED = False
+
+
+def _log_render_backend_once(rw) -> None:
+    """One-time per-process log of which VTK render-window backend
+    actually came up. VTK's factory tries EGL (GPU) first and falls
+    back to OSMesa (software) silently — we want operators to know
+    which they're getting so a slow render isn't a mystery."""
+    global _RENDER_BACKEND_LOGGED
+    if _RENDER_BACKEND_LOGGED:
+        return
+    _RENDER_BACKEND_LOGGED = True
+    cls = type(rw).__name__
+    # Probe the actual OpenGL renderer string for clarity.
+    try:
+        ogl = rw.ReportCapabilities() or ""
+        gl_renderer = ""
+        for line in ogl.splitlines():
+            if "OpenGL renderer" in line or "OpenGL vendor" in line:
+                gl_renderer += line.strip() + "; "
+    except Exception:
+        gl_renderer = "<probe failed>"
+    logger.info("CAD render backend: %s — %s", cls, gl_renderer or "<no caps>")
+
+
 def _render_polydata(polydata, *, projection: str, size: int) -> bytes:
     """Render a vtkPolyData into a PNG byte string.
 
     Off-screen VTK pipeline: PolyDataNormals → PolyDataMapper →
     Actor → Renderer → vtkRenderWindow.SetOffScreenRendering(1) →
     vtkWindowToImageFilter → vtkPNGWriter to memory. No file IO.
+
+    VTK's window factory tries hardware EGL first and falls back to
+    software OSMesa silently. On a box where the running user is in
+    the ``render`` group with NVIDIA drivers, the hardware path is
+    automatic and renders are 50-100× faster. Without GPU access the
+    software path still works — just slower. No code changes needed
+    to switch; this function works either way.
     """
     import vtk
 
@@ -393,16 +600,71 @@ def _render_polydata(polydata, *, projection: str, size: int) -> bytes:
 
     cam = ren.GetActiveCamera()
     cfg = _VIEWS[projection]
-    pos = cfg["position"]
-    cam.SetFocalPoint(0.0, 0.0, 0.0)
-    cam.SetPosition(*pos)
     cam.SetViewUp(*cfg["up"])
     if cfg["ortho"]:
         cam.SetParallelProjection(True)
-    ren.ResetCamera()
+    else:
+        # Pin the perspective FOV so framing math is deterministic.
+        # Default is 30° vertical; we keep that but want it explicit
+        # so the distance math below matches.
+        cam.SetViewAngle(30.0)
+
+    # Compute a *robust* bounding box for camera framing — VTK's
+    # default ``ResetCamera`` uses the actor's full geometric bbox,
+    # which a single outlier mesh (e.g. a Spring placed at -150 m
+    # from the rest of the assembly via FreeCAD's modeling history)
+    # blows out by 40× and shrinks the visible model into a dot.
+    # We instead frame the 5th-95th percentile of vertex positions
+    # per axis: the bulk of the model fills the frame; outliers may
+    # render at the edges. Same content, useful camera.
+    bbox = _robust_bbox_for_framing(polydata)
+    if bbox is None:
+        ren.ResetCamera()
+    else:
+        import math
+
+        cx = (bbox[0] + bbox[1]) / 2.0
+        cy = (bbox[2] + bbox[3]) / 2.0
+        cz = (bbox[4] + bbox[5]) / 2.0
+        ext_x = bbox[1] - bbox[0]
+        ext_y = bbox[3] - bbox[2]
+        ext_z = bbox[5] - bbox[4]
+        max_ext = max(ext_x, ext_y, ext_z, 1.0)
+        # Normalize the view direction — the raw vectors in _VIEWS
+        # are convenient triples like (1, -1, 1) for ISO, which have
+        # magnitude > 1 and would otherwise push the camera too far.
+        dx, dy, dz = cfg["position"]
+        mag = math.sqrt(dx * dx + dy * dy + dz * dz) or 1.0
+        dx, dy, dz = dx / mag, dy / mag, dz / mag
+
+        if cfg["ortho"]:
+            # Orthographic — distance doesn't change scale, just
+            # avoid clipping. Set parallel scale to half the longest
+            # extent so the model fills the frame edge-to-edge.
+            dist = max_ext * 2.0
+            cam.SetFocalPoint(cx, cy, cz)
+            cam.SetPosition(cx + dx * dist, cy + dy * dist, cz + dz * dist)
+            cam.SetParallelScale(max_ext * 0.55)  # 90% frame fill
+        else:
+            # Perspective. Solve for the distance that puts a
+            # ``max_ext``-sized object at ~80% of the vertical FOV.
+            #
+            #   visible_at_distance = 2 * dist * tan(yfov/2)
+            #   we want visible = max_ext / fill_fraction
+            #
+            # With yfov = 30°, fill_fraction = 0.85:
+            #   dist = max_ext / (0.85 * 2 * tan(15°))
+            #        ≈ max_ext / 0.4555
+            #        ≈ 2.2 * max_ext
+            half_fov = math.radians(15.0)
+            fill = 0.85
+            dist = max_ext / (fill * 2.0 * math.tan(half_fov))
+            cam.SetFocalPoint(cx, cy, cz)
+            cam.SetPosition(cx + dx * dist, cy + dy * dist, cz + dz * dist)
     ren.ResetCameraClippingRange()
 
     rw.Render()
+    _log_render_backend_once(rw)
 
     w2i = vtk.vtkWindowToImageFilter()
     w2i.SetInput(rw)
