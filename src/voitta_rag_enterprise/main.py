@@ -109,6 +109,13 @@ def create_app() -> FastAPI:
     lifespan; we compose it with our own.
     """
     from .mcp_server import build_app as build_mcp_app
+    # Side-effect import: registers the ``cad_projection`` handler with
+    # ``asset_handlers``. The MCP ``request_asset`` tool and the
+    # ``/api/assets/{token}`` route resolve handlers by asset_type at
+    # call time, so this import has to land before the app starts
+    # serving. Adding a new on-demand handler (audio waveform, xlsx
+    # chart, …) is one more import line here.
+    from .services import cad_render  # noqa: F401
 
     # Bind the MCP route at /mcp internally; below we splice its routes into
     # the parent FastAPI app rather than mounting, so the URL is exactly /mcp

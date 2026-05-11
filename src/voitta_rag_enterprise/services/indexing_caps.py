@@ -88,6 +88,12 @@ class IndexingCaps:
     pdf_page_render_long_edge_px: int = 1024
     pdf_page_render_webp_quality: int = 75
 
+    # CAD glTF render-on-demand (services/cad_render.py). LLM-requested
+    # ``cad_projection`` renders are bounded server-side so a runaway
+    # request can't pin a worker thread.
+    cad_render_max_size: int = 2048
+    cad_render_timeout_s: int = 30
+
 
 # Bounds for client-side validation; the PATCH route applies the same
 # checks server-side. Keeping the table here lets the UI hint at sane
@@ -104,6 +110,8 @@ BOUNDS: dict[str, tuple[int, int]] = {
     "pdf_parse_timeout_s": (10, 7_200),
     "pdf_page_render_long_edge_px": (256, 4_096),
     "pdf_page_render_webp_quality": (10, 100),
+    "cad_render_max_size": (64, 4_096),
+    "cad_render_timeout_s": (5, 300),
 }
 
 

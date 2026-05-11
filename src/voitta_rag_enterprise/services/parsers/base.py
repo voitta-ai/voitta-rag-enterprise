@@ -9,7 +9,10 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
+
+if TYPE_CHECKING:
+    from ..asset_handlers import AssetSpec
 
 
 @dataclass
@@ -57,6 +60,14 @@ class ParserResult:
     # the merged map at embed time. Empty for parsers that don't emit it.
     char_to_page: list[tuple[int, int]] = field(default_factory=list)
     metadata: dict = field(default_factory=dict)
+    # On-demand assets the parser surfaces for this file — the LLM
+    # invokes them through the ``request_asset`` MCP tool. The parser
+    # describes the menu (what's available, which slugs, what params);
+    # the actual rendering / computation happens later via a handler
+    # registered in ``services.asset_handlers``. Parsers populate this
+    # at extract time so ``list_assets(file_id)`` knows the answer
+    # without re-parsing. Empty for parsers with nothing to expose.
+    on_demand_assets: list["AssetSpec"] = field(default_factory=list)
     success: bool = True
     error: str | None = None
 

@@ -258,6 +258,19 @@ def _run_extract_inner(file_id: int) -> None:
                     json.dumps(result.char_to_page),
                 )
 
+        # On-demand asset menu (e.g., CAD per-component projections,
+        # xlsx chart renderers — anything the LLM can call via
+        # ``request_asset``). Parsers that don't expose any leave
+        # ``on_demand_assets`` empty and we skip the write so absence
+        # naturally means "no menu".
+        if result.on_demand_assets:
+            with _stage("cas_write_on_demand_assets", count=len(result.on_demand_assets)):
+                cas_store.write_file_blob(
+                    new_sha,
+                    "on_demand_assets.json",
+                    json.dumps([a.as_dict() for a in result.on_demand_assets]),
+                )
+
         with _stage("cas_write_manifest"):
             cas_store.write_file_blob(
                 new_sha,

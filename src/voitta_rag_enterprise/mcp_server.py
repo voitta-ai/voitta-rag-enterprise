@@ -1224,6 +1224,86 @@ def _unauthorized(detail: str) -> JSONResponse:
 
 
 # ---------------------------------------------------------------------------
+# On-demand assets — universal channel for derived views of files.
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def list_assets(file_id: int) -> list[dict]:
+    """List the on-demand assets a file exposes.
+
+    Parsers populate this list at extract time — examples include CAD
+    component projections, xlsx chart renders, page re-renders, data
+    queries. The output names every ``asset_type`` the LLM can call
+    with :func:`request_asset` for this file, plus the within-file
+    slugs (component names, sheet names, …) and a ``params_schema``
+    fragment that documents how to construct the ``params`` argument.
+
+    Returns an empty list when the file's parser doesn't expose any
+    on-demand assets, or when the file isn't yet indexed.
+    """
+    from .services import asset_handlers as _ah
+
+    with session_scope() as s:
+        f = s.get(File, file_id)
+        if f is None:
+            raise ValueError(f"File {file_id} not found")
+        cas_id = f.file_cas_id
+    specs = _ah.load_assets_for_file(cas_id)
+    return [spec.as_dict() for spec in specs]
+
+
+@mcp.tool()
+def request_asset(
+    file_id: int,
+    asset_type: str,
+    slug: str | None = None,
+    params: dict | None = None,
+) -> dict:
+    """Request an on-demand derived view of a file.
+
+    Two response shapes — exactly one is populated:
+
+    * ``inline``: structured data the LLM consumes directly (rows from
+      a query, summary statistics). No URL involved.
+    * ``urls``: variant name → signed URL. The LLM follows each URL
+      with its bearer token to fetch bytes. ``expires_at`` accompanies.
+
+    Use :func:`list_assets` first to discover available ``asset_type``
+    values and the params schema for each. Invalid params raise
+    ``ValueError`` with the offending field; unknown asset_type raises
+    too. The handler decides whether ``slug`` is required.
+    """
+    from .services import asset_handlers as _ah
+
+    try:
+        handler = _ah.get_handler(asset_type)
+    except KeyError as e:
+        raise ValueError(f"unknown asset_type: {asset_type!r}") from e
+
+    raw_params = dict(params or {})
+    # Hand off to the handler's own validation. Handlers raise
+    # ValueError on bad input; that surfaces to the LLM verbatim.
+    validated = handler.validate_params(raw_params)
+
+    user_id = _resolved_user_id()
+    response = handler.request(
+        file_id=file_id,
+        slug=slug,
+        params=validated,
+        user_id=user_id,
+    )
+    out: dict = {"asset_type": response.asset_type}
+    if response.inline is not None:
+        out["inline"] = response.inline
+    if response.urls is not None:
+        out["urls"] = response.urls
+        if response.expires_at is not None:
+            out["expires_at"] = response.expires_at
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Standalone runner
 # ---------------------------------------------------------------------------
 

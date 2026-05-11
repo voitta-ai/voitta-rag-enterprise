@@ -40,6 +40,15 @@ dependencies = [
     "sentence-transformers>=3.2",
     "transformers>=4.45",
     "tree-sitter-language-pack>=1.8",
+    # CAD glTF parsing + headless mesh rendering. trimesh handles the
+    # scene graph and subgraph isolation; pyrender + PyOpenGL+OSMesa do
+    # the offscreen rasterization. Requires libosmesa6 on the host
+    # (apt) — see deploy notes. Render-on-demand only; no upfront
+    # rendering at index time, so the install cost is paid only by
+    # files that actually carry glTF assets.
+    "trimesh>=4.4",
+    "pyrender>=0.1.45",
+    "PyOpenGL>=3.1",
 ]
 
 [project.optional-dependencies]

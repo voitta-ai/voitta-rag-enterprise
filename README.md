@@ -189,7 +189,7 @@ For per-customer deployment instructions including the manual GCP-console OAuth 
 
 Built by GitHub Actions on tag and published to GHCR. Customers consume it by tag — they do not build anything.
 
-- Base: `python:3.12-slim` + system deps for MinerU, cairo, poppler.
+- Base: `python:3.12-slim` + system deps for MinerU, cairo, poppler, and OSMesa (CAD render: `libosmesa6`).
 - Models baked into the image at build time: e5-base, SigLIP-2, fastembed BM25, and MinerU's pipeline weights. This makes the image ~6–8 GB but gives instant cold-start and works in egress-restricted environments.
 - Pinned by version tag (`v0.x.y`); the customer's tfvars references a specific tag.
 

@@ -3,6 +3,7 @@
 from fastapi import APIRouter
 
 from .routes.admin import router as admin_router
+from .routes.assets import router as assets_router
 from .routes.auth import router as auth_router
 from .routes.files import router as files_router
 from .routes.folders import router as folders_router
@@ -28,5 +29,6 @@ api_router.include_router(sync_router)
 api_router.include_router(sync_oauth_router)
 api_router.include_router(users_router)
 api_router.include_router(admin_router)
+api_router.include_router(assets_router)
 
 __all__ = ["api_router", "ws_router"]
