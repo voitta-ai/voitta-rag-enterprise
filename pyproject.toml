@@ -40,15 +40,19 @@ dependencies = [
     "sentence-transformers>=3.2",
     "transformers>=4.45",
     "tree-sitter-language-pack>=1.8",
-    # CAD glTF parsing + headless mesh rendering. trimesh handles the
-    # scene graph and subgraph isolation; pyrender + PyOpenGL+OSMesa do
-    # the offscreen rasterization. Requires libosmesa6 on the host
-    # (apt) — see deploy notes. Render-on-demand only; no upfront
-    # rendering at index time, so the install cost is paid only by
-    # files that actually carry glTF assets.
-    "trimesh>=4.4",
-    "pyrender>=0.1.45",
-    "PyOpenGL>=3.1",
+    # CAD: STEP / STP file parsing + on-demand rendering.
+    #
+    # ``cadquery-ocp`` ships OpenCASCADE 7.x Python bindings as a
+    # self-contained pip wheel (~500 MB). Same kernel FreeCAD and
+    # Creality Print use; we go straight to it via OCP without a
+    # subprocess. Reader: ``STEPCAFControl_Reader``. Tessellator:
+    # ``BRepMesh_IncrementalMesh``.
+    #
+    # ``vtk`` does the headless rasterization. PyPI Linux wheels
+    # bake in software OpenGL, so renders work on any box without
+    # apt/GPU/EGL setup. Wheel is ~80 MB.
+    "cadquery-ocp>=7.7",
+    "vtk>=9.3",
 ]
 
 [project.optional-dependencies]

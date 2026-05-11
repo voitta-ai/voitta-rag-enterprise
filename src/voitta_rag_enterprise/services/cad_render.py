@@ -1,175 +1,64 @@
-"""On-demand CAD projection rendering.
+"""On-demand CAD projection rendering for STEP files.
 
-Registers ``cad_projection`` as an asset handler. The MCP tool
-:func:`request_asset` invokes :meth:`CadProjectionHandler.request`,
-which mints 4 signed URLs (one per projection). The HTTP route
-:meth:`api/routes/assets.fetch_asset` calls
-:meth:`CadProjectionHandler.fetch`, which does the actual rendering.
+Registers ``cad_projection`` with the asset-handler framework. The
+MCP ``request_asset`` call mints four signed URLs (front / top / side
+/ iso); each URL's HTTP fetch path lands here and produces a fresh
+PNG.
 
-No caching anywhere — the render runs in full on every fetch. The
-rationale: the index is the source of truth for what slugs exist, and
-the file's CAS bytes are the source of truth for what the geometry
-looks like. Both can change (re-extract); a cached PNG would lie
-between them. Spending ~1-3 s per render is the price of "what you see
-matches what is indexed."
+Pipeline per fetch:
 
-The headless GL backend is OSMesa (CPU). We pre-set
-``PYOPENGL_PLATFORM=osmesa`` *before* pyrender is imported — pyrender
-caches the backend at import time and there's no API to change it
-later. EGL/GPU would be faster but requires functioning drivers on the
-deploy box; OSMesa "just works" anywhere ``libosmesa6`` is installed.
+1. Re-parse the STEP file via OCP (deliberate; no caching anywhere)
+2. Resolve the requested ``slug`` to the XCAF entry paths the parser
+   stored at index time, then to TopoDS_Shape handles
+3. Build a single ``TopoDS_Compound`` from those shapes
+4. Tessellate via ``BRepMesh_IncrementalMesh``
+5. Convert triangles to a ``vtkPolyData``
+6. Render offscreen via VTK (its bundled software backend works
+   without GPU / X11 / EGL)
+7. Encode as PNG
+
+The 35 MB sample STEP parses in ~13 s. Per-component tessellation
+adds ~0.5 s; render adds ~0.5 s. Worst-case fetch is well under the
+30 s ``cad_render_timeout_s`` cap.
 """
 
 from __future__ import annotations
 
-import io
 import logging
-import os
-import re
 import time
 from typing import Any
 
-# pyrender reads this once at module load; setting it after import is
-# a no-op. Keep this line above the import.
-os.environ.setdefault("PYOPENGL_PLATFORM", "osmesa")
-
-import numpy as np  # noqa: E402  — must follow PYOPENGL_PLATFORM
-from PIL import Image as PILImage  # noqa: E402
-
-from .asset_handlers import (  # noqa: E402
+from .asset_handlers import (
     AssetHandler,
     AssetResponse,
     RenderedAsset,
     coerce_int,
+    load_assets_for_file,
     register,
 )
-from .signed_assets import issue_token  # noqa: E402
+from .signed_assets import issue_token
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Camera setup — 4 canonical projections
+# Camera presets
 # ---------------------------------------------------------------------------
 
 
-# Each projection produces a 4×4 view transform that places the camera
-# looking at the origin. The scene gets re-centered + scaled at render
-# time so the bbox center sits at origin and the longest axis is unit
-# length — these vectors then frame it consistently.
-_PROJECTIONS: dict[str, tuple[float, float, float]] = {
-    # (camera_x, camera_y, camera_z) → camera positions relative to origin.
-    # Z is "up" in glTF's right-handed coordinate system.
-    "front": (0.0, -2.5, 0.0),  # looking from -Y toward +Y
-    "top":   (0.0,  0.0, 2.5),  # looking from +Z down
-    "side":  (2.5,  0.0, 0.0),  # looking from +X toward -X
-    "iso":   (1.75, -1.75, 1.75),  # front-right-above
+# For axis-aligned views VTK gets a vector along which the camera
+# looks at the centred component; for ISO we pick a 35°-elevation,
+# 30°-azimuth offset (standard mechanical-drawing convention).
+_VIEWS: dict[str, dict[str, Any]] = {
+    "front": {"position": (0.0, -1.0, 0.0), "up": (0.0, 0.0, 1.0), "ortho": True},
+    "top":   {"position": (0.0,  0.0, 1.0), "up": (0.0, 1.0, 0.0), "ortho": True},
+    "side":  {"position": (1.0,  0.0, 0.0), "up": (0.0, 0.0, 1.0), "ortho": True},
+    "iso":   {"position": (1.0, -1.0, 1.0), "up": (0.0, 0.0, 1.0), "ortho": False},
 }
 
 
 def projection_names() -> list[str]:
-    return list(_PROJECTIONS.keys())
-
-
-def _look_at_origin(eye: tuple[float, float, float]) -> np.ndarray:
-    """Build a 4×4 camera pose looking from ``eye`` at the origin.
-
-    pyrender expects camera-from-world transforms with +Z as the
-    "into the scene" axis from the camera's POV. We compute the
-    standard look-at: forward = origin - eye, up = world-Z (or world-Y
-    if that degenerates).
-    """
-    eye_v = np.array(eye, dtype=np.float32)
-    target = np.zeros(3, dtype=np.float32)
-    forward = target - eye_v
-    forward /= np.linalg.norm(forward)
-
-    # Choose an up axis that isn't parallel to forward. World Z is
-    # the obvious pick except for the "top" view which looks straight
-    # down — there we use world Y.
-    if abs(forward[2]) > 0.95:
-        world_up = np.array([0, 1, 0], dtype=np.float32)
-    else:
-        world_up = np.array([0, 0, 1], dtype=np.float32)
-
-    right = np.cross(forward, world_up)
-    right /= np.linalg.norm(right)
-    up = np.cross(right, forward)
-
-    # pyrender camera pose: columns are [right, up, -forward, eye]
-    pose = np.eye(4, dtype=np.float32)
-    pose[:3, 0] = right
-    pose[:3, 1] = up
-    pose[:3, 2] = -forward
-    pose[:3, 3] = eye_v
-    return pose
-
-
-# ---------------------------------------------------------------------------
-# Subgraph isolation: pick which glTF nodes belong to a slug
-# ---------------------------------------------------------------------------
-
-
-# Same regexes the parser uses, duplicated here intentionally — keeps
-# this module's import graph tiny (no parser dependency at render time).
-_DOUBLE_COLON_RE = re.compile(r"^(?P<group>.+?)\s+::\s+(?P<part>.+)$")
-_BRACKET_GROUP_RE = re.compile(r"^(?P<part>.+?)\s*\[(?P<group>[^\]]+)\]\s*$")
-
-
-def _slugify(name: str, seen: set[str]) -> str:
-    base = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "component"
-    slug = base
-    n = 2
-    while slug in seen:
-        slug = f"{base}-{n}"
-        n += 1
-    seen.add(slug)
-    return slug
-
-
-def _route(name: str) -> str | None:
-    """Return the group name a node belongs to, or None to skip."""
-    if not name or name.startswith("Origin"):
-        return None
-    m = _DOUBLE_COLON_RE.match(name)
-    if m:
-        return m.group("group").strip()
-    m = _BRACKET_GROUP_RE.match(name)
-    if m:
-        return m.group("group").strip()
-    return None  # routes to "Unclassified" — handled by caller
-
-
-def slug_to_group_name(scene_node_names: list[str], target_slug: str) -> str | None:
-    """Reverse-resolve ``target_slug`` to the group name as the parser
-    would have named it.
-
-    We rebuild the same slugs-in-deterministic-order pass the parser
-    uses. Re-running this against the *same* file bytes always yields
-    the same slug→group mapping; against different bytes, we don't
-    pretend — the slug just won't be found and the caller raises 404.
-
-    Returns ``None`` if the slug doesn't map to any group in the
-    current file. The caller treats that as the "stale slug" case.
-    """
-    from collections import Counter
-
-    # Tally part-counts per group to get the same deterministic sort
-    # the parser uses (descending parts, then name).
-    counts: Counter = Counter()
-    seen_groups: set[str] = set()
-    for n in scene_node_names:
-        g = _route(n)
-        bucket = g if g is not None else "Unclassified"
-        counts[bucket] += 1
-        seen_groups.add(bucket)
-    ordered = sorted(seen_groups, key=lambda g: (-counts[g], g.lower()))
-    seen_slugs: set[str] = set()
-    for group in ordered:
-        slug = _slugify(group, seen_slugs)
-        if slug == target_slug:
-            return group
-    return None
+    return list(_VIEWS.keys())
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +67,7 @@ def slug_to_group_name(scene_node_names: list[str], target_slug: str) -> str | N
 
 
 class CadProjectionHandler(AssetHandler):
-    """4-projection renderer for one component of a CAD assembly."""
+    """4-projection renderer for one STEP component."""
 
     asset_type = "cad_projection"
 
@@ -213,13 +102,9 @@ class CadProjectionHandler(AssetHandler):
     ) -> AssetResponse:
         if not slug:
             raise ValueError("cad_projection requires a slug (component name)")
-
-        # Mint one signed URL per projection. The ``__variant__`` key
-        # rides in the token's params dict; the route's fetch path
-        # peels it back off before calling fetch().
         urls: dict[str, str] = {}
         expires_at = 0
-        for proj in _PROJECTIONS:
+        for proj in _VIEWS:
             token, exp = issue_token(
                 file_id=file_id,
                 asset_type=self.asset_type,
@@ -228,8 +113,12 @@ class CadProjectionHandler(AssetHandler):
                 user_id=user_id,
             )
             urls[proj] = f"/api/assets/{token}"
-            expires_at = exp  # all tokens minted in the same instant
-        return AssetResponse(asset_type=self.asset_type, urls=urls, expires_at=expires_at)
+            expires_at = exp
+        return AssetResponse(
+            asset_type=self.asset_type,
+            urls=urls,
+            expires_at=expires_at,
+        )
 
     def fetch(
         self,
@@ -242,17 +131,16 @@ class CadProjectionHandler(AssetHandler):
     ) -> RenderedAsset:
         if not slug:
             raise ValueError("cad_projection fetch requires a slug")
-        if variant not in _PROJECTIONS:
+        if variant not in _VIEWS:
             raise ValueError(
                 f"unknown projection: {variant!r}; expected one of "
-                f"{sorted(_PROJECTIONS.keys())}"
+                f"{sorted(_VIEWS.keys())}"
             )
         size = int(params.get("size", 320))
 
-        # Resolve the file to its on-disk glb. ``read_cas_bytes`` is the
-        # natural primitive but our cas store only writes named blobs
-        # under the file-cas dir — the raw source bytes live in the
-        # original folder root. We read them from there.
+        # File-id → on-disk STEP path. We never read the bytes
+        # ourselves; OCP opens the file directly so its UTF-8 / latin-1
+        # detection runs the way both FreeCAD and Creality use it.
         from ..db.database import session_scope
         from ..db.models import File, Folder
 
@@ -264,15 +152,28 @@ class CadProjectionHandler(AssetHandler):
             if folder is None:
                 raise FileNotFoundError(f"folder for file {file_id} missing")
             abs_path = f"{folder.path}/{f.rel_path}"
+            cas_id = f.file_cas_id
+
+        # Look up the slug's XCAF entry paths from the menu the parser
+        # persisted at extract time. This is what guarantees that
+        # "what's rendered matches what's indexed": the slug maps to
+        # a frozen list of label entry paths, the entries resolve
+        # deterministically against the freshly-parsed STEP, and any
+        # mismatch is a hard 404.
+        entry_paths = _entry_paths_for_slug(cas_id, slug)
+        if not entry_paths:
+            raise KeyError(
+                f"slug {slug!r} not in current asset menu for file {file_id}"
+            )
 
         from .indexing_caps import get_caps
 
         timeout_s = getattr(get_caps(), "cad_render_timeout_s", 30)
         started = time.perf_counter()
 
-        png = _render_component(
-            glb_path=abs_path,
-            slug=slug,
+        png = _render_subshape(
+            step_path=abs_path,
+            entry_paths=entry_paths,
             projection=variant,
             size=size,
             deadline=started + timeout_s,
@@ -280,173 +181,244 @@ class CadProjectionHandler(AssetHandler):
         return RenderedAsset(body=png, mime="image/png")
 
 
+def _entry_paths_for_slug(cas_id: str | None, slug: str) -> list[str]:
+    """Resolve a slug to its XCAF entry paths from the file's
+    on-demand-assets menu.
+
+    Returns the list verbatim from ``params_schema['x-entry-paths']``
+    of the matching AssetSpec, or an empty list if the slug isn't in
+    the menu (file re-indexed, slug retired, etc.)."""
+    specs = load_assets_for_file(cas_id)
+    for spec in specs:
+        if spec.asset_type == "cad_projection" and spec.slug == slug:
+            schema = spec.params_schema or {}
+            paths = schema.get("x-entry-paths") or []
+            if isinstance(paths, list):
+                return [str(p) for p in paths]
+    return []
+
+
 # ---------------------------------------------------------------------------
-# Rendering primitives
+# Render primitives (OCP + VTK)
 # ---------------------------------------------------------------------------
 
 
-def _render_component(
+def _render_subshape(
     *,
-    glb_path: str,
-    slug: str,
+    step_path: str,
+    entry_paths: list[str],
     projection: str,
     size: int,
     deadline: float,
 ) -> bytes:
-    """Load → isolate → render → PNG.
+    """Parse → resolve subshape → tessellate → render → PNG.
 
-    Each step checks the wall-clock against ``deadline`` and raises
-    ``TimeoutError`` if exceeded — the route converts that into 504.
-    Some scenes have millions of triangles and even the load step can
-    take seconds; without the deadline a single huge file would block
-    the server thread indefinitely.
+    Every step rechecks the wall-clock against ``deadline``; running
+    past it raises ``TimeoutError`` which the HTTP route maps to 504.
+    A pathological STEP that takes 60 s to parse won't pin our
+    request thread indefinitely.
     """
-    import trimesh
-    import pyrender
+    if time.perf_counter() > deadline:
+        raise TimeoutError("render: deadline exceeded before start")
 
-    def _expired() -> bool:
-        return time.perf_counter() > deadline
+    # Parse fresh — no document caching.
+    from .parsers.cad_step_parser import _parse_step_into_xcaf
 
-    if _expired():
-        raise TimeoutError("render: load deadline exceeded before start")
+    doc, _schema = _parse_step_into_xcaf(__import__("pathlib").Path(step_path))
+    if time.perf_counter() > deadline:
+        raise TimeoutError("render: STEP parse exceeded deadline")
 
-    try:
-        scene = trimesh.load(glb_path, force="scene")
-    except Exception as e:
-        raise ValueError(f"glb load failed: {e}") from e
-    if _expired():
-        raise TimeoutError("render: load took longer than allowed")
+    # Resolve every entry path back to a label, collect their shapes
+    # into a single TopoDS_Compound. The compound makes tessellation +
+    # camera framing trivial since we hand VTK one polydata.
+    from OCP.BRep import BRep_Builder
+    from OCP.TCollection import TCollection_AsciiString
+    from OCP.TDF import TDF_Label, TDF_Tool
+    from OCP.TopoDS import TopoDS_Compound
+    from OCP.XCAFDoc import XCAFDoc_DocumentTool
 
-    # Reverse the slug → group lookup using the same algorithm the
-    # parser uses. trimesh's scene.graph.nodes covers every leaf
-    # placement, but the slug map is built from the original glTF
-    # node names; pull those from the parsed asset to keep parity.
-    raw_names = _trimesh_original_node_names(scene)
-    group_name = slug_to_group_name(raw_names, slug)
-    if group_name is None:
-        raise KeyError(f"slug {slug!r} not in current file")
+    shape_tool = XCAFDoc_DocumentTool.ShapeTool_s(doc.Main())
+    data = doc.GetData()
 
-    # Build the subset of trimesh-graph nodes that belong to this
-    # component. trimesh expanded the gltf instances into hashed
-    # variants; we route each by re-applying the regex to the
-    # un-suffixed name.
-    target_nodes = []
-    for n in scene.graph.nodes:
-        stripped = _strip_trimesh_suffix(n)
-        g = _route(stripped) or "Unclassified"
-        if g == group_name:
-            target_nodes.append(n)
-    if not target_nodes:
-        raise KeyError(
-            f"slug {slug!r} maps to {group_name!r} but no trimesh nodes route there"
-        )
-    if _expired():
-        raise TimeoutError("render: subgraph extraction exceeded deadline")
-
-    # Build a fresh trimesh.Scene containing only those node names'
-    # geometry, with their world transforms baked in. Bake matters:
-    # the parent transform chain disappears when we extract a single
-    # node's mesh, so we need to apply the cumulative transform from
-    # world to leaf at copy time.
-    sub_scene = trimesh.Scene()
-    for n in target_nodes:
-        try:
-            transform, geometry_name = scene.graph[n]
-        except KeyError:
+    compound = TopoDS_Compound()
+    builder = BRep_Builder()
+    builder.MakeCompound(compound)
+    resolved = 0
+    for entry in entry_paths:
+        label = TDF_Label()
+        TDF_Tool.Label_s(data, TCollection_AsciiString(entry), label, False)
+        if label.IsNull():
             continue
-        if geometry_name is None or geometry_name not in scene.geometry:
+        shape = shape_tool.GetShape_s(label)
+        if shape.IsNull():
             continue
-        geom = scene.geometry[geometry_name]
-        sub_scene.add_geometry(geom, node_name=n, transform=transform)
-    if not sub_scene.geometry:
+        builder.Add(compound, shape)
+        resolved += 1
+    if resolved == 0:
         raise KeyError(
-            f"slug {slug!r} mapped to {group_name!r} has no renderable geometry"
+            "render: none of the entry paths resolved to geometry — "
+            "STEP may have been re-uploaded since the menu was built"
         )
-    if _expired():
-        raise TimeoutError("render: subgraph build exceeded deadline")
+    if time.perf_counter() > deadline:
+        raise TimeoutError("render: shape resolution exceeded deadline")
 
-    # Re-center + uniform-scale so the component fits the canonical
-    # [-0.5, 0.5] box. This makes the camera vectors above frame the
-    # subject consistently regardless of the original units.
-    bounds = sub_scene.bounds
-    if bounds is None or not np.all(np.isfinite(bounds)):
-        raise ValueError("subgraph has no finite bounding box")
-    center = (bounds[0] + bounds[1]) / 2.0
-    extent = bounds[1] - bounds[0]
-    longest = float(max(extent))
-    if longest <= 0:
-        raise ValueError("subgraph extent is zero")
-    scale = 1.0 / longest
-    T = np.eye(4, dtype=np.float32)
-    T[:3, :3] *= scale
-    T[:3, 3] = -center * scale
-    sub_scene.apply_transform(T)
+    # Tessellate the compound. Tolerances picked from the Creality
+    # ``libslic3r/Format/STEP.cpp`` defaults: linear 0.5 mm, angular
+    # 0.5 rad, parallel on. Loose enough that big assemblies finish
+    # quickly; tight enough that 320-px renders look clean.
+    from OCP.BRepMesh import BRepMesh_IncrementalMesh
 
-    # Build a pyrender scene from the trimesh scene.
-    py_scene = pyrender.Scene(
-        bg_color=[1.0, 1.0, 1.0, 1.0],
-        ambient_light=[0.4, 0.4, 0.4],
+    BRepMesh_IncrementalMesh(compound, 0.5, False, 0.5, True)
+    if time.perf_counter() > deadline:
+        raise TimeoutError("render: tessellation exceeded deadline")
+
+    # Triangles → vtkPolyData. We accumulate into bulk numpy arrays
+    # and then push them into VTK in one shot — much faster than
+    # InsertNextCell per triangle on large compounds (sub-second for
+    # ~100k triangles vs minutes).
+    poly = _compound_to_polydata(compound)
+    if time.perf_counter() > deadline:
+        raise TimeoutError("render: polydata build exceeded deadline")
+
+    return _render_polydata(poly, projection=projection, size=size)
+
+
+def _compound_to_polydata(compound):
+    """Walk every face of ``compound``, collect triangle vertices +
+    indices into numpy buffers, build a vtkPolyData in one pass.
+
+    Faster than the iterative ``InsertNextPoint`` / ``InsertNextCell``
+    pattern by orders of magnitude on big shapes, because each VTK
+    call goes through Python attribute resolution + a C++ trampoline.
+    """
+    import numpy as np
+    import vtk
+    from OCP.BRep import BRep_Tool
+    from OCP.TopAbs import TopAbs_FACE
+    from OCP.TopExp import TopExp_Explorer
+    from OCP.TopLoc import TopLoc_Location
+    from OCP.TopoDS import TopoDS
+
+    points_list: list[np.ndarray] = []
+    tris_list: list[np.ndarray] = []
+    base = 0
+
+    exp = TopExp_Explorer(compound, TopAbs_FACE)
+    while exp.More():
+        face = TopoDS.Face_s(exp.Current())
+        loc = TopLoc_Location()
+        tri = BRep_Tool.Triangulation_s(face, loc)
+        if tri is not None:
+            trsf = loc.Transformation()
+            n_nodes = tri.NbNodes()
+            pts = np.empty((n_nodes, 3), dtype=np.float32)
+            for j in range(1, n_nodes + 1):
+                p = tri.Node(j).Transformed(trsf)
+                pts[j - 1, 0] = p.X()
+                pts[j - 1, 1] = p.Y()
+                pts[j - 1, 2] = p.Z()
+            points_list.append(pts)
+
+            n_tris = tri.NbTriangles()
+            idx = np.empty((n_tris, 3), dtype=np.int64)
+            for t in range(1, n_tris + 1):
+                a, b, c = tri.Triangle(t).Get()
+                idx[t - 1, 0] = base + a - 1
+                idx[t - 1, 1] = base + b - 1
+                idx[t - 1, 2] = base + c - 1
+            tris_list.append(idx)
+            base += n_nodes
+        exp.Next()
+
+    if not points_list:
+        raise ValueError("compound has no triangulated faces")
+
+    points = np.concatenate(points_list, axis=0)
+    tris = np.concatenate(tris_list, axis=0)
+
+    from vtk.util import numpy_support  # type: ignore
+
+    vtk_points = vtk.vtkPoints()
+    vtk_points.SetData(numpy_support.numpy_to_vtk(points, deep=True))
+
+    # vtkCellArray needs a flat connectivity buffer of (3, a, b, c, 3, d, e, f, ...).
+    flat = np.empty((tris.shape[0], 4), dtype=np.int64)
+    flat[:, 0] = 3
+    flat[:, 1:] = tris
+    cells = vtk.vtkCellArray()
+    cells.SetCells(
+        tris.shape[0],
+        numpy_support.numpy_to_vtkIdTypeArray(flat.reshape(-1), deep=True),
     )
-    for trimesh_geom in sub_scene.dump():
-        mesh = pyrender.Mesh.from_trimesh(trimesh_geom, smooth=False)
-        py_scene.add(mesh)
 
-    # One directional light keyed roughly to the viewer direction.
-    light = pyrender.DirectionalLight(color=np.ones(3), intensity=3.0)
-    py_scene.add(light, pose=_look_at_origin((1.0, -1.0, 1.0)))
-
-    # Camera: orthographic for axis-aligned views, perspective for iso.
-    eye = _PROJECTIONS[projection]
-    if projection == "iso":
-        cam = pyrender.PerspectiveCamera(yfov=np.pi / 4.0, aspectRatio=1.0)
-    else:
-        cam = pyrender.OrthographicCamera(xmag=0.6, ymag=0.6)
-    py_scene.add(cam, pose=_look_at_origin(eye))
-    if _expired():
-        raise TimeoutError("render: scene build exceeded deadline")
-
-    # Offscreen render.
-    renderer = pyrender.OffscreenRenderer(viewport_width=size, viewport_height=size)
-    try:
-        color, _depth = renderer.render(py_scene)
-    finally:
-        renderer.delete()
-
-    img = PILImage.fromarray(color)
-    buf = io.BytesIO()
-    img.save(buf, format="PNG", compress_level=1)
-    return buf.getvalue()
+    pd = vtk.vtkPolyData()
+    pd.SetPoints(vtk_points)
+    pd.SetPolys(cells)
+    return pd
 
 
-def _trimesh_original_node_names(scene) -> list[str]:
-    """Pull the underlying glTF node names from a trimesh Scene.
+def _render_polydata(polydata, *, projection: str, size: int) -> bytes:
+    """Render a vtkPolyData into a PNG byte string.
 
-    trimesh remembers the source names in ``scene.metadata['nodes']``
-    when available (newer versions). When not, we fall back to the
-    graph node names with the per-instance suffix stripped — slightly
-    lossy but enough to drive ``slug_to_group_name``.
+    Off-screen VTK pipeline: PolyDataNormals → PolyDataMapper →
+    Actor → Renderer → vtkRenderWindow.SetOffScreenRendering(1) →
+    vtkWindowToImageFilter → vtkPNGWriter to memory. No file IO.
     """
-    md = getattr(scene, "metadata", {}) or {}
-    nodes = md.get("nodes")
-    if isinstance(nodes, list) and nodes and isinstance(nodes[0], dict):
-        return [n.get("name", "") for n in nodes if isinstance(n, dict)]
-    return [_strip_trimesh_suffix(n) for n in scene.graph.nodes]
+    import vtk
 
+    normals = vtk.vtkPolyDataNormals()
+    normals.SetInputData(polydata)
+    normals.SetSplitting(False)
+    normals.SetConsistency(True)
+    normals.Update()
 
-_TRIMESH_HEX_RE = re.compile(r"(?:_[0-9a-f]{6,})+$")
-_TRIMESH_NUM_RE = re.compile(r"(?:_\d{1,3})+$")
+    mapper = vtk.vtkPolyDataMapper()
+    mapper.SetInputConnection(normals.GetOutputPort())
 
+    actor = vtk.vtkActor()
+    actor.SetMapper(mapper)
+    actor.GetProperty().SetColor(0.65, 0.70, 0.78)
+    actor.GetProperty().SetAmbient(0.25)
+    actor.GetProperty().SetDiffuse(0.75)
+    actor.GetProperty().SetSpecular(0.10)
 
-def _strip_trimesh_suffix(name: str) -> str:
-    out = name
-    for _ in range(3):
-        before = out
-        out = _TRIMESH_HEX_RE.sub("", out)
-        out = _TRIMESH_NUM_RE.sub("", out)
-        out = out.rstrip("_")
-        if out == before:
-            break
-    return out
+    ren = vtk.vtkRenderer()
+    ren.SetBackground(1.0, 1.0, 1.0)
+    ren.AddActor(actor)
+
+    rw = vtk.vtkRenderWindow()
+    rw.SetOffScreenRendering(1)
+    rw.SetSize(size, size)
+    rw.AddRenderer(ren)
+
+    cam = ren.GetActiveCamera()
+    cfg = _VIEWS[projection]
+    pos = cfg["position"]
+    cam.SetFocalPoint(0.0, 0.0, 0.0)
+    cam.SetPosition(*pos)
+    cam.SetViewUp(*cfg["up"])
+    if cfg["ortho"]:
+        cam.SetParallelProjection(True)
+    ren.ResetCamera()
+    ren.ResetCameraClippingRange()
+
+    rw.Render()
+
+    w2i = vtk.vtkWindowToImageFilter()
+    w2i.SetInput(rw)
+    w2i.ReadFrontBufferOff()
+    w2i.Update()
+
+    writer = vtk.vtkPNGWriter()
+    writer.WriteToMemoryOn()
+    writer.SetInputConnection(w2i.GetOutputPort())
+    writer.Write()
+    blob = writer.GetResult()
+
+    from vtk.util import numpy_support  # type: ignore
+
+    arr = numpy_support.vtk_to_numpy(blob)
+    return arr.tobytes()
 
 
 # ---------------------------------------------------------------------------
