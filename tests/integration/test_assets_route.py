@@ -140,9 +140,18 @@ def test_route_rejects_tampered_token(app: FastAPI) -> None:
         assert r.status_code == 401
 
 
-def test_route_rejects_token_for_other_user(app: FastAPI) -> None:
-    """Tokens carry the issuing user's id. Re-presenting a token as a
-    different signed-in user must be rejected."""
+def test_signed_url_is_the_credential(app: FastAPI) -> None:
+    """A valid signed URL is fetchable by anyone within its TTL — no
+    per-request user auth required. The capability lives in the
+    signature; ACL is enforced at MINT time (request_asset), not at
+    fetch time. Same model as S3 pre-signed URLs.
+
+    Verifies that the route serves bytes when ``current_user`` is not
+    set (i.e. no session cookie) — by clearing the dependency override
+    we installed for the seed step and re-issuing the request without
+    any auth context."""
+    from voitta_rag_enterprise.api.deps import current_user
+
     with TestClient(app) as c:
         file_id = _seed_inside_client(c, app, email="alice@x.com")
         with session_scope() as s:
@@ -152,10 +161,16 @@ def test_route_rejects_token_for_other_user(app: FastAPI) -> None:
         resp = handler.request(
             file_id=file_id, slug=None, params={"variants": ["a"]}, user_id=alice_id,
         )
-        bob_url = list(resp.urls.values())[0]
-        auth_as(app, "bob@x.com")
-        r = c.get(bob_url)
-        assert r.status_code == 401
+        url = list(resp.urls.values())[0]
+
+        # Drop the current_user override entirely — the route must not
+        # depend on a session to fetch a valid signed URL.
+        app.dependency_overrides.pop(current_user, None)
+        r = c.get(url)
+        assert r.status_code == 200, r.text
+        body = r.content.decode()
+        assert f"file={file_id}" in body
+        assert "variant=a" in body
 
 
 def test_route_returns_400_on_unknown_asset_type(app: FastAPI) -> None:
