@@ -22,8 +22,52 @@ export function userStateLabel(state) {
     return "indexing";
 }
 
+// Maps a Drive-native ``source_url`` to one of the doc-stem dir
+// kinds we render with a Google Workspace icon. URLs follow
+// ``https://docs.google.com/{route}/d/<id>/...``; anything else
+// (raw file, Drive sharing link, external) returns null.
+const _GOOGLE_ROUTES = [
+    ["/document/", "document"],
+    ["/spreadsheets/", "spreadsheet"],
+    ["/presentation/", "presentation"],
+    ["/drawings/", "drawing"],
+    ["/forms/", "form"],
+];
+
+function _googleKindFromUrl(url) {
+    if (!url || typeof url !== "string") return null;
+    for (const [needle, kind] of _GOOGLE_ROUTES) {
+        if (url.includes(needle)) return kind;
+    }
+    return null;
+}
+
+// Walk the tree and tag every dir that's actually a Google
+// Workspace doc-stem (its descendant .md files were exported from
+// the same Doc / Sheet / Slide). Tag wins from the nearest
+// .md descendant — the doc's images sub-dir inherits its parent's
+// kind, which lets us optionally hide-the-fact-it's-a-folder later
+// without breaking existing renders.
+function _tagGoogleKinds(node) {
+    let kind = null;
+    for (const child of node.dirs.values()) {
+        const childKind = _tagGoogleKinds(child);
+        // Don't override a more-specific decision at this level;
+        // the dir is "kind X" iff at least one of its descendant
+        // .md files came from a Google native source of that kind.
+        if (childKind && !kind) kind = childKind;
+    }
+    for (const f of node.files) {
+        if (!f.rel_path.toLowerCase().endsWith(".md")) continue;
+        const k = _googleKindFromUrl(f.source_url);
+        if (k) { kind = k; break; }
+    }
+    if (kind) node.kind = kind;
+    return kind;
+}
+
 export function buildTree(folderFiles, folderId) {
-    /* Returns { dirs: Map<name, node>, files: [] } */
+    /* Returns { dirs: Map<name, node>, files: [], kind? } */
     const root = { dirs: new Map(), files: [] };
     for (const f of folderFiles) {
         if (f.state === "deleted") continue;
@@ -48,6 +92,7 @@ export function buildTree(folderFiles, folderId) {
             }
         }
     }
+    _tagGoogleKinds(root);
     return root;
 }
 

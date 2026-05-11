@@ -22,6 +22,12 @@ import { api } from "../api.js";
 import { reconcileChildren, setIfChanged } from "../dom/reconcile.js";
 import { buildSwitch } from "../dom/switch.js";
 import {
+    iconForDirKind,
+    iconForFile,
+    iconForFolder,
+    iconForFolderRoot,
+} from "./icons.js";
+import {
     getSelectedFolderId,
     getSelectedRelDir,
     isExpanded,
@@ -60,7 +66,7 @@ function buildFolderRoot(folderId) {
     label.className = "label";
     const glyph = document.createElement("span");
     glyph.className = "glyph";
-    glyph.textContent = "▣";
+    glyph.innerHTML = iconForFolderRoot();
     const text = document.createElement("span");
     label.append(glyph, text);
     nameCell.append(chevron, label);
@@ -100,7 +106,7 @@ function buildDirRow(folderId, relDir) {
     label.className = "label";
     const glyph = document.createElement("span");
     glyph.className = "glyph";
-    glyph.textContent = "📁";
+    glyph.innerHTML = iconForFolder();
     const text = document.createElement("span");
     label.append(glyph, text);
     nameCell.append(chevron, label);
@@ -119,8 +125,9 @@ function buildDirRow(folderId, relDir) {
     li.append(nameCell, fileCount, indexedCount, tag, spacer1, spacer2);
     li.addEventListener("click", onRowClick);
 
-    li._refs = { nameCell, chevron, text, fileCount, indexedCount, tag };
+    li._refs = { nameCell, chevron, glyph, text, fileCount, indexedCount, tag };
     li._isRoot = false;
+    li._dirKind = null;  // tracked across renders so we only re-set innerHTML on change
     return li;
 }
 
@@ -138,7 +145,6 @@ function buildFileRow(fileId) {
     label.className = "label";
     const glyph = document.createElement("span");
     glyph.className = "glyph";
-    glyph.textContent = "·";
     const text = document.createElement("span");
     label.append(glyph, text);
     nameCell.append(chevron, label);
@@ -150,7 +156,8 @@ function buildFileRow(fileId) {
 
     li.append(nameCell, blank1, blank2, tag);
 
-    li._refs = { nameCell, label, text, tag };
+    li._refs = { nameCell, label, glyph, text, tag };
+    li._fileExtKey = null;  // last extension key we rendered an icon for
     return li;
 }
 
@@ -176,9 +183,10 @@ function onRowClick(e) {
 // Row updaters (mutate in place across renders)
 // ---------------------------------------------------------------------------
 
-function updateTreeRow(li, { folder, displayName, depth, isOpen, hasChildren, isSelected, summary, sharedReadonly }) {
+function updateTreeRow(li, { folder, displayName, depth, isOpen, hasChildren, isSelected, summary, sharedReadonly, dirKind }) {
     const r = li._refs;
-    const baseClass = li._isRoot ? "tree-row folder-root" : "tree-row dir";
+    const kindClass = dirKind ? ` dir-kind-${dirKind}` : "";
+    const baseClass = (li._isRoot ? "tree-row folder-root" : "tree-row dir") + kindClass;
     const cls =
         baseClass +
         (isSelected ? " selected" : "") +
@@ -192,6 +200,14 @@ function updateTreeRow(li, { folder, displayName, depth, isOpen, hasChildren, is
     if (isOpen) chevCls += " open";
     if (!hasChildren) chevCls += " leaf";
     setIfChanged(r.chevron, "className", chevCls);
+
+    // Swap the dir glyph between folder and Google-Workspace icon
+    // *only* when it changes — innerHTML writes are otherwise free
+    // but produce churn under the dev-tools mutation observer.
+    if (!li._isRoot && li._dirKind !== (dirKind || null)) {
+        r.glyph.innerHTML = iconForDirKind(dirKind) || iconForFolder();
+        li._dirKind = dirKind || null;
+    }
 
     setIfChanged(r.text, "textContent", displayName);
 
@@ -265,6 +281,20 @@ function updateFileRow(li, { file, depth }) {
     if (r.nameCell.style.paddingLeft !== pad) r.nameCell.style.paddingLeft = pad;
     const basename = file.rel_path.split("/").pop();
     setIfChanged(r.text, "textContent", basename);
+
+    // The extension is the only thing affecting the icon — gate
+    // innerHTML writes on it so renames within the same extension
+    // (rare) don't churn DOM.
+    const lower = file.rel_path.toLowerCase();
+    const dot = lower.lastIndexOf(".");
+    let extKey = dot >= 0 ? lower.slice(dot) : "";
+    if (lower.endsWith(".tar.gz") || lower.endsWith(".tar.bz2") || lower.endsWith(".tar.xz")) {
+        extKey = ".tar.gz";
+    }
+    if (li._fileExtKey !== extKey) {
+        r.glyph.innerHTML = iconForFile(file.rel_path);
+        li._fileExtKey = extKey;
+    }
     if (r.label.title !== file.rel_path) r.label.title = file.rel_path;
     const stateLabel = userStateLabel(file.state);
     setIfChanged(r.tag, "className", `status-tag ${stateLabel}`);
@@ -361,7 +391,13 @@ function emitTreeRow({ targetRows, seenKeys, folder, node, relDir, displayName, 
         li = isRoot ? buildFolderRoot(folder.id) : buildDirRow(folder.id, relDir);
         rowCache.set(cacheKey, li);
     }
-    updateTreeRow(li, { folder, displayName, depth, isOpen, hasChildren, isSelected, summary, sharedReadonly });
+    // Roots use the folder badge regardless of descendants; only
+    // nested dirs adopt the Google-Workspace icon when their .md
+    // descendants identify a Drive-native source. (A root folder
+    // can be the Drive mount itself — labelling it "spreadsheet"
+    // because one of its files came from Sheets would be wrong.)
+    const dirKind = isRoot ? null : (node.kind || null);
+    updateTreeRow(li, { folder, displayName, depth, isOpen, hasChildren, isSelected, summary, sharedReadonly, dirKind });
     targetRows.push(li);
     seenKeys.add(cacheKey);
 

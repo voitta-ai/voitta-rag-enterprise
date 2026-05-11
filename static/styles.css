@@ -549,11 +549,30 @@ input[type="text"], input[type="file"] {
     min-width: 0;
     font-size: 13px;
 }
-.tree-row .label .glyph { flex-shrink: 0; font-size: 14px; }
+.tree-row .label .glyph {
+    flex-shrink: 0;
+    width: 14px;
+    height: 14px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 0;
+}
+.tree-row .label .glyph svg { display: block; }
 .tree-row.folder-root .label .glyph,
 .tree-row.dir .label .glyph { color: var(--color-accent); }
 .tree-row.file .label { color: var(--color-text-secondary); }
 .tree-row.file .label .glyph { color: var(--color-text-tertiary); }
+
+/* Selected row: monochrome icons inherit white via currentColor,
+   but the explicit-fill Google Workspace icons (dir-kind-*) keep
+   their brand colour — the row's accent background already
+   provides plenty of contrast. */
+.tree-row.dir-kind-document .label .glyph,
+.tree-row.dir-kind-spreadsheet .label .glyph,
+.tree-row.dir-kind-presentation .label .glyph,
+.tree-row.dir-kind-drawing .label .glyph,
+.tree-row.dir-kind-form .label .glyph { color: inherit; }
 
 .tree-row .num {
     text-align: right;
