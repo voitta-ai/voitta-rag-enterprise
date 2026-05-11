@@ -562,12 +562,16 @@ input[type="text"], input[type="file"] {
 .tree-row.folder-root .label .glyph,
 .tree-row.dir .label .glyph { color: var(--color-accent); }
 .tree-row.file .label { color: var(--color-text-secondary); }
-.tree-row.file .label .glyph { color: var(--color-text-tertiary); }
+/* File glyphs inherit the row's text colour so the page outline +
+   monochrome overlays read clearly on both light and dark themes.
+   ``var(--color-text-tertiary)`` was too dim against the dark-mode
+   surface — the CAD wireframe in particular vanished. */
+.tree-row.file .label .glyph { color: inherit; }
 
 /* Selected row: monochrome icons inherit white via currentColor,
-   but the explicit-fill Google Workspace icons (dir-kind-*) keep
-   their brand colour — the row's accent background already
-   provides plenty of contrast. */
+   but the explicit-fill brand icons (dir-kind-* and ext-driven
+   step/freecad/pdf) keep their colour — the row's accent background
+   already provides plenty of contrast. */
 .tree-row.dir-kind-document .label .glyph,
 .tree-row.dir-kind-spreadsheet .label .glyph,
 .tree-row.dir-kind-presentation .label .glyph,

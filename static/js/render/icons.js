@@ -138,9 +138,22 @@ const _OVERLAYS = {
         `<text x="3.0" y="11.4" font-family="ui-monospace, Menlo, monospace" font-size="4.2" font-weight="700" fill="currentColor">&lt;/&gt;</text>`,
     data:
         `<text x="3.4" y="11.4" font-family="ui-monospace, Menlo, monospace" font-size="4.6" font-weight="700" fill="currentColor">{ }</text>`,
+    // Generic CAD (.stl / .obj / .gltf / .glb / .3mf / .dxf / .dwg / .iges)
+    // — wireframe iso cube in currentColor.
     cad:
-        `<path d="M7 6.0 L9.6 7.2 L9.6 9.6 L7 10.8 L4.4 9.6 L4.4 7.2 Z" fill="none" stroke="currentColor" stroke-width="0.7" stroke-linejoin="round"/>` +
-        `<path d="M7 6.0 L7 8.4 L4.4 9.6 M7 8.4 L9.6 9.6" fill="none" stroke="currentColor" stroke-width="0.6"/>`,
+        `<path d="M7 6.0 L9.6 7.2 L9.6 9.6 L7 10.8 L4.4 9.6 L4.4 7.2 Z" fill="none" stroke="currentColor" stroke-width="0.8" stroke-linejoin="round"/>` +
+        `<path d="M7 6.0 L7 8.4 L4.4 9.6 M7 8.4 L9.6 9.6" fill="none" stroke="currentColor" stroke-width="0.7"/>`,
+    // STEP / STP — filled teal cube with white wireframe (industrial
+    // "blueprint" feel). No formal STEP brand colour exists; teal
+    // distinguishes from Docs blue without colliding with FreeCAD red.
+    step:
+        `<path fill="#0E7C7B" d="M7 5.8 L9.8 7.0 V9.6 L7 10.9 L4.2 9.6 V7.0 Z"/>` +
+        `<path fill="none" stroke="#fff" stroke-width="0.6" stroke-linejoin="round" d="M4.2 7.0 L7 8.3 L9.8 7.0 M7 8.3 V10.9"/>`,
+    // FCStd — FreeCAD red-orange filled cube with a white "F" mark
+    // (the FreeCAD logo's defining colour, simplified to read at 14px).
+    freecad:
+        `<path fill="#CB333B" d="M7 5.4 L10.4 7.0 V10.0 L7 11.6 L3.6 10.0 V7.0 Z"/>` +
+        `<path fill="#fff" d="M5.8 7.4 H8.6 V8.1 H6.6 V8.9 H8.2 V9.6 H6.6 V10.6 H5.8 Z"/>`,
     text:
         `<line x1="3.6" y1="6.8" x2="9.6" y2="6.8" stroke="currentColor" stroke-width="0.7"/>` +
         `<line x1="3.6" y1="8.2" x2="9.6" y2="8.2" stroke="currentColor" stroke-width="0.7"/>` +
@@ -187,9 +200,11 @@ const _EXT_TO_KIND = new Map([
     [".yaml", "data"], [".yml", "data"], [".toml", "data"], [".xml", "data"],
     [".ini", "data"], [".cfg", "data"], [".conf", "data"], [".env", "data"],
     [".txt", "text"], [".log", "text"], [".text", "text"],
-    [".step", "cad"], [".stp", "cad"], [".stl", "cad"], [".obj", "cad"],
-    [".glb", "cad"], [".gltf", "cad"], [".fcstd", "cad"], [".3mf", "cad"],
-    [".dxf", "cad"], [".dwg", "cad"], [".iges", "cad"], [".igs", "cad"],
+    [".step", "step"], [".stp", "step"], [".iges", "step"], [".igs", "step"],
+    [".fcstd", "freecad"],
+    [".stl", "cad"], [".obj", "cad"],
+    [".glb", "cad"], [".gltf", "cad"], [".3mf", "cad"],
+    [".dxf", "cad"], [".dwg", "cad"],
     [".zip", "archive"], [".tar", "archive"], [".tgz", "archive"],
     [".gz", "archive"], [".bz2", "archive"], [".xz", "archive"],
     [".7z", "archive"], [".rar", "archive"], [".zst", "archive"],
