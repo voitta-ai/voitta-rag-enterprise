@@ -25,8 +25,15 @@ import {
     iconForDirKind,
     iconForFile,
     iconForFolder,
-    iconForFolderRoot,
+    iconForSource,
 } from "./icons.js";
+
+// Helper — set the <img> src in place if and only if it changed.
+// Bypasses iconForX → string → src loops, and stops the browser from
+// re-decoding the SVG on every reconcile pass.
+function setIconSrc(img, src) {
+    if (img.getAttribute("src") !== src) img.setAttribute("src", src);
+}
 import {
     getSelectedFolderId,
     getSelectedRelDir,
@@ -66,7 +73,13 @@ function buildFolderRoot(folderId) {
     label.className = "label";
     const glyph = document.createElement("span");
     glyph.className = "glyph";
-    glyph.innerHTML = iconForFolderRoot();
+    const img = document.createElement("img");
+    img.className = "icon-img";
+    img.alt = "";
+    // Initial src — overwritten on first updateTreeRow once the
+    // sync_source_kind is known.
+    img.src = iconForSource("regular");
+    glyph.append(img);
     const text = document.createElement("span");
     label.append(glyph, text);
     nameCell.append(chevron, label);
@@ -83,10 +96,11 @@ function buildFolderRoot(folderId) {
     li.append(nameCell, fileCount, indexedCount, tag, slot1, slot2);
     li.addEventListener("click", onRowClick);
 
-    li._refs = { nameCell, chevron, label, glyph, text, fileCount, indexedCount, tag, slot1, slot2 };
+    li._refs = { nameCell, chevron, label, glyph, img, text, fileCount, indexedCount, tag, slot1, slot2 };
     li._activeSwitch = null;
     li._shareSwitch = null;
     li._isRoot = true;
+    li._sourceKind = null;
     return li;
 }
 
@@ -106,7 +120,11 @@ function buildDirRow(folderId, relDir) {
     label.className = "label";
     const glyph = document.createElement("span");
     glyph.className = "glyph";
-    glyph.innerHTML = iconForFolder();
+    const img = document.createElement("img");
+    img.className = "icon-img";
+    img.alt = "";
+    img.src = iconForFolder();
+    glyph.append(img);
     const text = document.createElement("span");
     label.append(glyph, text);
     nameCell.append(chevron, label);
@@ -125,9 +143,9 @@ function buildDirRow(folderId, relDir) {
     li.append(nameCell, fileCount, indexedCount, tag, spacer1, spacer2);
     li.addEventListener("click", onRowClick);
 
-    li._refs = { nameCell, chevron, glyph, text, fileCount, indexedCount, tag };
+    li._refs = { nameCell, chevron, glyph, img, text, fileCount, indexedCount, tag };
     li._isRoot = false;
-    li._dirKind = null;  // tracked across renders so we only re-set innerHTML on change
+    li._dirKind = null;
     return li;
 }
 
@@ -145,6 +163,10 @@ function buildFileRow(fileId) {
     label.className = "label";
     const glyph = document.createElement("span");
     glyph.className = "glyph";
+    const img = document.createElement("img");
+    img.className = "icon-img";
+    img.alt = "";
+    glyph.append(img);
     const text = document.createElement("span");
     label.append(glyph, text);
     nameCell.append(chevron, label);
@@ -156,8 +178,8 @@ function buildFileRow(fileId) {
 
     li.append(nameCell, blank1, blank2, tag);
 
-    li._refs = { nameCell, label, glyph, text, tag };
-    li._fileExtKey = null;  // last extension key we rendered an icon for
+    li._refs = { nameCell, label, glyph, img, text, tag };
+    li._fileExtKey = null;
     return li;
 }
 
@@ -201,11 +223,18 @@ function updateTreeRow(li, { folder, displayName, depth, isOpen, hasChildren, is
     if (!hasChildren) chevCls += " leaf";
     setIfChanged(r.chevron, "className", chevCls);
 
-    // Swap the dir glyph between folder and Google-Workspace icon
-    // *only* when it changes — innerHTML writes are otherwise free
-    // but produce churn under the dev-tools mutation observer.
-    if (!li._isRoot && li._dirKind !== (dirKind || null)) {
-        r.glyph.innerHTML = iconForDirKind(dirKind) || iconForFolder();
+    // Source kind icon on top-level rows; dir-kind / folder on
+    // nested ones. Update via src swap so the browser keeps the
+    // <img> cached and the DOM node never moves.
+    if (li._isRoot) {
+        const sk = folder.sync_source_kind || "regular";
+        if (li._sourceKind !== sk) {
+            setIconSrc(r.img, iconForSource(sk));
+            li._sourceKind = sk;
+        }
+    } else if (li._dirKind !== (dirKind || null)) {
+        const dirIcon = iconForDirKind(dirKind) || iconForFolder();
+        setIconSrc(r.img, dirIcon);
         li._dirKind = dirKind || null;
     }
 
@@ -292,7 +321,7 @@ function updateFileRow(li, { file, depth }) {
         extKey = ".tar.gz";
     }
     if (li._fileExtKey !== extKey) {
-        r.glyph.innerHTML = iconForFile(file.rel_path);
+        setIconSrc(r.img, iconForFile(file.rel_path));
         li._fileExtKey = extKey;
     }
     if (r.label.title !== file.rel_path) r.label.title = file.rel_path;

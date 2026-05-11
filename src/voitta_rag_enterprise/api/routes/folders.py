@@ -57,6 +57,16 @@ class FolderOut(BaseModel):
     enabled: bool
     created_at: int
     has_sync_source: bool = False
+    # UI-facing data-source identifier. Folded down from the joined
+    # FolderSyncSource row so the frontend doesn't need to know about
+    # gh_auth_method / gd_client_id / etc. One of:
+    #   "regular"         — no sync source
+    #   "github_public"   — GitHub mirror with no credentials
+    #   "github_private"  — GitHub mirror with SSH or token auth
+    #   "google_drive"    — Drive folder sync
+    # Future connectors append new values; the frontend falls back
+    # to the "regular" upload-folder icon for anything unknown.
+    sync_source_kind: str = "regular"
     # Ownership / sharing — see services/acl.py docstring.
     owner_id: int | None = None
     owned: bool = False  # True if the calling user owns this folder
@@ -82,10 +92,27 @@ class FileOut(BaseModel):
     source_url: str | None
 
 
+def _sync_source_kind(source: FolderSyncSource | None) -> str:
+    """Reduce the FolderSyncSource row to a single UI-facing string.
+
+    ``regular`` covers both "no row" and any row whose ``source_type``
+    we don't yet have a frontend icon for — the UI falls back to the
+    generic upload-folder icon, so it's safe to treat as default.
+    """
+    if source is None:
+        return "regular"
+    if source.source_type == "github":
+        return "github_private" if source.gh_auth_method else "github_public"
+    if source.source_type == "google_drive":
+        return "google_drive"
+    return "regular"
+
+
 def _to_folder_out(
     f: Folder,
     *,
     has_sync_source: bool = False,
+    sync_source_kind: str = "regular",
     owned: bool = False,
     active: bool = True,
 ) -> FolderOut:
@@ -97,6 +124,7 @@ def _to_folder_out(
         enabled=f.enabled,
         created_at=f.created_at,
         has_sync_source=has_sync_source,
+        sync_source_kind=sync_source_kind,
         owner_id=f.owner_id,
         owned=owned,
         shared=bool(f.shared),
@@ -648,17 +676,13 @@ def set_share(
     folder.shared = bool(body.shared)
     db.commit()
     db.refresh(folder)
-    has_sync = (
-        db.execute(
-            select(FolderSyncSource.folder_id).where(
-                FolderSyncSource.folder_id == folder_id
-            )
-        ).first()
-        is not None
-    )
+    sync_src = db.execute(
+        select(FolderSyncSource).where(FolderSyncSource.folder_id == folder_id)
+    ).scalar_one_or_none()
     out = _to_folder_out(
         folder,
-        has_sync_source=has_sync,
+        has_sync_source=sync_src is not None,
+        sync_source_kind=_sync_source_kind(sync_src),
         owned=True,
         active=folder_active_for_user(db, folder_id, user.id),
     )
@@ -683,17 +707,13 @@ def set_active_endpoint(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Folder not found")
     set_folder_active(db, folder_id, user.id, bool(body.active))
     db.commit()
-    has_sync = (
-        db.execute(
-            select(FolderSyncSource.folder_id).where(
-                FolderSyncSource.folder_id == folder_id
-            )
-        ).first()
-        is not None
-    )
+    sync_src = db.execute(
+        select(FolderSyncSource).where(FolderSyncSource.folder_id == folder_id)
+    ).scalar_one_or_none()
     return _to_folder_out(
         folder,
-        has_sync_source=has_sync,
+        has_sync_source=sync_src is not None,
+        sync_source_kind=_sync_source_kind(sync_src),
         owned=is_folder_owner(db, folder_id, user.id),
         active=bool(body.active),
     )
@@ -705,14 +725,16 @@ def list_folders(
     user: CurrentUser = Depends(current_user),
 ) -> list[FolderOut]:
     rows = db.execute(select(Folder).order_by(Folder.id)).scalars().all()
-    sync_ids = {
-        fid for (fid,) in db.execute(select(FolderSyncSource.folder_id)).all()
+    sync_rows = db.execute(select(FolderSyncSource)).scalars().all()
+    sync_by_folder: dict[int, FolderSyncSource] = {
+        s.folder_id: s for s in sync_rows
     }
     if get_settings().single_user:
         return [
             _to_folder_out(
                 f,
-                has_sync_source=f.id in sync_ids,
+                has_sync_source=f.id in sync_by_folder,
+                sync_source_kind=_sync_source_kind(sync_by_folder.get(f.id)),
                 owned=True,
                 active=folder_active_for_user(db, f.id, user.id),
             )
@@ -722,7 +744,8 @@ def list_folders(
     return [
         _to_folder_out(
             f,
-            has_sync_source=f.id in sync_ids,
+            has_sync_source=f.id in sync_by_folder,
+            sync_source_kind=_sync_source_kind(sync_by_folder.get(f.id)),
             owned=is_folder_owner(db, f.id, user.id),
             active=folder_active_for_user(db, f.id, user.id),
         )
