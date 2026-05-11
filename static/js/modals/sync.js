@@ -144,6 +144,7 @@ function openSyncModal() {
     $("#sync-gd-client-secret").placeholder = "GOCSPX-…";
     $("#sync-gd-add-folder-id").value = "";
     setGdFolders([]);
+    _snapshotSavedGdFolders([]);
     $("#sync-gd-sa-json").value = "";
     $("#sync-gd-sa-json").placeholder = '{"type":"service_account","client_email":"…","private_key":"…"}';
     setGdAuthMode("oauth");
@@ -191,6 +192,19 @@ function setSyncType(t) {
 // form on every set. Keeps the rendered list and the form-config call in
 // sync without parsing the DOM at submit time.
 let gdFolders = [];
+
+// Last-known-saved set of Drive folder IDs. Used by the Save handler
+// to detect folder *removals* (the cleanup pass deletes locally-mirrored
+// files for any folder that's no longer selected — see
+// services/sync/google_drive.py). When the user removes folders we
+// prompt before saving so they don't accidentally trash indexed data
+// without realizing it. Refreshed every time the modal loads from
+// server, every successful Save, and every Sync-now.
+let savedGdFolderIds = new Set();
+
+function _snapshotSavedGdFolders(folders) {
+    savedGdFolderIds = new Set((folders || []).map((f) => String(f.id || "")));
+}
 
 // Which credential pane is showing — drives both the rendered inputs and
 // what gets serialised in gdFormConfig. The two flows have meaningfully
@@ -347,6 +361,7 @@ async function loadSyncSource() {
             $("#sync-gd-client-id").value = gd.client_id || "";
             preselectGdProviderByClientId(gd.client_id || "");
             setGdFolders(gd.folders || []);
+            _snapshotSavedGdFolders(gd.folders || []);
             $("#sync-gd-client-secret").placeholder = gd.has_client_secret ? "(saved — type to replace)" : "GOCSPX-…";
             $("#sync-gd-sa-json").placeholder = gd.has_service_account ? "(service account JSON saved — paste a new one to replace)" : '{"type":"service_account","client_email":"…","private_key":"…"}';
             // Pick the right tab. If the saved config has a service-account
@@ -601,33 +616,85 @@ $("#sync-gh-load-branches").addEventListener("click", async () => {
     }
 });
 
+// Drive-folder removals trigger orphan-cleanup on the next sync —
+// files mirrored locally for any removed folder get deleted from disk,
+// then the watcher cascades that into SQLite + Qdrant removals. The
+// user almost certainly wants that, but they need to *know* it's
+// happening — silent data loss is the worst failure mode. We compare
+// the current selection against ``savedGdFolderIds`` (snapshot from
+// the server's last state) and warn before saving when anything got
+// dropped.
+function _removedGdFolderCount() {
+    const current = new Set(gdFolders.map((f) => String(f.id || "")));
+    let removed = 0;
+    for (const id of savedGdFolderIds) {
+        if (!current.has(id)) removed += 1;
+    }
+    return removed;
+}
+
+// Persist the form. Re-used by both ``Save`` and ``Sync now`` after
+// any confirm prompts have cleared. Returns the server response so
+// callers can chain.
+async function _doSave() {
+    const out = await api.putSync(syncFolderId, syncBody());
+    $("#sync-delete").hidden = false;
+    renderSyncStatus(out);
+    // Refresh credential placeholders: typed-in secrets are now stored
+    // server-side, so we wipe the inputs (so a re-save doesn't re-send
+    // them) and flip the placeholders to the "(saved — type to replace)"
+    // wording. Same dance for both OAuth and SA panes — the user sees
+    // "I just saved, the field is blank now" + "(saved — paste again to
+    // replace)" instead of being unsure whether their paste persisted.
+    if (out.source_type === "google_drive" && out.google_drive) {
+        const gd = out.google_drive;
+        $("#sync-gd-client-secret").value = "";
+        $("#sync-gd-client-secret").placeholder = gd.has_client_secret
+            ? "(saved — type to replace)"
+            : "GOCSPX-…";
+        $("#sync-gd-sa-json").value = "";
+        $("#sync-gd-sa-json").placeholder = gd.has_service_account
+            ? "(service account JSON saved — paste a new one to replace)"
+            : '{"type":"service_account","client_email":"…","private_key":"…"}';
+        // Folders the server now considers persisted — adopt them as
+        // the canonical state so a subsequent Sync-now goes through
+        // exactly what was saved (and we surface server-side renames
+        // / dedupes in the next render).
+        setGdFolders(gd.folders || []);
+        _snapshotSavedGdFolders(gd.folders || []);
+        setGdConnState({ connected: gd.connected, hasClientSecret: gd.has_client_secret });
+    }
+    return out;
+}
+
 $("#sync-save").addEventListener("click", async () => {
     try {
-        const out = await api.putSync(syncFolderId, syncBody());
-        $("#sync-delete").hidden = false;
-        renderSyncStatus(out);
-        // Refresh credential placeholders: typed-in secrets are now stored
-        // server-side, so we wipe the inputs (so a re-save doesn't re-send
-        // them) and flip the placeholders to the "(saved — type to replace)"
-        // wording. Same dance for both OAuth and SA panes — the user sees
-        // "I just saved, the field is blank now" + "(saved — paste again to
-        // replace)" instead of being unsure whether their paste persisted.
-        if (out.source_type === "google_drive" && out.google_drive) {
-            const gd = out.google_drive;
-            $("#sync-gd-client-secret").value = "";
-            $("#sync-gd-client-secret").placeholder = gd.has_client_secret
-                ? "(saved — type to replace)"
-                : "GOCSPX-…";
-            $("#sync-gd-sa-json").value = "";
-            $("#sync-gd-sa-json").placeholder = gd.has_service_account
-                ? "(service account JSON saved — paste a new one to replace)"
-                : '{"type":"service_account","client_email":"…","private_key":"…"}';
-            // Folders the server now considers persisted — adopt them as
-            // the canonical state so a subsequent Sync-now goes through
-            // exactly what was saved (and we surface server-side renames
-            // / dedupes in the next render).
-            setGdFolders(gd.folders || []);
-            setGdConnState({ connected: gd.connected, hasClientSecret: gd.has_client_secret });
+        // If the user removed Drive folders since the last load/save,
+        // make sure they understand the cleanup that's coming on the
+        // next sync. "Save & sync now" is the obvious follow-through;
+        // "Save only" lets them stage the change for later.
+        const removed = _removedGdFolderCount();
+        let triggerAfter = false;
+        if (removed > 0) {
+            const msg =
+                `You removed ${removed} Drive folder${removed === 1 ? "" : "s"} ` +
+                `from this sync.\n\n` +
+                `On the next sync, files mirrored from the removed folder(s) ` +
+                `will be deleted from disk, then their SQLite rows and Qdrant ` +
+                `points will be wiped.\n\n` +
+                `Save and trigger that sync NOW?\n\n` +
+                `• OK = Save & Sync now (cleanup runs immediately)\n` +
+                `• Cancel = Save only (cleanup waits for your next Sync-now ` +
+                `or the auto-sync timer)`;
+            triggerAfter = confirm(msg);
+        }
+        await _doSave();
+        if (triggerAfter) {
+            await api.triggerSync(syncFolderId);
+            alert("Sync queued. Watch the Recent jobs panel for progress; " +
+                  "deletions will follow as the watcher catches up to the " +
+                  "removed files.");
+            closeSyncModal();
         }
     } catch (err) {
         alert(err.message);
@@ -641,7 +708,7 @@ $("#sync-trigger").addEventListener("click", async () => {
     // trigger fired against the old config. Saving every time gives the
     // user the obvious "Sync now = sync what I see in this form" semantic.
     try {
-        await api.putSync(syncFolderId, syncBody());
+        await _doSave();
         await api.triggerSync(syncFolderId);
         alert("Sync queued. Watch the Recent jobs panel for progress.");
         closeSyncModal();
