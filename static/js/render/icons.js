@@ -27,10 +27,20 @@ const SIMPLE = `${PATH}/simple`;
 // ``data-theme`` attribute. Reading the live DOM means the function
 // stays correct after a runtime theme toggle without any subscriber
 // plumbing — the icon resolver is called on every reconcile pass.
-function _githubIcon() {
-    const isDark = document.documentElement.getAttribute("data-theme") === "dark"
+function _isDarkTheme() {
+    return document.documentElement.getAttribute("data-theme") === "dark"
         || document.body.getAttribute("data-theme") === "dark";
-    return `${SIMPLE}/${isDark ? "github-dark" : "github-light"}.svg`;
+}
+
+function _githubIcon() {
+    return `${SIMPLE}/${_isDarkTheme() ? "github-dark" : "github-light"}.svg`;
+}
+
+// FreeCAD ships in a single brand red (#CB333B) which reads on light
+// but goes dim on dark. We carry two variants — same approach as
+// GitHub — and pick at lookup time.
+function _freecadIcon() {
+    return `${SIMPLE}/${_isDarkTheme() ? "freecad-dark" : "freecad-light"}.svg`;
 }
 
 // ---------------------------------------------------------------------------
@@ -174,9 +184,10 @@ const _EXT_TO_FILE_ICON = new Map([
 export function iconForFile(rel_path) {
     if (!rel_path) return `${M_FILE}/document.svg`;
     const lower = rel_path.toLowerCase();
-    // FreeCAD: brand-faithful Simple Icons logo. Special-cased because
-    // it lives in a different vendor dir.
-    if (lower.endsWith(".fcstd")) return `${SIMPLE}/freecad.svg`;
+    // FreeCAD: brand-faithful Simple Icons logo. Special-cased
+    // because it lives in a different vendor dir AND needs a
+    // theme-aware fill (the single brand red dims on dark mode).
+    if (lower.endsWith(".fcstd")) return _freecadIcon();
     // Compound suffixes — collapse to archive before single-ext lookup.
     if (lower.endsWith(".tar.gz") || lower.endsWith(".tar.bz2") || lower.endsWith(".tar.xz")) {
         return `${M_FILE}/zip.svg`;
