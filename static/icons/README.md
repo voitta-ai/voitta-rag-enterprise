@@ -17,19 +17,35 @@ To refresh: bump the pin in `scripts/refresh_icons.sh` (when added) or
 re-run the curl loop documented at the top of `static/js/render/icons.js`,
 then audit the diff for any visual regressions.
 
-## simple/ — Simple Icons (CC0)
+## simple/ — mixed brand-icon set
 
-* **Source:** https://github.com/simple-icons/simple-icons
-* **Pin:** `09e084221b9ab229e15b42e035d856e99554a1a4` (develop branch as of 2026-05-11)
-* **License:** CC0 1.0 — `simple/LICENSE.md`
-* **What's here:** brand-faithful logos in their canonical colours —
-  FreeCAD (for `.FCStd`), Google Docs / Sheets / Slides / Forms (for
-  doc-stem dirs), Google Drive / GitHub / Dropbox / Google Cloud (for
-  top-level data-source badges).
-* **Not present:** Microsoft (SharePoint, Azure) and AWS (S3) — Simple
-  Icons removed these in 2024 over brand-guidelines concerns. When those
-  connectors land we'll vendor from `https://github.com/lobehub/lobe-icons`
-  or sketch our own; see the TODO block in `static/js/render/icons.js`.
+This directory is named after our original Simple Icons source but
+now mixes three providers. All are individually attributed:
+
+* **Simple Icons** (CC0 1.0 — `simple/LICENSE.md`)
+  Source: https://github.com/simple-icons/simple-icons @ `09e0842`
+  Files: `freecad.svg`, `dropbox.svg`, `googlecloud.svg`.
+
+* **Wikimedia Commons / public-domain Google logos**
+  Source: https://commons.wikimedia.org/wiki/File:Google_Drive_icon_(2020).svg
+  and the matching `Google_{Docs,Sheets,Slides,Forms}_2020_Logo.svg`
+  pages. These are released by Google as trademarks and are
+  reproduced here under fair use as application icons. Files:
+  `googledrive.svg`, `googledocs.svg`, `googlesheets.svg`,
+  `googleslides.svg`, `googleforms.svg`. The multi-colour brand
+  versions — `simple-icons` only ships single-fill paths.
+
+* **Lobe Icons** (MIT) for the GitHub octocat.
+  Source: https://github.com/lobehub/lobe-icons @ `0c66d0a3`.
+  Shipped as `github-light.svg` (`fill="#181717"`) and
+  `github-dark.svg` (`fill="#f5f5f7"`) — the upstream SVG uses
+  `fill="currentColor"` which an `<img>` element can't inherit.
+
+* **Not present:** Microsoft (SharePoint, Azure) and AWS (S3) —
+  Simple Icons removed these in 2024 over brand-guidelines concerns.
+  When those connectors land we'll vendor proper-coloured icons
+  from upstream brand resource pages (the same path the Google
+  icons took). See the TODO block in `static/js/render/icons.js`.
 
 ## Why vendor at all
 

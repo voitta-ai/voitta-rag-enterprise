@@ -26,6 +26,8 @@ import {
     iconForFile,
     iconForFolder,
     iconForSource,
+    lockBadgeIcon,
+    sourceNeedsLockBadge,
 } from "./icons.js";
 
 // Helper — set the <img> src in place if and only if it changed.
@@ -33,6 +35,27 @@ import {
 // re-decoding the SVG on every reconcile pass.
 function setIconSrc(img, src) {
     if (img.getAttribute("src") !== src) img.setAttribute("src", src);
+}
+
+// Show / hide a small lock badge layered over the source glyph.
+// Used for the "github_private" data source — the octocat plus a
+// padlock corner is the visual cue most users already know from
+// GitHub itself. The badge is a separate <img> appended on first
+// activation; subsequent updates only toggle its hidden state.
+function _applyLockBadge(glyphSpan, on) {
+    let badge = glyphSpan.querySelector(".source-lock");
+    if (on) {
+        if (!badge) {
+            badge = document.createElement("img");
+            badge.className = "source-lock";
+            badge.alt = "";
+            badge.src = lockBadgeIcon();
+            glyphSpan.append(badge);
+        }
+        badge.hidden = false;
+    } else if (badge) {
+        badge.hidden = true;
+    }
 }
 import {
     getSelectedFolderId,
@@ -231,6 +254,7 @@ function updateTreeRow(li, { folder, displayName, depth, isOpen, hasChildren, is
         if (li._sourceKind !== sk) {
             setIconSrc(r.img, iconForSource(sk));
             li._sourceKind = sk;
+            _applyLockBadge(r.glyph, sourceNeedsLockBadge(sk));
         }
     } else if (li._dirKind !== (dirKind || null)) {
         const dirIcon = iconForDirKind(dirKind) || iconForFolder();

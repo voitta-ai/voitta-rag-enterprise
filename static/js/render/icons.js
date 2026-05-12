@@ -21,6 +21,18 @@ const M_FOLDER = `${PATH}/material/folder`;
 const M_SRC = `${PATH}/material/source`;
 const SIMPLE = `${PATH}/simple`;
 
+// GitHub's logo is a monochrome octocat — needs a dark fill on a
+// light background and a light fill on a dark background. We ship
+// both prebaked variants and pick at lookup time from the body's
+// ``data-theme`` attribute. Reading the live DOM means the function
+// stays correct after a runtime theme toggle without any subscriber
+// plumbing — the icon resolver is called on every reconcile pass.
+function _githubIcon() {
+    const isDark = document.documentElement.getAttribute("data-theme") === "dark"
+        || document.body.getAttribute("data-theme") === "dark";
+    return `${SIMPLE}/${isDark ? "github-dark" : "github-light"}.svg`;
+}
+
 // ---------------------------------------------------------------------------
 // Folder icons
 // ---------------------------------------------------------------------------
@@ -46,30 +58,47 @@ export function iconForFolder() {
 // Simple Icons ships googledrive / dropbox / googlecloud today;
 // Microsoft + AWS were dropped by Simple Icons in 2024 (brand policy)
 // so SharePoint / Azure / S3 stay TODO until we pick a replacement set.
-const _SOURCE_ICONS = {
-    regular: `${M_FOLDER}/folder-upload.svg`,
-    github_public: `${M_FOLDER}/folder-git.svg`,
-    // ``folder-private`` already carries a lock motif; no overlay needed.
-    github_private: `${M_FOLDER}/folder-private.svg`,
-    google_drive: `${SIMPLE}/googledrive.svg`,
-    dropbox: `${SIMPLE}/dropbox.svg`,
-    gcs: `${SIMPLE}/googlecloud.svg`,
-    // TODO: vendor microsoftsharepoint / amazons3 / microsoftazure when
-    //       Microsoft / AWS connectors land. Lobe-icons looks promising.
-    sharepoint: null,
-    s3: null,
-    azure_data_lake: null,
-};
-
-export function iconForSource(syncSourceKind) {
-    return _SOURCE_ICONS[syncSourceKind] || _SOURCE_ICONS.regular;
+// Source-row resolvers. GitHub uses the proper Octocat brand mark
+// in light/dark variants; everything else uses a brand-coloured
+// vendor SVG (Google Drive's three-colour mark, etc.). The folder-
+// upload (Material) is the only Material-folder icon kept here —
+// it visually means "data lives in this folder, was uploaded".
+function _sourceIcon(kind) {
+    switch (kind) {
+        case "github_public":
+        case "github_private":
+            return _githubIcon();  // brand octocat, theme-aware
+        case "google_drive":
+            return `${SIMPLE}/googledrive.svg`;
+        case "dropbox":
+            return `${SIMPLE}/dropbox.svg`;
+        case "gcs":
+            return `${SIMPLE}/googlecloud.svg`;
+        // TODO: vendor sharepoint / amazons3 / microsoftazure when
+        //       those connectors land. Simple Icons dropped Microsoft
+        //       and AWS in 2024 — pick a replacement set then.
+        case "sharepoint":
+        case "s3":
+        case "azure_data_lake":
+        case "regular":
+        default:
+            return `${M_FOLDER}/folder-upload.svg`;
+    }
 }
 
-export function isSourceIconBranded(syncSourceKind) {
-    // Brand icons (Simple Icons) carry their own fills and should NOT
-    // inherit the row's text colour on selection. Material folder
-    // variants are colour-tinted by PKief — same: don't override.
-    return Boolean(_SOURCE_ICONS[syncSourceKind]);
+export function iconForSource(syncSourceKind) {
+    return _sourceIcon(syncSourceKind);
+}
+
+// Private GitHub repos need a lock badge over the octocat — the
+// caller layers a separate <img> on top via the .source-lock CSS
+// class. This flag tells the caller whether to render it.
+export function sourceNeedsLockBadge(syncSourceKind) {
+    return syncSourceKind === "github_private";
+}
+
+export function lockBadgeIcon() {
+    return `${M_SRC}/lock.svg`;
 }
 
 // ---------------------------------------------------------------------------

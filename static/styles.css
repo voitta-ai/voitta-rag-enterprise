@@ -557,7 +557,24 @@ input[type="text"], input[type="file"] {
     align-items: center;
     justify-content: center;
     line-height: 0;
+    position: relative;  /* anchor for the .source-lock overlay */
 }
+/* Private-source lock badge layered over the bottom-right corner
+   of the glyph. ~9 px so it's a clear cue without obscuring the
+   underlying brand mark; backdrop disc keeps it legible whether
+   the underlying icon is dark or light. */
+.tree-row .label .glyph .source-lock {
+    position: absolute;
+    right: -3px;
+    bottom: -3px;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--color-bg-elevated);
+    padding: 1px;
+    box-shadow: 0 0 0 1px var(--color-border);
+}
+.tree-row .label .glyph .source-lock[hidden] { display: none; }
 /* Vendored SVGs carry their own colour. ``<img>`` keeps the raster
    pixel-perfect on retina without the per-render decode overhead a
    plain inline-SVG would pay. */
