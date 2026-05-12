@@ -33,9 +33,17 @@ from voitta_rag_enterprise.services.parsers.cad_fcstd_parser import (
 def _make_fcstd(tmp_path: Path, objects: list[dict]) -> Path:
     """Build an FCStd zip from a list of object dicts.
 
-    Each dict is ``{"name", "type", "label", "placement"?, "group"?}``
-    where ``placement = (px, py, pz, q0, q1, q2, q3)`` and ``group``
-    is a list of child object names (for App::Part containers)."""
+    Each dict is ``{"name", "type", "label", "placement"?, "group"?,
+    "notes"?, "cells"?}`` where:
+    - ``placement = (px, py, pz, q0, q1, q2, q3)``
+    - ``group`` is a list of child object names (for App::Part containers)
+    - ``notes`` is a ``{prop_name: value}`` mapping emitted as
+      ``App::PropertyString`` annotations (Description / Note / etc.)
+    - ``cells`` is a ``{address: content}`` mapping emitted as a
+      Spreadsheet::Sheet ``cells`` property with one ``<Cell/>``
+      element per entry, mirroring FreeCAD's PropertySheet::Save format
+    """
+    from xml.sax.saxutils import escape, quoteattr
     objs_xml = []
     data_xml = []
     for o in objects:
@@ -57,6 +65,23 @@ def _make_fcstd(tmp_path: Path, objects: list[dict]) -> Path:
             props.append(
                 f'        <Property name="Group" type="App::PropertyLinkList">'
                 f'<LinkList>{links}</LinkList></Property>'
+            )
+        for prop_name, value in (o.get("notes") or {}).items():
+            props.append(
+                f'        <Property name="{prop_name}" '
+                f'type="App::PropertyString" group="Notes">'
+                f'<String value={quoteattr(value)}/></Property>'
+            )
+        cells = o.get("cells") or {}
+        if cells:
+            cell_xml = "".join(
+                f'<Cell address="{addr}" content={quoteattr(content)}/>'
+                for addr, content in cells.items()
+            )
+            props.append(
+                f'        <Property name="cells" type="Spreadsheet::PropertySheet">'
+                f'<Cells Count="{len(cells)}" xlink="1">{cell_xml}</Cells>'
+                f'</Property>'
             )
         data_xml.append(
             f'    <Object name="{o["name"]}">\n'
@@ -357,3 +382,119 @@ def test_parser_extension_matches() -> None:
     assert p.can_parse(Path("/tmp/foo.fcstd"))
     assert p.can_parse(Path("/tmp/foo.FCStd"))
     assert not p.can_parse(Path("/tmp/foo.step"))
+
+
+# ---------------------------------------------------------------------------
+# Engineering-note + spreadsheet capture
+# ---------------------------------------------------------------------------
+
+
+def test_parser_captures_part_description(tmp_path: Path) -> None:
+    """``App::PropertyString`` named ``Description`` (or any of the
+    accepted aliases) attached to a Part::Feature lands in the
+    component's Engineering notes section."""
+    fp = _make_fcstd(tmp_path, [
+        {
+            "name": "root", "type": "App::Part", "label": "Lift",
+            "group": ["bracket"],
+        },
+        {
+            "name": "bracket", "type": "Part::Feature",
+            "label": "Floor pulley RR-a :: sheave",
+            "notes": {"Description": "Coincident with guide bar #4"},
+        },
+    ])
+    r = CadFCStdParser().parse(fp)
+    assert r.success, r.error
+    assert "### Engineering notes (1)" in r.content
+    assert "Coincident with guide bar #4" in r.content
+    assert "Floor pulley RR-a :: sheave" in r.content
+    assert "_Description_" in r.content
+
+
+def test_parser_captures_note_aliases(tmp_path: Path) -> None:
+    """``Note``, ``Comment`` and ``Remark`` are all surfaced — authors
+    don't always use the canonical ``Description`` spelling."""
+    fp = _make_fcstd(tmp_path, [
+        {
+            "name": "root", "type": "App::Part", "label": "Lift",
+            "group": ["a", "b", "c"],
+        },
+        {"name": "a", "type": "Part::Feature", "label": "Part A",
+         "notes": {"Note": "TBD: revise tolerance"}},
+        {"name": "b", "type": "Part::Feature", "label": "Part B",
+         "notes": {"Comment": "Vendor change pending"}},
+        {"name": "c", "type": "Part::Feature", "label": "Part C",
+         "notes": {"Remarks": "Re-check at next review"}},
+    ])
+    r = CadFCStdParser().parse(fp)
+    assert r.success
+    assert "TBD: revise tolerance" in r.content
+    assert "Vendor change pending" in r.content
+    assert "Re-check at next review" in r.content
+
+
+def test_parser_skips_empty_descriptions(tmp_path: Path) -> None:
+    """An empty Description property doesn't create a Notes section."""
+    fp = _make_fcstd(tmp_path, [
+        {
+            "name": "root", "type": "App::Part", "label": "Lift",
+            "group": ["a"],
+        },
+        {"name": "a", "type": "Part::Feature", "label": "Part A",
+         "notes": {"Description": ""}},
+    ])
+    r = CadFCStdParser().parse(fp)
+    assert r.success
+    assert "Engineering notes" not in r.content
+
+
+def test_parser_captures_spreadsheet_cells(tmp_path: Path) -> None:
+    """``Spreadsheet::Sheet`` cells round-trip into the markdown as
+    address-keyed rows, sorted row-then-column."""
+    fp = _make_fcstd(tmp_path, [
+        {
+            "name": "root", "type": "App::Part", "label": "Lift",
+            "group": ["leaf"],
+        },
+        {"name": "leaf", "type": "Part::Feature", "label": "Bracket"},
+        {
+            "name": "EngineeringNotes",
+            "type": "Spreadsheet::Sheet",
+            "label": "Engineering Notes",
+            "cells": {
+                "A1": "Label",
+                "B1": "Status",
+                "C1": "Note",
+                "A2": "Bracket",
+                "B2": "TBD",
+                "C2": "Awaiting drawings",
+                "A3": "Pulley",
+                "B3": "OK",
+                "C3": "Verified 2026-04",
+            },
+        },
+    ])
+    r = CadFCStdParser().parse(fp)
+    assert r.success, r.error
+    assert "## Spreadsheets" in r.content
+    assert "### Sheet: Engineering Notes" in r.content
+    assert "`A1`: Label" in r.content
+    assert "`C3`: Verified 2026-04" in r.content
+    # Row-major order: header row, then row 2, then row 3.
+    idx_a1 = r.content.index("`A1`")
+    idx_b1 = r.content.index("`B1`")
+    idx_a2 = r.content.index("`A2`")
+    assert idx_a1 < idx_b1 < idx_a2
+
+
+def test_parser_drops_empty_sheets(tmp_path: Path) -> None:
+    """A Spreadsheet object with no cells doesn't emit a section."""
+    fp = _make_fcstd(tmp_path, [
+        {"name": "root", "type": "App::Part", "label": "Lift", "group": ["leaf"]},
+        {"name": "leaf", "type": "Part::Feature", "label": "Bracket"},
+        {"name": "EmptySheet", "type": "Spreadsheet::Sheet", "label": "Empty"},
+    ])
+    r = CadFCStdParser().parse(fp)
+    assert r.success
+    assert "## Spreadsheets" not in r.content

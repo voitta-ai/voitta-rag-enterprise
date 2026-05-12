@@ -70,6 +70,17 @@ _DOUBLE_COLON = re.compile(r"^(?P<group>.+?)\s+::\s+(?P<part>.+)$")
 _BRACKET_GROUP = re.compile(r"^(?P<part>.+?)\s*\[(?P<group>[^\]]+)\]\s*$")
 _FREECAD_INSTANCE = re.compile(r"(?<=[^\s\d])\d{3,}$")
 
+# Property names that look like free-form engineering annotations.
+# FreeCAD's docs recommend ``Description`` but authors aren't strict
+# about spelling — accept the common variants. Lowercase compare.
+_NOTE_PROP_NAMES = frozenset({
+    "description", "descriptions",
+    "note", "notes",
+    "comment", "comments",
+    "remark", "remarks",
+    "engineeringnote", "engineering_note", "engineeringnotes",
+})
+
 
 def _clean_part_name(raw: str) -> str:
     return _FREECAD_INSTANCE.sub("", raw).rstrip(" _.") or raw.strip()
@@ -99,6 +110,18 @@ class _Obj:
     parent: str | None = None       # parent's internal name; None for roots
     children: list[str] = field(default_factory=list)   # internal names
     placement: tuple[float, ...] = (0, 0, 0, 0, 0, 0, 1)  # px, py, pz, q0..q3
+    # Free-form text annotations. ``description`` is the convention
+    # FreeCAD authors use for engineering notes attached to a part:
+    # ``obj.addProperty("App::PropertyString", "Description", "Notes", ...)``
+    # We collect *any* string property whose name suggests an annotation
+    # (Description, Note, Notes, Comment, Remark) so authors aren't
+    # locked to one exact spelling.
+    notes: dict[str, str] = field(default_factory=dict)
+    # Spreadsheet cells when ``type == "Spreadsheet::Sheet"`` — a
+    # mapping of cell address (``A1``) to its content string. The
+    # content is what the user typed; cells holding formulas keep
+    # the formula source (``=1+1`` not ``2``). Empty for non-sheets.
+    cells: dict[str, str] = field(default_factory=dict)
 
 
 def _parse_document_xml(raw: bytes) -> dict[str, _Obj]:
@@ -155,6 +178,30 @@ def _parse_document_xml(raw: bytes) -> dict[str, _Obj]:
                     if child and child in by_name:
                         obj.children.append(child)
                         by_name[child].parent = name
+            elif ptype == "App::PropertyString" and pname.lower() in _NOTE_PROP_NAMES:
+                # Engineering note attached to the part. The String
+                # element carries the actual text; treat empty/missing
+                # as "not really annotated" and skip.
+                s = p.find("String")
+                if s is not None:
+                    val = (s.get("value") or "").strip()
+                    if val:
+                        obj.notes[pname] = val
+            elif pname == "cells" and obj.type == "Spreadsheet::Sheet":
+                # ``Spreadsheet::Sheet`` stores its data as a property
+                # named ``cells`` (lowercase, per Spreadsheet/App/Sheet.cpp).
+                # The inner element is ``<Cells Count="N" xlink="1">``
+                # holding one ``<Cell address="A1" content="..." />``
+                # per used cell. Formulas keep their source string;
+                # we surface that as-is so the indexer can search for
+                # both literal text and formula expressions.
+                cells_el = p.find("Cells")
+                if cells_el is not None:
+                    for cell in cells_el.findall("Cell"):
+                        addr = cell.get("address") or ""
+                        content = cell.get("content") or ""
+                        if addr and content:
+                            obj.cells[addr] = content
 
     return by_name
 
@@ -257,6 +304,12 @@ class Component:
     # parse. Stuffing them in this list bound transform-formula bugs
     # to the cached asset spec; recomputing keeps it a code-only fix.
     members: list[str] = field(default_factory=list)
+    # Per-part engineering annotations collected from the descendant
+    # tree. Each entry is ``(label_or_name, prop_name, value)`` —
+    # exposing the prop_name lets the indexer chunk by property type
+    # (every Description in the model, every Note, etc.) without
+    # losing the per-part context. Order is depth-first traversal.
+    notes: list[tuple[str, str, str]] = field(default_factory=list)
 
 
 def _route_label(label: str) -> tuple[str | None, str | None]:
@@ -280,18 +333,22 @@ def _route_label(label: str) -> tuple[str | None, str | None]:
 
 def _collect_members(
     by_name: dict[str, _Obj], root_name: str
-) -> tuple[list[str], Counter, list[tuple[str, _Obj]]]:
-    """Walk every descendant of ``root_name``, return (parts, hardware,
-    feature_objs) for that subtree.
+) -> tuple[list[str], Counter, list[tuple[str, _Obj]], list[tuple[str, str, str]]]:
+    """Walk every descendant of ``root_name``, return ``(parts,
+    hardware, feature_objs, notes)`` for that subtree.
 
     ``feature_objs`` is the list of (zip_member_path, _Obj) pairs for
     every Part::Feature we touch — used downstream to compose the
-    render-side member list. Traversal is depth-first; a cycle guard
-    keeps us safe on pathological documents.
+    render-side member list. ``notes`` collects every engineering
+    annotation found on any descendant (not just Part::Features —
+    an App::Part container can carry a Description too) as
+    ``(displayed_name, prop_name, value)`` tuples. Traversal is
+    depth-first; a cycle guard keeps us safe on pathological documents.
     """
     parts: list[str] = []
     hardware: Counter = Counter()
     feature_objs: list[tuple[str, _Obj]] = []
+    notes: list[tuple[str, str, str]] = []
     visited: set[str] = set()
     stack: list[str] = [root_name]
 
@@ -313,11 +370,19 @@ def _collect_members(
             elif part:
                 if part not in parts:
                     parts.append(part)
+        # Engineering notes can live on Part::Features or on the
+        # App::Part containers themselves. Surface them either way
+        # so a per-assembly Description doesn't get lost just
+        # because the container has no geometry of its own.
+        if obj.notes:
+            display = obj.label or obj.name
+            for prop, value in obj.notes.items():
+                notes.append((display, prop, value))
         # Recurse into children regardless of type — App::Part,
         # nested Mirror, etc. all have Group lists we should walk.
         stack.extend(obj.children)
 
-    return parts, hardware, feature_objs
+    return parts, hardware, feature_objs, notes
 
 
 def _user_visible_assemblies(by_name: dict[str, _Obj]) -> list[_Obj]:
@@ -375,10 +440,16 @@ def _component_size(c: Component) -> int:
 def build_markdown(
     file_stem: str,
     components: dict[str, Component],
+    spreadsheets: list[_Obj] | None = None,
 ) -> tuple[str, dict[str, tuple[str, list[str]]]]:
     """Return (markdown, slug_map) where slug_map is
     ``{slug → (component_name, [brp_path, ...])}``. Transforms are
-    composed at render time, not stored here."""
+    composed at render time, not stored here.
+
+    ``spreadsheets`` is the list of Spreadsheet::Sheet objects whose
+    ``cells`` dict is populated; we emit them as a top-level section
+    so the indexer chunks each sheet alongside the BOM.
+    """
     ordered = sorted(
         components.values(),
         key=lambda c: (-_component_size(c), c.name.lower()),
@@ -428,7 +499,50 @@ def build_markdown(
             for pn, qty in c.hardware.most_common():
                 lines.append(f"- {qty}× {pn}")
             lines.append("")
+        # Engineering notes attached to descendants. Surfaced
+        # separately from parts/hardware so they don't get
+        # mistaken for BOM lines; the per-part ``display`` prefix
+        # tells the LLM which part each note attaches to.
+        if c.notes:
+            lines.append(f"### Engineering notes ({len(c.notes)})")
+            for display, prop, value in c.notes:
+                lines.append(f"- **{display}** — _{prop}_: {value}")
+            lines.append("")
+    if spreadsheets:
+        # Sheets with no used cells are dropped at the parse step,
+        # so reaching here means there's at least one cell to print.
+        lines.append("## Spreadsheets")
+        lines.append("")
+        lines.append(
+            "Embedded Spreadsheet workbench tabs. Each row below "
+            "shows ``<address>: <content>``; formulas keep their "
+            "source expression rather than the evaluated value."
+        )
+        lines.append("")
+        for sheet in spreadsheets:
+            sheet_label = sheet.label or sheet.name
+            lines.append(f"### Sheet: {sheet_label}")
+            lines.append("")
+            for addr in _sorted_cell_addresses(sheet.cells):
+                content = sheet.cells[addr]
+                lines.append(f"- `{addr}`: {content}")
+            lines.append("")
     return "\n".join(lines), slug_map
+
+
+def _sorted_cell_addresses(cells: dict[str, str]) -> list[str]:
+    """Sort cell addresses in spreadsheet-natural order: row first,
+    then column. ``A1, B1, A2`` becomes ``A1, B1, A2`` rather than
+    the lexicographic ``A1, A2, B1``."""
+    def key(addr: str) -> tuple[int, int]:
+        col_letters = "".join(ch for ch in addr if ch.isalpha())
+        row_digits = "".join(ch for ch in addr if ch.isdigit())
+        col = 0
+        for ch in col_letters.upper():
+            col = col * 26 + (ord(ch) - ord("A") + 1)
+        row = int(row_digits) if row_digits else 0
+        return (row, col)
+    return sorted(cells, key=key)
 
 
 def _emit_asset_specs(
@@ -526,7 +640,7 @@ class CadFCStdParser(BaseParser):
 
         for root in assemblies:
             label = root.label or root.name
-            parts, hardware, feats = _collect_members(by_name, root.name)
+            parts, hardware, feats, notes = _collect_members(by_name, root.name)
             members: list[str] = []
             for zip_path, fobj in feats:
                 if zip_path not in brp_set:
@@ -538,6 +652,7 @@ class CadFCStdParser(BaseParser):
                 parts=parts,
                 hardware=hardware,
                 members=members,
+                notes=notes,
             )
             components[label] = comp
 
@@ -547,6 +662,7 @@ class CadFCStdParser(BaseParser):
         orphan_parts: list[str] = []
         orphan_hw: Counter = Counter()
         orphan_members: list[str] = []
+        orphan_notes: list[tuple[str, str, str]] = []
         for o in by_name.values():
             if o.type != "Part::Feature":
                 continue
@@ -562,12 +678,17 @@ class CadFCStdParser(BaseParser):
                 orphan_hw[part] += 1
             elif part and part not in orphan_parts:
                 orphan_parts.append(part)
+            if o.notes:
+                display = o.label or o.name
+                for prop, value in o.notes.items():
+                    orphan_notes.append((display, prop, value))
         if orphan_members:
             components["Unclassified"] = Component(
                 name="Unclassified",
                 parts=orphan_parts,
                 hardware=orphan_hw,
                 members=orphan_members,
+                notes=orphan_notes,
             )
 
         # Add a synthetic "Whole assembly" component ONLY when the
@@ -582,6 +703,8 @@ class CadFCStdParser(BaseParser):
             seen_brp: set[str] = set()
             whole_parts: list[str] = []
             whole_hw: Counter = Counter()
+            whole_notes: list[tuple[str, str, str]] = []
+            seen_notes: set[tuple[str, str, str]] = set()
             for c in components.values():
                 for brp in c.members:
                     if brp not in seen_brp:
@@ -592,15 +715,32 @@ class CadFCStdParser(BaseParser):
                         whole_parts.append(p)
                 for k, v in c.hardware.items():
                     whole_hw[k] += v
+                for note in c.notes:
+                    if note not in seen_notes:
+                        seen_notes.add(note)
+                        whole_notes.append(note)
             if whole_members:
                 components["Whole assembly"] = Component(
                     name="Whole assembly",
                     parts=whole_parts,
                     hardware=whole_hw,
                     members=whole_members,
+                    notes=whole_notes,
                 )
 
-        if not components:
+        # Collect every Spreadsheet::Sheet with at least one used cell.
+        # These travel with the document and are first-class chunks —
+        # the indexer treats the markdown section the same as any
+        # other text.
+        spreadsheets = [
+            o for o in by_name.values()
+            if o.type == "Spreadsheet::Sheet" and o.cells
+        ]
+        # Stable order — sort by label so re-indexes produce diffable
+        # markdown rather than churning on dict-insertion order.
+        spreadsheets.sort(key=lambda o: (o.label or o.name).lower())
+
+        if not components and not spreadsheets:
             return ParserResult(
                 content=(
                     f"# {file_path.stem}\n\n"
@@ -608,7 +748,11 @@ class CadFCStdParser(BaseParser):
                 )
             )
 
-        content, slug_map = build_markdown(file_stem=file_path.stem, components=components)
+        content, slug_map = build_markdown(
+            file_stem=file_path.stem,
+            components=components,
+            spreadsheets=spreadsheets,
+        )
         return ParserResult(
             content=content,
             on_demand_assets=_emit_asset_specs(slug_map),
