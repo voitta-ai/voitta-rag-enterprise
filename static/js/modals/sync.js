@@ -156,9 +156,11 @@ function openSyncModal() {
 
     // Reset picker state, then refresh + load in sequence so the
     // pre-select-by-client_id pass in loadSyncSource sees a populated
-    // gdGoogleProviders map.
+    // gdGoogleProviders map. NFS status probe runs in parallel — it
+    // just toggles option visibility and doesn't gate the load.
     $("#sync-gd-provider-picker").value = "";
     $("#sync-gd-pane-oauth").classList.remove("provider-picked");
+    nfsRefreshStatus();
     refreshGdProviderPicker()
         .finally(loadSyncSource)
         .finally(() => {
@@ -180,13 +182,92 @@ function openSyncModal() {
 function setSyncType(t) {
     $("#sync-form-github").hidden = t !== "github";
     $("#sync-form-google_drive").hidden = t !== "google_drive";
+    $("#sync-form-nfs").hidden = t !== "nfs";
     if (t === "google_drive") {
         // Mirror the URL the backend will hand to Google so the user can
         // copy-paste it verbatim into "Authorized redirect URIs".
         const hint = $("#sync-gd-redirect-hint");
         if (hint) hint.textContent = `${window.location.origin}/api/sync/oauth/google/callback`;
     }
+    if (t === "nfs") {
+        // Refresh on every entry — the admin may have toggled NFS off
+        // since the modal opened. nfsRefreshStatus also re-paints the
+        // root-display field.
+        nfsRefreshStatus().then(() => nfsBrowseTo(nfsCurrentPath));
+    }
 }
+
+// ---------------------------------------------------------------------------
+// NFS picker — server-side, scoped under the admin NFS root
+// ---------------------------------------------------------------------------
+
+let nfsCurrentPath = "";   // POSIX relative path; "" = root
+let nfsAvailable = false;  // last status probe
+
+async function nfsRefreshStatus() {
+    try {
+        const s = await api.nfsStatus();
+        nfsAvailable = !!s.available;
+        const opt = $("#sync-type-option-nfs");
+        if (opt) opt.hidden = !s.available;
+        const rootDisplay = $("#sync-nfs-root-display");
+        if (rootDisplay) {
+            rootDisplay.value = s.nfs_root || "";
+            rootDisplay.placeholder = s.available
+                ? ""
+                : s.nfs_root
+                    ? `${s.nfs_root} — unavailable (${s.status})`
+                    : "(set the NFS root in Admin → Storage)";
+        }
+        return s;
+    } catch (err) {
+        nfsAvailable = false;
+        const opt = $("#sync-type-option-nfs");
+        if (opt) opt.hidden = true;
+        return { available: false, status: "error" };
+    }
+}
+
+async function nfsBrowseTo(rel) {
+    nfsCurrentPath = rel || "";
+    $("#sync-nfs-subpath").value = nfsCurrentPath;
+    const list = $("#sync-nfs-entries");
+    const hint = $("#sync-nfs-hint");
+    list.innerHTML = "";
+    if (!nfsAvailable) {
+        hint.textContent = "NFS is unavailable — ask an admin to configure the NFS root.";
+        return;
+    }
+    try {
+        const out = await api.nfsBrowse(nfsCurrentPath);
+        if (!out.entries.length) {
+            const li = document.createElement("li");
+            li.className = "muted";
+            li.textContent = "(no sub-folders here — this folder will sync as-is)";
+            list.append(li);
+        }
+        for (const e of out.entries) {
+            const li = document.createElement("li");
+            li.textContent = e.name;
+            li.title = e.rel_path;
+            li.addEventListener("click", () => nfsBrowseTo(e.rel_path));
+            list.append(li);
+        }
+        hint.textContent = nfsCurrentPath
+            ? `Will sync ${nfsCurrentPath}/. Click an entry to descend further.`
+            : "Will sync the entire NFS root. Click an entry to scope down.";
+    } catch (err) {
+        hint.textContent = `Browse failed: ${err.message}`;
+    }
+}
+
+$("#sync-nfs-up").addEventListener("click", () => {
+    if (!nfsCurrentPath) return;
+    const parts = nfsCurrentPath.split("/");
+    parts.pop();
+    nfsBrowseTo(parts.join("/"));
+});
+$("#sync-nfs-clear").addEventListener("click", () => nfsBrowseTo(""));
 
 // Mirror of the user's current selection in the GD picker; flushed to the
 // form on every set. Keeps the rendered list and the form-config call in
@@ -356,6 +437,15 @@ async function loadSyncSource() {
                 opt.selected = true;
                 sel.append(opt);
             }
+        } else if (src.source_type === "nfs" && src.nfs) {
+            // Re-probe status so the option visibility is fresh; then
+            // populate the saved subpath and walk to it. If the admin
+            // disabled NFS since the row was saved, the picker shows
+            // an unavailable banner — the user can still see what was
+            // configured but cannot trigger a sync.
+            await nfsRefreshStatus();
+            nfsCurrentPath = src.nfs.subpath || "";
+            await nfsBrowseTo(nfsCurrentPath);
         } else if (src.source_type === "google_drive" && src.google_drive) {
             const gd = src.google_drive;
             $("#sync-gd-client-id").value = gd.client_id || "";
@@ -513,13 +603,14 @@ function gdFormConfig() {
 function syncBody() {
     const t = $("#sync-type").value;
     // Auto-sync settings live alongside source_type — same payload for
-    // both github and google_drive so the backend doesn't need source-
-    // specific scheduling code.
+    // every source so the backend doesn't need source-specific
+    // scheduling code.
     const autoEnabled = $("#sync-auto-enabled").checked;
     const autoHours = Math.max(1, Math.min(24, Number($("#sync-auto-hours").value) || 6));
     const base = { auto_sync_enabled: autoEnabled, auto_sync_hours: autoHours };
     if (t === "github") return { ...base, source_type: "github", github: ghFormConfig() };
     if (t === "google_drive") return { ...base, source_type: "google_drive", google_drive: gdFormConfig() };
+    if (t === "nfs") return { ...base, source_type: "nfs", nfs: { subpath: nfsCurrentPath } };
     throw new Error(`Unknown source_type: ${t}`);
 }
 

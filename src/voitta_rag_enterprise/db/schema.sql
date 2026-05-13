@@ -133,7 +133,7 @@ CREATE TABLE IF NOT EXISTS cas_refs (
 -- by prefix (gh_*, gd_*, …). Add new prefixes as connectors land.
 CREATE TABLE IF NOT EXISTS folder_sync_sources (
     folder_id          INTEGER PRIMARY KEY REFERENCES folders(id) ON DELETE CASCADE,
-    source_type        TEXT NOT NULL,                        -- 'github' | 'google_drive'
+    source_type        TEXT NOT NULL,                        -- 'github' | 'google_drive' | 'nfs'
     -- GitHub
     gh_repo            TEXT,                                 -- HTTPS or git@ URL
     gh_path            TEXT,                                 -- subfolder within the repo
@@ -150,6 +150,10 @@ CREATE TABLE IF NOT EXISTS folder_sync_sources (
     gd_refresh_token          TEXT,                          -- set by the OAuth callback, not the save endpoint
     gd_service_account_json   TEXT,                          -- alternative auth (server-to-server)
     gd_folder_id              TEXT,                          -- root Drive folder or shared-drive ID
+    -- NFS (admin-defined root path + user-chosen subpath underneath).
+    -- The connector mirrors files from ``<admin nfs_root>/<nfs_subpath>``
+    -- into the folder's filesystem storage, same lifecycle as Drive.
+    nfs_subpath               TEXT,                          -- POSIX relative path under the admin-set NFS root
     -- Status / bookkeeping
     sync_status        TEXT NOT NULL DEFAULT 'idle',         -- 'idle' | 'syncing' | 'error'
     sync_error         TEXT,

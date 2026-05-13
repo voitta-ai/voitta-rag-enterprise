@@ -185,6 +185,10 @@ class FolderSyncSource(Base):
     gd_refresh_token: Mapped[str | None] = mapped_column(default=None)
     gd_service_account_json: Mapped[str | None] = mapped_column(default=None)
     gd_folder_id: Mapped[str | None] = mapped_column(default=None)
+    # NFS — admin sets the root via settings, user picks a subpath
+    # under it via the sync UI; ``nfs_subpath`` is that POSIX path
+    # *relative* to the root (never absolute, never with ``..``).
+    nfs_subpath: Mapped[str | None] = mapped_column(default=None)
     # Status
     sync_status: Mapped[str] = mapped_column(default="idle")
     sync_error: Mapped[str | None] = mapped_column(default=None)

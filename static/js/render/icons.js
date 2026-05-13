@@ -84,6 +84,12 @@ function _sourceIcon(kind) {
             return `${SIMPLE}/dropbox.svg`;
         case "gcs":
             return `${SIMPLE}/googlecloud.svg`;
+        case "nfs":
+            // Material's folder-server variant — yellow folder body
+            // with a small server-rack overlay. Distinct from the
+            // generic upload folder + GitHub/Drive marks, instantly
+            // reads as "this lives on a network mount".
+            return `${M_FOLDER}/folder-server.svg`;
         // TODO: vendor sharepoint / amazons3 / microsoftazure when
         //       those connectors land. Simple Icons dropped Microsoft
         //       and AWS in 2024 — pick a replacement set then.

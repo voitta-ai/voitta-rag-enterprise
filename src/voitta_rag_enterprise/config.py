@@ -101,6 +101,7 @@ class Settings(BaseSettings):
         # the index — they're internal bookkeeping that mutates on
         # every sync and would otherwise show up in the file tree.
         ".voitta_sources.json,.voitta_timestamps.json,.voitta_sync.lock,"
+        ".voitta_nfs_sources.json,"
         # Sidecar dir for full Google Sheets workbooks (.xlsx) downloaded
         # alongside the per-sheet markdown summaries. Indexer must NOT
         # see these — the markdown is the searchable representation; the

@@ -23,10 +23,11 @@ export function closeAdmin() {
     $("#admin-backdrop").hidden = true;
 }
 
-// Admin modal tabs — Sign-in gate / Users / OAuth providers / Data caps.
-// Pure DOM toggle; refreshAdmin always pulls every section regardless of
-// which tab is visible, so flipping tabs is instant.
-const ADMIN_TABS = ["access", "users", "oauth", "caps"];
+// Admin modal tabs — Sign-in gate / Users / OAuth providers / Data
+// caps / Storage. Pure DOM toggle; refreshAdmin always pulls every
+// section regardless of which tab is visible, so flipping tabs is
+// instant.
+const ADMIN_TABS = ["access", "users", "oauth", "caps", "storage"];
 
 function setAdminTab(name) {
     if (!ADMIN_TABS.includes(name)) name = "access";
@@ -43,19 +44,86 @@ function setAdminTab(name) {
 
 async function refreshAdmin() {
     try {
-        const [allow, users, providers, caps] = await Promise.all([
+        const [allow, users, providers, caps, settings] = await Promise.all([
             api.adminAllowlist(),
             api.adminListUsers(),
             api.adminListAuthProviders(),
             api.adminGetIndexingCaps(),
+            api.adminGetSettings(),
         ]);
         renderList("#admin-domains", allow.domains, "domain", api.adminRemoveDomain);
         renderList("#admin-blocked", allow.blocked, "email", api.adminUnblock);
         renderUsersTable(users);
         renderAuthProvidersTable(providers);
         renderCapsTable(caps);
+        renderStorageSettings(settings);
     } catch (err) {
         alert(err.message);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Storage tab (NFS root)
+// ---------------------------------------------------------------------------
+
+function renderStorageSettings(settings) {
+    const input = $("#admin-nfs-root");
+    const status = $("#admin-nfs-status");
+    const saveBtn = $("#admin-nfs-save");
+    const clearBtn = $("#admin-nfs-clear");
+    if (!input || !status || !saveBtn || !clearBtn) return;
+    // Reset value to server truth on every refresh, but only when the
+    // user isn't actively editing (focus on the input is treated as
+    // "leave my draft alone"). Saves the awkward case where a
+    // background WS refresh clobbers what they were typing.
+    if (document.activeElement !== input) {
+        input.value = settings.nfs_root || "";
+    }
+    paintNfsStatus(status, settings);
+    // Bind once.
+    if (!saveBtn._bound) {
+        saveBtn._bound = true;
+        saveBtn.addEventListener("click", async () => {
+            try {
+                const out = await api.adminUpdateSettings({ nfs_root: input.value.trim() });
+                input.value = out.nfs_root;
+                paintNfsStatus(status, out);
+            } catch (err) {
+                paintNfsStatus(status, { nfs_available: false, nfs_status: err.message || "save failed", nfs_root: input.value });
+            }
+        });
+    }
+    if (!clearBtn._bound) {
+        clearBtn._bound = true;
+        clearBtn.addEventListener("click", async () => {
+            try {
+                const out = await api.adminUpdateSettings({ nfs_root: "" });
+                input.value = "";
+                paintNfsStatus(status, out);
+            } catch (err) {
+                alert(err.message);
+            }
+        });
+    }
+}
+
+function paintNfsStatus(el, settings) {
+    const root = settings.nfs_root || "";
+    const status = settings.nfs_status || (root ? "ok" : "disabled");
+    const available = !!settings.nfs_available;
+    el.hidden = false;
+    el.classList.remove("ok", "warn", "err");
+    if (!root) {
+        el.classList.add("warn");
+        el.textContent = "Disabled — folder owners will not see NFS as a sync option.";
+        return;
+    }
+    if (available) {
+        el.classList.add("ok");
+        el.textContent = `Available — folder owners can now configure NFS sync rooted at ${root}.`;
+    } else {
+        el.classList.add("err");
+        el.textContent = `Unavailable (${status}). Fix the mount or pick another path; users won't see NFS as a sync option.`;
     }
 }
 

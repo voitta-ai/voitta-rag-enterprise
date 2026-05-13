@@ -130,6 +130,13 @@ export const api = {
         req("POST", `/api/folders/${folderId}/sync/google-drive/auth`),
     gdListFolders: (folderId) =>
         req("GET", `/api/folders/${folderId}/sync/google-drive/folders`),
+    // NFS — capability probe + scoped directory picker. The picker
+    // walks one level at a time so a deep tree doesn't fetch all at
+    // once; the server resolves and validates every ``rel`` against
+    // the admin's NFS root before returning entries.
+    nfsStatus: () => req("GET", "/api/sync/nfs/status"),
+    nfsBrowse: (rel = "") =>
+        req("GET", `/api/sync/nfs/browse?rel=${encodeURIComponent(rel || "")}`),
     authConfig: () => req("GET", "/api/auth/config"),
     me: () => req("GET", "/api/auth/me"),
     logout: () => req("POST", "/api/auth/logout"),
@@ -177,4 +184,11 @@ export const api = {
     // PATCH accepts a partial dict of integer overrides.
     adminGetIndexingCaps: () => req("GET", "/api/admin/indexing-caps"),
     adminUpdateIndexingCaps: (partial) => req("PATCH", "/api/admin/indexing-caps", partial),
+
+    // Admin — typed settings (currently: NFS root). The PATCH is
+    // partial: send {nfs_root: ""} to disable, send {nfs_root: "/mnt/x"}
+    // to enable + validate. The server checks existence + read access
+    // at write time and refuses bad paths.
+    adminGetSettings: () => req("GET", "/api/admin/settings"),
+    adminUpdateSettings: (partial) => req("PATCH", "/api/admin/settings", partial),
 };

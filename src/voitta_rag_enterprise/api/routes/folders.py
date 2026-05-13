@@ -105,6 +105,8 @@ def _sync_source_kind(source: FolderSyncSource | None) -> str:
         return "github_private" if source.gh_auth_method else "github_public"
     if source.source_type == "google_drive":
         return "google_drive"
+    if source.source_type == "nfs":
+        return "nfs"
     return "regular"
 
 

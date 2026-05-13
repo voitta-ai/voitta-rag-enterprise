@@ -40,6 +40,14 @@ from ..config import get_settings
 ALLOWED_DOMAINS = "allowed_domains.txt"
 ALLOWED_USERS = "allowed_users.txt"
 BLOCKED_USERS = "blocked_users.txt"
+SETTINGS_JSON = "settings.json"
+
+# Default typed settings shipped with the app. ``nfs_root`` is empty
+# until an admin sets it; an empty value disables the NFS connector
+# entirely (the UI hides the option, the API rejects configuration).
+_DEFAULT_SETTINGS: dict[str, object] = {
+    "nfs_root": "",
+}
 
 
 def admin_dir() -> Path:
@@ -147,6 +155,87 @@ def remove_blocked_user(email: str) -> None:
     email = email.strip().lower()
     cur = [u for u in list_blocked_users() if u != email]
     _write(BLOCKED_USERS, cur)
+
+
+# ---------------------------------------------------------------------------
+# Typed settings — single JSON file sitting next to the txt allowlists.
+# ---------------------------------------------------------------------------
+#
+# The allowlist trio above is intentionally line-oriented because admins
+# edit them via SSH for lockout recovery. ``settings.json`` is for typed
+# config (paths, integers, bools) that is set via the admin UI only;
+# format is plain JSON so it's still hand-editable in an emergency, but
+# we don't pretend the structure is line-friendly.
+
+
+def _settings_path() -> Path:
+    return admin_dir() / SETTINGS_JSON
+
+
+def load_settings() -> dict[str, object]:
+    """Return the merged (defaults + persisted) settings dict.
+
+    Unknown keys persisted by older versions are kept verbatim, in case
+    we removed a setting and want to put it back later. Known keys
+    missing from the file fall back to their default — so the caller
+    can use ``load_settings().get("nfs_root", "")`` safely.
+    """
+    import json
+
+    out: dict[str, object] = dict(_DEFAULT_SETTINGS)
+    p = _settings_path()
+    if not p.exists():
+        return out
+    try:
+        raw = p.read_text()
+        data = json.loads(raw) if raw.strip() else {}
+        if isinstance(data, dict):
+            out.update(data)
+    except (OSError, ValueError):
+        # Corrupt file: log via the caller; here we just return defaults
+        # so a malformed settings.json doesn't crash request handling.
+        return dict(_DEFAULT_SETTINGS)
+    return out
+
+
+def save_settings(updates: dict[str, object]) -> dict[str, object]:
+    """Merge ``updates`` over the persisted settings, write atomically,
+    and return the new merged dict.
+
+    Only keys present in ``updates`` are touched — pass ``{"nfs_root": ""}``
+    to explicitly clear a setting; omit a key entirely to leave it alone.
+    """
+    import json
+
+    cur = load_settings()
+    cur.update(updates)
+    p = _settings_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    body = json.dumps(cur, indent=2, sort_keys=True) + "\n"
+    fd, tmp = tempfile.mkstemp(prefix=f".{p.name}.", dir=p.parent)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(body)
+        os.replace(tmp, p)
+    except Exception:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+    return cur
+
+
+def get_nfs_root() -> str:
+    """Return the admin-configured NFS root directory, or empty string.
+
+    Empty means the feature is disabled — callers that build sync-source
+    payloads, browse endpoints, or admin-settings status should all gate
+    on a non-empty return value AND a passing existence check. Doing the
+    existence check at every read point (rather than caching) keeps the
+    UI honest: an NFS mount that disappears flips the feature off
+    without any restart.
+    """
+    raw = load_settings().get("nfs_root", "")
+    return str(raw) if raw is not None else ""
 
 
 # ---------------------------------------------------------------------------

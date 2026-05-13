@@ -547,3 +547,91 @@ def update_indexing_caps(
         defaults=indexing_caps.defaults_dict(),
         bounds=indexing_caps.bounds_dict(),
     )
+
+
+# ---------------------------------------------------------------------------
+# Admin-typed settings (currently: NFS root)
+# ---------------------------------------------------------------------------
+
+
+class AdminSettingsOut(BaseModel):
+    nfs_root: str
+    # ``nfs_available`` is ``nfs_root`` non-empty AND the directory
+    # exists + is readable. The sync UI gates the NFS option on this
+    # boolean so a mount that disappears flips the feature off without
+    # restart.
+    nfs_available: bool
+    nfs_status: str  # 'disabled' | 'ok' | 'missing' | 'not_a_directory' | 'unreadable'
+
+
+class _AdminSettingsPatchIn(BaseModel):
+    # Only fields actually present in the request body are touched —
+    # pass ``{"nfs_root": ""}`` to clear, omit to leave alone. Empty
+    # string is a valid value (disables the feature) so we can't use
+    # ``None`` as the "leave alone" signal; require the key's presence.
+    nfs_root: str | None = None
+
+
+def _probe_nfs_root(value: str) -> tuple[bool, str]:
+    """Classify the configured NFS root for the UI status pill."""
+    from pathlib import Path
+
+    if not value:
+        return False, "disabled"
+    p = Path(value)
+    if not p.exists():
+        return False, "missing"
+    if not p.is_dir():
+        return False, "not_a_directory"
+    # Smoke-test read access; iterdir on an unreadable mount throws.
+    try:
+        next(iter(p.iterdir()), None)
+    except (PermissionError, OSError):
+        return False, "unreadable"
+    return True, "ok"
+
+
+def _admin_settings_out() -> AdminSettingsOut:
+    nfs_root = admin_store.get_nfs_root()
+    ok, status_str = _probe_nfs_root(nfs_root)
+    return AdminSettingsOut(
+        nfs_root=nfs_root,
+        nfs_available=ok,
+        nfs_status=status_str,
+    )
+
+
+@router.get("/settings", response_model=AdminSettingsOut)
+def get_admin_settings(_: CurrentUser = Depends(admin_user)) -> AdminSettingsOut:
+    return _admin_settings_out()
+
+
+@router.patch("/settings", response_model=AdminSettingsOut)
+def update_admin_settings(
+    body: _AdminSettingsPatchIn,
+    me: CurrentUser = Depends(admin_user),
+) -> AdminSettingsOut:
+    """Update one or more typed admin settings.
+
+    ``nfs_root`` is validated at write time. An empty string is
+    accepted (turns the feature off); a non-empty path must exist and
+    be readable, otherwise 400 — the admin gets immediate feedback
+    rather than a delayed "no files found" at sync time. The runtime
+    check still re-runs every browse / sync request, so a path that
+    disappears after configuration also degrades gracefully.
+    """
+    updates: dict[str, object] = {}
+    if body.nfs_root is not None:
+        value = body.nfs_root.strip()
+        if value:
+            ok, status_str = _probe_nfs_root(value)
+            if not ok:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    f"NFS root {value!r} cannot be used: {status_str}",
+                )
+        updates["nfs_root"] = value
+    if updates:
+        admin_store.save_settings(updates)
+        logger.info("admin: %s updated settings: keys=%s", me.email, sorted(updates))
+    return _admin_settings_out()

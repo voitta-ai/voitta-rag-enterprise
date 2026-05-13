@@ -721,6 +721,10 @@ async def _run_sync_inner(folder_id: int) -> None:
                     service_account_json=source.gd_service_account_json or "",
                 ),
             }
+        elif source_type == "nfs":
+            cfg = {
+                "nfs_subpath": (source.nfs_subpath or "").strip("/"),
+            }
         else:
             raise NotImplementedError(f"unknown source_type: {source_type!r}")
 
@@ -755,7 +759,7 @@ async def _run_sync_inner(folder_id: int) -> None:
             event["detail"] = detail
         events.publish("folders", event)
 
-    if source_type == "google_drive":
+    if source_type in ("google_drive", "nfs"):
         cfg["progress_cb"] = _on_progress
 
     # Initial event from the worker side, before the connector starts —

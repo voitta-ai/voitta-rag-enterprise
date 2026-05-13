@@ -95,6 +95,10 @@ def init_db() -> None:
         raw_conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_images_kind ON images(file_id, kind, page)"
         )
+        # NFS connector: per-folder subpath under the admin-set root.
+        # Default NULL is safe — existing rows are github/google_drive
+        # and never read this column.
+        _ensure_column(raw_conn, "folder_sync_sources", "nfs_subpath", "TEXT")
         raw_conn.commit()
     finally:
         raw_conn.close()

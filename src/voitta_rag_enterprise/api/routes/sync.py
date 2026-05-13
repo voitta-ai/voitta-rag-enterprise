@@ -82,14 +82,26 @@ class GoogleDriveSyncIn(BaseModel):
     service_account_json: str = ""
 
 
+class NfsSyncIn(BaseModel):
+    """Payload for ``PUT /folders/{id}/sync`` when ``source_type == 'nfs'``.
+
+    The admin-defined NFS root lives in ``admin_store.settings`` and is
+    *not* passed in the payload — the sync source records only the
+    user-chosen relative subpath below the root.
+    """
+
+    subpath: str = ""
+
+
 class SyncSourceIn(BaseModel):
-    source_type: Literal["github", "google_drive"]
+    source_type: Literal["github", "google_drive", "nfs"]
     github: GithubSyncIn | None = None
     google_drive: GoogleDriveSyncIn | None = None
+    nfs: NfsSyncIn | None = None
     # Periodic auto-sync. ``auto_sync_hours`` is bounded to 1-24 by the
     # scheduler — wider intervals belong to a real cron, not this in-process
     # loop. Both fields are common to all source types so they live on the
-    # outer envelope, not inside ``github`` / ``google_drive``.
+    # outer envelope, not inside the per-source blocks.
     auto_sync_enabled: bool = False
     auto_sync_hours: int = Field(default=6, ge=1, le=24)
 
@@ -114,6 +126,16 @@ class GoogleDriveSyncOut(BaseModel):
     connected: bool  # true once a refresh_token has been stored
 
 
+class NfsSyncOut(BaseModel):
+    subpath: str
+    # Snapshot of the current admin-side NFS root + its availability,
+    # so the modal can show the resolved absolute path without a
+    # second roundtrip and gate the Save button on availability.
+    nfs_root: str
+    nfs_available: bool
+    nfs_status: str
+
+
 class SyncSourceOut(BaseModel):
     folder_id: int
     source_type: str
@@ -124,11 +146,36 @@ class SyncSourceOut(BaseModel):
     auto_sync_hours: int
     github: GithubSyncOut | None = None
     google_drive: GoogleDriveSyncOut | None = None
+    nfs: NfsSyncOut | None = None
+
+
+def _nfs_status_snapshot() -> tuple[str, bool, str]:
+    """Return ``(nfs_root, available, status)`` for inclusion in NFS
+    sync-source responses. Re-checks on every call — an unmounted NFS
+    flips the feature off without a restart."""
+    from ...services.admin_store import get_nfs_root
+
+    root = get_nfs_root()
+    if not root:
+        return "", False, "disabled"
+    from pathlib import Path
+
+    p = Path(root)
+    if not p.exists():
+        return root, False, "missing"
+    if not p.is_dir():
+        return root, False, "not_a_directory"
+    try:
+        next(iter(p.iterdir()), None)
+    except (PermissionError, OSError):
+        return root, False, "unreadable"
+    return root, True, "ok"
 
 
 def _to_out(src: FolderSyncSource) -> SyncSourceOut:
     gh = None
     gd = None
+    nfs = None
     if src.source_type == "github":
         gh = GithubSyncOut(
             repo=src.gh_repo or "",
@@ -151,6 +198,14 @@ def _to_out(src: FolderSyncSource) -> SyncSourceOut:
             has_service_account=bool(src.gd_service_account_json),
             connected=bool(src.gd_refresh_token),
         )
+    elif src.source_type == "nfs":
+        root, available, status_str = _nfs_status_snapshot()
+        nfs = NfsSyncOut(
+            subpath=src.nfs_subpath or "",
+            nfs_root=root,
+            nfs_available=available,
+            nfs_status=status_str,
+        )
     return SyncSourceOut(
         folder_id=src.folder_id,
         source_type=src.source_type,
@@ -161,6 +216,7 @@ def _to_out(src: FolderSyncSource) -> SyncSourceOut:
         auto_sync_hours=int(src.auto_sync_hours),
         github=gh,
         google_drive=gd,
+        nfs=nfs,
     )
 
 
@@ -272,6 +328,8 @@ def upsert_sync_source(
         if existing is not None and existing.source_type != "github":
             _clear_google_drive_fields(src)
         src.source_type = "github"
+        if existing is not None and existing.source_type != "github":
+            src.nfs_subpath = None
         src.gh_repo = gh_cfg.repo.strip()
         src.gh_path = gh_cfg.path.strip("/")
         src.gh_branches = encode_branches_field(gh_cfg.branches)
@@ -281,6 +339,49 @@ def upsert_sync_source(
         src.gh_username = gh_cfg.username or None
         src.gh_pat = gh_cfg.pat or None
         src.gh_token = gh_cfg.ssh_key or None
+
+    elif body.source_type == "nfs":
+        if body.nfs is None:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "Missing 'nfs' config for source_type='nfs'",
+            )
+        # NFS must be enabled + the configured root must be reachable.
+        # Re-check at every save so an admin who removes the NFS root
+        # immediately blocks new sync sources.
+        root, available, status_str = _nfs_status_snapshot()
+        if not available:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"NFS is not available ({status_str}); ask an admin to "
+                "configure the NFS root.",
+            )
+        # Validate the chosen subpath: must resolve under the root, no
+        # ``..``, no symlink escapes. Lean on the connector helper for
+        # the canonical check so the rules stay in one place.
+        from ...services.sync.nfs import _resolve_under
+
+        subpath = (body.nfs.subpath or "").strip().strip("/")
+        try:
+            resolved = _resolve_under(Path(root), subpath)
+        except ValueError as e:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, f"Invalid NFS subpath: {e}"
+            ) from e
+        if not resolved.exists() or not resolved.is_dir():
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"NFS subpath does not exist or is not a directory: {subpath!r}",
+            )
+
+        src = existing or FolderSyncSource(
+            folder_id=folder_id, source_type="nfs"
+        )
+        if existing is not None and existing.source_type != "nfs":
+            _clear_github_fields(src)
+            _clear_google_drive_fields(src)
+        src.source_type = "nfs"
+        src.nfs_subpath = subpath
 
     elif body.source_type == "google_drive":
         if body.google_drive is None:
@@ -315,6 +416,7 @@ def upsert_sync_source(
         )
         if existing is not None and existing.source_type != "google_drive":
             _clear_github_fields(src)
+            src.nfs_subpath = None
             # New source type → drop any stored refresh_token, it belongs to
             # whatever client we were using before.
             src.gd_refresh_token = None
@@ -468,6 +570,13 @@ def trigger_sync(
             status.HTTP_400_BAD_REQUEST,
             "Pick at least one Google Drive folder before syncing",
         )
+    if src.source_type == "nfs":
+        root, available, status_str = _nfs_status_snapshot()
+        if not available:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"NFS is not available ({status_str})",
+            )
     job_id = job_queue.enqueue(
         db,
         "sync",
@@ -706,4 +815,82 @@ async def gd_oauth_callback(
     return HTMLResponse(
         "<html><body><script>window.close()</script>"
         "<p>Google Drive connected. You can close this tab.</p></body></html>"
+    )
+
+
+# ---------------------------------------------------------------------------
+# NFS — capability check + directory picker (folder-agnostic).
+#
+# Mounted on ``oauth_router`` because these endpoints don't carry a
+# ``folder_id`` in their URLs. The sync UI hits ``/sync/nfs/status`` once
+# to decide whether to surface NFS as an option, then ``/sync/nfs/browse``
+# to step into the picker.
+# ---------------------------------------------------------------------------
+
+
+class NfsCapabilityOut(BaseModel):
+    available: bool
+    status: str  # 'disabled' | 'ok' | 'missing' | 'not_a_directory' | 'unreadable'
+    nfs_root: str  # echo so the modal can show "rooted at ..."
+
+
+class NfsBrowseEntry(BaseModel):
+    name: str
+    rel_path: str
+
+
+class NfsBrowseOut(BaseModel):
+    rel_path: str       # the directory we listed
+    parent: str | None  # one level up, or None at the root
+    entries: list[NfsBrowseEntry]
+
+
+@oauth_router.get("/nfs/status", response_model=NfsCapabilityOut)
+def nfs_status(_: CurrentUser = Depends(current_user)) -> NfsCapabilityOut:
+    """Tell the SPA whether the NFS connector is currently usable.
+
+    Cheap probe (single stat + iterdir) so the sync modal can call it
+    on open without measurable cost. Read-level access is enough — any
+    signed-in user can discover whether NFS is on; only owners can
+    actually configure it.
+    """
+    root, available, status_str = _nfs_status_snapshot()
+    return NfsCapabilityOut(available=available, status=status_str, nfs_root=root)
+
+
+@oauth_router.get("/nfs/browse", response_model=NfsBrowseOut)
+def nfs_browse(
+    rel: str = Query("", description="POSIX path relative to the admin NFS root; '' = root"),
+    user: CurrentUser = Depends(current_user),
+) -> NfsBrowseOut:
+    """Return the immediate subdirectories of ``<nfs_root>/<rel>``.
+
+    Files are intentionally omitted — the picker walks directories only,
+    and any leaf you'd want to index is reachable by descending into its
+    parent. Path safety is enforced by ``services.sync.nfs._resolve_under``;
+    ``..``-escapes and symlink redirections to outside the root raise 400.
+    """
+    from ...services.sync.nfs import list_children
+
+    root, available, status_str = _nfs_status_snapshot()
+    if not available:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"NFS is not available ({status_str})",
+        )
+    rel = (rel or "").strip().strip("/")
+    try:
+        entries = list_children(rel)
+    except (FileNotFoundError, NotADirectoryError) as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(e)) from e
+    except (PermissionError, ValueError) as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
+    parent = None
+    if rel:
+        parts = rel.split("/")
+        parent = "/".join(parts[:-1])  # may be ""; "" → root, frontend handles it
+    return NfsBrowseOut(
+        rel_path=rel,
+        parent=parent,
+        entries=[NfsBrowseEntry(**e) for e in entries],
     )

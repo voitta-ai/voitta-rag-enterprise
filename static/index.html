@@ -49,6 +49,9 @@
                     <button type="button" id="admin-tab-btn-caps"
                         class="seg-tab" role="tab" aria-selected="false"
                         aria-controls="admin-tab-pane-caps">Data file caps</button>
+                    <button type="button" id="admin-tab-btn-storage"
+                        class="seg-tab" role="tab" aria-selected="false"
+                        aria-controls="admin-tab-pane-storage">Storage</button>
                 </div>
 
                 <!-- Tab: Sign-in gate (allowed domains + blocked emails) -->
@@ -176,6 +179,29 @@
                             </thead>
                             <tbody></tbody>
                         </table>
+                    </section>
+                </div>
+
+                <!-- Storage settings (NFS root, etc.). Persisted to
+                     <data_dir>/admin/settings.json. -->
+                <div id="admin-tab-pane-storage" class="admin-tab-pane" role="tabpanel" hidden>
+                    <section class="admin-section">
+                        <header>
+                            <h4>NFS share</h4>
+                            <span class="hint">
+                                Absolute path to a directory you've mounted on the host (NFS, SMB,
+                                or any local mount). When set, folder owners can pick a sub-tree
+                                under it as a sync source. Leave blank to disable. The path is
+                                validated when you save and re-checked on every sync request.
+                            </span>
+                        </header>
+                        <div class="form-row admin-nfs-row">
+                            <label for="admin-nfs-root">NFS root</label>
+                            <input id="admin-nfs-root" type="text" placeholder="/mnt/voitta-nfs" />
+                            <button id="admin-nfs-save" type="button" class="btn-primary">Save</button>
+                            <button id="admin-nfs-clear" type="button">Disable</button>
+                        </div>
+                        <div id="admin-nfs-status" class="admin-nfs-status" hidden></div>
                     </section>
                 </div>
             </div>
@@ -361,6 +387,10 @@
                 <select id="sync-type">
                     <option value="github">GitHub / Git</option>
                     <option value="google_drive">Google Drive</option>
+                    <!-- Shown only when the admin has configured an NFS
+                         root and the path is reachable. sync.js drops
+                         this <option> on open via setNfsAvailability. -->
+                    <option value="nfs" id="sync-type-option-nfs" hidden>NFS share</option>
                 </select>
 
                 <div id="sync-form-github">
@@ -513,6 +543,32 @@
                     </div>
                     <ul id="sync-gd-folders-list" style="margin:6px 0 0;padding-left:18px;font-size:13px;color:var(--muted, #666);"></ul>
                     <p class="hint" id="sync-gd-folders-hint">Each picked folder syncs into its own subdirectory under this folder.</p>
+                </div>
+
+                <!-- NFS sync pane. ``nfs_root`` is admin-configured;
+                     the user picks a subdirectory under it via the
+                     scoped browse endpoint. The picker walks one level
+                     at a time so a deep tree never pre-fetches. -->
+                <div id="sync-form-nfs" hidden>
+                    <p class="hint" style="margin:0 0 6px;">
+                        Files are copied into this folder's normal storage on every sync; the
+                        watcher then indexes them like uploaded files. Symlinks are skipped to
+                        prevent surprise traversals. Path safety is enforced server-side.
+                    </p>
+                    <label>NFS root (set by admin)</label>
+                    <input type="text" id="sync-nfs-root-display" readonly
+                        placeholder="(set the NFS root in Admin → Storage)"
+                        class="readonly-input">
+
+                    <label>Sub-folder under the NFS root</label>
+                    <div class="nfs-picker-row">
+                        <input type="text" id="sync-nfs-subpath" readonly
+                            placeholder="(pick below — leave blank to sync the entire root)">
+                        <button type="button" id="sync-nfs-up" class="btn btn-secondary btn-sm">Up</button>
+                        <button type="button" id="sync-nfs-clear" class="btn btn-secondary btn-sm">Clear</button>
+                    </div>
+                    <ul id="sync-nfs-entries" class="nfs-picker-list"></ul>
+                    <p class="hint" id="sync-nfs-hint">Click an entry to descend. The current path is what will be synced.</p>
                 </div>
 
                 <!-- Auto-sync schedule. Common to all source types. The
