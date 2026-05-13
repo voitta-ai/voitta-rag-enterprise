@@ -615,6 +615,7 @@ $("#admin-tab-btn-access").addEventListener("click", () => setAdminTab("access")
 $("#admin-tab-btn-users").addEventListener("click", () => setAdminTab("users"));
 $("#admin-tab-btn-oauth").addEventListener("click", () => setAdminTab("oauth"));
 $("#admin-tab-btn-caps").addEventListener("click", () => setAdminTab("caps"));
+$("#admin-tab-btn-storage").addEventListener("click", () => setAdminTab("storage"));
 
 $("#admin-auth-provider-add").addEventListener("click", submitAddAuthProvider);
 $("#admin-auth-provider-client-secret").addEventListener("keydown", (e) => {
