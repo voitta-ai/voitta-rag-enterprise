@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- Folder body — teal/network blue, clearly distinct from yellow folders -->
+  <path fill="#0277bd" d="m13.844 7.536-1.288-1.072A2 2 0 0 0 11.276 6H4a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h24a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2H15.124a2 2 0 0 1-1.28-.464"/>
+  <!-- Network topology glyph: hub node at top, three spokes to leaf nodes -->
+  <!-- Hub -->
+  <circle fill="#fff" cx="16" cy="15" r="2"/>
+  <!-- Spokes -->
+  <line x1="16" y1="17" x2="10" y2="21" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/>
+  <line x1="16" y1="17" x2="16" y2="22" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/>
+  <line x1="16" y1="17" x2="22" y2="21" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/>
+  <!-- Leaf nodes -->
+  <circle fill="#fff" cx="10" cy="22" r="1.5"/>
+  <circle fill="#fff" cx="16" cy="23" r="1.5"/>
+  <circle fill="#fff" cx="22" cy="22" r="1.5"/>
+</svg>
