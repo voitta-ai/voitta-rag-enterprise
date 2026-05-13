@@ -169,10 +169,14 @@ function buildDirRow(folderId, relDir) {
     const tag = document.createElement("span");
     tag.className = "status-tag";
 
+    const spacer1 = document.createElement("span");
+    spacer1.style.visibility = "hidden";
+    const spacer2 = document.createElement("span");
+    spacer2.style.visibility = "hidden";
     const delBtn = _buildDeleteBtn(() => onDeleteDir(li));
     delBtn.hidden = true;
 
-    li.append(nameCell, fileCount, indexedCount, tag, delBtn);
+    li.append(nameCell, fileCount, indexedCount, tag, spacer1, spacer2, delBtn);
     li.addEventListener("click", onRowClick);
 
     li._refs = { nameCell, chevron, glyph, img, text, fileCount, indexedCount, tag, delBtn };
@@ -240,7 +244,7 @@ function onRowClick(e) {
 // Row updaters (mutate in place across renders)
 // ---------------------------------------------------------------------------
 
-function updateTreeRow(li, { folder, displayName, depth, isOpen, hasChildren, isSelected, summary, sharedReadonly, dirKind }) {
+function updateTreeRow(li, { folder, displayName, depth, isOpen, hasChildren, isSelected, summary, sharedReadonly, dirKind, canDelete }) {
     const r = li._refs;
     const kindClass = dirKind ? ` dir-kind-${dirKind}` : "";
     const baseClass = (li._isRoot ? "tree-row folder-root" : "tree-row dir") + kindClass;
