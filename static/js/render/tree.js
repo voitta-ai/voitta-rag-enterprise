@@ -176,6 +176,8 @@ function buildDirRow(folderId, relDir) {
     const delBtn = _buildDeleteBtn(() => onDeleteDir(li));
     delBtn.hidden = true;
 
+    // spacer1 + spacer2 keep the 6-column grid aligned with root rows.
+    // delBtn is position:absolute so it doesn't add a 7th grid column.
     li.append(nameCell, fileCount, indexedCount, tag, spacer1, spacer2, delBtn);
     li.addEventListener("click", onRowClick);
 
@@ -209,12 +211,13 @@ function buildFileRow(fileId) {
     nameCell.append(chevron, label);
 
     const blank1 = document.createElement("span");
+    const blank2 = document.createElement("span");
     const tag = document.createElement("span");
     tag.className = "status-tag";
     const delBtn = _buildDeleteBtn(() => onDeleteFile(li));
     delBtn.hidden = true;
 
-    li.append(nameCell, blank1, tag, delBtn);
+    li.append(nameCell, blank1, blank2, tag, delBtn);
 
     li._refs = { nameCell, label, glyph, img, text, tag, delBtn };
     li._fileExtKey = null;

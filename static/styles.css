@@ -340,6 +340,7 @@ input[type="text"], input[type="file"] {
     overflow-x: hidden;
 }
 .tree-row {
+    position: relative;
     display: grid;
     grid-template-columns: var(--tree-cols);
     align-items: center;
@@ -521,8 +522,10 @@ input[type="text"], input[type="file"] {
 .tree-row:last-child { border-bottom: none; }
 .tree-row:hover { background: var(--color-bg-hover); }
 .tree-delete-btn {
-    flex-shrink: 0;
-    margin-left: auto;
+    position: absolute;
+    right: var(--tree-pad-x);
+    top: 50%;
+    transform: translateY(-50%);
     padding: 0 5px;
     border: none;
     background: none;
