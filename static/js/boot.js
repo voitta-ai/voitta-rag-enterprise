@@ -25,6 +25,7 @@ import "./modals/sync.js";  // self-wires #btn-sync + sync modal + GD picker
 import "./flows/upload.js";  // self-wires Upload button + file input
 import { updateToolbarState } from "./flows/toolbar.js";
 import { connStatus, files, folders, folderStats, jobs, reindexProgress, syncProgress } from "./store.js";
+import { addGhostDir } from "./flows/selection.js";
 import { connect } from "./ws.js";
 
 const $ = (sel) => document.querySelector(sel);
@@ -98,9 +99,20 @@ async function bootstrap() {
             ? `Managed root: ${rootInfo.root_path}`
             : "VOITTA_ROOT_PATH not set — folder creation is disabled.";
         $("#btn-new-folder").disabled = !rootInfo.configured;
-        folders.set(await api.listFolders());
+        const folderList = await api.listFolders();
+        folders.set(folderList);
         files.set(await api.listAllFiles());
         jobs.set(await api.recentJobs());
+        // Seed ghost dirs from the real filesystem so empty subdirectories
+        // appear in the tree even before any files are indexed into them.
+        await Promise.allSettled(
+            folderList.map(async (f) => {
+                try {
+                    const dirs = await api.listFolderDirs(f.id);
+                    for (const rel of dirs) addGhostDir(f.id, rel);
+                } catch (_) { /* best-effort */ }
+            })
+        );
     } catch (err) {
         console.warn("snapshot failed", err);
     }

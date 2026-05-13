@@ -1077,6 +1077,37 @@ def delete_subdir(
         job_queue.enqueue("delete_file", {"file_id": exact.id})
 
 
+@router.get("/{folder_id}/dirs")
+def list_folder_dirs(
+    folder_id: int,
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(current_user),
+) -> list[str]:
+    """Return all subdirectory rel-paths present on disk for a regular folder.
+
+    Used by the frontend to seed empty dirs into the tree so they appear
+    even before any files are indexed into them.
+    """
+    folder = db.get(Folder, folder_id)
+    if folder is None or not user_can_see_folder(db, folder_id, user.id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Folder not found")
+    root = Path(folder.path)
+    if not root.is_dir():
+        return []
+    result: list[str] = []
+    for dirpath, dirnames, _ in os.walk(root):
+        # Prune hidden dirs in-place so os.walk skips their subtrees too.
+        dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
+        for d in dirnames:
+            full = Path(dirpath) / d
+            try:
+                rel = full.resolve().relative_to(root.resolve()).as_posix()
+            except ValueError:
+                continue
+            result.append(rel)
+    return result
+
+
 @router.get("/{folder_id}/files", response_model=list[FileOut])
 def list_folder_files(
     folder_id: int,

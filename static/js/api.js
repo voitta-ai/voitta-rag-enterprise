@@ -33,6 +33,7 @@ export const api = {
     listFolders: () => req("GET", "/api/folders"),
     addFolderByName: (name) => req("POST", "/api/folders", { name }),
     deleteFolder: (id) => req("DELETE", `/api/folders/${id}`),
+    listFolderDirs: (folderId) => req("GET", `/api/folders/${folderId}/dirs`),
     deleteFile: (folderId, fileId) => req("DELETE", `/api/folders/${folderId}/files/${fileId}`),
     deleteSubdir: (folderId, rel) => req("DELETE", `/api/folders/${folderId}/dirs?rel=${encodeURIComponent(rel)}`),
     setFolderShare: (id, shared) => req("PATCH", `/api/folders/${id}/share`, { shared }),
