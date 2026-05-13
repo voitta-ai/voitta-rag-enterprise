@@ -994,7 +994,12 @@ def list_folder_files(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Folder not found")
     rows = (
         db.execute(
-            select(File).where(File.folder_id == folder_id).order_by(File.rel_path)
+            select(File)
+            .where(
+                File.folder_id == folder_id,
+                ~File.rel_path.like("%.voitta.meta"),
+            )
+            .order_by(File.rel_path)
         )
         .scalars()
         .all()
