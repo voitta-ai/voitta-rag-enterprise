@@ -39,6 +39,7 @@ from ...services.sync.google_drive import (
     get_auth_url as gd_get_auth_url,
 )
 from ...services.sync.google_drive import (
+    list_folder_children as gd_list_folder_children,
     list_root_folders as gd_list_root_folders,
 )
 from ..deps import current_user, db_session
@@ -749,6 +750,35 @@ async def gd_list_folders(
     except Exception as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
     return GdFoldersOut(**data)
+
+
+@router.get("/google-drive/browse")
+async def gd_browse_folder(
+    folder_id: int,
+    parent_id: str = Query(..., description="Drive folder ID whose children to list"),
+    drive_id: str = Query("", description="Shared Drive ID (leave empty for My Drive / Shared-with-me)"),
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(current_user),
+) -> list[dict]:
+    """Return immediate subfolder children of a Drive folder for the tree picker."""
+    _check_owner(folder_id, db, user)
+    src = db.get(FolderSyncSource, folder_id)
+    if src is None or src.source_type != "google_drive":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No Google Drive source")
+    if not src.gd_refresh_token and not src.gd_service_account_json:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Not connected to Google Drive")
+    try:
+        children = await gd_list_folder_children(
+            parent_id=parent_id,
+            drive_id=drive_id,
+            client_id=src.gd_client_id or "",
+            client_secret=src.gd_client_secret or "",
+            refresh_token=src.gd_refresh_token or "",
+            service_account_json=src.gd_service_account_json or "",
+        )
+    except Exception as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
+    return children
 
 
 @oauth_router.get("/oauth/google/callback")

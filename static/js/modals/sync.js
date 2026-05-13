@@ -837,76 +837,252 @@ $("#sync-gd-connect").addEventListener("click", async () => {
 $("#sync-gd-pick-folder").addEventListener("click", async () => {
     try {
         const data = await api.gdListFolders(syncFolderId);
-        await openGdPicker(data);
+        openGdPicker(data);
     } catch (err) {
         alert(err.message);
     }
 });
 
-// ----- Google Drive folder-picker modal -----
+// ---------------------------------------------------------------------------
+// Google Drive folder-picker — lazy tree with 3-state checkboxes
+// ---------------------------------------------------------------------------
+//
+// State model
+// -----------
+// gdPickNodes  map<id, node>  one entry per Drive folder seen so far
+// gdPickRoots  array<id>      top-level IDs in display order
+//
+// Each node: { id, name, driveId, owner_email, shared_at, modified_at,
+//              checked: bool, indeterminate: bool,
+//              children: null | array<id>,   // null = not yet fetched
+//              loading: bool, expanded: bool }
+//
+// Checkbox tri-state rule
+// -----------------------
+// - checked=true  indeterminate=false → this folder and everything under it
+// - checked=false indeterminate=true  → some children are checked
+// - checked=false indeterminate=false → nothing selected in subtree
+//
+// Propagation: checking a node forces all loaded descendants to the same
+// state.  Unchecking / partial-checking a node recalculates ancestors.
+
+let gdPickNodes = new Map();   // id → node
+let gdPickRoots = [];          // ordered top-level ids
+
+function _gdNode(f, driveId = "") {
+    return {
+        id: f.id, name: f.name, driveId,
+        owner_email: f.owner_email || "",
+        shared_at: f.shared_at || "",
+        modified_at: f.modified_at || "",
+        checked: false, indeterminate: false,
+        children: null, loading: false, expanded: false,
+    };
+}
 
 function openGdPicker(data) {
-    const all = [
-        ...data.folders.map((f) => ({ ...f, group: "My Drive" })),
-        ...data.shared_folders.map((f) => ({ ...f, group: "Shared with me" })),
-        ...data.shared_drives.map((f) => ({ ...f, group: "Shared drives" })),
-    ];
-    if (all.length === 0) {
-        alert("No Drive folders found.");
-        return;
-    }
-    const list = $("#gd-pick-list");
-    list.innerHTML = "";
+    gdPickNodes = new Map();
+    gdPickRoots = [];
     const preselected = new Set(gdFolders.map((f) => f.id));
 
-    // Group rows under a section heading so the user can scan visually.
-    const groups = ["My Drive", "Shared with me", "Shared drives"];
-    for (const group of groups) {
-        const items = all.filter((f) => f.group === group);
-        if (items.length === 0) continue;
-        const header = document.createElement("div");
-        header.style.cssText = "font-weight:600;margin:6px 0 2px;color:var(--muted, #666);font-size:12px;text-transform:uppercase;";
-        header.textContent = group;
-        list.append(header);
-        for (const f of items) {
-            const row = document.createElement("label");
-            row.className = "check-row";
-            row.style.cssText = "display:flex;gap:8px;align-items:flex-start;padding:4px 0;";
-            const cb = document.createElement("input");
-            cb.type = "checkbox";
-            cb.dataset.id = f.id;
-            cb.dataset.name = f.name;
-            cb.checked = preselected.has(f.id);
-            cb.style.marginTop = "3px";  // line up with the first text row
-            const text = document.createElement("span");
-            text.style.cssText = "display:flex;flex-direction:column;gap:1px;line-height:1.3;";
-            const title = document.createElement("span");
-            title.textContent = f.name;
-            text.append(title);
-            const subtitle = gdSubtitle(f);
-            if (subtitle) {
-                const sub = document.createElement("span");
-                sub.style.cssText = "font-size:11px;color:var(--color-text-secondary);";
-                sub.textContent = subtitle;
-                text.append(sub);
-            }
-            row.append(cb, text);
-            list.append(row);
+    const groups = [
+        { label: "My Drive",       items: data.folders,        driveId: "" },
+        { label: "Shared with me", items: data.shared_folders, driveId: "" },
+        { label: "Shared drives",  items: data.shared_drives,  driveId: "" },
+    ];
+    // Shared Drives: the drive id IS the root folder id for browsing.
+    for (const g of groups) {
+        for (const f of (g.items || [])) {
+            const node = _gdNode(f, g.label === "Shared drives" ? f.id : "");
+            node.checked = preselected.has(f.id);
+            gdPickNodes.set(f.id, node);
+            gdPickRoots.push({ id: f.id, group: g.label });
         }
     }
-    refreshGdPickAllState();
+
+    if (gdPickNodes.size === 0) { alert("No Drive folders found."); return; }
+
+    _gdRenderTree();
     $("#gd-pick-backdrop").hidden = false;
 }
 
-/* Build the dim subtitle line under each picker row.
+function _gdRenderTree() {
+    const list = $("#gd-pick-list");
+    list.innerHTML = "";
 
-   Eight folders all called "Meet Recordings" only become useful once you
-   can see whose they are; this is also where we surface stale-folder
-   age (`modifiedTime` on a Meet Recordings folder = the date of the last
-   recording dropped in). Drive returns ISO timestamps; we render the
-   date portion only because seconds add visual noise without information.
-*/
-function gdSubtitle(f) {
+    const groups = ["My Drive", "Shared with me", "Shared drives"];
+    for (const group of groups) {
+        const rootIds = gdPickRoots.filter((r) => r.group === group).map((r) => r.id);
+        if (!rootIds.length) continue;
+        const header = document.createElement("div");
+        header.className = "gd-tree-group";
+        header.textContent = group;
+        list.append(header);
+        for (const id of rootIds) {
+            list.append(_gdBuildRow(id, 0));
+        }
+    }
+    _gdRefreshTopCheckbox();
+}
+
+function _gdBuildRow(id, depth) {
+    const node = gdPickNodes.get(id);
+    const wrap = document.createElement("div");
+    wrap.dataset.gdId = id;
+
+    const row = document.createElement("div");
+    row.className = "gd-tree-row";
+    row.style.paddingLeft = `${depth * 16 + 4}px`;
+
+    // Expander button (▶ / ▼ / spinner / leaf dot)
+    const exp = document.createElement("button");
+    exp.type = "button";
+    exp.className = "gd-tree-exp";
+    exp.setAttribute("aria-label", node.expanded ? "Collapse" : "Expand");
+    exp.textContent = node.loading ? "⋯" : node.expanded ? "▾" : node.children === null ? "▸" : node.children.length ? "▸" : "·";
+    if (node.children !== null && !node.children.length) exp.disabled = true;
+    exp.addEventListener("click", () => _gdToggleExpand(id));
+
+    // Checkbox
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.className = "gd-tree-cb";
+    cb.checked = node.checked;
+    cb.indeterminate = node.indeterminate;
+    cb.addEventListener("change", () => _gdToggleCheck(id, cb.checked));
+
+    // Label
+    const label = document.createElement("span");
+    label.className = "gd-tree-label";
+    const title = document.createElement("span");
+    title.textContent = node.name;
+    label.append(title);
+    const sub = _gdSubtitle(node);
+    if (sub) {
+        const s = document.createElement("span");
+        s.className = "gd-tree-sub";
+        s.textContent = sub;
+        label.append(s);
+    }
+
+    row.append(exp, cb, label);
+    wrap.append(row);
+
+    if (node.expanded && node.children) {
+        const kids = document.createElement("div");
+        kids.className = "gd-tree-children";
+        for (const cid of node.children) {
+            kids.append(_gdBuildRow(cid, depth + 1));
+        }
+        wrap.append(kids);
+    }
+
+    return wrap;
+}
+
+async function _gdToggleExpand(id) {
+    const node = gdPickNodes.get(id);
+    if (node.loading) return;
+
+    if (node.expanded) {
+        node.expanded = false;
+        _gdReRenderRow(id);
+        return;
+    }
+
+    if (node.children === null) {
+        // Lazy-load children from the server.
+        node.loading = true;
+        _gdReRenderRow(id);
+        try {
+            const children = await api.gdBrowseFolder(syncFolderId, id, node.driveId);
+            node.children = children.map((f) => {
+                if (!gdPickNodes.has(f.id)) {
+                    const child = _gdNode(f, node.driveId);
+                    // Inherit checked state from parent if parent is fully checked.
+                    if (node.checked) child.checked = true;
+                    gdPickNodes.set(f.id, child);
+                }
+                return f.id;
+            });
+        } catch (err) {
+            node.loading = false;
+            _gdReRenderRow(id);
+            alert(`Could not load subfolders: ${err.message}`);
+            return;
+        }
+        node.loading = false;
+    }
+
+    node.expanded = node.children.length > 0;
+    _gdReRenderRow(id);
+}
+
+function _gdToggleCheck(id, on) {
+    _gdSetSubtree(id, on);
+    _gdBubbleUp(id);
+    _gdRefreshTopCheckbox();
+}
+
+function _gdSetSubtree(id, on) {
+    const node = gdPickNodes.get(id);
+    node.checked = on;
+    node.indeterminate = false;
+    if (node.children) {
+        for (const cid of node.children) _gdSetSubtree(cid, on);
+    }
+    _gdReRenderCb(id);
+}
+
+function _gdBubbleUp(id) {
+    // Find the parent of `id` by scanning the tree (simple enough for Drive folder counts).
+    const parent = _gdFindParent(id);
+    if (!parent) return;
+    const pnode = gdPickNodes.get(parent);
+    if (!pnode.children) return;
+    const kids = pnode.children.map((cid) => gdPickNodes.get(cid));
+    const allOn = kids.every((k) => k.checked && !k.indeterminate);
+    const noneOn = kids.every((k) => !k.checked && !k.indeterminate);
+    pnode.checked = allOn;
+    pnode.indeterminate = !allOn && !noneOn;
+    _gdReRenderCb(parent);
+    _gdBubbleUp(parent);
+}
+
+function _gdFindParent(id) {
+    for (const [pid, node] of gdPickNodes) {
+        if (node.children && node.children.includes(id)) return pid;
+    }
+    return null;
+}
+
+function _gdReRenderRow(id) {
+    // Replace the wrapper div for `id` (but not the subtree DOM — re-render from scratch).
+    const old = document.querySelector(`[data-gd-id="${id}"]`);
+    if (!old) return;
+    const depth = Math.round((parseInt(old.querySelector(".gd-tree-row").style.paddingLeft) - 4) / 16);
+    const fresh = _gdBuildRow(id, depth);
+    old.replaceWith(fresh);
+}
+
+function _gdReRenderCb(id) {
+    const node = gdPickNodes.get(id);
+    const cb = document.querySelector(`[data-gd-id="${id}"] .gd-tree-cb`);
+    if (!cb) return;
+    cb.checked = node.checked;
+    cb.indeterminate = node.indeterminate;
+}
+
+function _gdRefreshTopCheckbox() {
+    const all = $("#gd-pick-all");
+    const nodes = [...gdPickNodes.values()];
+    if (!nodes.length) { all.checked = false; all.indeterminate = false; return; }
+    const on = nodes.filter((n) => n.checked).length;
+    all.checked = on === nodes.size;
+    all.indeterminate = on > 0 && on < nodes.size;
+}
+
+function _gdSubtitle(f) {
     const parts = [];
     if (f.owner_email) parts.push(f.owner_email);
     if (f.shared_at) parts.push(`shared ${f.shared_at.slice(0, 10)}`);
@@ -914,21 +1090,10 @@ function gdSubtitle(f) {
     return parts.join(" · ");
 }
 
-function refreshGdPickAllState() {
-    const boxes = $("#gd-pick-list").querySelectorAll('input[type="checkbox"]');
-    const all = $("#gd-pick-all");
-    if (boxes.length === 0) { all.checked = false; all.indeterminate = false; return; }
-    let on = 0;
-    boxes.forEach((b) => { if (b.checked) on += 1; });
-    all.checked = on === boxes.length;
-    all.indeterminate = on > 0 && on < boxes.length;
-}
-
-$("#gd-pick-list").addEventListener("change", refreshGdPickAllState);
-
 $("#gd-pick-all").addEventListener("change", () => {
     const on = $("#gd-pick-all").checked;
-    $("#gd-pick-list").querySelectorAll('input[type="checkbox"]').forEach((b) => { b.checked = on; });
+    for (const id of gdPickNodes.keys()) _gdSetSubtree(id, on);
+    _gdRefreshTopCheckbox();
 });
 
 function closeGdPicker() {
@@ -942,10 +1107,23 @@ $("#gd-pick-backdrop").addEventListener("click", (e) => {
 });
 
 $("#gd-pick-ok").addEventListener("click", () => {
+    // Collect every fully-checked node (not indeterminate). This gives us
+    // the minimal set needed: if a parent is checked, no need to list children.
     const picked = [];
-    $("#gd-pick-list").querySelectorAll('input[type="checkbox"]:checked').forEach((b) => {
-        picked.push({ id: b.dataset.id, name: b.dataset.name });
-    });
+    const checkedIds = new Set(
+        [...gdPickNodes.entries()]
+            .filter(([, n]) => n.checked && !n.indeterminate)
+            .map(([id]) => id)
+    );
+    // Drop descendants whose ancestor is already in the set.
+    for (const id of checkedIds) {
+        const isRedundant = [...checkedIds].some(
+            (oid) => oid !== id && gdPickNodes.get(oid)?.children?.includes(id)
+        );
+        if (!isRedundant) {
+            picked.push({ id, name: gdPickNodes.get(id).name });
+        }
+    }
     setGdFolders(picked);
     closeGdPicker();
 });

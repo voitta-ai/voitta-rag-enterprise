@@ -433,6 +433,57 @@ def _folder_summary(f: dict) -> dict[str, str]:
     }
 
 
+async def list_folder_children(
+    *,
+    parent_id: str,
+    drive_id: str = "",
+    client_id: str = "",
+    client_secret: str = "",
+    refresh_token: str = "",
+    service_account_json: str = "",
+) -> list[dict[str, str]]:
+    """Return immediate subfolder children of *parent_id*.
+
+    ``drive_id`` must be supplied when browsing inside a Shared Drive —
+    the Drive API requires ``driveId`` + ``includeItemsFromAllDrives`` to
+    reach those items.  For My Drive / Shared-with-me folders leave it
+    empty.
+    """
+    if refresh_token:
+        access_token = await _refresh_access_token(client_id, client_secret, refresh_token)
+    elif service_account_json:
+        access_token = await asyncio.to_thread(
+            _service_account_access_token, service_account_json
+        )
+    else:
+        raise RuntimeError("Cannot browse: no OAuth token and no service-account JSON")
+
+    headers = {"Authorization": f"Bearer {access_token}"}
+    base = "https://www.googleapis.com/drive/v3/files"
+    fields = "files(id,name,owners(displayName,emailAddress),modifiedTime)"
+    params: dict[str, str] = {
+        "fields": fields,
+        "pageSize": "200",
+        "orderBy": "name",
+        "q": (
+            f"'{parent_id}' in parents "
+            "and mimeType='application/vnd.google-apps.folder' "
+            "and trashed=false"
+        ),
+        "supportsAllDrives": "true",
+        "includeItemsFromAllDrives": "true",
+    }
+    if drive_id:
+        params["driveId"] = drive_id
+        params["corpora"] = "drive"
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(base, headers=headers, params=params)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Drive browse failed: {resp.text[:300]}")
+    return [_folder_summary(f) for f in resp.json().get("files", [])]
+
+
 async def _refresh_access_token(
     client_id: str, client_secret: str, refresh_token: str
 ) -> str:
