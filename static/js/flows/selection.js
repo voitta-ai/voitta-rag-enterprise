@@ -69,6 +69,15 @@ export function addGhostDir(folderId, relDir) {
     _ghostDirs.get(folderId).add(relDir);
 }
 
+export function removeGhostDir(folderId, relDir) {
+    const set = _ghostDirs.get(folderId);
+    if (!set) return;
+    const prefix = relDir.endsWith("/") ? relDir : relDir + "/";
+    for (const d of [...set]) {
+        if (d === relDir || d.startsWith(prefix)) set.delete(d);
+    }
+}
+
 // Mutate selection + ask the render loop for a full pass. The render
 // loop will rebuild the tree, sidebar, and toolbar in a single rAF
 // callback so a click never rebuilds three times.

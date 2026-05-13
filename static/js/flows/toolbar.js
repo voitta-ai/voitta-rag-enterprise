@@ -8,7 +8,8 @@
 import { api } from "../api.js";
 import { renderFolders } from "../render/tree.js";
 import { closeModal, openModal } from "../modals/new-folder.js";
-import { addGhostDir, expand, getSelectedFileId, getSelectedFolderId, getSelectedRelDir, setSelection } from "./selection.js";
+import { addGhostDir, expand, getSelectedFileId, getSelectedFolderId, getSelectedRelDir, removeGhostDir, setSelection } from "./selection.js";
+import { scheduleFullRender } from "../render/render-loop.js";
 import { files, folders, jobs } from "../store.js";
 
 const $ = (sel) => document.querySelector(sel);
@@ -145,13 +146,23 @@ $("#btn-remove").addEventListener("click", async () => {
             const name = fileObj ? fileObj.rel_path.split("/").pop() : `file #${fileId}`;
             if (!confirm(`Delete "${name}"?\n\nThis cannot be undone.`)) return;
             await api.deleteFile(folderId, fileId);
+            // Remove from files store immediately; WS event will confirm.
+            files.update((list) => list.filter((f) => f.id !== fileId));
             setSelection(folderId, relDir);
+            scheduleFullRender();
         } else if (relDir) {
             // Delete a subdirectory.
             const dirName = relDir.split("/").pop();
             if (!confirm(`Delete folder "${dirName}" and all its contents?\n\nThis cannot be undone.`)) return;
             await api.deleteSubdir(folderId, relDir);
+            // Remove dir and all its children from ghost dirs, files store.
+            removeGhostDir(folderId, relDir);
+            const prefix = relDir.endsWith("/") ? relDir : relDir + "/";
+            files.update((list) => list.filter(
+                (f) => f.folder_id !== folderId || (f.rel_path !== relDir && !f.rel_path.startsWith(prefix))
+            ));
             setSelection(folderId, "");
+            scheduleFullRender();
         } else {
             // Delete the top-level folder.
             if (!confirm(`Delete folder "${folder.display_name}"?\n\nThe folder and all its files will be permanently removed from disk.`)) return;

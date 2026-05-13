@@ -62,9 +62,11 @@ import {
     getSelectedFolderId,
     getSelectedRelDir,
     isExpanded,
+    removeGhostDir,
     selectNode,
     toggleExpanded,
 } from "../flows/selection.js";
+import { scheduleFullRender } from "./render-loop.js";
 import {
     activeFolderIds,
     buildTree,
@@ -403,7 +405,8 @@ async function onDeleteFile(li) {
     if (!confirm(`Delete "${name}"?\n\nThis cannot be undone.`)) return;
     try {
         await api.deleteFile(folderId, fileId);
-        // The watcher will push a file.deleted event; tree will update.
+        files.update((list) => list.filter((f) => f.id !== fileId));
+        scheduleFullRender();
     } catch (err) {
         alert(err.message);
     }
@@ -416,7 +419,12 @@ async function onDeleteDir(li) {
     if (!confirm(`Delete folder "${name}" and all its contents?\n\nThis cannot be undone.`)) return;
     try {
         await api.deleteSubdir(folderId, rel);
-        // Files inside will emit file.deleted events; tree reconciles.
+        removeGhostDir(folderId, rel);
+        const prefix = rel.endsWith("/") ? rel : rel + "/";
+        files.update((list) => list.filter(
+            (f) => f.folder_id !== folderId || (f.rel_path !== rel && !f.rel_path.startsWith(prefix))
+        ));
+        scheduleFullRender();
     } catch (err) {
         alert(err.message);
     }
