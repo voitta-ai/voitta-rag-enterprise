@@ -180,7 +180,15 @@ def _run_extract_inner(file_id: int) -> None:
         new_sha = hashlib.sha256(raw).hexdigest()
     logger.debug("sha=%s size=%d", new_sha, len(raw))
 
-    if _short_circuit_unchanged(file_id, new_sha, stat.st_mtime_ns):
+    from .meta_sidecar import load as load_meta_sidecar
+
+    meta = load_meta_sidecar(abs_path)
+    effective_mtime_ns = (
+        meta.modified_at_ns if (meta and meta.modified_at_ns is not None)
+        else stat.st_mtime_ns
+    )
+
+    if _short_circuit_unchanged(file_id, new_sha, effective_mtime_ns):
         logger.info("extract skip: unchanged sha")
         return
 
@@ -295,7 +303,7 @@ def _run_extract_inner(file_id: int) -> None:
             commit = _commit_indexing(
                 file_id=file_id,
                 new_sha=new_sha,
-                mtime_ns=stat.st_mtime_ns,
+                mtime_ns=effective_mtime_ns,
                 chunks=chunks,
                 images=list(zip(image_shas, result.images, strict=True)),
                 page_images=list(
@@ -1106,9 +1114,20 @@ def _embed_text_sync(file_id: int, round_token: int | None = None) -> None:
             tab = file.tab
             file_cas_id = file.file_cas_id
             allowed_users = allowed_user_ids_for_file(s, file_id)
+            folder = s.get(Folder, folder_id)
+            folder_path = folder.path if folder else None
 
         char_to_page = _load_char_to_page(file_cas_id)
         layout_summaries = _load_layout_summaries(file_cas_id)
+
+        from .meta_sidecar import load as load_meta_sidecar
+
+        meta_payload: dict | None = None
+        if folder_path:
+            abs_file = Path(folder_path) / rel_path
+            meta = load_meta_sidecar(abs_file)
+            if meta:
+                meta_payload = meta.payload_fields or None
 
         text_emb = get_text_embedder()
         sparse_emb = get_sparse_embedder()
@@ -1159,6 +1178,7 @@ def _embed_text_sync(file_id: int, round_token: int | None = None) -> None:
                         page=primary_page,
                         pages=pages,
                         layout_summary=summary,
+                        meta_payload=meta_payload,
                     )
                 )
         else:

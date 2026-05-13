@@ -278,6 +278,9 @@ class ChunkPoint:
     # starts with ``layout_``). None when no layout was captured for
     # the primary page.
     layout_summary: dict | None = None
+    # Optional ``meta_*``-prefixed fields from a ``.voitta.meta`` sidecar.
+    # Merged flat into the payload so each field is independently filterable.
+    meta_payload: dict | None = None
 
 
 @dataclass
@@ -426,6 +429,8 @@ def _chunk_payload(p: ChunkPoint) -> dict:
     }
     if p.layout_summary:
         payload.update(p.layout_summary)
+    if p.meta_payload:
+        payload.update(p.meta_payload)
     return payload
 
 

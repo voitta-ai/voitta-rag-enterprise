@@ -102,6 +102,8 @@ class Settings(BaseSettings):
         # every sync and would otherwise show up in the file tree.
         ".voitta_sources.json,.voitta_timestamps.json,.voitta_sync.lock,"
         ".voitta_nfs_sources.json,"
+        # Per-file metadata sidecars — never indexed directly.
+        "*.voitta.meta,"
         # Sidecar dir for full Google Sheets workbooks (.xlsx) downloaded
         # alongside the per-sheet markdown summaries. Indexer must NOT
         # see these — the markdown is the searchable representation; the
