@@ -127,6 +127,16 @@ function buildFolderRoot(folderId) {
     return li;
 }
 
+function _buildDeleteBtn(onClick) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "tree-delete-btn";
+    btn.title = "Delete";
+    btn.textContent = "×";
+    btn.addEventListener("click", (e) => { e.stopPropagation(); onClick(); });
+    return btn;
+}
+
 function buildDirRow(folderId, relDir) {
     const li = document.createElement("li");
     li.className = "tree-row dir";
@@ -158,17 +168,17 @@ function buildDirRow(folderId, relDir) {
     indexedCount.className = "num";
     const tag = document.createElement("span");
     tag.className = "status-tag";
-    const spacer1 = document.createElement("span");
-    spacer1.style.visibility = "hidden";
-    const spacer2 = document.createElement("span");
-    spacer2.style.visibility = "hidden";
 
-    li.append(nameCell, fileCount, indexedCount, tag, spacer1, spacer2);
+    const delBtn = _buildDeleteBtn(() => onDeleteDir(li));
+    delBtn.hidden = true;
+
+    li.append(nameCell, fileCount, indexedCount, tag, delBtn);
     li.addEventListener("click", onRowClick);
 
-    li._refs = { nameCell, chevron, glyph, img, text, fileCount, indexedCount, tag };
+    li._refs = { nameCell, chevron, glyph, img, text, fileCount, indexedCount, tag, delBtn };
     li._isRoot = false;
     li._dirKind = null;
+    li._canDelete = false;
     return li;
 }
 
@@ -195,14 +205,16 @@ function buildFileRow(fileId) {
     nameCell.append(chevron, label);
 
     const blank1 = document.createElement("span");
-    const blank2 = document.createElement("span");
     const tag = document.createElement("span");
     tag.className = "status-tag";
+    const delBtn = _buildDeleteBtn(() => onDeleteFile(li));
+    delBtn.hidden = true;
 
-    li.append(nameCell, blank1, blank2, tag);
+    li.append(nameCell, blank1, tag, delBtn);
 
-    li._refs = { nameCell, label, glyph, img, text, tag };
+    li._refs = { nameCell, label, glyph, img, text, tag, delBtn };
     li._fileExtKey = null;
+    li._canDelete = false;
     return li;
 }
 
@@ -274,7 +286,13 @@ function updateTreeRow(li, { folder, displayName, depth, isOpen, hasChildren, is
     setIfChanged(r.tag, "className", `status-tag ${summary.status}`);
     setIfChanged(r.tag, "textContent", summary.status);
 
-    if (li._isRoot) updateRootSwitches(li, folder);
+    if (li._isRoot) {
+        updateRootSwitches(li, folder);
+    } else if (li._refs.delBtn) {
+        const show = !!canDelete;
+        if (li._refs.delBtn.hidden === show) li._refs.delBtn.hidden = !show;
+        li._canDelete = show;
+    }
 }
 
 function updateRootSwitches(li, folder) {
@@ -354,6 +372,40 @@ function updateFileRow(li, { file, depth }) {
     setIfChanged(r.tag, "textContent", stateLabel);
     const tagTitle = `state=${file.state}, pending_embeds=${file.pending_embeds}`;
     if (r.tag.title !== tagTitle) r.tag.title = tagTitle;
+
+    // Delete button — only for owned regular folders.
+    const canDel = !!(file._canDelete);
+    if (r.delBtn.hidden === canDel) r.delBtn.hidden = !canDel;
+}
+
+// ---------------------------------------------------------------------------
+// Delete handlers (files + subdirs, regular folders only)
+// ---------------------------------------------------------------------------
+
+async function onDeleteFile(li) {
+    const fileId = Number(li.dataset.fileId);
+    const folderId = Number(li.dataset.folderId);
+    const name = li._refs.text.textContent;
+    if (!confirm(`Delete "${name}"?\n\nThis cannot be undone.`)) return;
+    try {
+        await api.deleteFile(folderId, fileId);
+        // The watcher will push a file.deleted event; tree will update.
+    } catch (err) {
+        alert(err.message);
+    }
+}
+
+async function onDeleteDir(li) {
+    const folderId = Number(li.dataset.folderId);
+    const rel = li.dataset.relDir;
+    const name = li._refs.text.textContent;
+    if (!confirm(`Delete folder "${name}" and all its contents?\n\nThis cannot be undone.`)) return;
+    try {
+        await api.deleteSubdir(folderId, rel);
+        // Files inside will emit file.deleted events; tree reconciles.
+    } catch (err) {
+        alert(err.message);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -450,7 +502,8 @@ function emitTreeRow({ targetRows, seenKeys, folder, node, relDir, displayName, 
     // can be the Drive mount itself — labelling it "spreadsheet"
     // because one of its files came from Sheets would be wrong.)
     const dirKind = isRoot ? null : (node.kind || null);
-    updateTreeRow(li, { folder, displayName, depth, isOpen, hasChildren, isSelected, summary, sharedReadonly, dirKind });
+    const canDelete = !isRoot && !!(folder.owned) && (folder.sync_source_kind || "regular") === "regular";
+    updateTreeRow(li, { folder, displayName, depth, isOpen, hasChildren, isSelected, summary, sharedReadonly, dirKind, canDelete });
     targetRows.push(li);
     seenKeys.add(cacheKey);
 
@@ -468,6 +521,7 @@ function emitTreeRow({ targetRows, seenKeys, folder, node, relDir, displayName, 
             folderActive,
         });
     }
+    const fileCanDelete = !!(folder.owned) && (folder.sync_source_kind || "regular") === "regular";
     for (const f of [...node.files].sort((a, b) => a.rel_path.localeCompare(b.rel_path))) {
         const fkey = `file:${f.id}`;
         let fli = rowCache.get(fkey);
@@ -475,6 +529,8 @@ function emitTreeRow({ targetRows, seenKeys, folder, node, relDir, displayName, 
             fli = buildFileRow(f.id);
             rowCache.set(fkey, fli);
         }
+        fli.dataset.folderId = String(folder.id);
+        fli._canDelete = fileCanDelete;
         updateFileRow(fli, { file: f, depth: depth + 1 });
         targetRows.push(fli);
         seenKeys.add(fkey);

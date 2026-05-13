@@ -520,6 +520,22 @@ input[type="text"], input[type="file"] {
 }
 .tree-row:last-child { border-bottom: none; }
 .tree-row:hover { background: var(--color-bg-hover); }
+.tree-delete-btn {
+    flex-shrink: 0;
+    margin-left: auto;
+    padding: 0 5px;
+    border: none;
+    background: none;
+    color: var(--color-text-secondary);
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+    border-radius: 3px;
+    opacity: 0;
+    transition: opacity .1s;
+}
+.tree-row:hover .tree-delete-btn { opacity: .5; }
+.tree-delete-btn:hover { opacity: 1 !important; color: var(--color-danger, #c0392b); background: var(--color-bg-hover); }
 .tree-row.selected,
 .tree-row.selected:hover { background: var(--color-accent); color: #fff; }
 .tree-row.selected .num,

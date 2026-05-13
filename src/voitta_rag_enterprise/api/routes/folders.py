@@ -983,6 +983,100 @@ def delete_folder(
     events.publish("folders", {"type": "folder.removed", "folder_id": folder_id})
 
 
+def _require_regular(folder: Folder, source: FolderSyncSource | None) -> None:
+    """Raise 409 if the folder has a sync source (files managed externally)."""
+    if source is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Cannot delete individual files from a synced folder.",
+        )
+
+
+@router.delete("/{folder_id}/files/{file_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_file(
+    folder_id: int,
+    file_id: int,
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(current_user),
+) -> None:
+    """Delete a single file (and its .voitta.meta sidecar if present) from a regular folder."""
+    folder = _require_owner(db, folder_id, user)
+    source = db.get(FolderSyncSource, folder_id)
+    _require_regular(folder, source)
+
+    file = db.get(File, file_id)
+    if file is None or file.folder_id != folder_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
+
+    # Delete from disk (best-effort; DB cleanup happens regardless).
+    folder_path = Path(folder.path)
+    abs_path = folder_path / file.rel_path
+    with contextlib.suppress(OSError):
+        abs_path.unlink(missing_ok=True)
+    # Also remove any .voitta.meta sidecar.
+    with contextlib.suppress(OSError):
+        sidecar = abs_path.parent / (abs_path.name + ".voitta.meta")
+        sidecar.unlink(missing_ok=True)
+
+    # Enqueue the wipe + row deletion via the normal worker path.
+    job_queue.enqueue("delete_file", {"file_id": file_id})
+
+
+@router.delete("/{folder_id}/dirs", status_code=status.HTTP_204_NO_CONTENT)
+def delete_subdir(
+    folder_id: int,
+    rel: str,
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(current_user),
+) -> None:
+    """Delete a subdirectory and all its contents from a regular folder."""
+    folder = _require_owner(db, folder_id, user)
+    source = db.get(FolderSyncSource, folder_id)
+    _require_regular(folder, source)
+
+    if not rel or rel in (".", "/"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Cannot delete the root directory.")
+
+    # Path-safety: must resolve inside the folder root.
+    folder_path = Path(folder.path).resolve()
+    parts = [p for p in rel.replace("\\", "/").split("/") if p and p != "."]
+    if any(p == ".." for p in parts):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Path traversal not allowed.")
+    target = folder_path.joinpath(*parts).resolve()
+    try:
+        target.relative_to(folder_path)
+    except ValueError:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Path escapes folder root.")
+
+    if target == folder_path:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Cannot delete the root directory.")
+
+    # Remove from disk.
+    if target.exists():
+        shutil.rmtree(target, ignore_errors=True)
+
+    # Mark all File rows under this subdir as deleted and enqueue wipes.
+    prefix = rel.rstrip("/") + "/"
+    files = db.execute(
+        select(File).where(
+            File.folder_id == folder_id,
+            File.rel_path.like(f"{prefix}%"),
+        )
+    ).scalars().all()
+    for f in files:
+        job_queue.enqueue("delete_file", {"file_id": f.id})
+
+    # Also handle files directly in the dir (no deeper nesting).
+    exact = db.execute(
+        select(File).where(
+            File.folder_id == folder_id,
+            File.rel_path == rel.rstrip("/"),
+        )
+    ).scalars().first()
+    if exact:
+        job_queue.enqueue("delete_file", {"file_id": exact.id})
+
+
 @router.get("/{folder_id}/files", response_model=list[FileOut])
 def list_folder_files(
     folder_id: int,
