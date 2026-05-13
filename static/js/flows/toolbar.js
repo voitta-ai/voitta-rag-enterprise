@@ -8,7 +8,7 @@
 import { api } from "../api.js";
 import { renderFolders } from "../render/tree.js";
 import { closeModal, openModal } from "../modals/new-folder.js";
-import { addGhostDir, expand, getSelectedFolderId, getSelectedRelDir, setSelection } from "./selection.js";
+import { addGhostDir, expand, getSelectedFileId, getSelectedFolderId, getSelectedRelDir, setSelection } from "./selection.js";
 import { files, folders, jobs } from "../store.js";
 
 const $ = (sel) => document.querySelector(sel);
@@ -54,7 +54,16 @@ export function updateToolbarState() {
                 : "Configure a remote sync (e.g. GitHub) for this empty folder";
         }
     }
-    $("#btn-remove").disabled = !isRoot || readOnly;
+    const selectedFileId = getSelectedFileId();
+    const selectedRelDir = getSelectedRelDir();
+    const isRegular = (folder?.sync_source_kind || "regular") === "regular";
+    // Remove enabled for: top-level folder (owner only), subdir (owned regular), file (owned regular)
+    const canRemove = !!folder && isOwned && (
+        isRoot ||
+        (!selectedFileId && selectedRelDir && isRegular) ||
+        (!!selectedFileId && isRegular)
+    );
+    $("#btn-remove").disabled = !canRemove;
 }
 
 async function createSubfolder() {
@@ -121,13 +130,34 @@ $("#btn-reindex").addEventListener("click", async () => {
 });
 
 $("#btn-remove").addEventListener("click", async () => {
-    if (!getSelectedFolderId()) return;
-    const folder = folders.get().find((f) => f.id === getSelectedFolderId());
+    const folderId = getSelectedFolderId();
+    if (!folderId) return;
+    const folder = folders.get().find((f) => f.id === folderId);
     if (!folder) return;
-    if (!confirm(`Delete folder "${folder.display_name}"?\n\nThe folder and all its files will be permanently removed from disk.`)) return;
+
+    const fileId = getSelectedFileId();
+    const relDir = getSelectedRelDir();
+
     try {
-        await api.deleteFolder(getSelectedFolderId());
-        setSelection(null, "");
+        if (fileId) {
+            // Delete a single file.
+            const fileObj = files.get().find((f) => f.id === fileId);
+            const name = fileObj ? fileObj.rel_path.split("/").pop() : `file #${fileId}`;
+            if (!confirm(`Delete "${name}"?\n\nThis cannot be undone.`)) return;
+            await api.deleteFile(folderId, fileId);
+            setSelection(folderId, relDir);
+        } else if (relDir) {
+            // Delete a subdirectory.
+            const dirName = relDir.split("/").pop();
+            if (!confirm(`Delete folder "${dirName}" and all its contents?\n\nThis cannot be undone.`)) return;
+            await api.deleteSubdir(folderId, relDir);
+            setSelection(folderId, "");
+        } else {
+            // Delete the top-level folder.
+            if (!confirm(`Delete folder "${folder.display_name}"?\n\nThe folder and all its files will be permanently removed from disk.`)) return;
+            await api.deleteFolder(folderId);
+            setSelection(null, "");
+        }
     } catch (err) {
         alert(err.message);
     }

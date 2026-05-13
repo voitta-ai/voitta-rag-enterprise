@@ -58,6 +58,7 @@ function _applyLockBadge(glyphSpan, on) {
     }
 }
 import {
+    getSelectedFileId,
     getSelectedFolderId,
     getSelectedRelDir,
     isExpanded,
@@ -240,7 +241,11 @@ function onChevronClick(e) {
 
 function onRowClick(e) {
     const li = e.currentTarget;
-    selectNode(Number(li.dataset.folderId), li.dataset.relDir || "");
+    if (li.dataset.fileId) {
+        selectNode(Number(li.dataset.folderId), li.dataset.relDir || "", Number(li.dataset.fileId));
+    } else {
+        selectNode(Number(li.dataset.folderId), li.dataset.relDir || "");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -357,6 +362,8 @@ function updateFileRow(li, { file, depth }) {
     const r = li._refs;
     const pad = depth > 0 ? `${depth * 14}px` : "";
     if (r.nameCell.style.paddingLeft !== pad) r.nameCell.style.paddingLeft = pad;
+    const isSelected = file.id === getSelectedFileId();
+    setIfChanged(li, "className", `tree-row file${isSelected ? " selected" : ""}`);
     const basename = file.rel_path.split("/").pop();
     setIfChanged(r.text, "textContent", basename);
 
@@ -381,7 +388,7 @@ function updateFileRow(li, { file, depth }) {
     if (r.tag.title !== tagTitle) r.tag.title = tagTitle;
 
     // Delete button — only for owned regular folders.
-    const canDel = !!(file._canDelete);
+    const canDel = !!(li._canDelete);
     if (r.delBtn.hidden === canDel) r.delBtn.hidden = !canDel;
 }
 

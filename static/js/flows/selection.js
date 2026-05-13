@@ -15,6 +15,7 @@ import { scheduleFullRender } from "../render/render-loop.js";
 
 let _selectedFolderId = null;
 let _selectedRelDir = ""; // "" = folder root; otherwise "subdir/inner"
+let _selectedFileId = null; // null = dir/root selected; number = file selected
 
 const _expandedNodes = new Set(); // keys: `${folder_id}:${rel_dir}`
 const _ghostDirs = new Map(); // folder_id → Set<rel_dir>
@@ -31,9 +32,14 @@ export function getSelectedRelDir() {
     return _selectedRelDir;
 }
 
-export function setSelection(folderId, relDir) {
+export function getSelectedFileId() {
+    return _selectedFileId;
+}
+
+export function setSelection(folderId, relDir, fileId = null) {
     _selectedFolderId = folderId;
     _selectedRelDir = relDir;
+    _selectedFileId = fileId;
 }
 
 export function getExpandedNodes() {
@@ -66,7 +72,7 @@ export function addGhostDir(folderId, relDir) {
 // Mutate selection + ask the render loop for a full pass. The render
 // loop will rebuild the tree, sidebar, and toolbar in a single rAF
 // callback so a click never rebuilds three times.
-export function selectNode(folderId, relDir) {
-    setSelection(folderId, relDir);
+export function selectNode(folderId, relDir, fileId = null) {
+    setSelection(folderId, relDir, fileId);
     scheduleFullRender();
 }
