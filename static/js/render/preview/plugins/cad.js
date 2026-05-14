@@ -106,13 +106,17 @@ const plugin = {
             box.getSize(size);
             const maxDim = Math.max(size.x, size.y, size.z);
             mesh.position.sub(centre);
-            // Initial view: standard mechanical-drawing isometric.
-            // Equal X/Z + slight Y lift gives a front-three-quarter
-            // "hero" angle that reads as 3D from any model orientation,
-            // unlike a pure axis-aligned view which collapses to 2D when
-            // the part happens to be flat in that plane.
+            // CAD convention is Z-up — STEP / IGES / FCStd all author
+            // models with Z as the vertical axis. Three.js defaults to
+            // Y-up, which rotates parts 90° (a scissor lift comes out
+            // lying on its side). Setting camera.up to +Z before
+            // OrbitControls is created propagates the convention to
+            // the orbit/pan/zoom handler.
+            camera.up.set(0, 0, 1);
+            // Standard mechanical-drawing isometric in a Z-up world:
+            // camera at front-right-above looking at the origin.
             const d = maxDim * 1.4;
-            camera.position.set(d, d * 0.9, d);
+            camera.position.set(d, -d, d * 0.7);
             camera.lookAt(0, 0, 0);
             camera.near = maxDim * 0.001;
             camera.far = maxDim * 100;
