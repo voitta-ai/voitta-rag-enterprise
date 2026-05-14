@@ -174,26 +174,32 @@ def _coerce_and_clamp(name: str, value: int) -> int:
 
 
 def get_caps() -> IndexingCaps:
-    """Return the current cap snapshot. Cached after the first read."""
-    global _cache
-    with _lock:
-        if _cache is not None:
-            return _cache
-        overlay = {**_env_defaults(), **_load_from_disk()}
-        clamped = {k: _coerce_and_clamp(k, v) for k, v in overlay.items()}
-        _cache = IndexingCaps(**{k: v for k, v in clamped.items()
-                                 if k in {f.name for f in fields(IndexingCaps)}})
-        return _cache
+    """Return the current cap snapshot — always re-reads from disk.
+
+    Previously this used a module-level cache for performance, but
+    that broke admin updates across processes: a ``PATCH
+    /api/admin/indexing-caps`` (or a ``services.indexing_caps.update``
+    from an SSH session) invalidated the writer's cache but left the
+    uvicorn worker serving stale values until restart.
+
+    The cap file is small (typically <1 KB) and reads are cheap.
+    Skipping the cache trades nothing meaningful for a correctness
+    guarantee: every call to :func:`get_caps` reflects the current
+    on-disk overrides.
+    """
+    overlay = {**_env_defaults(), **_load_from_disk()}
+    clamped = {k: _coerce_and_clamp(k, v) for k, v in overlay.items()}
+    return IndexingCaps(**{k: v for k, v in clamped.items()
+                           if k in {f.name for f in fields(IndexingCaps)}})
 
 
 def invalidate_cache() -> None:
-    """Drop the in-process cache so the next :func:`get_caps` re-reads.
+    """No-op kept for back-compat; :func:`get_caps` no longer caches.
 
-    Exposed for tests; production callers go through :func:`update`.
-    """
-    global _cache
-    with _lock:
-        _cache = None
+    Callers (admin route, tests, the legacy ``update`` helper) still
+    invoke this; we leave the name in place so the import surface
+    doesn't break, but it has no work to do."""
+    pass
 
 
 def update(partial: dict[str, int]) -> IndexingCaps:
