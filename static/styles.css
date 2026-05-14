@@ -1392,6 +1392,12 @@ input[type="text"], input[type="file"] {
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    /* Fill the available sidebar height so plugins (especially the
+       spreadsheet grid) can have an internal scroller. Without this,
+       the panel grows with its content and the sidebar — not the grid
+       — becomes the scrollable area. */
+    flex: 1;
+    min-height: 0;
 }
 
 .preview-header {
@@ -1499,27 +1505,131 @@ input[type="text"], input[type="file"] {
 /* Unsupported plugin */
 .preview-unsupported { padding: var(--md); }
 
-/* Spreadsheet plugin — wide tables; let the panel scroll horizontally
-   within each sheet's table instead of squashing all the columns. */
-.preview-spreadsheet .preview-markdown table {
-    width: auto;
-    min-width: 100%;
-    font-size: 11px;
+/* Spreadsheet plugin — Excel-style grid with column letters, row
+   numbers, and a sheet-tab strip. The whole pane is the scroller so
+   the column / row headers stay aligned with the cell grid. */
+.preview-spreadsheet {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: 0;
 }
-.preview-spreadsheet .preview-markdown th,
-.preview-spreadsheet .preview-markdown td {
-    padding: 3px 6px;
-    white-space: nowrap;
-}
-/* Each `## Sheet:` heading wraps a single table — give it its own
-   horizontal scroller so multi-sheet workbooks don't share one bar. */
-.preview-spreadsheet .preview-markdown {
-    padding: var(--sm);
-}
-.preview-spreadsheet .preview-markdown > * { max-width: 100%; }
-.preview-spreadsheet .preview-markdown table {
-    display: block;
+
+/* Sheet-tab strip. Mirrors the Excel bottom-tab idiom but lives at the
+   top so it stays in view while the cell grid scrolls below. */
+.preview-sheet-tabs {
+    display: flex;
+    gap: 2px;
+    padding: 6px 8px 0;
+    background: var(--color-bg);
+    border-bottom: 1px solid var(--color-border-light);
     overflow-x: auto;
+    flex-shrink: 0;
+}
+.preview-sheet-tab {
+    background: var(--color-bg-elevated);
+    color: var(--color-text-secondary);
+    border: 1px solid var(--color-border-light);
+    border-bottom: none;
+    border-radius: 4px 4px 0 0;
+    padding: 4px 10px;
+    font-size: 11px;
+    cursor: pointer;
+    white-space: nowrap;
+    font-family: var(--font);
+}
+.preview-sheet-tab:hover { color: var(--color-text-primary); }
+.preview-sheet-tab.active {
+    background: var(--color-bg);
+    color: var(--color-text-primary);
+    border-color: var(--color-border);
+    border-bottom: 1px solid var(--color-bg);
+    margin-bottom: -1px;
+    font-weight: 600;
+}
+
+.preview-sheet-scroll {
+    flex: 1;
+    overflow: auto;
+    background: var(--color-bg);
+}
+.preview-sheet-wrap { display: inline-block; min-width: 100%; }
+
+.preview-sheet-grid {
+    border-collapse: separate;
+    border-spacing: 0;
+    font: 11px/1.4 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+    table-layout: auto;
+}
+
+/* Cell + header borders. ``border-collapse: separate`` + edge-only
+   borders gives the clean Excel grid look without the double-line
+   artifacts of ``collapse``. */
+.preview-sheet-grid th,
+.preview-sheet-grid td {
+    border-right: 1px solid var(--color-border-light);
+    border-bottom: 1px solid var(--color-border-light);
+    padding: 2px 6px;
+    min-width: 60px;
+    max-width: 240px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--color-text-primary);
+    background: var(--color-bg-elevated);
+}
+
+/* Column-letter header — sticky to the top of the scroller. */
+.preview-sheet-col-head {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: var(--color-bg-hover);
+    color: var(--color-text-secondary);
+    font-weight: 500;
+    text-align: center;
+    border-top: 1px solid var(--color-border-light);
+}
+
+/* Row-number header — sticky to the left of the scroller. */
+.preview-sheet-row-head {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    background: var(--color-bg-hover);
+    color: var(--color-text-secondary);
+    font-weight: 500;
+    text-align: right;
+    border-left: 1px solid var(--color-border-light);
+    min-width: 32px;
+}
+
+/* Top-left corner — sticky in both axes, sits above both headers. */
+.preview-sheet-corner {
+    position: sticky;
+    top: 0;
+    left: 0;
+    z-index: 3;
+    background: var(--color-bg-hover);
+    border-top: 1px solid var(--color-border-light);
+    border-left: 1px solid var(--color-border-light);
+    min-width: 32px;
+}
+
+/* Numbers right-aligned, monospace-ish digits for column alignment. */
+.preview-sheet-grid td.num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+.preview-sheet-grid td.date {
+    color: var(--color-text-primary);
+    font-variant-numeric: tabular-nums;
+}
+
+.preview-sheet-trunc {
+    padding: 8px 12px;
+    font-size: 11px;
+    color: var(--color-text-secondary);
 }
 
 /* Markdown plugin — rendered prose inside the preview panel */
