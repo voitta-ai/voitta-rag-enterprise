@@ -106,7 +106,14 @@ const plugin = {
             box.getSize(size);
             const maxDim = Math.max(size.x, size.y, size.z);
             mesh.position.sub(centre);
-            camera.position.set(0, 0, maxDim * 1.8);
+            // Initial view: standard mechanical-drawing isometric.
+            // Equal X/Z + slight Y lift gives a front-three-quarter
+            // "hero" angle that reads as 3D from any model orientation,
+            // unlike a pure axis-aligned view which collapses to 2D when
+            // the part happens to be flat in that plane.
+            const d = maxDim * 1.4;
+            camera.position.set(d, d * 0.9, d);
+            camera.lookAt(0, 0, 0);
             camera.near = maxDim * 0.001;
             camera.far = maxDim * 100;
             camera.updateProjectionMatrix();
