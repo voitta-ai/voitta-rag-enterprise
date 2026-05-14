@@ -350,19 +350,36 @@ def search_images(
 
 @mcp.tool()
 def get_file(file_id: int) -> dict:
-    """Return file metadata + the full extracted **markdown** content.
+    """Return file metadata + the full extracted **markdown** content
+    INLINE in the response body. Use sparingly.
 
-    ``text`` is the Voitta-flavoured markdown extract: the file went
-    through a parser at index time (pypdf / python-docx / openpyxl /
-    MinerU / …) and the resulting markdown is what comes back here.
-    It's not the original PDF/DOCX bytes.
+    ⚠ **Prefer Python-side processing over inlining.** ``text`` is
+    the Voitta-flavoured markdown extract (pypdf / python-docx /
+    openpyxl / MinerU at index time, depending on format), and even
+    a modest report runs to tens or hundreds of KB. Streaming all
+    that into the LLM's context window for tasks that don't need
+    the whole document is wasteful and slow.
 
-    For the **original bytes**, use
-    :func:`request_asset` with ``asset_type="original"`` — that
-    returns a signed URL serving the source file. Prefer the
-    asset path when you want to push the file into a downstream
-    Python pipeline (pandas, openpyxl, pypdf, custom parser); use
-    ``get_file`` when you want the text-as-context to reason over.
+    Recommended decision tree:
+
+    * Need the **original file** (PDF/DOCX/XLSX/etc.) for parsing,
+      data extraction, table analysis, summarisation, anything
+      that benefits from a Python script: chain
+      ``request_asset(file_id, "original")`` →
+      ``fetch_to_python_storage(url=…)`` → ``run_compute(...)``.
+      The bytes never enter context; the LLM works against a
+      ``python_storage`` handle.
+    * Need a **small, targeted span** of the markdown extract for
+      reasoning: use ``get_chunk_range(file_id, start, end)`` to
+      pull a few chunks instead of the whole file.
+    * Need the **whole markdown extract as reading context** for a
+      short document the model has to summarise / quote
+      verbatim: ``get_file`` is fine.
+
+    Rule of thumb: if you'd open the file in pandas / openpyxl /
+    pypdf to answer the question, route through python_storage.
+    If you'd skim it as prose to write a summary, ``get_file`` /
+    ``get_chunk_range`` are the right call.
     """
     with session_scope() as s:
         f = s.get(File, file_id)
@@ -388,9 +405,21 @@ def get_chunk_range(
 ) -> list[ChunkInfo]:
     """Return chunks ``[start_index, end_index)`` of a file, in order.
 
-    Each chunk also carries the same ``page`` / ``pages`` / ``layout``
-    fields as search hits, so the LLM can navigate "show me chunks on
-    pages with tables" without going back through ``search``.
+    The bounded-slice complement to ``get_file``. Returns the
+    extracted markdown for a contiguous chunk range plus per-chunk
+    ``page`` / ``pages`` / ``layout`` so the LLM can navigate
+    "show me chunks on pages with tables" without re-running search.
+
+    **Prefer this over ``get_file`` for targeted reads.** A search hit
+    plus ±N neighbouring chunks is almost always cheaper context than
+    inlining the entire markdown.
+
+    Capped at 500 chunks per call; if you find yourself paging across
+    a whole file, that's a signal to switch to
+    ``request_asset(file_id, "original")`` →
+    ``fetch_to_python_storage`` → ``run_compute`` instead, so the
+    Python script can iterate the file without round-tripping the
+    bytes through context.
     """
     from .services.indexing import _load_char_to_page, _load_layout_summaries
     from .services.layout import pages_for_range, primary_page_for_range
@@ -900,20 +929,35 @@ def get_page_layout(file_id: int, page: int) -> list[dict]:
 @mcp.tool()
 def get_workbook(file_id: int) -> dict:
     """Return the full ``.xlsx`` workbook for a Sheets-derived markdown
-    summary as base64-encoded bytes.
+    summary as base64-encoded bytes INLINE.
 
-    Per-sheet markdown summaries cap at 100 rows; this tool is the
-    escape hatch for callers that need the full grid. The workbook
-    lives under ``<folder>/.voitta_workbooks/<rel>/...xlsx`` (excluded
-    from indexing) and is written by the Sheets exporter on every
-    sync.
+    ⚠ **Almost always the wrong tool — prefer the Python path.** A
+    serialised xlsx in the LLM's context is rarely useful: the model
+    can't parse base64 spreadsheet bytes any better than a human.
+    Almost every "what does the data say" question is better answered
+    by routing the workbook through ``python_storage`` and reading
+    it with pandas:
 
-    ``file_id`` is the id of any per-sheet ``.md`` file produced by
-    the SpreadsheetExporter. The tool walks back to the workbook stem
-    (the parent directory) and serves the matching xlsx. Raises if
-    the file isn't a Sheets-derived markdown or the xlsx isn't on
-    disk (e.g. an older sync from before this feature shipped — the
-    user should re-sync the folder).
+        # Recommended:
+        url  = request_asset(file_id, "original")["urls"]["file"]
+        snap = fetch_to_python_storage(url=url, name="<sheet>.xlsx")
+        run_compute(code=f'''
+            import pandas as pd
+            rec = ctx.snapshot({snap["handle"]!r})
+            xlsx = rec["path"] + "/" + rec["meta"]["stored_name"]
+            sheets = pd.read_excel(xlsx, sheet_name=None)
+            ctx.text(sheets["Q4 Plan"].head(20).to_markdown())
+        ''')
+
+    ``get_workbook`` exists only as the legacy escape hatch from
+    before ``request_asset(asset_type='original')`` existed. The
+    per-sheet markdown summaries cap at 100 rows so the existing
+    flow ``search`` → ``get_chunk_range`` covers reasoning. For
+    full-grid analysis, use the Python path.
+
+    ``file_id`` is the id of any per-sheet ``.md`` file produced
+    by the SpreadsheetExporter. Raises if the file isn't a
+    Sheets-derived markdown or the xlsx isn't on disk.
     """
     from pathlib import Path
 
@@ -1295,34 +1339,45 @@ def request_asset(
 
     * ``inline``: structured data the LLM consumes directly (rows from
       a query, summary statistics). No URL involved.
-    * ``urls``: variant name → signed URL. The LLM (or its client)
-      follows each URL to fetch bytes. URLs are HMAC-signed and
+    * ``urls``: variant name → signed URL. URLs are HMAC-signed,
       short-lived (~1 hour TTL by default); the URL itself is the
-      credential. ``expires_at`` accompanies as a unix timestamp.
+      credential, no headers needed. ``expires_at`` accompanies.
+
+    **For URLs: chain with ``fetch_to_python_storage``.** The signed
+    URL doesn't reach the LLM's reasoning context — the LLM passes it
+    straight to ``fetch_to_python_storage(url=..., name=...)`` to
+    pull the bytes into ``python_storage``, then processes the
+    resulting handle with ``run_compute``. The bytes themselves
+    never enter context.
+
+    Canonical "give me the source file" pattern (3 calls):
+
+        asset = request_asset(file_id=N, asset_type="original")
+        snap  = fetch_to_python_storage(
+                    url=asset["urls"]["file"],
+                    name="<filename from get_file/search>",
+                )
+        run_compute(code=f"rec = ctx.snapshot({snap['handle']!r}); ...")
 
     Common ``asset_type`` values
     ----------------------------
 
-    * ``"original"`` — return the file's **source bytes** (PDF /
-      DOCX / XLSX / STEP / image / whatever was indexed) as a single
-      signed URL under ``urls["file"]``. No ``slug`` or ``params``
-      needed. Use this when you want to push the raw file into a
-      downstream Python pipeline rather than reading the Voitta
-      markdown extract via :func:`get_file`. Available on every
-      indexed file.
+    * ``"original"`` — file's **source bytes** (PDF / DOCX / XLSX /
+      STEP / image / whatever was indexed). Single URL under
+      ``urls["file"]``. No ``slug`` or ``params``. Available on
+      every indexed file. Use this anytime you want to *process*
+      the file rather than read its markdown extract.
 
     * ``"cad_projection"`` — render four PNG views (front / top /
-      side / iso) of a STEP/FCStd subcomponent. Requires a ``slug``
+      side / iso) of a STEP/FCStd subcomponent. Requires ``slug``
       naming the component. Optional ``params={"size": 320}``.
 
     * Future / parser-specific: ``list_assets(file_id)`` is the
       source of truth for what's available for a given file.
 
-    Use :func:`list_assets` first to discover available
-    ``asset_type`` values and their ``params_schema``. Invalid
-    params raise ``ValueError`` with the offending field; unknown
-    ``asset_type`` raises too. The handler decides whether ``slug``
-    is required.
+    Use :func:`list_assets` first to discover ``asset_type`` values
+    and their ``params_schema``. Invalid params raise ``ValueError``
+    with the offending field; unknown ``asset_type`` raises too.
     """
     from .services import asset_handlers as _ah
 
