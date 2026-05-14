@@ -9,7 +9,6 @@
 //   unmount(container)          → void          (cancel fetches, dispose GL, clear DOM)
 
 import { api } from "../../api.js";
-import { getSelectedFolderId, getSelectedRelDir, selectNode } from "../../flows/selection.js";
 import { files } from "../../store.js";
 
 const $ = (sel) => document.querySelector(sel);
@@ -20,14 +19,6 @@ let _activeFileId = null;
 
 export function registerPlugin(plugin) {
     _plugins.push(plugin);
-}
-
-// Wire the back button once at module load (modules run after DOM is parsed).
-const _backBtn = document.getElementById("preview-back");
-if (_backBtn) {
-    _backBtn.addEventListener("click", () => {
-        selectNode(getSelectedFolderId(), getSelectedRelDir(), null);
-    });
 }
 
 export function renderFilePreview(fileId) {

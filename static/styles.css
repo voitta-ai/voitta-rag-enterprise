@@ -1409,14 +1409,6 @@ input[type="text"], input[type="file"] {
     flex-shrink: 0;
 }
 
-.preview-back {
-    flex-shrink: 0;
-    font-size: 12px;
-    color: var(--color-accent);
-    white-space: nowrap;
-}
-.preview-back:hover { color: var(--color-accent-hover); }
-
 .preview-filename {
     flex: 1;
     font-size: 12px;
