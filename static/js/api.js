@@ -161,6 +161,7 @@ export const api = {
     fileDownloadUrl: (fileId) => `/api/files/${fileId}/raw`,
     filePageImages: (fileId) => req("GET", `/api/files/${fileId}/page-images`),
     fileMeshUrl: (fileId) => `/api/files/${fileId}/stl`,
+    fileEmail: (fileId) => req("GET", `/api/files/${fileId}/email`),
 
     // Admin
     adminAllowlist: () => req("GET", "/api/admin/allowlist"),

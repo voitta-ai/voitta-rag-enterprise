@@ -139,6 +139,114 @@ def get_file_page_images(
     ]
 
 
+class EmailAttachment(BaseModel):
+    filename: str
+    content_type: str
+    size: int
+
+
+class EmailPreview(BaseModel):
+    from_addr: str | None = None
+    to: str | None = None
+    cc: str | None = None
+    bcc: str | None = None
+    reply_to: str | None = None
+    subject: str | None = None
+    date: str | None = None
+    message_id: str | None = None
+    body_html: str | None = None
+    body_text: str | None = None
+    attachments: list[EmailAttachment] = []
+
+
+@router.get("/{file_id}/email", response_model=EmailPreview)
+def get_file_email(
+    file_id: int,
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(current_user),
+) -> EmailPreview:
+    """Parse an RFC-822 .eml file into structured fields for preview."""
+    import email
+    from email import policy
+    from email.utils import getaddresses
+
+    file = db.get(File, file_id)
+    if file is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
+    if Path(file.rel_path).suffix.lower() != ".eml":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Not an .eml file")
+    folder = db.get(Folder, file.folder_id)
+    if folder is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Folder not found")
+    path = Path(folder.path) / file.rel_path
+    if not path.exists():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "File not on disk")
+
+    # ``policy.default`` decodes headers + charset-aware body parts and
+    # collapses multipart/alternative to a sensible ``get_body`` walk —
+    # the manual ``walk()`` + decode dance compat.py used to need.
+    msg = email.message_from_bytes(path.read_bytes(), policy=policy.default)
+
+    def _addr(header: str) -> str | None:
+        raw = msg.get(header)
+        if raw is None:
+            return None
+        # getaddresses unwraps "Name <addr>, addr2" groupings; rejoin
+        # for display so the UI gets one tidy line per header.
+        pairs = getaddresses([str(raw)])
+        formatted = [
+            f"{n} <{a}>" if n else a
+            for n, a in pairs
+            if a or n
+        ]
+        return ", ".join(formatted) or str(raw)
+
+    body_html: str | None = None
+    body_text: str | None = None
+    try:
+        html_part = msg.get_body(preferencelist=("html",))
+        if html_part is not None:
+            body_html = html_part.get_content()
+    except Exception:
+        body_html = None
+    try:
+        text_part = msg.get_body(preferencelist=("plain",))
+        if text_part is not None:
+            body_text = text_part.get_content()
+    except Exception:
+        body_text = None
+
+    attachments: list[EmailAttachment] = []
+    for part in msg.iter_attachments():
+        fname = part.get_filename() or "(unnamed)"
+        try:
+            payload = part.get_payload(decode=True) or b""
+            size = len(payload)
+        except Exception:
+            size = 0
+        attachments.append(
+            EmailAttachment(
+                filename=fname,
+                content_type=part.get_content_type(),
+                size=size,
+            )
+        )
+
+    return EmailPreview(
+        from_addr=_addr("From"),
+        to=_addr("To"),
+        cc=_addr("Cc"),
+        bcc=_addr("Bcc"),
+        reply_to=_addr("Reply-To"),
+        subject=str(msg.get("Subject")) if msg.get("Subject") else None,
+        date=str(msg.get("Date")) if msg.get("Date") else None,
+        message_id=str(msg.get("Message-ID")) if msg.get("Message-ID") else None,
+        body_html=body_html,
+        body_text=body_text,
+        attachments=attachments,
+    )
+
+
 _CAD_EXTS = {".step", ".stp", ".iges", ".igs", ".fcstd"}
 
 

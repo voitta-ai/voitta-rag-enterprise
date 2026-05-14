@@ -23,6 +23,7 @@ import "./render/preview/plugins/image.js";
 import "./render/preview/plugins/spreadsheet.js";
 import "./render/preview/plugins/pages.js";
 import "./render/preview/plugins/cad.js";
+import "./render/preview/plugins/email.js";
 import "./render/preview/plugins/text.js";
 import "./render/preview/plugins/unsupported.js";
 import "./modals/admin.js";  // self-wires Admin button + admin modal
