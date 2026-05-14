@@ -116,6 +116,13 @@ def create_app() -> FastAPI:
     # serving. Adding a new on-demand handler (audio waveform, xlsx
     # chart, …) is one more import line here.
     from .services import cad_render  # noqa: F401
+    # Side-effect import: registers ``asset_type="original"``, which
+    # exposes the file's source bytes (PDF/DOCX/XLSX/STEP/…) via a
+    # signed URL. Available on every indexed file regardless of
+    # parser; ``list_assets`` synthesises the menu entry. Bookmarklet-
+    # style clients use this to ingest raw bytes into a downstream
+    # Python pipeline instead of consuming the markdown extract.
+    from .services import original_file  # noqa: F401
 
     # Bind the MCP route at /mcp internally; below we splice its routes into
     # the parent FastAPI app rather than mounting, so the URL is exactly /mcp

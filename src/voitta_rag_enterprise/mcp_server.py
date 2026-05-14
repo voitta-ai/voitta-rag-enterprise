@@ -350,7 +350,20 @@ def search_images(
 
 @mcp.tool()
 def get_file(file_id: int) -> dict:
-    """Return file metadata + the full extracted markdown content."""
+    """Return file metadata + the full extracted **markdown** content.
+
+    ``text`` is the Voitta-flavoured markdown extract: the file went
+    through a parser at index time (pypdf / python-docx / openpyxl /
+    MinerU / …) and the resulting markdown is what comes back here.
+    It's not the original PDF/DOCX bytes.
+
+    For the **original bytes**, use
+    :func:`request_asset` with ``asset_type="original"`` — that
+    returns a signed URL serving the source file. Prefer the
+    asset path when you want to push the file into a downstream
+    Python pipeline (pandas, openpyxl, pypdf, custom parser); use
+    ``get_file`` when you want the text-as-context to reason over.
+    """
     with session_scope() as s:
         f = s.get(File, file_id)
         if f is None:
@@ -1232,25 +1245,41 @@ def _unauthorized(detail: str) -> JSONResponse:
 def list_assets(file_id: int) -> list[dict]:
     """List the on-demand assets a file exposes.
 
-    Parsers populate this list at extract time — examples include CAD
-    component projections, xlsx chart renders, page re-renders, data
-    queries. The output names every ``asset_type`` the LLM can call
-    with :func:`request_asset` for this file, plus the within-file
-    slugs (component names, sheet names, …) and a ``params_schema``
-    fragment that documents how to construct the ``params`` argument.
+    Two sources feed this list:
 
-    Returns an empty list when the file's parser doesn't expose any
-    on-demand assets, or when the file isn't yet indexed.
+    * **Synthetic, always present** — ``asset_type="original"``: serve
+      the file's source bytes (PDF/DOCX/XLSX/STEP/…) via a signed URL.
+      This is the escape hatch when a caller needs the raw format and
+      not the Voitta markdown extract that :func:`get_file` returns.
+      Use it when you want to load a file into a downstream Python
+      pipeline (pandas, openpyxl, pypdf, custom parser).
+
+    * **Parser-declared** — CAD component projections, xlsx chart
+      renders, data queries, page re-renders. The on-disk
+      ``on_demand_assets.json`` (written by parsers at index time)
+      enumerates these. Each entry names a ``slug`` (within-file
+      target — component name, sheet name) and a ``params_schema``
+      fragment so the LLM can construct valid ``params``.
+
+    Returns at least the synthetic ``original`` entry for every
+    indexed file; empty list only when the file isn't yet indexed.
     """
     from .services import asset_handlers as _ah
+    from .services import original_file as _orig
 
     with session_scope() as s:
         f = s.get(File, file_id)
         if f is None:
             raise ValueError(f"File {file_id} not found")
         cas_id = f.file_cas_id
-    specs = _ah.load_assets_for_file(cas_id)
-    return [spec.as_dict() for spec in specs]
+        rel_path = f.rel_path
+    out: list[dict] = []
+    # Synthetic "original" spec first — common case for the LLM is
+    # "give me the bytes", so listing it at the top reduces the
+    # need to scroll past parser-specific entries.
+    out.append(_orig.spec_for(file_id, rel_path).as_dict())
+    out.extend(spec.as_dict() for spec in _ah.load_assets_for_file(cas_id))
+    return out
 
 
 @mcp.tool()
@@ -1266,13 +1295,34 @@ def request_asset(
 
     * ``inline``: structured data the LLM consumes directly (rows from
       a query, summary statistics). No URL involved.
-    * ``urls``: variant name → signed URL. The LLM follows each URL
-      with its bearer token to fetch bytes. ``expires_at`` accompanies.
+    * ``urls``: variant name → signed URL. The LLM (or its client)
+      follows each URL to fetch bytes. URLs are HMAC-signed and
+      short-lived (~1 hour TTL by default); the URL itself is the
+      credential. ``expires_at`` accompanies as a unix timestamp.
 
-    Use :func:`list_assets` first to discover available ``asset_type``
-    values and the params schema for each. Invalid params raise
-    ``ValueError`` with the offending field; unknown asset_type raises
-    too. The handler decides whether ``slug`` is required.
+    Common ``asset_type`` values
+    ----------------------------
+
+    * ``"original"`` — return the file's **source bytes** (PDF /
+      DOCX / XLSX / STEP / image / whatever was indexed) as a single
+      signed URL under ``urls["file"]``. No ``slug`` or ``params``
+      needed. Use this when you want to push the raw file into a
+      downstream Python pipeline rather than reading the Voitta
+      markdown extract via :func:`get_file`. Available on every
+      indexed file.
+
+    * ``"cad_projection"`` — render four PNG views (front / top /
+      side / iso) of a STEP/FCStd subcomponent. Requires a ``slug``
+      naming the component. Optional ``params={"size": 320}``.
+
+    * Future / parser-specific: ``list_assets(file_id)`` is the
+      source of truth for what's available for a given file.
+
+    Use :func:`list_assets` first to discover available
+    ``asset_type`` values and their ``params_schema``. Invalid
+    params raise ``ValueError`` with the offending field; unknown
+    ``asset_type`` raises too. The handler decides whether ``slug``
+    is required.
     """
     from .services import asset_handlers as _ah
 
@@ -1317,6 +1367,14 @@ def build_app(transport: str = "streamable-http", path: str | None = None):
     ``/mcp``.
     """
     init_db()
+    # Side-effect imports: register asset_handlers before any
+    # request_asset call lands. The unified app in main.py also
+    # imports these (for the HTTP /api/assets/{token} route);
+    # registering twice is idempotent (asset_handlers.register
+    # short-circuits when the same instance re-registers).
+    from .services import cad_render  # noqa: F401
+    from .services import original_file  # noqa: F401
+
     app = mcp.http_app(transport=transport, stateless_http=True, path=path)
     app.add_middleware(BearerAuthMiddleware)
     return app
