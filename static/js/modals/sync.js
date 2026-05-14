@@ -147,6 +147,7 @@ function openSyncModal() {
     _snapshotSavedGdFolders([]);
     $("#sync-gd-sa-json").value = "";
     $("#sync-gd-sa-json").placeholder = '{"type":"service_account","client_email":"…","private_key":"…"}';
+    $("#sync-gd-use-loopback").checked = false;
     setGdAuthMode("oauth");
     setGdConnState({ connected: false, hasClientSecret: false });
     // Auto-sync defaults: off, 6h. loadSyncSource overrides from the row.
@@ -179,6 +180,25 @@ function openSyncModal() {
         });
 }
 
+// Fixed-port loopback redirect — kept in lockstep with the backend's
+// GD_LOOPBACK_REDIRECT_URI. Admins paste this verbatim into Google
+// Cloud Console; a local nginx bridge listens on 53682 and proxies the
+// callback back to this server.
+const GD_LOOPBACK_REDIRECT_URI =
+    "http://localhost:53682/api/sync/oauth/google/callback";
+
+function updateGdRedirectHint() {
+    const useLoopback = $("#sync-gd-use-loopback")?.checked;
+    const hint = $("#sync-gd-redirect-hint");
+    if (hint) {
+        hint.textContent = useLoopback
+            ? GD_LOOPBACK_REDIRECT_URI
+            : `${window.location.origin}/api/sync/oauth/google/callback`;
+    }
+    const loopbackHint = $("#sync-gd-loopback-hint");
+    if (loopbackHint) loopbackHint.hidden = !useLoopback;
+}
+
 function setSyncType(t) {
     $("#sync-form-github").hidden = t !== "github";
     $("#sync-form-google_drive").hidden = t !== "google_drive";
@@ -186,8 +206,7 @@ function setSyncType(t) {
     if (t === "google_drive") {
         // Mirror the URL the backend will hand to Google so the user can
         // copy-paste it verbatim into "Authorized redirect URIs".
-        const hint = $("#sync-gd-redirect-hint");
-        if (hint) hint.textContent = `${window.location.origin}/api/sync/oauth/google/callback`;
+        updateGdRedirectHint();
     }
     if (t === "nfs") {
         // Refresh on every entry — the admin may have toggled NFS off
@@ -454,6 +473,8 @@ async function loadSyncSource() {
             _snapshotSavedGdFolders(gd.folders || []);
             $("#sync-gd-client-secret").placeholder = gd.has_client_secret ? "(saved — type to replace)" : "GOCSPX-…";
             $("#sync-gd-sa-json").placeholder = gd.has_service_account ? "(service account JSON saved — paste a new one to replace)" : '{"type":"service_account","client_email":"…","private_key":"…"}';
+            $("#sync-gd-use-loopback").checked = !!gd.use_loopback;
+            updateGdRedirectHint();
             // Pick the right tab. If the saved config has a service-account
             // key (and only that), surface SA mode; otherwise default to
             // OAuth — that's the more common path and the one the redirect-
@@ -584,12 +605,14 @@ function gdFormConfig() {
     // prefers, which would be confusing. Empty strings are safe: the
     // back-end PUT validator preserves stored secrets when blank values
     // arrive (so "saved" placeholders aren't wiped on every save).
+    const useLoopback = !!$("#sync-gd-use-loopback")?.checked;
     if (gdAuthMode === "sa") {
         return {
             client_id: "",
             client_secret: "",
             folders: gdFolders,
             service_account_json: $("#sync-gd-sa-json").value,
+            use_loopback: useLoopback,
         };
     }
     return {
@@ -597,6 +620,7 @@ function gdFormConfig() {
         client_secret: $("#sync-gd-client-secret").value,
         folders: gdFolders,
         service_account_json: "",
+        use_loopback: useLoopback,
     };
 }
 
@@ -663,6 +687,12 @@ $("#sync-gd-client-secret").addEventListener("input", () =>
         connected: $("#sync-gd-conn-status").textContent.startsWith("Connected"),
         hasClientSecret: $("#sync-gd-client-secret").placeholder.startsWith("(saved"),
     }));
+
+// Loopback toggle flips the redirect-hint between the server's origin
+// and the fixed http://localhost:53682/... URL the admin should
+// register in GCP. Doesn't save by itself — the value is sent with
+// the next gdFormConfig() Save.
+$("#sync-gd-use-loopback").addEventListener("change", updateGdRedirectHint);
 
 $("#sync-close").addEventListener("click", closeSyncModal);
 $("#sync-backdrop").addEventListener("click", (e) => {

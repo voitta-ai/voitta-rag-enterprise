@@ -185,6 +185,12 @@ class FolderSyncSource(Base):
     gd_refresh_token: Mapped[str | None] = mapped_column(default=None)
     gd_service_account_json: Mapped[str | None] = mapped_column(default=None)
     gd_folder_id: Mapped[str | None] = mapped_column(default=None)
+    # When True the OAuth redirect URI is built as
+    # http://localhost:53682/api/sync/oauth/google/callback — admins can
+    # then register only a localhost URL in GCP without exposing the
+    # Voitta hostname. A small nginx bridge running on the admin's box
+    # proxies the callback back to this server.
+    gd_use_loopback: Mapped[bool] = mapped_column(default=False)
     # NFS — admin sets the root via settings, user picks a subpath
     # under it via the sync UI; ``nfs_subpath`` is that POSIX path
     # *relative* to the root (never absolute, never with ``..``).

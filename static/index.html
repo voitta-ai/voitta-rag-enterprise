@@ -519,6 +519,25 @@
                             autocomplete="off" spellcheck="false"
                             data-1p-ignore data-lpignore="true" data-form-type="other">
 
+                        <!-- Localhost-loopback redirect. When on, the OAuth flow uses
+                             http://localhost:53682/... — the admin only ever registers
+                             a localhost URL in GCP (no Voitta hostname leaks), and a
+                             small nginx bridge on the admin's machine proxies the
+                             callback back to this server. Off by default; toggling it
+                             invalidates the stored refresh_token because Google
+                             scopes tokens to the redirect URI used at consent. -->
+                        <label class="check-row" style="margin-top:8px;">
+                            <input type="checkbox" id="sync-gd-use-loopback">
+                            <span style="text-transform:none;letter-spacing:0;color:var(--color-text);font-size:12px;">
+                                Use localhost loopback redirect
+                            </span>
+                        </label>
+                        <p class="hint" id="sync-gd-loopback-hint" hidden style="margin:4px 0 0;">
+                            Register <code id="sync-gd-loopback-uri">http://localhost:53682/api/sync/oauth/google/callback</code>
+                            in Google Cloud Console and run the local nginx bridge on
+                            this machine. The Voitta hostname never appears in GCP.
+                        </p>
+
                         <div class="actions actions-right" style="margin-top:8px;">
                             <button type="button" id="sync-gd-connect" class="btn btn-secondary btn-sm" disabled title="Save client_id and client_secret first">Connect</button>
                             <span id="sync-gd-conn-status" class="hint" style="margin-left:auto;"></span>

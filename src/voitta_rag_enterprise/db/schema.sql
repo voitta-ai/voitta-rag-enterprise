@@ -150,6 +150,7 @@ CREATE TABLE IF NOT EXISTS folder_sync_sources (
     gd_refresh_token          TEXT,                          -- set by the OAuth callback, not the save endpoint
     gd_service_account_json   TEXT,                          -- alternative auth (server-to-server)
     gd_folder_id              TEXT,                          -- root Drive folder or shared-drive ID
+    gd_use_loopback           INTEGER NOT NULL DEFAULT 0,    -- 1 = OAuth redirect via http://localhost:53682 (admin runs a local nginx bridge that proxies the callback back to this server)
     -- NFS (admin-defined root path + user-chosen subpath underneath).
     -- The connector mirrors files from ``<admin nfs_root>/<nfs_subpath>``
     -- into the folder's filesystem storage, same lifecycle as Drive.

@@ -81,6 +81,10 @@ class GoogleDriveSyncIn(BaseModel):
     client_secret: str = ""
     folders: list[GoogleDriveFolder] = Field(default_factory=list)
     service_account_json: str = ""
+    # When True the OAuth flow uses the localhost-loopback redirect URI
+    # (the admin then registers only the localhost URL in GCP and runs
+    # a small local nginx bridge). Default False = original behaviour.
+    use_loopback: bool = False
 
 
 class NfsSyncIn(BaseModel):
@@ -125,6 +129,7 @@ class GoogleDriveSyncOut(BaseModel):
     has_client_secret: bool
     has_service_account: bool
     connected: bool  # true once a refresh_token has been stored
+    use_loopback: bool = False
 
 
 class NfsSyncOut(BaseModel):
@@ -198,6 +203,7 @@ def _to_out(src: FolderSyncSource) -> SyncSourceOut:
             has_client_secret=bool(src.gd_client_secret),
             has_service_account=bool(src.gd_service_account_json),
             connected=bool(src.gd_refresh_token),
+            use_loopback=bool(src.gd_use_loopback),
         )
     elif src.source_type == "nfs":
         root, available, status_str = _nfs_status_snapshot()
@@ -434,6 +440,13 @@ def upsert_sync_source(
             [{"id": f.id, "name": f.name} for f in gd_cfg.folders]
         )
         # Refresh-token field is set by the OAuth callback, never by save.
+        # Loopback flag: switching it invalidates any refresh_token that
+        # was issued under the other redirect URI (Google scopes refresh
+        # tokens to the redirect URI used at consent), so drop it.
+        prev_loopback = bool(existing and existing.gd_use_loopback)
+        if prev_loopback != bool(gd_cfg.use_loopback):
+            src.gd_refresh_token = None
+        src.gd_use_loopback = bool(gd_cfg.use_loopback)
 
     else:  # pragma: no cover — Pydantic Literal guards this
         raise HTTPException(
@@ -474,6 +487,7 @@ def _clear_google_drive_fields(src: FolderSyncSource) -> None:
     src.gd_refresh_token = None
     src.gd_service_account_json = None
     src.gd_folder_id = None
+    src.gd_use_loopback = False
 
 
 def _publish_folder_changed(folder: Folder, *, has_sync_source: bool) -> None:
@@ -640,19 +654,35 @@ class GdAuthInitOut(BaseModel):
     auth_url: str
 
 
-def _oauth_redirect_uri(request: Request) -> str:
+# Port used by the optional localhost-loopback redirect URI. Hardcoded
+# on purpose — admins register this exact URL in GCP, and a small
+# nginx bridge on their machine listens on this port and proxies the
+# callback back to this server. Keep in sync with the bridge config.
+GD_LOOPBACK_PORT = 53682
+GD_LOOPBACK_REDIRECT_URI = (
+    f"http://localhost:{GD_LOOPBACK_PORT}/api/sync/oauth/google/callback"
+)
+
+
+def _oauth_redirect_uri(request: Request, *, use_loopback: bool = False) -> str:
     """Build the redirect URI the way Google's consent screen will see it.
 
-    ``request.base_url`` reflects what the ASGI server received on the wire,
-    which is plain HTTP when a reverse proxy (Cloudflare, Caddy, nginx)
-    terminates TLS in front of the app. Google then rejects the code-
-    exchange with ``redirect_uri_mismatch`` because the value we registered
-    is ``https://…``. Read ``X-Forwarded-Proto`` and ``X-Forwarded-Host``
-    ourselves so this works without requiring uvicorn to be launched with
-    ``--proxy-headers``.
+    When ``use_loopback`` is set (per-folder opt-in) we return the
+    fixed localhost URL — the admin has registered that in GCP and is
+    running a local nginx bridge that proxies the callback back here.
+
+    Otherwise: ``request.base_url`` reflects what the ASGI server received
+    on the wire, which is plain HTTP when a reverse proxy (Cloudflare,
+    Caddy, nginx) terminates TLS in front of the app. Google then rejects
+    the code-exchange with ``redirect_uri_mismatch`` because the value we
+    registered is ``https://…``. Read ``X-Forwarded-Proto`` and
+    ``X-Forwarded-Host`` ourselves so this works without requiring uvicorn
+    to be launched with ``--proxy-headers``.
 
     Falls back to ``request.url`` for the localhost / no-proxy case.
     """
+    if use_loopback:
+        return GD_LOOPBACK_REDIRECT_URI
     fwd_proto = request.headers.get("x-forwarded-proto", "").split(",")[0].strip()
     fwd_host = request.headers.get("x-forwarded-host", "").split(",")[0].strip()
     proto = fwd_proto or request.url.scheme
@@ -687,7 +717,7 @@ def gd_auth_init(
     state = base64.urlsafe_b64encode(str(folder_id).encode()).decode()
     auth_url = gd_get_auth_url(
         client_id=src.gd_client_id,
-        redirect_uri=_oauth_redirect_uri(request),
+        redirect_uri=_oauth_redirect_uri(request, use_loopback=bool(src.gd_use_loopback)),
         state=state,
     )
     return GdAuthInitOut(auth_url=auth_url)
@@ -806,13 +836,14 @@ async def gd_oauth_callback(
             )
         client_id = src.gd_client_id or ""
         client_secret = src.gd_client_secret or ""
+        use_loopback = bool(src.gd_use_loopback)
 
     try:
         tokens = await gd_exchange_code(
             client_id=client_id,
             client_secret=client_secret,
             code=code,
-            redirect_uri=_oauth_redirect_uri(request),
+            redirect_uri=_oauth_redirect_uri(request, use_loopback=use_loopback),
         )
     except Exception as e:
         logger.exception("Google OAuth callback failed for folder %s", folder_id)

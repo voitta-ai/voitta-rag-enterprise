@@ -99,6 +99,17 @@ def init_db() -> None:
         # Default NULL is safe — existing rows are github/google_drive
         # and never read this column.
         _ensure_column(raw_conn, "folder_sync_sources", "nfs_subpath", "TEXT")
+        # Google Drive OAuth loopback flag. When set, the redirect URI
+        # is built as http://localhost:53682/... so admins can register
+        # a localhost-loopback URL in GCP (and run a small local nginx
+        # that proxies the callback back here). Default 0 = use the
+        # original behaviour (redirect to the server's own host).
+        _ensure_column(
+            raw_conn,
+            "folder_sync_sources",
+            "gd_use_loopback",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
         raw_conn.commit()
     finally:
         raw_conn.close()
