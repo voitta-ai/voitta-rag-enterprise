@@ -125,6 +125,29 @@ class FolderInfo(BaseModel):
     shared: bool = False
 
 
+class EntryInfo(BaseModel):
+    """A single entry returned when ``list_indexed_folders`` is called with a
+    non-empty ``prefix`` — i.e. when the tool is being used as a directory
+    listing rather than a roots listing."""
+
+    # ``"folder"`` for a (sub)directory, ``"file"`` for an indexed file.
+    kind: str
+    # Last path segment (the filename or subdir name).
+    name: str
+    # Full virtual path from the storage root, e.g. ``"MyDocs/sub/file.pdf"``.
+    # Folder entries end with ``/``.
+    path: str
+    # Containing top-level folder id, so callers can pivot to other tools
+    # (search with folder_ids=[…], get_file, …) without a second lookup.
+    folder_id: int
+    # File-only fields — None for folder entries.
+    file_id: int | None = None
+    state: str | None = None
+    size_bytes: int | None = None
+    source_url: str | None = None
+    source_kind: str | None = None
+
+
 class FileInfo(BaseModel):
     id: int
     folder_id: int
@@ -238,17 +261,38 @@ class PageImageInfo(BaseModel):
 
 
 @mcp.tool()
-def list_indexed_folders() -> list[FolderInfo]:
-    """List the folders visible to the calling user, with file-count breakdown.
+def list_indexed_folders(
+    prefix: str | None = None,
+) -> list[FolderInfo] | list[EntryInfo]:
+    """Browse indexed storage as a virtual filesystem.
 
-    Returns every visible folder (owned, granted, shared). The ``active``
-    flag tells the caller which ones are currently in their MCP search
-    rotation — they remain listed even when toggled off so the LLM can
-    suggest re-enabling.
+    Two modes, selected by ``prefix``:
+
+    * **Roots listing** (``prefix`` is ``None`` or ``""`` or ``"/"``) — returns
+      every top-level folder visible to the calling user (owned, granted,
+      shared) as ``FolderInfo`` rows, with a file-count breakdown. The
+      ``active`` flag tells the caller which ones are currently in their MCP
+      search rotation — folders remain listed even when toggled off so the
+      LLM can suggest re-enabling.
+
+    * **Directory listing** (``prefix`` non-empty, e.g. ``"MyDocs/reports"``
+      or ``"/MyDocs/reports/"``) — treats storage as a filesystem. The first
+      path segment is the folder ``display_name``; the remainder is the
+      rel-path inside that folder. Returns ``EntryInfo`` rows for every
+      direct child: subdirectories first (``kind="folder"``), then files
+      (``kind="file"``). Pass an empty string or just the folder name to
+      list its root.
+
+    Filtering: ``.voitta.meta`` sidecars and any dot-prefixed entries
+    (``.git/…``, ``.DS_Store``, …) are hidden in directory mode — they are
+    internal/system files and should not be surfaced to the LLM.
+
+    :param prefix: virtual path to list. ``None`` / empty → roots.
     """
     settings = get_settings()
     user_id = _resolved_user_id()
     show_all = settings.single_user
+    cleaned = (prefix or "").strip().strip("/")
     with session_scope() as s:
         if show_all or user_id is None:
             visible_ids: set[int] = {
@@ -258,31 +302,118 @@ def list_indexed_folders() -> list[FolderInfo]:
         else:
             visible_ids = set(visible_folder_ids(s, user_id))
             active_ids = set(mcp_visible_folder_ids(s, user_id))
-        out: list[FolderInfo] = []
-        for f in s.execute(select(Folder).order_by(Folder.id)).scalars():
-            if f.id not in visible_ids:
+
+        if not cleaned:
+            out: list[FolderInfo] = []
+            for f in s.execute(select(Folder).order_by(Folder.id)).scalars():
+                if f.id not in visible_ids:
+                    continue
+                total = (
+                    s.execute(
+                        select(File).where(
+                            File.folder_id == f.id, File.state != "deleted"
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                indexed = [x for x in total if x.state == "indexed"]
+                out.append(
+                    FolderInfo(
+                        id=f.id,
+                        path=f.path,
+                        display_name=f.display_name,
+                        source_type=f.source_type,
+                        files_total=len(total),
+                        files_indexed=len(indexed),
+                        active=f.id in active_ids,
+                        shared=bool(f.shared),
+                    )
+                )
+            return out
+
+        head, _, tail = cleaned.partition("/")
+        # Resolve the top-level segment against visible folders by
+        # display_name. Falls back to numeric id for unambiguous addressing
+        # when two folders share a display_name.
+        candidates = [
+            f
+            for f in s.execute(select(Folder).order_by(Folder.id)).scalars()
+            if f.id in visible_ids and f.display_name == head
+        ]
+        if not candidates and head.isdigit():
+            f = s.get(Folder, int(head))
+            if f is not None and f.id in visible_ids:
+                candidates = [f]
+        if not candidates:
+            return []
+        folder = candidates[0]
+
+        sub_prefix = tail  # rel-path within the folder; "" means root
+        like_pat = f"{sub_prefix}/%" if sub_prefix else "%"
+
+        rows = (
+            s.execute(
+                select(File).where(
+                    File.folder_id == folder.id,
+                    File.state != "deleted",
+                    File.rel_path.like(like_pat),
+                    ~File.rel_path.like("%.voitta.meta"),
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+        dirs: dict[str, None] = {}
+        files: list[File] = []
+        depth = len(sub_prefix.split("/")) if sub_prefix else 0
+        for r in rows:
+            parts = r.rel_path.split("/")
+            if sub_prefix and parts[:depth] != sub_prefix.split("/"):
                 continue
-            total = (
-                s.execute(
-                    select(File).where(File.folder_id == f.id, File.state != "deleted")
+            remainder = parts[depth:]
+            if not remainder:
+                continue
+            head_seg = remainder[0]
+            if head_seg.startswith("."):
+                continue
+            if len(remainder) == 1:
+                if any(p.startswith(".") for p in parts):
+                    continue
+                files.append(r)
+            else:
+                if any(p.startswith(".") for p in parts[:depth + 1]):
+                    continue
+                dirs.setdefault(head_seg, None)
+
+        base = f"{folder.display_name}/{sub_prefix}".rstrip("/")
+        entries: list[EntryInfo] = []
+        for name in sorted(dirs.keys()):
+            entries.append(
+                EntryInfo(
+                    kind="folder",
+                    name=name,
+                    path=f"{base}/{name}/",
+                    folder_id=folder.id,
                 )
-                .scalars()
-                .all()
             )
-            indexed = [x for x in total if x.state == "indexed"]
-            out.append(
-                FolderInfo(
-                    id=f.id,
-                    path=f.path,
-                    display_name=f.display_name,
-                    source_type=f.source_type,
-                    files_total=len(total),
-                    files_indexed=len(indexed),
-                    active=f.id in active_ids,
-                    shared=bool(f.shared),
+        for f in sorted(files, key=lambda x: x.rel_path):
+            name = f.rel_path.split("/")[-1]
+            entries.append(
+                EntryInfo(
+                    kind="file",
+                    name=name,
+                    path=f"{base}/{name}",
+                    folder_id=folder.id,
+                    file_id=f.id,
+                    state=f.state,
+                    size_bytes=f.size_bytes,
+                    source_url=f.source_url,
+                    source_kind=classify_source_kind(f),
                 )
             )
-        return out
+        return entries
 
 
 def _mcp_search_folder_filter(
