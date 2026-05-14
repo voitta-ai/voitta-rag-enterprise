@@ -1499,6 +1499,29 @@ input[type="text"], input[type="file"] {
 /* Unsupported plugin */
 .preview-unsupported { padding: var(--md); }
 
+/* Spreadsheet plugin — wide tables; let the panel scroll horizontally
+   within each sheet's table instead of squashing all the columns. */
+.preview-spreadsheet .preview-markdown table {
+    width: auto;
+    min-width: 100%;
+    font-size: 11px;
+}
+.preview-spreadsheet .preview-markdown th,
+.preview-spreadsheet .preview-markdown td {
+    padding: 3px 6px;
+    white-space: nowrap;
+}
+/* Each `## Sheet:` heading wraps a single table — give it its own
+   horizontal scroller so multi-sheet workbooks don't share one bar. */
+.preview-spreadsheet .preview-markdown {
+    padding: var(--sm);
+}
+.preview-spreadsheet .preview-markdown > * { max-width: 100%; }
+.preview-spreadsheet .preview-markdown table {
+    display: block;
+    overflow-x: auto;
+}
+
 /* Markdown plugin — rendered prose inside the preview panel */
 .preview-markdown {
     padding: var(--md);

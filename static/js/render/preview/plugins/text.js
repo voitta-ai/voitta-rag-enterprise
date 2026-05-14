@@ -6,6 +6,7 @@
 // be on disk (works for Google Drive synced files too).
 
 import { registerPlugin } from "../index.js";
+import { renderMarkdownInto } from "../markdown.js";
 
 const MD_EXTS = new Set([".md", ".markdown", ".mdx"]);
 
@@ -22,8 +23,6 @@ const TEXT_EXTS = new Set([
 ]);
 
 let _abortCtrl = null;
-// Cache the marked module after first load.
-let _marked = null;
 
 const plugin = {
     canPreview(file) {
@@ -39,31 +38,18 @@ const plugin = {
         const isMarkdown = MD_EXTS.has(_ext(file.rel_path));
 
         try {
-            // Fetch text and (if needed) marked in parallel.
-            const [resp] = await Promise.all([
-                fetch(`/api/files/${file.id}/text`, { credentials: "same-origin", signal }),
-                isMarkdown && !_marked ? _loadMarked() : Promise.resolve(),
-            ]);
+            const resp = await fetch(`/api/files/${file.id}/text`, {
+                credentials: "same-origin",
+                signal,
+            });
             if (signal.aborted) return;
             if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
             const text = await resp.text();
             if (signal.aborted) return;
 
             container.innerHTML = "";
-
-            if (isMarkdown && _marked) {
-                const article = document.createElement("article");
-                article.className = "preview-markdown";
-                // marked.parse is synchronous; use DOMPurify-style approach:
-                // set innerHTML only after confirming content is our own
-                // server-extracted text (not user-supplied HTML).
-                article.innerHTML = _marked.parse(text);
-                // Open links in a new tab so they don't navigate away from the app.
-                for (const a of article.querySelectorAll("a[href]")) {
-                    a.target = "_blank";
-                    a.rel = "noopener noreferrer";
-                }
-                container.append(article);
+            if (isMarkdown) {
+                await renderMarkdownInto(container, text);
             } else {
                 const pre = document.createElement("pre");
                 pre.className = "preview-text";
@@ -83,13 +69,6 @@ const plugin = {
         container.innerHTML = "";
     },
 };
-
-async function _loadMarked() {
-    const mod = await import("https://esm.sh/marked@13");
-    _marked = mod.marked;
-    // Configure: don't mangle URLs, use GFM + line breaks.
-    _marked.setOptions({ gfm: true, breaks: false });
-}
 
 function _ext(relPath) {
     const dot = relPath.toLowerCase().lastIndexOf(".");

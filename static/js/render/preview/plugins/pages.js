@@ -12,7 +12,7 @@ import { registerPlugin } from "../index.js";
 
 const PAGE_EXTS = new Set([
     ".pdf", ".pptx", ".ppt", ".docx", ".doc",
-    ".xlsx", ".xls", ".odp", ".ods", ".odt",
+    ".odp", ".odt",
 ]);
 
 let _abortCtrl = null;

@@ -20,6 +20,7 @@ import { renderFolders } from "./render/tree.js";
 // Register preview plugins in priority order. Each import has a side
 // effect of calling registerPlugin(); unsupported.js is always last.
 import "./render/preview/plugins/image.js";
+import "./render/preview/plugins/spreadsheet.js";
 import "./render/preview/plugins/pages.js";
 import "./render/preview/plugins/cad.js";
 import "./render/preview/plugins/text.js";
