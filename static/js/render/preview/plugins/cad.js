@@ -13,7 +13,7 @@
 
 import { registerPlugin } from "../index.js";
 
-const CAD_EXTS = new Set([".step", ".stp", ".iges", ".igs"]);
+const CAD_EXTS = new Set([".step", ".stp", ".iges", ".igs", ".fcstd"]);
 
 // STL files can be loaded directly without backend conversion.
 const STL_EXTS = new Set([".stl"]);

@@ -139,7 +139,7 @@ def get_file_page_images(
     ]
 
 
-_CAD_EXTS = {".step", ".stp", ".iges", ".igs"}
+_CAD_EXTS = {".step", ".stp", ".iges", ".igs", ".fcstd"}
 
 
 @router.get("/{file_id}/stl")
@@ -148,7 +148,7 @@ def get_file_stl(
     db: Session = Depends(db_session),
     user: CurrentUser = Depends(current_user),
 ) -> Response:
-    """Convert a STEP/IGES file to binary STL for the 3D preview."""
+    """Convert a STEP/IGES/FCStd file to binary STL for the 3D preview."""
     file = db.get(File, file_id)
     if file is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
@@ -171,24 +171,99 @@ def get_file_stl(
 
 
 def _to_stl(file_path: str, ext: str) -> bytes:
+    if ext == ".fcstd":
+        shape = _fcstd_to_compound(file_path)
+    else:
+        shape = _step_iges_to_shape(file_path, ext)
+    return _shape_to_stl_bytes(shape)
+
+
+def _step_iges_to_shape(file_path: str, ext: str):
+    if ext in (".step", ".stp"):
+        from OCP.STEPControl import STEPControl_Reader  # type: ignore[import]
+        reader = STEPControl_Reader()
+    else:
+        from OCP.IGESControl import IGESControl_Reader  # type: ignore[import]
+        reader = IGESControl_Reader()
+    reader.ReadFile(file_path)
+    reader.TransferRoots()
+    return reader.OneShape()
+
+
+def _fcstd_to_compound(file_path: str):
+    """Walk a FreeCAD .FCStd archive, compose world transforms via the
+    App::Part hierarchy, and accumulate every Part::Feature into a single
+    TopoDS_Compound. Mirrors the geometry-assembly half of
+    services.cad_render._render_fcstd_component (without the VTK render).
+    """
+    import os
+    import tempfile
+    import zipfile
+
+    from OCP.BRep import BRep_Builder  # type: ignore[import]
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_Transform  # type: ignore[import]
+    from OCP.BRepTools import BRepTools  # type: ignore[import]
+    from OCP.gp import gp_Trsf  # type: ignore[import]
+    from OCP.TopoDS import TopoDS_Compound, TopoDS_Shape  # type: ignore[import]
+
+    from ...services.parsers.cad_fcstd_parser import (
+        _parse_document_xml,
+        _world_transform,
+    )
+
+    with zipfile.ZipFile(file_path) as z:
+        zip_names = set(z.namelist())
+        if "Document.xml" not in zip_names:
+            raise ValueError("Document.xml missing from FCStd archive")
+        xml_raw = z.read("Document.xml")
+    by_name = _parse_document_xml(xml_raw)
+    if not by_name:
+        raise ValueError("Document.xml empty or malformed")
+
+    # Every *.Shape.brp blob in the archive is a Part::Feature payload.
+    brps = sorted(n for n in zip_names if n.endswith(".Shape.brp"))
+
+    builder = BRep_Builder()
+    compound = TopoDS_Compound()
+    builder.MakeCompound(compound)
+    loaded = 0
+
+    with tempfile.TemporaryDirectory(prefix="fcstd-stl-") as tmp:
+        with zipfile.ZipFile(file_path) as z:
+            for i, brp in enumerate(brps):
+                feature_name = brp[: -len(".Shape.brp")]
+                if feature_name not in by_name:
+                    continue
+                tform = _world_transform(by_name, feature_name)
+                target = os.path.join(tmp, f"{i}.brp")
+                with z.open(brp) as src, open(target, "wb") as dst:
+                    dst.write(src.read())
+                shape = TopoDS_Shape()
+                if not BRepTools.Read_s(shape, target, builder) or shape.IsNull():
+                    continue
+                trsf = gp_Trsf()
+                # OCC's SetValues takes the 3×4 affine; the implicit 4th
+                # row is (0, 0, 0, 1). FCStd placements are rigid → safe.
+                trsf.SetValues(
+                    tform[0], tform[1], tform[2], tform[3],
+                    tform[4], tform[5], tform[6], tform[7],
+                    tform[8], tform[9], tform[10], tform[11],
+                )
+                transformed = BRepBuilderAPI_Transform(shape, trsf, True).Shape()
+                builder.Add(compound, transformed)
+                loaded += 1
+
+    if loaded == 0:
+        raise ValueError("no renderable brp members in FCStd")
+    return compound
+
+
+def _shape_to_stl_bytes(shape) -> bytes:
     import os
     import tempfile
 
     from OCP.BRepMesh import BRepMesh_IncrementalMesh  # type: ignore[import]
     from OCP.StlAPI import StlAPI_Writer  # type: ignore[import]
-
-    if ext in (".step", ".stp"):
-        from OCP.STEPControl import STEPControl_Reader  # type: ignore[import]
-        reader = STEPControl_Reader()
-        reader.ReadFile(file_path)
-        reader.TransferRoots()
-        shape = reader.OneShape()
-    else:
-        from OCP.IGESControl import IGESControl_Reader  # type: ignore[import]
-        reader = IGESControl_Reader()
-        reader.ReadFile(file_path)
-        reader.TransferRoots()
-        shape = reader.OneShape()
 
     mesh = BRepMesh_IncrementalMesh(shape, 0.1, False, 0.5)
     mesh.Perform()
