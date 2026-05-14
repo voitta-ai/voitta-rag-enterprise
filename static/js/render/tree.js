@@ -510,7 +510,13 @@ function emitTreeRow({ targetRows, seenKeys, folder, node, relDir, displayName, 
     const summary = summariseSubtree(node, !!folderActive);
     const hasChildren = node.dirs.size > 0 || node.files.length > 0;
     const isOpen = isExpanded(folder.id, relDir);
-    const isSelected = folder.id === getSelectedFolderId() && relDir === getSelectedRelDir();
+    // Dir/root row counts as "selected" only when no file is selected.
+    // Otherwise clicking a file inside this dir would highlight both the
+    // file row and its parent dir row, which looks like two competing
+    // selections.
+    const isSelected = folder.id === getSelectedFolderId()
+        && relDir === getSelectedRelDir()
+        && getSelectedFileId() === null;
     const sharedReadonly = isRoot && folder.shared && !folder.owned;
 
     const cacheKey = isRoot ? `root:${folder.id}` : `dir:${folder.id}:${relDir}`;
