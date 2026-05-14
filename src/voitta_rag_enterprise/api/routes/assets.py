@@ -89,19 +89,4 @@ def fetch_asset(token: str) -> Response:
     except TimeoutError as e:
         raise HTTPException(status.HTTP_504_GATEWAY_TIMEOUT, str(e)) from e
 
-    headers = {}
-    if rendered.filename:
-        # RFC 6266 — attachment disposition with a UTF-8 filename
-        # fallback for non-ASCII names. The bookmarklet's MCP adapter
-        # uses this name when writing the bytes into python_storage,
-        # so meta.json reflects the real source filename instead of a
-        # synthesised "vre_file_<id>".
-        import urllib.parse as _u
-
-        ascii_safe = rendered.filename.encode("ascii", "ignore").decode("ascii") or "file"
-        utf8_quoted = _u.quote(rendered.filename, safe="")
-        headers["Content-Disposition"] = (
-            f'attachment; filename="{ascii_safe}"; filename*=UTF-8\'\'{utf8_quoted}'
-        )
-
-    return Response(content=rendered.body, media_type=rendered.mime, headers=headers)
+    return Response(content=rendered.body, media_type=rendered.mime)
