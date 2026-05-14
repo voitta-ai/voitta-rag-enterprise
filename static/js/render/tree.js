@@ -221,6 +221,7 @@ function buildFileRow(fileId) {
     delBtn.hidden = true;
 
     li.append(nameCell, blank1, blank2, tag, delBtn);
+    li.addEventListener("click", onRowClick);
 
     li._refs = { nameCell, label, glyph, img, text, tag, delBtn };
     li._fileExtKey = null;
@@ -552,6 +553,9 @@ function emitTreeRow({ targetRows, seenKeys, folder, node, relDir, displayName, 
             rowCache.set(fkey, fli);
         }
         fli.dataset.folderId = String(folder.id);
+        // relDir = parent dir of the file (empty string at folder root).
+        const slashIdx = f.rel_path.lastIndexOf("/");
+        fli.dataset.relDir = slashIdx >= 0 ? f.rel_path.slice(0, slashIdx) : "";
         fli._canDelete = fileCanDelete;
         updateFileRow(fli, { file: f, depth: depth + 1 });
         targetRows.push(fli);

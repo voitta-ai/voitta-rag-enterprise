@@ -157,6 +157,11 @@ export const api = {
     search: (query, modes = ["chunks"], folderIds = null, limit = 10) =>
         req("POST", "/api/search", { query, modes, folder_ids: folderIds, limit }),
 
+    // File preview
+    fileDownloadUrl: (fileId) => `/api/files/${fileId}/raw`,
+    filePageImages: (fileId) => req("GET", `/api/files/${fileId}/page-images`),
+    fileMeshUrl: (fileId) => `/api/files/${fileId}/stl`,
+
     // Admin
     adminAllowlist: () => req("GET", "/api/admin/allowlist"),
     adminAddDomain: (domain) => req("POST", "/api/admin/allowlist/domains", { domain }),

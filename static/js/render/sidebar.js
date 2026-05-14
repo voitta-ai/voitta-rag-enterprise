@@ -13,12 +13,24 @@
 
 import { api } from "../api.js";
 import { reconcileChildren, setIfChanged } from "../dom/reconcile.js";
-import { getSelectedFolderId, getSelectedRelDir } from "../flows/selection.js";
+import { getSelectedFileId, getSelectedFolderId, getSelectedRelDir } from "../flows/selection.js";
+import { renderFilePreview, unmountPreview } from "./preview/index.js";
 import { files, folders, folderStats, reindexProgress, syncProgress } from "../store.js";
 
 const $ = (sel) => document.querySelector(sel);
 
 export function renderSidebar() {
+    const fileId = getSelectedFileId();
+    if (fileId !== null) {
+        renderFilePreview(fileId);
+        return;
+    }
+
+    // No file selected — ensure any mounted preview is torn down.
+    unmountPreview();
+    const preview = $("#file-preview");
+    if (preview) preview.hidden = true;
+
     const folder = folders.get().find((f) => f.id === getSelectedFolderId());
     const empty = $("#sidebar-empty");
     const detail = $("#folder-detail");

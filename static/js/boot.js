@@ -17,6 +17,13 @@ import { renderJobs } from "./render/jobs.js";
 import { renderSidebar } from "./render/sidebar.js";
 import { updateJobsTabIndicator } from "./render/tabs.js";
 import { renderFolders } from "./render/tree.js";
+// Register preview plugins in priority order. Each import has a side
+// effect of calling registerPlugin(); unsupported.js is always last.
+import "./render/preview/plugins/image.js";
+import "./render/preview/plugins/pages.js";
+import "./render/preview/plugins/cad.js";
+import "./render/preview/plugins/text.js";
+import "./render/preview/plugins/unsupported.js";
 import "./modals/admin.js";  // self-wires Admin button + admin modal
 import { ensureAuthenticated } from "./modals/login.js";
 import { setRootInfo } from "./modals/new-folder.js";

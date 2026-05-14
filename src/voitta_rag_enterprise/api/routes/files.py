@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse, Response
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ...cas import store as cas_store
-from ...db.models import Chunk, File, Image
+from ...db.models import Chunk, File, Folder, Image
 from ...services.acl import CurrentUser
 from ..deps import current_user, db_session
 
@@ -84,6 +86,121 @@ def get_file_text(
         return cas_store.read_file_blob(file.file_cas_id, "text.md").decode("utf-8")
     except FileNotFoundError as e:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Extracted text missing") from e
+
+
+@router.get("/{file_id}/raw")
+def download_file(
+    file_id: int,
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(current_user),
+) -> FileResponse:
+    file = db.get(File, file_id)
+    if file is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
+    folder = db.get(Folder, file.folder_id)
+    if folder is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Folder not found")
+    path = Path(folder.path) / file.rel_path
+    if not path.exists():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "File not on disk")
+    return FileResponse(str(path), filename=path.name, media_type="application/octet-stream")
+
+
+@router.get("/{file_id}/page-images", response_model=list[FileImage])
+def get_file_page_images(
+    file_id: int,
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(current_user),
+) -> list[FileImage]:
+    file = db.get(File, file_id)
+    if file is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
+    rows = (
+        db.execute(
+            select(Image)
+            .where(Image.file_id == file_id, Image.kind == "page_render")
+            .order_by(Image.page, Image.image_index)
+        )
+        .scalars()
+        .all()
+    )
+    return [
+        FileImage(
+            image_id=img.id,
+            image_index=img.image_index,
+            position=None,
+            page=img.page,
+            width=img.width,
+            height=img.height,
+            mime=img.mime,
+            image_cas_id=img.image_cas_id,
+        )
+        for img in rows
+    ]
+
+
+_CAD_EXTS = {".step", ".stp", ".iges", ".igs"}
+
+
+@router.get("/{file_id}/stl")
+def get_file_stl(
+    file_id: int,
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(current_user),
+) -> Response:
+    """Convert a STEP/IGES file to binary STL for the 3D preview."""
+    file = db.get(File, file_id)
+    if file is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
+    ext = Path(file.rel_path).suffix.lower()
+    if ext not in _CAD_EXTS:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Cannot convert {ext!r} to STL")
+    folder = db.get(Folder, file.folder_id)
+    if folder is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Folder not found")
+    path = Path(folder.path) / file.rel_path
+    if not path.exists():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "File not on disk")
+    try:
+        stl_bytes = _to_stl(str(path), ext)
+    except ImportError:
+        raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, "OCP not available")
+    except Exception as exc:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(exc)) from exc
+    return Response(content=stl_bytes, media_type="model/stl")
+
+
+def _to_stl(file_path: str, ext: str) -> bytes:
+    import os
+    import tempfile
+
+    from OCP.BRepMesh import BRepMesh_IncrementalMesh  # type: ignore[import]
+    from OCP.StlAPI import StlAPI_Writer  # type: ignore[import]
+
+    if ext in (".step", ".stp"):
+        from OCP.STEPControl import STEPControl_Reader  # type: ignore[import]
+        reader = STEPControl_Reader()
+        reader.ReadFile(file_path)
+        reader.TransferRoots()
+        shape = reader.OneShape()
+    else:
+        from OCP.IGESControl import IGESControl_Reader  # type: ignore[import]
+        reader = IGESControl_Reader()
+        reader.ReadFile(file_path)
+        reader.TransferRoots()
+        shape = reader.OneShape()
+
+    mesh = BRepMesh_IncrementalMesh(shape, 0.1, False, 0.5)
+    mesh.Perform()
+
+    with tempfile.NamedTemporaryFile(suffix=".stl", delete=False) as f:
+        tmp = f.name
+    try:
+        writer = StlAPI_Writer()
+        writer.Write(shape, tmp)
+        return Path(tmp).read_bytes()
+    finally:
+        os.unlink(tmp)
 
 
 @router.get("/{file_id}/images", response_model=list[FileImage])
