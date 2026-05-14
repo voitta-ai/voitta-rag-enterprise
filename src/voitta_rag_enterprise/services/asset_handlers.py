@@ -176,10 +176,21 @@ class AssetHandler:
 
 @dataclass
 class RenderedAsset:
-    """Bytes + mime for the HTTP fetch path."""
+    """Bytes + mime for the HTTP fetch path.
+
+    ``filename`` is optional. When set, the HTTP route surfaces it as
+    ``Content-Disposition: attachment; filename="<name>"`` so a downstream
+    client (browser, ``curl -OJ``, the bookmarklet's MCP adapter writing
+    into python_storage) gets a human-recognisable name without having
+    to derive one from the URL token.  Leave it ``None`` for renders
+    that don't have a meaningful source name (synthesised projections,
+    cropped figures); the route falls back to inline disposition with
+    just the MIME.
+    """
 
     body: bytes
     mime: str
+    filename: str | None = None
 
 
 _HANDLERS: dict[str, AssetHandler] = {}

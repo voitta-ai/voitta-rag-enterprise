@@ -217,7 +217,15 @@ class OriginalFileHandler(AssetHandler):
                 f"({rel_path}): {e}"
             ) from e
 
-        return RenderedAsset(body=body, mime=guess_mime(rel_path))
+        # Hand the basename of the indexed path through as the
+        # filename — the bookmarklet's MCP adapter writes the bytes
+        # into python_storage under this name, so meta.json shows
+        # the real source filename instead of an opaque token.
+        return RenderedAsset(
+            body=body,
+            mime=guess_mime(rel_path),
+            filename=Path(rel_path).name,
+        )
 
 
 _HANDLER = OriginalFileHandler()
