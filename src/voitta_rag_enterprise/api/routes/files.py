@@ -265,7 +265,15 @@ def _shape_to_stl_bytes(shape) -> bytes:
     from OCP.BRepMesh import BRepMesh_IncrementalMesh  # type: ignore[import]
     from OCP.StlAPI import StlAPI_Writer  # type: ignore[import]
 
-    mesh = BRepMesh_IncrementalMesh(shape, 0.1, False, 0.5)
+    # Coarse tessellation tuned for the ~360px sidebar preview, not for
+    # printable accuracy. ``isRelative=True`` makes ``linearDeflection``
+    # a fraction of the bounding-box max dimension, so a 5 mm screw and
+    # a 2 m machine frame both come out with sensible facet counts
+    # without hand-tuning. The angular cap of 1.0 rad (~57°) lets the
+    # mesher merge near-coplanar faces aggressively. ``inParallel=True``
+    # uses all cores for the per-face work. Expect ~3-5× faster vs the
+    # 0.1 mm absolute setting and proportionally smaller STL bytes.
+    mesh = BRepMesh_IncrementalMesh(shape, 0.02, True, 1.0, True)
     mesh.Perform()
 
     with tempfile.NamedTemporaryFile(suffix=".stl", delete=False) as f:
