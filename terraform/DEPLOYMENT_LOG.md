@@ -213,6 +213,75 @@ if pull time becomes painful).
 
 ## Phase 7 — teardown (not yet run)
 
+## Phase 5 — admin panel + impersonation (in-app)
+
+Replaced the env-var allowlist (`VOITTA_ALLOWED_DOMAINS` + `users.txt`)
+with a runtime-mutable surface persisted on the data PD:
+
+- `<data_dir>/admin/allowed_domains.txt`
+- `<data_dir>/admin/allowed_users.txt`
+- `<data_dir>/admin/blocked_users.txt`
+
+Editable from the **🔒 Admin** panel in the SPA. Block-list trumps
+allow. New `users.is_admin` column with a forward-only ALTER TABLE in
+`init_db` (no Alembic). `VOITTA_SUPER_ADMINS` env (Terraform var
+`super_admins`) is the bootstrap-admin recovery path — always admitted,
+always re-stamps is_admin on every sign-in.
+
+`/api/admin/*` — full surface for allowlist editing, blocklist editing,
+listing users, toggling admin, pre-creating + admin-granting users who
+haven't signed in yet, and impersonation.
+
+Impersonation is wired through the `current_user` FastAPI dependency:
+admins can choose "View as <other>" from the panel; ACL/visibility code
+downstream uses the impersonated user's permissions transparently.
+Admin checks always go through a separate `real_user` dependency so
+impersonation never confers admin rights.
+
+### Gotchas
+
+- **Non-trivial CSS bug**: `.admin-list` had `flex-shrink: 1` (the
+  default) inside a flex-column modal-body with `overflow-y: auto`.
+  Items rendered at correct height (36px each) but the *parent ul*
+  collapsed to 2px under the column flex layout — overflow:auto isn't
+  enough on its own. Fix: `flex-shrink: 0` on `.admin-list`.
+- "Allowed users" section was redundant once the Users table grew an
+  Add row that wraps allowlist+admin grant in a single click. Dropped
+  it; the panel is 2-up (Allowed domains | Blocked) on top, Users
+  below.
+- The default `<button>` next to a `class=""` rendered as a stark
+  white-on-black close button. Other modals already use `btn-text`;
+  matched it.
+
+## Phase 6 — Google OAuth wired (in flight at time of writing)
+
+Manual steps in the GCP console (no CLI / Terraform / API path exists
+for "Sign in with Google" OAuth clients with custom redirect URIs —
+`gcloud iam oauth-clients` is for IAP/Workforce only):
+
+1. Create consent screen at
+   `console.cloud.google.com/auth/overview?project=<id>` (External,
+   add test users).
+2. Create OAuth client at `console.cloud.google.com/apis/credentials`
+   (Web application; redirect URI =
+   `https://<fqdn>/api/auth/google/callback`).
+3. Paste Client ID + secret into the env's `terraform.tfvars`.
+4. `terraform apply -replace=module.voitta_rag.google_compute_instance.this`.
+
 ## Lessons learned
 
-(populated as we go)
+- **Always reach for the smallest viable shape first.** Started this
+  attempt with GKE because it sounded "right" for a server-side app;
+  burned a couple hours on the GKE → Compute Engine pivot. CE VM was
+  the right answer from the start.
+- **Verify cloud-init re-runs on metadata change**: it does not.
+  `terraform apply -replace=...google_compute_instance.this` is the
+  only way to roll the VM after a cloud-init template change. Documented
+  in `terraform/README.md`.
+- **The `gcloud auth login` vs `gcloud auth application-default login`
+  distinction bites the first time you hit it.** Terraform's GCS
+  backend needs ADC, not the regular user creds.
+- **Forward-only schema migrations are fine until they aren't.** The
+  current `_ensure_column` helper handles ADD COLUMN cases; anything
+  more complex (drop, rename, type change) will need Alembic. Leaving
+  that as a future-Roman problem.

@@ -47,7 +47,7 @@ module "voitta_rag" {
   name         = "voitta-rag"
   machine_type = "c4-standard-8"
 
-  image_uri = "ghcr.io/voitta-ai/voitta-rag-enterprise:sha-9b90d7e"
+  image_uri = "ghcr.io/voitta-ai/voitta-rag-enterprise:sha-287fe40"
 
   domain       = "rag-enterprise-demo.voitta.ai"
   data_disk_gb = 200
@@ -59,14 +59,6 @@ module "voitta_rag" {
 
   google_oauth_client_id     = var.google_oauth_client_id
   google_oauth_client_secret = var.google_oauth_client_secret
-
-  # Phase A: OAuth credentials still empty → google_auth_enabled=False,
-  # so the sign-in button doesn't render. We use VOITTA_DEV_USER so the
-  # admin UI is exercisable end-to-end without needing the OAuth round-
-  # trip yet. Phase B will fill in the OAuth creds via terraform.tfvars.
-  extra_env = {
-    VOITTA_DEV_USER = "roman.semein@gmail.com"
-  }
 }
 
 output "external_ip" {
