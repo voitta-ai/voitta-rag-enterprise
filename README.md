@@ -81,7 +81,7 @@ Exposes 12 tools:
 
 - **Search & retrieval** — `search`, `search_images`, `get_file`, `get_chunk_range`, `get_chunk_images`, `get_image`, `list_indexed_folders`, `resolve_url`.
 - **Page-level views** — `list_page_images`, `get_page_image` (per-page WebP renders for PDFs + cross-file Workspace slide thumbnails).
-- **On-demand assets** — `list_assets`, `request_asset` (mint signed URLs for CAD projections and other parser-declared derived views; URLs are absolute when `VOITTA_PUBLIC_BASE_URL` is set, otherwise relative paths).
+- **On-demand assets** — `list_assets`, `request_asset` (mint signed URLs for CAD projections, CAD 3D meshes (`asset_type="cad_mesh"` → `urls["mesh"]` → fetch GLB bytes for three.js / `GLTFLoader`), and other parser-declared derived views; URLs are absolute when `VOITTA_PUBLIC_BASE_URL` is set, otherwise relative paths).
 
 ACL identity comes from the `X-User-Name` header.
 
@@ -95,6 +95,7 @@ STEP (`.step` / `.stp`) and FreeCAD native (`.FCStd`) files are indexed into a c
 - **Slugs.** Each App::Part becomes a renderable component; a synthetic `whole-assembly` slug rolls up everything when there's no single-root container.
 - **Camera framing.** Robust 5–95 percentile bbox + view-aligned u/v extent projection so iso/front/top/side all fill the frame consistently. Outlier feature placements (broken FreeCAD Mirror history, "deleted by moving 150 m away") are dropped via a 1.5×IQR fence on translation magnitude before framing.
 - **On-demand contract.** Render is never done at index time — `request_asset(file_id=N, asset_type="cad_projection", slug=...)` mints four signed URLs (front, top, side, iso) good for ~7 days. Per-render cost is dominated by tessellation + VTK; a 670-part assembly renders in ~1.5 s on CPU.
+- **3D mesh export (`cad_mesh`).** For interactive viewing rather than static images, `request_asset(file_id=N, asset_type="cad_mesh")` returns a single signed URL under `urls["mesh"]` pointing at a binary glTF (`.glb`, mime `model/gltf-binary`). Fetch the URL to get the bytes — consumable by three.js `GLTFLoader` and every other glTF-aware viewer. Without `slug` the whole assembly is exported; with a `slug` (same vocabulary as `cad_projection` — discover via `list_assets`) only that component. The GLB scene contains **one named node per component**, so the client can list / hide / colour parts by `node.name`. Optional `params={"linear_deflection": <mm>}` controls tessellation tolerance (range 0.001–5.0 mm, default 0.5 — smaller = more triangles, larger file). Supported on `.step` / `.stp` / `.iges` / `.igs` / `.FCStd`.
 
 Code: [`services/parsers/cad_step_parser.py`](./src/voitta_rag_enterprise/services/parsers/cad_step_parser.py), [`services/parsers/cad_fcstd_parser.py`](./src/voitta_rag_enterprise/services/parsers/cad_fcstd_parser.py), [`services/cad_render.py`](./src/voitta_rag_enterprise/services/cad_render.py). Outside of `cadquery-ocp` and `vtk` (both in core deps), the CAD path needs no extra apt packages beyond the EGL/Mesa stack already in the Dockerfile.
 
