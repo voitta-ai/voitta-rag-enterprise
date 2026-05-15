@@ -123,6 +123,11 @@ def create_app() -> FastAPI:
     # style clients use this to ingest raw bytes into a downstream
     # Python pipeline instead of consuming the markdown extract.
     from .services import original_file  # noqa: F401
+    # Side-effect import: registers ``asset_type="cad_mesh"``, which
+    # exports a binary glTF (.glb) of a CAD file for three.js / web
+    # viewers. Available on STEP / IGES / FCStd files. ``list_assets``
+    # surfaces it conditionally on extension.
+    from .services import cad_mesh  # noqa: F401
 
     # Bind the MCP route at /mcp internally; below we splice its routes into
     # the parent FastAPI app rather than mounting, so the URL is exactly /mcp

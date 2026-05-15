@@ -1440,6 +1440,7 @@ def list_assets(file_id: int) -> list[dict]:
     indexed file; empty list only when the file isn't yet indexed.
     """
     from .services import asset_handlers as _ah
+    from .services import cad_mesh as _cm
     from .services import original_file as _orig
 
     with session_scope() as s:
@@ -1453,6 +1454,15 @@ def list_assets(file_id: int) -> list[dict]:
     # "give me the bytes", so listing it at the top reduces the
     # need to scroll past parser-specific entries.
     out.append(_orig.spec_for(file_id, rel_path).as_dict())
+    # Synthetic "cad_mesh" spec for CAD files — a whole-file GLB
+    # export consumable by three.js / web viewers. The same handler
+    # also accepts a slug to export a single component (using the
+    # slugs the parser writes for ``cad_projection``); the per-
+    # component variant isn't emitted as its own list_assets entry
+    # because the menu would balloon — the LLM can reuse the
+    # cad_projection slugs.
+    if _cm.is_cad_file(rel_path):
+        out.append(_cm.spec_for(file_id, rel_path).as_dict())
     out.extend(spec.as_dict() for spec in _ah.load_assets_for_file(cas_id))
     return out
 
@@ -1502,6 +1512,16 @@ def request_asset(
     * ``"cad_projection"`` — render four PNG views (front / top /
       side / iso) of a STEP/FCStd subcomponent. Requires ``slug``
       naming the component. Optional ``params={"size": 320}``.
+
+    * ``"cad_mesh"`` — export a STEP / IGES / FCStd file as a binary
+      glTF (``.glb``, mime ``model/gltf-binary``) suitable for
+      ``three.js`` ``GLTFLoader`` / web viewers. Single URL under
+      ``urls["mesh"]``. The scene contains one named node per
+      component, so a viewer can list / hide / colour parts by
+      ``node.name``. Without ``slug`` the whole assembly is
+      exported; with a ``slug`` from ``cad_projection``, only that
+      component. Optional ``params={"linear_deflection": 0.5}``
+      controls tessellation tolerance in millimetres.
 
     * Future / parser-specific: ``list_assets(file_id)`` is the
       source of truth for what's available for a given file.
@@ -1560,6 +1580,7 @@ def build_app(transport: str = "streamable-http", path: str | None = None):
     # short-circuits when the same instance re-registers).
     from .services import cad_render  # noqa: F401
     from .services import original_file  # noqa: F401
+    from .services import cad_mesh  # noqa: F401
 
     app = mcp.http_app(transport=transport, stateless_http=True, path=path)
     app.add_middleware(BearerAuthMiddleware)
