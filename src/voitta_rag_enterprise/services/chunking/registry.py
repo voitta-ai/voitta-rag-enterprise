@@ -11,6 +11,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from .base import ChunkInfo, ChunkingStrategy
+from .cad import CadComponentStrategy
 from .code import AstCodeStrategy
 from .paragraph import ParagraphStrategy
 
@@ -42,6 +43,10 @@ class ChunkingRegistry:
 def build_default_registry() -> ChunkingRegistry:
     r = ChunkingRegistry()
     r.register(AstCodeStrategy())
+    # CAD-aware strategy claims .fcstd before the paragraph fallback,
+    # so each ``## Component:`` section the FCStd parser writes lands
+    # in its own chunk.
+    r.register(CadComponentStrategy())
     r.register(ParagraphStrategy())
     return r
 

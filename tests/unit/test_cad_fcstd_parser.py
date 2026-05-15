@@ -227,8 +227,9 @@ def test_parse_document_xml_extracts_label_and_placement() -> None:
 
 def test_parser_emits_top_level_components(tmp_path: Path) -> None:
     """A FCStd with three App::Parts (one wrapper containing two
-    children) yields all three as renderable components — including
-    the wrapper, because the user may want to render everything."""
+    children) yields all three as renderable components — and the
+    nested children inherit the wrapper's slug prefix so the full
+    hierarchy is addressable as a path."""
     fp = _make_fcstd(tmp_path, [
         {
             "name": "wrapper", "type": "App::Part", "label": "4-Post Lift",
@@ -249,8 +250,12 @@ def test_parser_emits_top_level_components(tmp_path: Path) -> None:
     assert r.success, r.error
     slugs = {s.slug for s in r.on_demand_assets}
     assert "4-post-lift" in slugs
-    assert "runway-a" in slugs
-    assert "runway-b" in slugs
+    assert "4-post-lift/runway-a" in slugs
+    assert "4-post-lift/runway-b" in slugs
+    # Every Part::Feature is now addressable on its own as the leaf
+    # of the path.
+    assert "4-post-lift/runway-a/runway-a-p1" in slugs
+    assert "4-post-lift/runway-b/runway-b-p1" in slugs
     # Single root → no synthetic Whole assembly
     assert "whole-assembly" not in slugs
 
@@ -487,6 +492,67 @@ def test_parser_captures_spreadsheet_cells(tmp_path: Path) -> None:
     idx_a2 = r.content.index("`A2`")
     assert idx_a1 < idx_b1 < idx_a2
 
+
+def test_parser_emits_internal_path_and_kind_on_specs(tmp_path: Path) -> None:
+    """Every AssetSpec carries the FreeCAD internal-name chain and
+    a kind discriminator alongside the user-facing slug."""
+    fp = _make_fcstd(tmp_path, [
+        {"name": "wrapper", "type": "App::Part", "label": "Lift",
+         "group": ["frame"]},
+        {"name": "frame", "type": "App::Part", "label": "Frame",
+         "group": ["rail_l"]},
+        {"name": "rail_l", "type": "Part::Feature", "label": "Rail L"},
+    ])
+    r = CadFCStdParser().parse(fp)
+    assert r.success, r.error
+    by_slug = {s.slug: s for s in r.on_demand_assets}
+    leaf = by_slug["lift/frame/rail-l"]
+    assert leaf.params_schema["x-fcstd-internal-path"] == [
+        "wrapper", "frame", "rail_l"
+    ]
+    assert leaf.params_schema["x-fcstd-path"] == ["Lift", "Frame", "Rail L"]
+    assert leaf.params_schema["x-fcstd-kind"] == "feature"
+    assert leaf.params_schema["x-fcstd-members"] == [{"brp": "rail_l.Shape.brp"}]
+
+    container = by_slug["lift/frame"]
+    assert container.params_schema["x-fcstd-kind"] == "container"
+    # Container's members include the whole subtree (one feature here).
+    assert container.params_schema["x-fcstd-members"] == [{"brp": "rail_l.Shape.brp"}]
+
+def test_parser_one_section_per_addressable_component(tmp_path: Path) -> None:
+    """Every addressable component (container + feature) gets its own
+    ``## Component:`` section so the CAD-aware chunker can split per
+    component."""
+    fp = _make_fcstd(tmp_path, [
+        {"name": "wrapper", "type": "App::Part", "label": "Lift",
+         "group": ["frame"]},
+        {"name": "frame", "type": "App::Part", "label": "Frame",
+         "group": ["a", "b"]},
+        {"name": "a", "type": "Part::Feature", "label": "Rail L"},
+        {"name": "b", "type": "Part::Feature", "label": "Rail R"},
+    ])
+    r = CadFCStdParser().parse(fp)
+    sections = r.content.count("\n## Component:")
+    # 2 containers + 2 features = 4 sections
+    assert sections == 4
+    # Each section embeds its slug and the cad_mesh call line so a
+    # search hit on that chunk surfaces the retrieval path.
+    assert "Slug: `lift/frame/rail-l`" in r.content
+    assert 'asset_type="cad_mesh", slug="lift/frame/rail-l"' in r.content
+
+def test_parser_sibling_slug_collisions_are_disambiguated(tmp_path: Path) -> None:
+    """Two siblings with the same label get ``-2`` suffixes within the
+    same parent scope — distinct slugs at the full-path level."""
+    fp = _make_fcstd(tmp_path, [
+        {"name": "wrapper", "type": "App::Part", "label": "Lift",
+         "group": ["a", "b"]},
+        {"name": "a", "type": "Part::Feature", "label": "Rail"},
+        {"name": "b", "type": "Part::Feature", "label": "Rail"},
+    ])
+    r = CadFCStdParser().parse(fp)
+    slugs = {s.slug for s in r.on_demand_assets}
+    assert "lift/rail" in slugs
+    assert "lift/rail-2" in slugs
 
 def test_parser_drops_empty_sheets(tmp_path: Path) -> None:
     """A Spreadsheet object with no cells doesn't emit a section."""

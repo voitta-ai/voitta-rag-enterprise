@@ -17,6 +17,36 @@ name-convention regex needed for the top-level grouping. We still
 apply those conventions to label *parts* inside a component because
 the user's CAD pipeline uses them as part-naming discipline.
 
+Addressing granularity
+----------------------
+Every ``Part::Feature`` is its own addressable component, identified
+by a **label path** (e.g. ``4-post-lift/base-frame/longitudinal-rail-l``).
+Each ``App::Part`` container is also addressable (renders the
+subtree). Both forms accept the same MCP calls — ``cad_projection``
+for PNG views, ``cad_mesh`` for a three.js-ready GLB. The path
+scheme is filesystem-shaped on purpose: agents that walk
+``list_assets`` can navigate by prefix, and the LLM can ask for
+``4-post-lift/base-frame`` to get the sub-assembly or drill down to
+a single rail.
+
+Slug uniqueness
+---------------
+Within a given parent, sibling slugs are made unique by appending
+``-2``/``-3``/... when two siblings slugify to the same string.
+Across the whole document, full paths inherit uniqueness from this
+per-scope disambiguation.
+
+Internal name path
+------------------
+We also record the chain of FreeCAD internal names
+(``Part001 / Part005 / Body017``) on the AssetSpec's ``params_schema``
+as ``x-fcstd-internal-path``. The label path is the user-facing slug;
+the internal path is the stable identifier that round-trips across
+renames in the FreeCAD UI. Renderers don't need the internal path
+(they use ``x-fcstd-members``); it's there for diagnostics and so
+future tools can pivot on the FreeCAD identity rather than the
+human label.
+
 Geometry handling
 
 Each ``Part::Feature`` corresponds to ``<object_name>.Shape.brp``
@@ -86,8 +116,15 @@ def _clean_part_name(raw: str) -> str:
     return _FREECAD_INSTANCE.sub("", raw).rstrip(" _.") or raw.strip()
 
 
+def _slugify_segment(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "component"
+
+
 def _slugify(name: str, seen: set[str]) -> str:
-    base = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "component"
+    """Legacy single-segment slugifier kept for backward-compat callers
+    (tests, the synthetic ``Whole assembly`` slug). New code uses
+    ``_slugify_path`` to produce hierarchical slugs."""
+    base = _slugify_segment(name)
     slug = base
     n = 2
     while slug in seen:
@@ -95,6 +132,36 @@ def _slugify(name: str, seen: set[str]) -> str:
         n += 1
     seen.add(slug)
     return slug
+
+
+def _slugify_path(
+    segments: tuple[str, ...],
+    parent_seen: dict[tuple[str, ...], set[str]],
+) -> str:
+    """Slugify the leaf segment with per-parent disambiguation.
+
+    ``parent_seen[parent_segments]`` tracks the slugified leaf segments
+    already used by siblings under the same parent path. The full slug
+    is ``parent-slug/leaf-slug`` joined by ``/`` — uniqueness across
+    the whole document follows from per-scope disambiguation.
+    """
+    parent = segments[:-1]
+    leaf = segments[-1]
+    seen = parent_seen.setdefault(parent, set())
+    base = _slugify_segment(leaf)
+    slug_leaf = base
+    n = 2
+    while slug_leaf in seen:
+        slug_leaf = f"{base}-{n}"
+        n += 1
+    seen.add(slug_leaf)
+    # Parent path slug: each segment slugified independently, joined
+    # by '/'. Sibling uniqueness at every level was already enforced
+    # when the parent was registered, so a plain slugify is fine here.
+    parent_slug_segments = [_slugify_segment(s) for s in parent]
+    if parent_slug_segments:
+        return "/".join(parent_slug_segments + [slug_leaf])
+    return slug_leaf
 
 
 # ---------------------------------------------------------------------------
@@ -293,10 +360,30 @@ def _world_transform(by_name: dict[str, _Obj], leaf_name: str) -> tuple[float, .
 
 @dataclass
 class Component:
-    """One renderable bucket — either an App::Part (real container)
-    or the synthetic "Unclassified" bucket for orphan Part::Features."""
+    """An addressable bucket in the FCStd asset menu.
+
+    Four flavours, distinguished by ``kind``:
+
+    * ``"container"`` — an ``App::Part``. ``members`` are every brp
+      under its subtree. Rendering gives the whole sub-assembly.
+    * ``"feature"`` — a single ``Part::Feature``. ``members`` is one
+      brp. Rendering gives just that part.
+    * ``"orphans"`` — synthetic catch-all for ``Part::Feature`` nodes
+      not under any ``App::Part``.
+    * ``"whole"`` — synthetic "render everything" when the file lacks
+      a single top-level App::Part to play that role.
+
+    ``path_segments`` is the ancestor-label chain ending in this
+    component's own label; ``internal_path_segments`` is the same
+    chain in FreeCAD internal names. ``slug`` is the user-facing
+    path-style identifier (e.g. ``base-frame/longitudinal-rail-l``).
+    """
 
     name: str
+    kind: str = "container"
+    path_segments: tuple[str, ...] = ()
+    internal_path_segments: tuple[str, ...] = ()
+    slug: str = ""
     parts: list[str] = field(default_factory=list)
     hardware: Counter = field(default_factory=Counter)
     # Zip-internal brp paths only. World transforms are *not* stored
@@ -428,6 +515,24 @@ def _has_only_one_apppart_root(by_name: dict[str, _Obj]) -> _Obj | None:
     return roots[0] if len(roots) == 1 else None
 
 
+def _container_ancestor_chain(
+    by_name: dict[str, _Obj], obj: _Obj
+) -> list[_Obj]:
+    """Return the chain of App::Part ancestors from root → immediate parent.
+
+    The leaf object itself is NOT included. Origin containers are
+    skipped (they're FreeCAD's coordinate-system markers, not part of
+    the user-facing hierarchy)."""
+    chain: list[_Obj] = []
+    cursor = by_name.get(obj.parent) if obj.parent else None
+    while cursor is not None:
+        if cursor.type == "App::Part" and not (cursor.label or cursor.name).startswith("Origin"):
+            chain.append(cursor)
+        cursor = by_name.get(cursor.parent) if cursor.parent else None
+    chain.reverse()
+    return chain
+
+
 # ---------------------------------------------------------------------------
 # Markdown emission
 # ---------------------------------------------------------------------------
@@ -437,55 +542,83 @@ def _component_size(c: Component) -> int:
     return len(c.parts) + sum(c.hardware.values())
 
 
+def _component_sort_key(c: Component) -> tuple[int, str]:
+    """Sort containers before features, then by name."""
+    kind_order = {"whole": 0, "container": 1, "orphans": 2, "feature": 3}
+    return (kind_order.get(c.kind, 4), c.name.lower())
+
+
 def build_markdown(
     file_stem: str,
-    components: dict[str, Component],
+    components: list[Component],
     spreadsheets: list[_Obj] | None = None,
-) -> tuple[str, dict[str, tuple[str, list[str]]]]:
-    """Return (markdown, slug_map) where slug_map is
-    ``{slug → (component_name, [brp_path, ...])}``. Transforms are
-    composed at render time, not stored here.
+) -> str:
+    """Emit Markdown with one ``## Component:`` section per addressable
+    component. The companion ``CadComponentStrategy`` chunker splits on
+    these headings so each component lands in its own chunk — that's
+    what makes search return per-component hits with the slug visible
+    in the chunk text.
 
-    ``spreadsheets`` is the list of Spreadsheet::Sheet objects whose
-    ``cells`` dict is populated; we emit them as a top-level section
-    so the indexer chunks each sheet alongside the BOM.
+    Path layout: the index lists every slug as ``- `<slug>` — Label``;
+    feature-level entries are indented under their container so the
+    LLM can read the tree without re-fetching Document.xml.
     """
-    ordered = sorted(
-        components.values(),
-        key=lambda c: (-_component_size(c), c.name.lower()),
-    )
-    seen: set[str] = set()
-    slug_map: dict[str, tuple[str, list[str]]] = {}
-    for c in ordered:
-        slug = _slugify(c.name, seen)
-        slug_map[slug] = (c.name, list(c.members))
+    feature_count = sum(1 for c in components if c.kind == "feature")
+    container_count = sum(1 for c in components if c.kind == "container")
 
     lines: list[str] = [f"# {file_stem}", ""]
     lines.append(
-        f"FreeCAD assembly · {len(ordered)} top-level components"
+        f"FreeCAD assembly · {container_count} containers, "
+        f"{feature_count} features, {len(components)} addressable components"
     )
     lines.append("")
     lines.append("## Components")
     lines.append("")
     lines.append(
-        "Drill into any component below. Each is renderable with:"
-    )
-    lines.append(
-        "  `request_asset(file_id=<N>, asset_type=\"cad_projection\", slug=...)`"
+        "Every entry below is addressable as ``slug=<path>`` against "
+        "``cad_projection`` (PNG views) and ``cad_mesh`` (glTF binary "
+        "for three.js). Paths are filesystem-shaped: an App::Part "
+        "renders its subtree; a Part::Feature renders just that part."
     )
     lines.append("")
-    for slug, (comp_name, _) in slug_map.items():
-        c = next(c for c in ordered if c.name == comp_name)
-        lines.append(f"- `{slug}` — {c.name} ({_component_size(c)} parts)")
+    indexed = sorted(components, key=lambda c: c.slug)
+    for c in indexed:
+        depth = max(0, c.slug.count("/"))
+        indent = "  " * depth
+        kind_tag = {
+            "container": " (sub-assembly)",
+            "feature": "",
+            "orphans": " (orphans)",
+            "whole": " (whole)",
+        }.get(c.kind, "")
+        lines.append(f"{indent}- `{c.slug}` — {c.name}{kind_tag}")
     lines.append("")
-    for slug, (comp_name, _) in slug_map.items():
-        c = next(c for c in ordered if c.name == comp_name)
+
+    ordered = sorted(components, key=_component_sort_key)
+    for c in ordered:
         lines.append(f"## Component: {c.name}")
         lines.append("")
-        lines.append(f"Slug: `{slug}`")
+        lines.append(f"Slug: `{c.slug}`")
+        if c.internal_path_segments:
+            lines.append(
+                f"Internal path: `{' / '.join(c.internal_path_segments)}`"
+            )
+        kind_human = {
+            "container": "App::Part container (renders subtree)",
+            "feature": "Part::Feature (single addressable part)",
+            "orphans": "Orphans (Part::Features outside any App::Part)",
+            "whole": "Synthetic whole-assembly aggregate",
+        }.get(c.kind, c.kind)
+        lines.append(f"Kind: {kind_human}")
+        lines.append("")
+        lines.append("Renderable via:")
         lines.append(
-            f"Renderable via: `request_asset(file_id=<N>, "
-            f'asset_type="cad_projection", slug="{slug}")`'
+            f'- `request_asset(file_id=<N>, asset_type="cad_projection", '
+            f'slug="{c.slug}")`'
+        )
+        lines.append(
+            f'- `request_asset(file_id=<N>, asset_type="cad_mesh", '
+            f'slug="{c.slug}")`'
         )
         lines.append("")
         if c.parts:
@@ -499,10 +632,6 @@ def build_markdown(
             for pn, qty in c.hardware.most_common():
                 lines.append(f"- {qty}× {pn}")
             lines.append("")
-        # Engineering notes attached to descendants. Surfaced
-        # separately from parts/hardware so they don't get
-        # mistaken for BOM lines; the per-part ``display`` prefix
-        # tells the LLM which part each note attaches to.
         if c.notes:
             lines.append(f"### Engineering notes ({len(c.notes)})")
             for display, prop, value in c.notes:
@@ -527,7 +656,7 @@ def build_markdown(
                 content = sheet.cells[addr]
                 lines.append(f"- `{addr}`: {content}")
             lines.append("")
-    return "\n".join(lines), slug_map
+    return "\n".join(lines)
 
 
 def _sorted_cell_addresses(cells: dict[str, str]) -> list[str]:
@@ -546,28 +675,28 @@ def _sorted_cell_addresses(cells: dict[str, str]) -> list[str]:
 
 
 def _emit_asset_specs(
-    slug_map: dict[str, tuple[str, list[str]]],
+    components: list[Component],
 ) -> list[AssetSpec]:
+    """One AssetSpec per addressable component. ``cad_mesh`` reuses
+    these via the same slug at render time (no separate spec needed —
+    ``cad_mesh.spec_for`` only emits the whole-file menu entry; the
+    per-slug specs come from here)."""
     specs: list[AssetSpec] = []
-    for slug, (comp_name, members) in slug_map.items():
-        # Each member carries only the zip-internal brp path. The
-        # render handler re-parses Document.xml on every request and
-        # composes world transforms from the current parser logic.
-        # Dict-of-one shape is kept (rather than a bare list of strings)
-        # so future per-member metadata (color, material, hide flag)
-        # can be added without invalidating cached specs.
-        members_payload = [{"brp": brp_path} for brp_path in members]
+    for c in components:
+        members_payload = [{"brp": brp_path} for brp_path in c.members]
+        path_label = " / ".join(c.path_segments) if c.path_segments else c.name
         specs.append(
             AssetSpec(
                 asset_type="cad_projection",
-                label=f"Render projections of {comp_name}",
+                label=f"Render projections of {path_label}",
                 description=(
                     "Returns four signed image URLs (front, top, side, iso) "
-                    "for the named component. FCStd is re-parsed on every "
-                    "request; component geometry composed from per-feature "
-                    "BREP blobs in the archive."
+                    "for the named component. The same slug works against "
+                    "``cad_mesh`` for a glTF binary suitable for three.js. "
+                    "FCStd is re-parsed on every request; geometry composed "
+                    "from per-feature BREP blobs in the archive."
                 ),
-                slug=slug,
+                slug=c.slug,
                 params_schema={
                     "type": "object",
                     "properties": {
@@ -580,10 +709,23 @@ def _emit_asset_specs(
                     },
                     "additionalProperties": False,
                     # FCStd-specific render hint; the render handler
-                    # picks up this key and uses the
-                    # FCStd code path. Coexists with STEP's
-                    # ``x-entry-paths`` since both can't apply.
+                    # picks up this key and uses the FCStd code path.
+                    # Coexists with STEP's ``x-entry-paths`` since both
+                    # can't apply.
                     "x-fcstd-members": members_payload,
+                    # Stable FreeCAD identity for diagnostics + future
+                    # tools that need to round-trip back to the source
+                    # document. Not consumed by the renderer.
+                    "x-fcstd-internal-path": list(c.internal_path_segments),
+                    # User-facing path segments — same info the slug
+                    # encodes, but unslugified so consumers don't have
+                    # to reverse-engineer.
+                    "x-fcstd-path": list(c.path_segments),
+                    # ``"container"``/``"feature"``/``"orphans"``/``"whole"``
+                    # so the LLM can prefer feature-level addressing when
+                    # it knows what it wants and fall back to containers
+                    # for sub-assemblies.
+                    "x-fcstd-kind": c.kind,
                 },
                 examples=(
                     {"size": 320},
@@ -629,75 +771,169 @@ class CadFCStdParser(BaseParser):
         if not by_name:
             return ParserResult.failure("FCStd has no Objects in Document.xml")
 
-        components: dict[str, Component] = {}
+        components: list[Component] = []
+        parent_seen: dict[tuple[str, ...], set[str]] = {}
+        # Slug → Component, used to find the right Component to append
+        # to when a feature is re-encountered (shouldn't happen, but
+        # defensive against weird FreeCAD docs).
+        by_slug: dict[str, Component] = {}
 
-        # Every App::Part as a potential renderable component. Each
-        # rolls up its full subtree so the BOM matches what you see in
-        # the FreeCAD Model panel for that part.
+        # Pass 1: containers. Visit in BFS root-first order so parent
+        # containers are registered (and slug-scoped) before children.
         assemblies = _user_visible_assemblies(by_name)
         single_root = _has_only_one_apppart_root(by_name)
         members_collected: set[str] = set()  # Part::Feature names we covered
 
-        for root in assemblies:
-            label = root.label or root.name
+        # Sort containers so roots come first — important for the
+        # per-parent slug-disambiguation scoping.
+        def _container_depth(o: _Obj) -> int:
+            return len(_container_ancestor_chain(by_name, o))
+
+        for root in sorted(assemblies, key=_container_depth):
+            chain = _container_ancestor_chain(by_name, root)
+            path_segments = tuple(
+                (a.label or a.name) for a in chain
+            ) + ((root.label or root.name),)
+            internal_segments = tuple(a.name for a in chain) + (root.name,)
+            slug = _slugify_path(path_segments, parent_seen)
+
             parts, hardware, feats, notes = _collect_members(by_name, root.name)
             members: list[str] = []
             for zip_path, fobj in feats:
                 if zip_path not in brp_set:
-                    continue  # silently skip features missing their brp
+                    continue
                 members.append(zip_path)
                 members_collected.add(fobj.name)
             comp = Component(
-                name=label,
+                name=root.label or root.name,
+                kind="container",
+                path_segments=path_segments,
+                internal_path_segments=internal_segments,
+                slug=slug,
                 parts=parts,
                 hardware=hardware,
                 members=members,
                 notes=notes,
             )
-            components[label] = comp
+            components.append(comp)
+            by_slug[slug] = comp
 
-        # Orphan Part::Features (not under any App::Part) get an
-        # Unclassified bucket. Rare in user-authored files but possible
-        # for documents created by importing flat geometry.
-        orphan_parts: list[str] = []
-        orphan_hw: Counter = Counter()
-        orphan_members: list[str] = []
-        orphan_notes: list[tuple[str, str, str]] = []
+        # Pass 2: every Part::Feature gets its own slug, regardless of
+        # whether it lives under an App::Part. Orphans (no container)
+        # are collected separately for the synthetic "orphans" bucket.
+        orphan_features: list[_Obj] = []
         for o in by_name.values():
             if o.type != "Part::Feature":
-                continue
-            if o.name in members_collected:
                 continue
             zip_path = f"{o.name}.Shape.brp"
             if zip_path not in brp_set:
                 continue
-            orphan_members.append(zip_path)
+
+            chain = _container_ancestor_chain(by_name, o)
+            if not chain:
+                orphan_features.append(o)
+                continue
+
+            path_segments = tuple(
+                (a.label or a.name) for a in chain
+            ) + ((o.label or o.name),)
+            internal_segments = tuple(a.name for a in chain) + (o.name,)
+            slug = _slugify_path(path_segments, parent_seen)
+
             label = o.label or o.name
             group, part = _route_label(label)
+            parts: list[str] = []
+            hardware = Counter()
             if group is not None:
-                orphan_hw[part] += 1
-            elif part and part not in orphan_parts:
-                orphan_parts.append(part)
+                hardware[part] += 1
+            elif part:
+                parts.append(part)
+
+            notes: list[tuple[str, str, str]] = []
             if o.notes:
                 display = o.label or o.name
                 for prop, value in o.notes.items():
-                    orphan_notes.append((display, prop, value))
-        if orphan_members:
-            components["Unclassified"] = Component(
+                    notes.append((display, prop, value))
+
+            comp = Component(
+                name=label,
+                kind="feature",
+                path_segments=path_segments,
+                internal_path_segments=internal_segments,
+                slug=slug,
+                parts=parts,
+                hardware=hardware,
+                members=[zip_path],
+                notes=notes,
+            )
+            components.append(comp)
+            by_slug[slug] = comp
+            members_collected.add(o.name)
+
+        # Orphan Part::Features get a single "Unclassified" container
+        # AND each gets its own feature-level slug under that container.
+        if orphan_features:
+            orphan_root_segments = ("Unclassified",)
+            orphan_root_slug = _slugify_path(orphan_root_segments, parent_seen)
+            orphan_parts: list[str] = []
+            orphan_hw: Counter = Counter()
+            orphan_members: list[str] = []
+            orphan_notes: list[tuple[str, str, str]] = []
+            for o in orphan_features:
+                zip_path = f"{o.name}.Shape.brp"
+                orphan_members.append(zip_path)
+                label = o.label or o.name
+                group, part = _route_label(label)
+                if group is not None:
+                    orphan_hw[part] += 1
+                elif part and part not in orphan_parts:
+                    orphan_parts.append(part)
+                if o.notes:
+                    display = o.label or o.name
+                    for prop, value in o.notes.items():
+                        orphan_notes.append((display, prop, value))
+
+                # Per-feature slug under the synthetic orphan container.
+                f_path = orphan_root_segments + (label,)
+                f_internal = ("",) + (o.name,)
+                f_slug = _slugify_path(f_path, parent_seen)
+                f_notes: list[tuple[str, str, str]] = []
+                if o.notes:
+                    display = o.label or o.name
+                    for prop, value in o.notes.items():
+                        f_notes.append((display, prop, value))
+                comp = Component(
+                    name=label,
+                    kind="feature",
+                    path_segments=f_path,
+                    internal_path_segments=f_internal,
+                    slug=f_slug,
+                    parts=[part] if part and group is None else [],
+                    hardware=(Counter([part]) if part and group is not None else Counter()),
+                    members=[zip_path],
+                    notes=f_notes,
+                )
+                components.append(comp)
+                by_slug[f_slug] = comp
+
+            orphan_comp = Component(
                 name="Unclassified",
+                kind="orphans",
+                path_segments=orphan_root_segments,
+                internal_path_segments=(),
+                slug=orphan_root_slug,
                 parts=orphan_parts,
                 hardware=orphan_hw,
                 members=orphan_members,
                 notes=orphan_notes,
             )
+            components.append(orphan_comp)
+            by_slug[orphan_root_slug] = orphan_comp
 
-        # Add a synthetic "Whole assembly" component ONLY when the
-        # file doesn't already have a single named root that serves
-        # the same purpose. If the user already has e.g. `4-Post Lift`
-        # as the sole top-level App::Part, that IS the whole assembly
-        # — adding a sibling slug for the same geometry just clutters
-        # the menu. With multiple roots or none, the synthetic slug
-        # is the only way to render everything in one shot.
+        # Synthetic "whole assembly" slug only when the file doesn't
+        # already have a single root App::Part to fill that role. With
+        # a single root, that root IS the whole assembly; adding a
+        # sibling slug for the same geometry just clutters the menu.
         if single_root is None:
             whole_members: list[str] = []
             seen_brp: set[str] = set()
@@ -705,7 +941,13 @@ class CadFCStdParser(BaseParser):
             whole_hw: Counter = Counter()
             whole_notes: list[tuple[str, str, str]] = []
             seen_notes: set[tuple[str, str, str]] = set()
-            for c in components.values():
+            for c in components:
+                # Only roll up container-kind components into "whole";
+                # feature-level components are already covered by their
+                # containers (and rolling them up here would double-
+                # count parts in the BOM).
+                if c.kind != "container":
+                    continue
                 for brp in c.members:
                     if brp not in seen_brp:
                         seen_brp.add(brp)
@@ -720,24 +962,25 @@ class CadFCStdParser(BaseParser):
                         seen_notes.add(note)
                         whole_notes.append(note)
             if whole_members:
-                components["Whole assembly"] = Component(
+                whole_segments = ("Whole assembly",)
+                whole_slug = _slugify_path(whole_segments, parent_seen)
+                components.append(Component(
                     name="Whole assembly",
+                    kind="whole",
+                    path_segments=whole_segments,
+                    internal_path_segments=(),
+                    slug=whole_slug,
                     parts=whole_parts,
                     hardware=whole_hw,
                     members=whole_members,
                     notes=whole_notes,
-                )
+                ))
 
         # Collect every Spreadsheet::Sheet with at least one used cell.
-        # These travel with the document and are first-class chunks —
-        # the indexer treats the markdown section the same as any
-        # other text.
         spreadsheets = [
             o for o in by_name.values()
             if o.type == "Spreadsheet::Sheet" and o.cells
         ]
-        # Stable order — sort by label so re-indexes produce diffable
-        # markdown rather than churning on dict-insertion order.
         spreadsheets.sort(key=lambda o: (o.label or o.name).lower())
 
         if not components and not spreadsheets:
@@ -748,14 +991,14 @@ class CadFCStdParser(BaseParser):
                 )
             )
 
-        content, slug_map = build_markdown(
+        content = build_markdown(
             file_stem=file_path.stem,
             components=components,
             spreadsheets=spreadsheets,
         )
         return ParserResult(
             content=content,
-            on_demand_assets=_emit_asset_specs(slug_map),
+            on_demand_assets=_emit_asset_specs(components),
         )
 
 
