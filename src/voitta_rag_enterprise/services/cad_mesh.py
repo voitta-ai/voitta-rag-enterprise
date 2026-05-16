@@ -323,7 +323,15 @@ def _compose_fcstd_all(fcstd_path: str) -> list[tuple[str, Any]]:
                     tform[8], tform[9], tform[10], tform[11],
                 )
                 transformed = BRepBuilderAPI_Transform(shape, trsf, True).Shape()
-                parts.append((feature_name, transformed))
+                # Human label path matches what list_assets surfaces;
+                # internal name kept as a unique disambiguator suffix.
+                display = _label_path(by_name, feature_name)
+                node_name = (
+                    f"{display} [{feature_name}]"
+                    if display and display != feature_name
+                    else feature_name
+                )
+                parts.append((node_name, transformed))
     if not parts:
         raise ValueError("no renderable brp members in FCStd")
     return parts
@@ -388,7 +396,13 @@ def _compose_fcstd_components(
                     tform[8], tform[9], tform[10], tform[11],
                 )
                 transformed = BRepBuilderAPI_Transform(shape, trsf, True).Shape()
-                parts.append((feature_name, transformed))
+                display = _label_path(by_name, feature_name)
+                node_name = (
+                    f"{display} [{feature_name}]"
+                    if display and display != feature_name
+                    else feature_name
+                )
+                parts.append((node_name, transformed))
     if not parts:
         raise KeyError(
             "cad_mesh: no members resolvable from current Document.xml"
@@ -449,6 +463,21 @@ def _compose_step_subshape(
 # ---------------------------------------------------------------------------
 # Tessellation — TopoDS_Shape → numpy arrays.
 # ---------------------------------------------------------------------------
+
+
+def _label_path(by_name: dict, feature_name: str) -> str:
+    """Build a human-readable label path by walking the parent chain in
+    ``by_name`` (``{name → _Obj}`` from ``_parse_document_xml``). Falls
+    back to the internal name if no label is set. Example:
+    ``"4 post lift / base frame / Longitudinal rail L"``."""
+    segments: list[str] = []
+    cursor = by_name.get(feature_name)
+    seen: set[str] = set()
+    while cursor is not None and cursor.name not in seen:
+        seen.add(cursor.name)
+        segments.append((cursor.label or cursor.name).strip() or cursor.name)
+        cursor = by_name.get(cursor.parent) if cursor.parent else None
+    return " / ".join(reversed(segments)) if segments else feature_name
 
 
 def _tessellate_parts(
