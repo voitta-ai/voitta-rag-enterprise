@@ -244,12 +244,14 @@
                 <div class="toolbar-divider"></div>
                 <div class="toolbar-group">
                     <button id="btn-new-subfolder" class="btn btn-secondary" disabled title="Create a subfolder inside the selected managed folder">📂 New subfolder</button>
-                    <button id="btn-upload" class="btn btn-secondary" disabled title="Upload a file into the selected managed folder">⬆ Upload</button>
+                    <button id="btn-upload" class="btn btn-secondary" disabled title="Upload one or more files into the selected managed folder">⬆ Upload files</button>
+                    <button id="btn-upload-folder" class="btn btn-secondary" disabled title="Upload a folder (with its full subdirectory tree preserved)">📁 Upload folder</button>
                     <button id="btn-reindex" class="btn btn-secondary" disabled title="Hard re-index every file under the selected folder or subfolder">↻ Reindex</button>
                     <button id="btn-sync" class="btn btn-secondary" disabled title="Configure or run a remote sync (e.g. GitHub) for this folder">🔄 Sync</button>
                     <button id="btn-remove" class="btn btn-secondary" disabled title="Unregister the selected folder">🗑 Remove</button>
                 </div>
                 <input type="file" id="upload-input" multiple hidden>
+                <input type="file" id="upload-folder-input" webkitdirectory directory multiple hidden>
                 <span id="root-hint" class="hint"></span>
                 <div id="upload-progress" class="upload-progress" hidden>
                     <span class="upload-progress-label" id="upload-progress-label">Uploading…</span>

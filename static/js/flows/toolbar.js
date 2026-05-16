@@ -25,6 +25,7 @@ export function updateToolbarState() {
 
     $("#btn-new-subfolder").disabled = !folder || readOnly;
     $("#btn-upload").disabled = !folder || readOnly;
+    $("#btn-upload-folder").disabled = !folder || readOnly;
     $("#btn-reindex").disabled = !folder || readOnly;
     // Sync button: only at the folder root. Hidden when the folder is
     // non-empty AND has no sync source — sync can't be configured on an

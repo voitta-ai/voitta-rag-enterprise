@@ -216,6 +216,26 @@ body {
     align-items: stretch;
     flex: 1;
     min-height: 0;
+    position: relative;
+}
+/* Active drag-and-drop highlight on the browser pane. Outlines the
+   whole grid so it's obvious the drop is being accepted; the
+   pointer-events guard keeps child interactivity working during a
+   drag (without it, dragover would not bubble correctly). */
+.browser-layout.drop-active::after {
+    content: "Drop folders or files here";
+    position: absolute;
+    inset: 0;
+    border: 2px dashed var(--accent, #5b8def);
+    border-radius: 8px;
+    background: rgba(91, 141, 239, 0.08);
+    color: var(--accent, #5b8def);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 600;
+    pointer-events: none;
+    z-index: 10;
 }
 
 /* ---------- Buttons ---------- */

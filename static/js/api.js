@@ -92,17 +92,27 @@ export const api = {
         // Per-file callbacks let the UI render a row per file ("a.pdf —
         // 42%" / "✓ a.pdf"); the watcher's ``file.upserted`` events also
         // populate the folder's file list as each file lands.
-        const list = Array.from(files);
+        //
+        // ``files`` can be either:
+        //   * ``File[]`` — all uploaded into ``relDir``.
+        //   * ``{file: File, relDir: string}[]`` — per-entry target
+        //     subdirectory. Used by the directory picker + drag-and-drop
+        //     paths so nested folder structure is preserved on the server.
+        const list = Array.from(files).map((entry) =>
+            entry instanceof File
+                ? { file: entry, relDir }
+                : { file: entry.file, relDir: entry.relDir ?? relDir }
+        );
         let next = 0;
         const failures = [];
         async function worker() {
             while (true) {
                 const idx = next++;
                 if (idx >= list.length) return;
-                const file = list[idx];
+                const { file, relDir: perFileRelDir } = list[idx];
                 try {
                     const resp = await api.uploadOne(
-                        folderId, file, relDir,
+                        folderId, file, perFileRelDir,
                         onFileProgress
                             ? (p) => onFileProgress(idx, file, p)
                             : null,
