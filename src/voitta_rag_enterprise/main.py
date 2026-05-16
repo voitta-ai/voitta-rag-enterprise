@@ -357,6 +357,18 @@ def create_app() -> FastAPI:
 
             return FileResponse(STATIC_DIR / "index.html")
 
+        @app.get("/favicon.ico", include_in_schema=False)
+        async def favicon() -> object:
+            # Browsers request /favicon.ico unconditionally even when
+            # the page declares a <link rel="icon"> — serve the SVG
+            # so the request resolves instead of 404'ing in the
+            # console.
+            from fastapi.responses import FileResponse
+
+            return FileResponse(
+                STATIC_DIR / "favicon.svg", media_type="image/svg+xml"
+            )
+
     return app
 
 
