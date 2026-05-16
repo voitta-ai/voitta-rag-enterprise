@@ -53,7 +53,13 @@ export const api = {
         // Smaller-than-batch POSTs also give us per-file XHR progress
         // events instead of a single aggregate fraction.
         const form = new FormData();
-        form.append("file", file);
+        // Explicit basename override: Chrome's <input webkitdirectory>
+        // populates the multipart ``filename`` header with the file's
+        // full webkitRelativePath ("research/images/foo.jpg"), and
+        // ``_safe_filename`` on the backend rejects anything with a
+        // slash. The directory component is already on the wire as
+        // the ``rel_dir`` query param, so pass only the basename here.
+        form.append("file", file, file.name);
         const query = relDir ? `?rel_dir=${encodeURIComponent(relDir)}` : "";
         const url = `/api/folders/${folderId}/upload${query}`;
         return new Promise((resolve, reject) => {
