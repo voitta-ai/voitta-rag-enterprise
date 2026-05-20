@@ -75,22 +75,28 @@ def _find_inflight(session: Session, dedup_key: str) -> int | None:
 
 
 def reclaim_abandoned_jobs(*, max_attempts: int = 5) -> tuple[int, int]:
-    """Reset jobs left in ``running`` from a previous process.
+    """Mark every ``running`` row from a previous process as ``error``.
 
-    A worker pool that dies mid-job (uvicorn --reload, OOM kill, ctrl-C)
-    leaves rows stuck at ``state='running'`` forever — ``claim_one`` only
-    picks ``queued`` rows, and there is no other code path that resurrects
-    them.
+    A worker pool that dies mid-job (uvicorn --reload, OOM kill, ctrl-C,
+    SIGKILL) leaves rows stuck at ``state='running'`` forever —
+    ``claim_one`` only picks ``queued`` rows, and there is no other code
+    path that resurrects them.
 
-    On startup we scan every ``running`` row:
-    * if its attempts count is below ``max_attempts``, push it back to
-      ``queued`` so a fresh worker can re-run it;
-    * if it has hit the cap, mark it ``error`` with a synthetic message so
-      the UI surfaces the dead job instead of hiding it.
+    Earlier this function requeued such rows so a fresh worker would
+    retry, but that re-introduced the same problem on the next death:
+    a parser that wedges once tends to wedge again, and the user ends
+    up watching the queue stall on the same poison job across multiple
+    restarts. The simpler rule — fail the job, move on, never retry —
+    keeps the queue draining and surfaces the dead job in the UI so
+    the operator can investigate manually.
 
-    Returns ``(requeued, killed)`` so the caller can log what happened.
+    ``max_attempts`` is kept in the signature for backwards-compat but
+    is unused; every ``running`` row is now moved to ``error``.
+
+    Returns ``(requeued, killed)`` where ``requeued`` is always 0 and
+    ``killed`` is the number of rows transitioned to ``error``.
     """
-    requeued = 0
+    _ = max_attempts  # kept for backwards-compat; no longer used
     killed = 0
     with session_scope() as s:
         rows = list(
@@ -101,32 +107,23 @@ def reclaim_abandoned_jobs(*, max_attempts: int = 5) -> tuple[int, int]:
             )
         )
         for jid, attempts in rows:
-            if attempts >= max_attempts:
-                s.execute(
-                    text(
-                        "UPDATE jobs SET state='error', error=:e, "
-                        "finished_at=:now WHERE id=:id"
+            s.execute(
+                text(
+                    "UPDATE jobs SET state='error', error=:e, "
+                    "finished_at=:now WHERE id=:id"
+                ),
+                {
+                    "id": jid,
+                    "now": int(time.time()),
+                    "e": (
+                        f"abandoned in 'running' state on previous run "
+                        f"(attempts={attempts}); marked error on startup "
+                        "instead of retrying"
                     ),
-                    {
-                        "id": jid,
-                        "now": int(time.time()),
-                        "e": (
-                            f"abandoned in 'running' state after {attempts} "
-                            "attempts (worker pool died mid-job)"
-                        ),
-                    },
-                )
-                killed += 1
-            else:
-                s.execute(
-                    text(
-                        "UPDATE jobs SET state='queued', started_at=NULL "
-                        "WHERE id=:id"
-                    ),
-                    {"id": jid},
-                )
-                requeued += 1
-    return requeued, killed
+                },
+            )
+            killed += 1
+    return 0, killed
 
 
 def claim_one() -> ClaimedJob | None:
