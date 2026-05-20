@@ -12,6 +12,17 @@ from typing import Any
 from ..gpu_lock import gpu_lock
 from .types import ImageEmbedder
 
+
+class UnsupportedImageError(RuntimeError):
+    """Raised when the embedder can't decode an image (WMF/EMF/corrupt).
+
+    Caught at the indexing.py per-image boundary so the file as a whole
+    still completes; one bad clipart asset shouldn't tank a 50-slide
+    deck. The message includes the detected PIL format when known so
+    a curious operator can grep the logs and decide whether to add a
+    rasterizer.
+    """
+
 logger = logging.getLogger(__name__)
 
 FAKE_DIM = 64
@@ -91,7 +102,22 @@ class SiglipImageEmbedder(ImageEmbedder):
         from PIL import Image as PILImage
 
         processor, model = self._ensure_loaded()
-        img = PILImage.open(io.BytesIO(data)).convert("RGB")
+        try:
+            img = PILImage.open(io.BytesIO(data))
+            img.load()  # force decode now so format-specific failures
+            # surface here (WMF/EMF need an external rasterizer that
+            # Pillow doesn't ship) rather than inside convert() later.
+            img = img.convert("RGB")
+        except Exception as e:
+            # Re-raise as a clean, recognisable exception so the per-image
+            # error log in indexing.py reads "unsupported image format:
+            # WMF" instead of a 10-frame PIL traceback. The caller catches
+            # this and continues with the next image — one unparseable
+            # asset in a PowerPoint deck shouldn't sink the whole file.
+            fmt = getattr(locals().get("img"), "format", None) or "unknown"
+            raise UnsupportedImageError(
+                f"cannot decode image (format={fmt}): {e}"
+            ) from e
         # Hand the processor an explicit (H, W, 3) ndarray + channels_last so it
         # never has to guess the channel axis. SiglipImageProcessor's heuristic
         # picks the wrong axis on images where H or W equals 3 (e.g. tiny inline

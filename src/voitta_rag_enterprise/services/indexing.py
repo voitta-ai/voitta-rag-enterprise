@@ -330,12 +330,32 @@ def _run_extract_inner(file_id: int) -> None:
         if chunks:
             with _stage("embed_text_inline"):
                 _embed_text_sync(file_id, round_token=round_token)
-        for image_id in image_ids:
+    except Exception:
+        _mark_error(file_id, _format_exception("inline text embed failed"))
+        return
+    # Per-image embed failures are *not* fatal to the file. One
+    # unparseable WMF / EMF / corrupt PNG buried in an old PowerPoint
+    # shouldn't tank the whole document — we'd be hiding hundreds of
+    # other useful pages of text for one bad clipart. Each image
+    # records its own error inside ``_embed_image_sync``; we just log
+    # at the file level and let the rest of the file complete.
+    image_failures: list[tuple[int, BaseException]] = []
+    for image_id in image_ids:
+        try:
             with _stage("embed_image_inline", image_id=image_id):
                 _embed_image_sync(image_id, round_token=round_token)
-    except Exception:
-        _mark_error(file_id, _format_exception("inline embeds failed"))
-        return
+        except Exception as e:  # noqa: BLE001
+            image_failures.append((image_id, e))
+            logger.warning(
+                "embed_image failed for image_id=%s in file_id=%s: %s",
+                image_id, file_id, e,
+            )
+    if image_failures:
+        logger.warning(
+            "file_id=%s indexed with %d/%d image embed failures "
+            "(text + remaining images still indexed)",
+            file_id, len(image_failures), len(image_ids),
+        )
 
     elapsed_ms = (time.perf_counter() - extract_started) * 1000
     logger.info(
