@@ -1273,9 +1273,11 @@ def ms_auth_init(
 async def ms_oauth_callback(
     request: Request,
     code: str | None = Query(None),
-    state: str = Query(...),
+    state: str | None = Query(None),
     error: str | None = Query(None),
     error_description: str | None = Query(None),
+    admin_consent: str | None = Query(None),
+    tenant: str | None = Query(None),
 ) -> HTMLResponse:
     """Microsoft OAuth callback — works for both SharePoint and Teams rows.
 
@@ -1285,6 +1287,21 @@ async def ms_oauth_callback(
     fix the real issue instead of staring at a 422 schema error from
     a missing ``code`` query param.
     """
+    # Admin-consent return — the /adminconsent endpoint redirects here
+    # with ``admin_consent=True&tenant=…`` and no ``code`` or ``state``.
+    # Tenant-wide grant is already saved server-side at Azure AD by the
+    # time the redirect fires; nothing for us to do here except show a
+    # friendly page so the admin doesn't think it failed.
+    if (admin_consent or "").lower() == "true":
+        logger.info("Microsoft admin consent recorded for tenant=%s", tenant)
+        return HTMLResponse(
+            "<html><body style='font-family:sans-serif;padding:20px;'>"
+            "<h3>Admin consent recorded ✓</h3>"
+            "<p>Tenant-wide permissions are now granted. You can close "
+            "this tab — the user who was setting up the integration can "
+            "click Connect again and sign in normally.</p>"
+            "</body></html>"
+        )
     if error:
         logger.warning(
             "Microsoft OAuth callback returned error=%s desc=%s",
@@ -1304,6 +1321,11 @@ async def ms_oauth_callback(
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             "Microsoft callback did not include code or error",
+        )
+    if not state:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Microsoft callback did not include state",
         )
     try:
         folder_id = int(base64.urlsafe_b64decode(state.encode()).decode())
