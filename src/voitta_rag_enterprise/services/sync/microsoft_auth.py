@@ -193,10 +193,15 @@ def get_auth_url(
         "response_mode": "query",
         "scope": DELEGATED_SCOPES,
         "state": state,
-        # ``prompt=consent`` ensures a refresh_token is re-issued even
-        # when this client has been consented to before (otherwise we
-        # only get one on first consent — same problem Google has).
-        "prompt": "consent",
+        # NOTE: we used to pass ``prompt=consent`` here (copied the
+        # idea from the Google flow). That forces Microsoft to ask
+        # the *user* to re-consent on every sign-in — and a non-admin
+        # user cannot re-consent to admin-only scopes like
+        # ``Sites.Read.All`` even when tenant-wide admin consent has
+        # already been granted. The result is a "Need admin approval"
+        # wall that no amount of admin clicks can clear. Microsoft
+        # issues refresh tokens whenever ``offline_access`` is in
+        # scope, regardless of prompt — so we just don't set it.
     }
     return (
         f"{MS_LOGIN_BASE}/{tenant_id}/oauth2/v2.0/authorize?{urlencode(params)}"
