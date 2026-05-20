@@ -110,6 +110,24 @@ def init_db() -> None:
             "gd_use_loopback",
             "INTEGER NOT NULL DEFAULT 0",
         )
+        # Microsoft (SharePoint + Teams) — shared auth columns plus the
+        # per-connector specifics. Defaults are NULL/0 so existing
+        # github/google_drive/nfs rows stay untouched.
+        for col, decl in (
+            ("ms_tenant_id", "TEXT"),
+            ("ms_client_id", "TEXT"),
+            ("ms_client_secret", "TEXT"),
+            ("ms_cert_pem", "TEXT"),
+            ("ms_auth_method", "TEXT"),
+            ("ms_refresh_token", "TEXT"),
+            ("ms_use_loopback", "INTEGER NOT NULL DEFAULT 0"),
+            ("sp_selected_sites", "TEXT"),
+            ("sp_all_sites", "INTEGER NOT NULL DEFAULT 0"),
+            ("tm_user_mode", "TEXT"),
+            ("tm_user_id", "TEXT"),
+            ("tm_include_attended", "INTEGER NOT NULL DEFAULT 1"),
+        ):
+            _ensure_column(raw_conn, "folder_sync_sources", col, decl)
         raw_conn.commit()
     finally:
         raw_conn.close()

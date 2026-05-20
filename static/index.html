@@ -399,6 +399,8 @@
                 <select id="sync-type">
                     <option value="github">GitHub / Git</option>
                     <option value="google_drive">Google Drive</option>
+                    <option value="sharepoint">SharePoint</option>
+                    <option value="teams">Teams meetings</option>
                     <!-- Shown only when the admin has configured an NFS
                          root and the path is reachable. sync.js drops
                          this <option> on open via setNfsAvailability. -->
@@ -574,6 +576,181 @@
                     </div>
                     <ul id="sync-gd-folders-list" style="margin:6px 0 0;padding-left:18px;font-size:13px;color:var(--muted, #666);"></ul>
                     <p class="hint" id="sync-gd-folders-hint">Each picked folder syncs into its own subdirectory under this folder.</p>
+                </div>
+
+                <!-- SharePoint sync pane. Tenant-wide app credentials are
+                     shared with the Teams pane (so a user can configure
+                     one Azure AD app and point N folders at sites or
+                     meetings); the per-folder selection lives below. -->
+                <div id="sync-form-sharepoint" hidden>
+                    <p class="hint" style="margin:0 0 6px;">
+                        Mirrors selected SharePoint sites. Office files
+                        (.docx/.xlsx/.pptx) sync as-is; SharePoint Pages
+                        and OneNote notebooks render to markdown. Needs an
+                        Azure AD app — see Microsoft's docs for tenant_id
+                        + client_id. Missing scopes are surfaced below.
+                    </p>
+
+                    <div class="seg-tabs" role="tablist">
+                        <button type="button" id="sync-sp-tab-oauth"
+                            class="seg-tab active" role="tab" aria-selected="true">
+                            Sign in with Microsoft
+                        </button>
+                        <button type="button" id="sync-sp-tab-secret"
+                            class="seg-tab" role="tab" aria-selected="false">
+                            App + secret
+                        </button>
+                        <button type="button" id="sync-sp-tab-cert"
+                            class="seg-tab" role="tab" aria-selected="false">
+                            App + certificate
+                        </button>
+                    </div>
+
+                    <label>Tenant ID</label>
+                    <input type="text" id="sync-sp-tenant-id"
+                        placeholder="00000000-0000-0000-0000-000000000000 or contoso.onmicrosoft.com"
+                        autocomplete="off" data-1p-ignore data-lpignore="true">
+
+                    <label>Client ID</label>
+                    <input type="text" id="sync-sp-client-id"
+                        placeholder="00000000-0000-0000-0000-000000000000"
+                        autocomplete="off" data-1p-ignore data-lpignore="true">
+
+                    <div id="sync-sp-pane-secret">
+                        <label>Client secret</label>
+                        <input type="text" id="sync-sp-client-secret"
+                            placeholder="(paste app secret)" autocomplete="off"
+                            spellcheck="false" data-1p-ignore data-lpignore="true"
+                            data-form-type="other">
+                    </div>
+
+                    <div id="sync-sp-pane-cert" hidden>
+                        <label>PEM (private key + certificate)</label>
+                        <textarea id="sync-sp-cert-pem" rows="5"
+                            placeholder="-----BEGIN PRIVATE KEY-----&#10;…&#10;-----END PRIVATE KEY-----&#10;-----BEGIN CERTIFICATE-----&#10;…&#10;-----END CERTIFICATE-----"></textarea>
+                    </div>
+
+                    <label class="check-row" style="margin-top:8px;">
+                        <input type="checkbox" id="sync-sp-use-loopback">
+                        <span style="text-transform:none;letter-spacing:0;color:var(--color-text);font-size:12px;">
+                            Use localhost loopback redirect
+                        </span>
+                    </label>
+                    <p class="hint" id="sync-sp-loopback-hint" hidden style="margin:4px 0 0;">
+                        Register <code id="sync-sp-loopback-uri">http://localhost:53682/api/sync/oauth/microsoft/callback</code>
+                        in Azure AD and run the local nginx bridge on this machine.
+                    </p>
+
+                    <div class="actions actions-right" id="sync-sp-conn-row" style="margin-top:8px;">
+                        <button type="button" id="sync-sp-connect" class="btn btn-secondary btn-sm" disabled title="Save tenant/client/secret first">Connect</button>
+                        <span id="sync-sp-conn-status" class="hint" style="margin-left:auto;"></span>
+                    </div>
+
+                    <!-- Missing-scope warning panel, populated by
+                         /sync/microsoft/scope-check on Save. -->
+                    <div id="sync-sp-scope-warn" class="sync-scope-warn" hidden></div>
+
+                    <label>SharePoint sites</label>
+                    <div class="branches-row">
+                        <button type="button" id="sync-sp-pick-sites" class="btn btn-secondary btn-sm" disabled title="Connect first">Pick sites…</button>
+                        <label class="check-row" style="margin:0;">
+                            <input type="checkbox" id="sync-sp-all-sites">
+                            <span style="text-transform:none;letter-spacing:0;color:var(--color-text);font-size:12px;">
+                                Sync ALL accessible sites
+                            </span>
+                        </label>
+                        <span id="sync-sp-sites-count" class="hint">none selected</span>
+                    </div>
+                    <ul id="sync-sp-sites-list" style="margin:6px 0 0;padding-left:18px;font-size:13px;color:var(--muted, #666);"></ul>
+                </div>
+
+                <!-- Teams meetings sync pane. Same shared MS auth as the
+                     SharePoint pane; the per-folder selection is
+                     who's meetings to capture (me / specific user /
+                     all users in tenant). -->
+                <div id="sync-form-teams" hidden>
+                    <p class="hint" style="margin:0 0 6px;">
+                        Captures Teams meetings (subject, attendees, transcripts when
+                        available). Recordings are recorded as deep links — MP4 files are
+                        NOT downloaded. Missing scopes are surfaced below.
+                    </p>
+
+                    <div class="seg-tabs" role="tablist">
+                        <button type="button" id="sync-tm-tab-oauth"
+                            class="seg-tab active" role="tab" aria-selected="true">
+                            Sign in with Microsoft
+                        </button>
+                        <button type="button" id="sync-tm-tab-secret"
+                            class="seg-tab" role="tab" aria-selected="false">
+                            App + secret
+                        </button>
+                        <button type="button" id="sync-tm-tab-cert"
+                            class="seg-tab" role="tab" aria-selected="false">
+                            App + certificate
+                        </button>
+                    </div>
+
+                    <label>Tenant ID</label>
+                    <input type="text" id="sync-tm-tenant-id"
+                        placeholder="00000000-0000-0000-0000-000000000000 or contoso.onmicrosoft.com"
+                        autocomplete="off" data-1p-ignore data-lpignore="true">
+
+                    <label>Client ID</label>
+                    <input type="text" id="sync-tm-client-id"
+                        placeholder="00000000-0000-0000-0000-000000000000"
+                        autocomplete="off" data-1p-ignore data-lpignore="true">
+
+                    <div id="sync-tm-pane-secret">
+                        <label>Client secret</label>
+                        <input type="text" id="sync-tm-client-secret"
+                            placeholder="(paste app secret)" autocomplete="off"
+                            spellcheck="false" data-1p-ignore data-lpignore="true"
+                            data-form-type="other">
+                    </div>
+                    <div id="sync-tm-pane-cert" hidden>
+                        <label>PEM (private key + certificate)</label>
+                        <textarea id="sync-tm-cert-pem" rows="5"
+                            placeholder="-----BEGIN PRIVATE KEY-----&#10;…&#10;-----END PRIVATE KEY-----&#10;-----BEGIN CERTIFICATE-----&#10;…&#10;-----END CERTIFICATE-----"></textarea>
+                    </div>
+
+                    <label class="check-row" style="margin-top:8px;">
+                        <input type="checkbox" id="sync-tm-use-loopback">
+                        <span style="text-transform:none;letter-spacing:0;color:var(--color-text);font-size:12px;">
+                            Use localhost loopback redirect
+                        </span>
+                    </label>
+                    <p class="hint" id="sync-tm-loopback-hint" hidden style="margin:4px 0 0;">
+                        Register <code>http://localhost:53682/api/sync/oauth/microsoft/callback</code>
+                        in Azure AD and run the local nginx bridge.
+                    </p>
+
+                    <div class="actions actions-right" style="margin-top:8px;">
+                        <button type="button" id="sync-tm-connect" class="btn btn-secondary btn-sm" disabled title="Save tenant/client/secret first">Connect</button>
+                        <span id="sync-tm-conn-status" class="hint" style="margin-left:auto;"></span>
+                    </div>
+
+                    <div id="sync-tm-scope-warn" class="sync-scope-warn" hidden></div>
+
+                    <label>Whose meetings?</label>
+                    <div class="radio-row">
+                        <label><input type="radio" name="sync-tm-user-mode" value="me" checked> Me (OAuth only)</label>
+                        <label><input type="radio" name="sync-tm-user-mode" value="specific"> Specific user</label>
+                        <label><input type="radio" name="sync-tm-user-mode" value="all_users"> All users in tenant</label>
+                    </div>
+                    <div id="sync-tm-user-row" hidden style="margin-top:6px;">
+                        <label>User (mailbox)</label>
+                        <div class="branches-row">
+                            <button type="button" id="sync-tm-pick-user" class="btn btn-secondary btn-sm" disabled>Pick user…</button>
+                            <input type="text" id="sync-tm-user-id" placeholder="userPrincipalName or object id" style="flex:1;">
+                        </div>
+                    </div>
+
+                    <label class="check-row" style="margin-top:8px;">
+                        <input type="checkbox" id="sync-tm-include-attended" checked>
+                        <span style="text-transform:none;letter-spacing:0;color:var(--color-text);font-size:12px;">
+                            Include meetings the user only attended (needs <code>CallRecords.Read.All</code>)
+                        </span>
+                    </label>
                 </div>
 
                 <!-- NFS sync pane. ``nfs_root`` is admin-configured;

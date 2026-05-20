@@ -107,6 +107,10 @@ def _sync_source_kind(source: FolderSyncSource | None) -> str:
         return "google_drive"
     if source.source_type == "nfs":
         return "nfs"
+    if source.source_type == "sharepoint":
+        return "sharepoint"
+    if source.source_type == "teams":
+        return "teams"
     return "regular"
 
 

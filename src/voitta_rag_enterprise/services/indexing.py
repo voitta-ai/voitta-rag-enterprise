@@ -733,6 +733,30 @@ async def _run_sync_inner(folder_id: int) -> None:
             cfg = {
                 "nfs_subpath": (source.nfs_subpath or "").strip("/"),
             }
+        elif source_type in ("sharepoint", "teams"):
+            from .sync.microsoft_auth import MicrosoftAuth
+            ms_auth = MicrosoftAuth(
+                tenant_id=source.ms_tenant_id or "",
+                client_id=source.ms_client_id or "",
+                client_secret=source.ms_client_secret or "",
+                cert_pem=source.ms_cert_pem or "",
+                refresh_token=source.ms_refresh_token or "",
+                method=source.ms_auth_method or "",
+            )
+            if source_type == "sharepoint":
+                from .sync.sharepoint import coerce_sites_field
+                cfg = {
+                    "auth": ms_auth,
+                    "sites": coerce_sites_field(source.sp_selected_sites),
+                    "all_sites": bool(source.sp_all_sites),
+                }
+            else:
+                cfg = {
+                    "auth": ms_auth,
+                    "user_mode": source.tm_user_mode or "me",
+                    "user_id": source.tm_user_id or "",
+                    "include_attended": bool(source.tm_include_attended),
+                }
         else:
             raise NotImplementedError(f"unknown source_type: {source_type!r}")
 
@@ -767,7 +791,7 @@ async def _run_sync_inner(folder_id: int) -> None:
             event["detail"] = detail
         events.publish("folders", event)
 
-    if source_type in ("google_drive", "nfs"):
+    if source_type in ("google_drive", "nfs", "sharepoint", "teams"):
         cfg["progress_cb"] = _on_progress
 
     # Initial event from the worker side, before the connector starts —
@@ -807,6 +831,14 @@ async def _run_sync_inner(folder_id: int) -> None:
             src.sync_status = "error" if stats.errors else "idle"
             src.sync_error = "; ".join(stats.errors) if stats.errors else None
             src.last_synced_at = int(time.time())
+            # Microsoft rotates refresh tokens on most refresh calls; the
+            # connector parks the rotated value on its MicrosoftAuth and
+            # we persist it here so the next sync can mint a token.
+            if source_type in ("sharepoint", "teams"):
+                ms_auth = cfg.get("auth")
+                rotated = getattr(ms_auth, "rotated_refresh_token", None)
+                if rotated:
+                    src.ms_refresh_token = rotated
 
     _publish_sync_source_changed(folder_id)
     # Final clear-the-badge event. The GD connector already emits "done"

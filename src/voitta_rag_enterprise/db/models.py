@@ -191,6 +191,35 @@ class FolderSyncSource(Base):
     # Voitta hostname. A small nginx bridge running on the admin's box
     # proxies the callback back to this server.
     gd_use_loopback: Mapped[bool] = mapped_column(default=False)
+    # Microsoft (shared by ``sharepoint`` and ``teams`` source types).
+    # ``ms_auth_method`` is one of: "oauth" (delegated, refresh-token),
+    # "app_secret" (client-credentials with a client_secret), "app_cert"
+    # (client-credentials with a PEM private key). For oauth we also
+    # store ms_refresh_token; for app_* the tenant-wide app credentials
+    # are enough to mint tokens on demand.
+    ms_tenant_id: Mapped[str | None] = mapped_column(default=None)
+    ms_client_id: Mapped[str | None] = mapped_column(default=None)
+    ms_client_secret: Mapped[str | None] = mapped_column(default=None)
+    ms_cert_pem: Mapped[str | None] = mapped_column(default=None)
+    ms_auth_method: Mapped[str | None] = mapped_column(default=None)
+    ms_refresh_token: Mapped[str | None] = mapped_column(default=None)
+    # Same loopback story as gdrive: when True the OAuth redirect is
+    # http://localhost:53682/api/sync/oauth/microsoft/callback so admins
+    # only register a localhost URL in Azure AD.
+    ms_use_loopback: Mapped[bool] = mapped_column(default=False)
+    # SharePoint-specific. ``sp_selected_sites`` is a JSON array of
+    # ``{"id": str, "displayName": str, "webUrl": str}``; ignored when
+    # ``sp_all_sites`` is True (then every accessible site is synced).
+    sp_selected_sites: Mapped[str | None] = mapped_column(default=None)
+    sp_all_sites: Mapped[bool] = mapped_column(default=False)
+    # Teams-specific. ``tm_user_mode`` is "me" (delegated only) or
+    # "specific" (one mailbox) or "all_users" (every user in tenant —
+    # app-only). ``tm_user_id`` is required for "specific".
+    # ``tm_include_attended`` adds /communications/callRecords lookup
+    # so meetings the user only attended (not organized) are captured.
+    tm_user_mode: Mapped[str | None] = mapped_column(default=None)
+    tm_user_id: Mapped[str | None] = mapped_column(default=None)
+    tm_include_attended: Mapped[bool] = mapped_column(default=True)
     # NFS — admin sets the root via settings, user picks a subpath
     # under it via the sync UI; ``nfs_subpath`` is that POSIX path
     # *relative* to the root (never absolute, never with ``..``).

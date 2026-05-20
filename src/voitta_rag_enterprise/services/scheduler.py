@@ -81,6 +81,16 @@ def _tick_once() -> None:
             # error-marked sync_status every tick.
             if src.source_type == "google_drive" and not src.gd_folder_id:
                 continue
+            # SharePoint: skip if no sites picked AND "all sites" is off.
+            if src.source_type == "sharepoint" and not (
+                src.sp_all_sites or src.sp_selected_sites
+            ):
+                continue
+            # Teams: skip if user_mode is "specific" but no user is set.
+            if src.source_type == "teams" and (
+                (src.tm_user_mode or "me") == "specific" and not src.tm_user_id
+            ):
+                continue
             job_queue.enqueue(
                 s,
                 "sync",

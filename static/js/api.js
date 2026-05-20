@@ -158,6 +158,14 @@ export const api = {
     nfsStatus: () => req("GET", "/api/sync/nfs/status"),
     nfsBrowse: (rel = "") =>
         req("GET", `/api/sync/nfs/browse?rel=${encodeURIComponent(rel || "")}`),
+    msAuthInit: (folderId) =>
+        req("POST", `/api/folders/${folderId}/sync/microsoft/auth`),
+    msListSites: (folderId) =>
+        req("GET", `/api/folders/${folderId}/sync/microsoft/sites`),
+    msListUsers: (folderId) =>
+        req("GET", `/api/folders/${folderId}/sync/microsoft/users`),
+    msScopeCheck: (folderId) =>
+        req("GET", `/api/folders/${folderId}/sync/microsoft/scope-check`),
     authConfig: () => req("GET", "/api/auth/config"),
     me: () => req("GET", "/api/auth/me"),
     logout: () => req("POST", "/api/auth/logout"),

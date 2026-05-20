@@ -203,17 +203,16 @@ function setSyncType(t) {
     $("#sync-form-github").hidden = t !== "github";
     $("#sync-form-google_drive").hidden = t !== "google_drive";
     $("#sync-form-nfs").hidden = t !== "nfs";
+    $("#sync-form-sharepoint").hidden = t !== "sharepoint";
+    $("#sync-form-teams").hidden = t !== "teams";
     if (t === "google_drive") {
-        // Mirror the URL the backend will hand to Google so the user can
-        // copy-paste it verbatim into "Authorized redirect URIs".
         updateGdRedirectHint();
     }
     if (t === "nfs") {
-        // Refresh on every entry — the admin may have toggled NFS off
-        // since the modal opened. nfsRefreshStatus also re-paints the
-        // root-display field.
         nfsRefreshStatus().then(() => nfsBrowseTo(nfsCurrentPath));
     }
+    if (t === "sharepoint") updateMsLoopbackHint("sp");
+    if (t === "teams") updateMsLoopbackHint("tm");
 }
 
 // ---------------------------------------------------------------------------
@@ -484,6 +483,20 @@ async function loadSyncSource() {
             const saOnly = gd.has_service_account && !gd.has_client_secret;
             setGdAuthMode(saOnly ? "sa" : "oauth");
             setGdConnState({ connected: gd.connected, hasClientSecret: gd.has_client_secret });
+        } else if (src.source_type === "sharepoint" && src.sharepoint) {
+            loadMsForm("sp", src.sharepoint);
+            setSpSites(src.sharepoint.sites || []);
+            $("#sync-sp-all-sites").checked = !!src.sharepoint.all_sites;
+            updateSpSitesUi();
+        } else if (src.source_type === "teams" && src.teams) {
+            loadMsForm("tm", src.teams);
+            const mode = src.teams.user_mode || "me";
+            document.querySelectorAll('input[name="sync-tm-user-mode"]').forEach((el) => {
+                el.checked = el.value === mode;
+            });
+            $("#sync-tm-user-id").value = src.teams.user_id || "";
+            $("#sync-tm-include-attended").checked = !!src.teams.include_attended;
+            updateTmUserModeUi();
         }
         // Auto-sync schedule (common to both source types).
         $("#sync-auto-enabled").checked = !!src.auto_sync_enabled;
@@ -635,6 +648,8 @@ function syncBody() {
     if (t === "github") return { ...base, source_type: "github", github: ghFormConfig() };
     if (t === "google_drive") return { ...base, source_type: "google_drive", google_drive: gdFormConfig() };
     if (t === "nfs") return { ...base, source_type: "nfs", nfs: { subpath: nfsCurrentPath } };
+    if (t === "sharepoint") return { ...base, source_type: "sharepoint", sharepoint: spFormConfig() };
+    if (t === "teams") return { ...base, source_type: "teams", teams: tmFormConfig() };
     throw new Error(`Unknown source_type: ${t}`);
 }
 
@@ -784,6 +799,12 @@ async function _doSave() {
         setGdFolders(gd.folders || []);
         _snapshotSavedGdFolders(gd.folders || []);
         setGdConnState({ connected: gd.connected, hasClientSecret: gd.has_client_secret });
+    }
+    // Sharepoint / Teams post-save refresh — defined further down in the
+    // file. The hook is on ``window`` so we don't need a forward
+    // declaration in this module.
+    if (typeof window.__voittaMsAfterSave === "function") {
+        window.__voittaMsAfterSave(out);
     }
     return out;
 }
@@ -1192,3 +1213,456 @@ syncSources.subscribe((map) => {
         last_synced_at: entry.last_synced_at,
     });
 });
+
+
+// ===========================================================================
+// Microsoft (SharePoint + Teams) — auth tabs, sites picker, scope warning.
+//
+// Same shape for both connectors: shared auth fields (tenant/client/secret/
+// cert) live behind the ``sp-`` / ``tm-`` element prefix to keep the two
+// forms independent. Form helpers below are written generically — ``kind``
+// is "sp" for SharePoint and "tm" for Teams.
+// ===========================================================================
+
+const MS_LOOPBACK_REDIRECT_URI =
+    "http://localhost:53682/api/sync/oauth/microsoft/callback";
+
+// Selected sites for SharePoint (mirrors the gdFolders array). Mutated by
+// the picker modal + the saved-row loader.
+let spSites = [];
+
+function setSpSites(sites) {
+    spSites = (sites || []).map((s) => ({
+        id: String(s.id || ""),
+        displayName: s.displayName || s.name || "",
+        webUrl: s.webUrl || "",
+    })).filter((s) => s.id);
+    updateSpSitesUi();
+}
+
+function updateSpSitesUi() {
+    const list = $("#sync-sp-sites-list");
+    const count = $("#sync-sp-sites-count");
+    list.innerHTML = "";
+    if (spSites.length === 0) {
+        count.textContent = "none selected";
+    } else {
+        count.textContent = `${spSites.length} site${spSites.length === 1 ? "" : "s"} selected`;
+        for (const s of spSites) {
+            const li = document.createElement("li");
+            li.textContent = s.displayName || s.id;
+            if (s.webUrl) li.title = s.webUrl;
+            list.append(li);
+        }
+    }
+    const allOn = $("#sync-sp-all-sites")?.checked;
+    $("#sync-sp-pick-sites").disabled = allOn;
+}
+
+function updateTmUserModeUi() {
+    const mode = document.querySelector('input[name="sync-tm-user-mode"]:checked')?.value || "me";
+    $("#sync-tm-user-row").hidden = mode !== "specific";
+    $("#sync-tm-pick-user").disabled = mode !== "specific";
+}
+
+function setMsAuthMode(kind, mode) {
+    const tabs = {
+        oauth: $(`#sync-${kind}-tab-oauth`),
+        secret: $(`#sync-${kind}-tab-secret`),
+        cert: $(`#sync-${kind}-tab-cert`),
+    };
+    for (const [k, el] of Object.entries(tabs)) {
+        if (!el) continue;
+        el.classList.toggle("active", k === mode);
+        el.setAttribute("aria-selected", k === mode ? "true" : "false");
+    }
+    const secretPane = $(`#sync-${kind}-pane-secret`);
+    const certPane = $(`#sync-${kind}-pane-cert`);
+    if (secretPane) secretPane.hidden = mode === "cert";
+    if (certPane) certPane.hidden = mode !== "cert";
+    // Stash the mode on the wrapper element so form-config can read it.
+    const root = $(`#sync-form-${kind === "sp" ? "sharepoint" : "teams"}`);
+    if (root) root.dataset.authMode = mode;
+}
+
+function getMsAuthMode(kind) {
+    const root = $(`#sync-form-${kind === "sp" ? "sharepoint" : "teams"}`);
+    return root?.dataset.authMode || "oauth";
+}
+
+function msAuthMethodFromMode(mode) {
+    if (mode === "secret") return "app_secret";
+    if (mode === "cert") return "app_cert";
+    return "oauth";
+}
+
+function modeFromAuthMethod(method) {
+    if (method === "app_secret") return "secret";
+    if (method === "app_cert") return "cert";
+    return "oauth";
+}
+
+function updateMsLoopbackHint(kind) {
+    const useLoopback = !!$(`#sync-${kind}-use-loopback`)?.checked;
+    const hint = $(`#sync-${kind}-loopback-hint`);
+    if (hint) hint.hidden = !useLoopback;
+}
+
+function setMsConnState(kind, { connected, hasSecret, hasCert }) {
+    const mode = getMsAuthMode(kind);
+    const tenant = $(`#sync-${kind}-tenant-id`).value.trim();
+    const cid = $(`#sync-${kind}-client-id`).value.trim();
+    let canConnect = false;
+    if (mode === "oauth") {
+        const secretReady = hasSecret || $(`#sync-${kind}-client-secret`).value.length > 0;
+        canConnect = !!(tenant && cid && secretReady);
+    }
+    const btn = $(`#sync-${kind}-connect`);
+    if (btn) {
+        btn.disabled = !canConnect || mode !== "oauth";
+        btn.title = mode !== "oauth"
+            ? "App-only auth doesn't need a browser sign-in"
+            : (canConnect ? "" : "Save tenant_id, client_id and client_secret first");
+    }
+    const status = $(`#sync-${kind}-conn-status`);
+    if (status) {
+        if (mode !== "oauth") {
+            status.textContent = "App-only — no sign-in needed";
+        } else if (connected) {
+            status.textContent = "Connected ✓";
+        } else {
+            status.textContent = "";
+        }
+    }
+    // Sites picker / user picker need a connection (or app-only creds).
+    const ready = (mode !== "oauth") || connected;
+    if (kind === "sp") {
+        const allOn = $("#sync-sp-all-sites").checked;
+        $("#sync-sp-pick-sites").disabled = !ready || allOn;
+    } else {
+        $("#sync-tm-pick-user").disabled = !ready
+            || (document.querySelector('input[name="sync-tm-user-mode"]:checked')?.value !== "specific");
+    }
+}
+
+function loadMsForm(kind, cfg) {
+    const mode = modeFromAuthMethod(cfg.auth_method || "oauth");
+    setMsAuthMode(kind, mode);
+    $(`#sync-${kind}-tenant-id`).value = cfg.tenant_id || "";
+    $(`#sync-${kind}-client-id`).value = cfg.client_id || "";
+    $(`#sync-${kind}-client-secret`).placeholder = cfg.has_client_secret
+        ? "(saved — type to replace)" : "(paste app secret)";
+    const certEl = $(`#sync-${kind}-cert-pem`);
+    if (certEl) certEl.placeholder = cfg.has_cert
+        ? "(certificate saved — paste new PEM to replace)"
+        : certEl.getAttribute("placeholder");
+    $(`#sync-${kind}-use-loopback`).checked = !!cfg.use_loopback;
+    updateMsLoopbackHint(kind);
+    setMsConnState(kind, {
+        connected: !!cfg.connected,
+        hasSecret: !!cfg.has_client_secret,
+        hasCert: !!cfg.has_cert,
+    });
+}
+
+function msFormConfigGeneric(kind) {
+    const mode = getMsAuthMode(kind);
+    return {
+        tenant_id: $(`#sync-${kind}-tenant-id`).value.trim(),
+        client_id: $(`#sync-${kind}-client-id`).value.trim(),
+        client_secret: $(`#sync-${kind}-client-secret`).value,
+        cert_pem: $(`#sync-${kind}-cert-pem`)?.value || "",
+        auth_method: msAuthMethodFromMode(mode),
+        use_loopback: !!$(`#sync-${kind}-use-loopback`).checked,
+    };
+}
+
+function spFormConfig() {
+    return {
+        ...msFormConfigGeneric("sp"),
+        sites: spSites,
+        all_sites: !!$("#sync-sp-all-sites").checked,
+    };
+}
+
+function tmFormConfig() {
+    const mode = document.querySelector('input[name="sync-tm-user-mode"]:checked')?.value || "me";
+    return {
+        ...msFormConfigGeneric("tm"),
+        user_mode: mode,
+        user_id: $("#sync-tm-user-id").value.trim(),
+        include_attended: !!$("#sync-tm-include-attended").checked,
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Wire up tabs + change handlers
+// ---------------------------------------------------------------------------
+
+for (const kind of ["sp", "tm"]) {
+    $(`#sync-${kind}-tab-oauth`).addEventListener("click", () => setMsAuthMode(kind, "oauth"));
+    $(`#sync-${kind}-tab-secret`).addEventListener("click", () => setMsAuthMode(kind, "secret"));
+    $(`#sync-${kind}-tab-cert`).addEventListener("click", () => setMsAuthMode(kind, "cert"));
+    for (const id of [`#sync-${kind}-tenant-id`, `#sync-${kind}-client-id`, `#sync-${kind}-client-secret`]) {
+        $(id).addEventListener("input", () => setMsConnState(kind, {
+            connected: $(`#sync-${kind}-conn-status`).textContent.startsWith("Connected"),
+            hasSecret: $(`#sync-${kind}-client-secret`).placeholder.startsWith("(saved"),
+        }));
+    }
+    $(`#sync-${kind}-use-loopback`).addEventListener("change", () => updateMsLoopbackHint(kind));
+}
+
+$("#sync-sp-all-sites").addEventListener("change", updateSpSitesUi);
+document.querySelectorAll('input[name="sync-tm-user-mode"]').forEach((el) => {
+    el.addEventListener("change", updateTmUserModeUi);
+});
+
+// ---------------------------------------------------------------------------
+// Connect (OAuth popup) + sites picker + user picker
+// ---------------------------------------------------------------------------
+
+async function msConnectFlow(kind) {
+    // Same flow as gdConnectFlow: save first so the row has tenant/client/
+    // secret, then open the OAuth URL in a popup and wait for the events
+    // stream to notify us that the callback completed.
+    try {
+        await _doSave();
+    } catch (err) {
+        alert(err.message);
+        return;
+    }
+    let auth_url;
+    try {
+        ({ auth_url } = await api.msAuthInit(syncFolderId));
+    } catch (err) {
+        alert(err.message);
+        return;
+    }
+    const popup = window.open(auth_url, "voitta-ms-auth", "width=520,height=720");
+    if (!popup) {
+        alert("Pop-up blocked — allow pop-ups and try again.");
+        return;
+    }
+    // Same polling pattern as gdConnect — poll until the popup closes
+    // then re-fetch the source row (the callback set the refresh_token
+    // server-side before closing its own tab).
+    const t = setInterval(async () => {
+        if (popup.closed) {
+            clearInterval(t);
+            await loadSyncSource();
+            msRunScopeCheck(kind).catch(() => {});
+        }
+    }, 500);
+}
+
+$("#sync-sp-connect").addEventListener("click", () => msConnectFlow("sp"));
+$("#sync-tm-connect").addEventListener("click", () => msConnectFlow("tm"));
+
+async function msRunScopeCheck(kind) {
+    const panel = $(`#sync-${kind}-scope-warn`);
+    if (!panel) return;
+    try {
+        const out = await api.msScopeCheck(syncFolderId);
+        renderScopeWarning(panel, out);
+    } catch (err) {
+        panel.hidden = false;
+        panel.innerHTML = "";
+        const p = document.createElement("p");
+        p.className = "hint";
+        p.textContent = `Scope check failed: ${err.message}`;
+        panel.appendChild(p);
+    }
+}
+
+function renderScopeWarning(panel, out) {
+    panel.innerHTML = "";
+    if (!out.missing || out.missing.length === 0) {
+        panel.hidden = true;
+        return;
+    }
+    panel.hidden = false;
+    const h = document.createElement("strong");
+    h.textContent = out.app_only
+        ? "Missing application permissions — ask your Azure AD admin to grant:"
+        : "Missing delegated permissions — reconnect after granting:";
+    panel.appendChild(h);
+    const ul = document.createElement("ul");
+    for (const m of out.missing) {
+        const li = document.createElement("li");
+        li.innerHTML = `<code>${m.scope}</code> — ${m.feature}. <em>${m.impact}</em>`;
+        ul.appendChild(li);
+    }
+    panel.appendChild(ul);
+}
+
+// SharePoint sites picker — a simple modal-less list. Loads the full
+// site list, lets the user toggle checkboxes, writes back into spSites.
+async function msPickSites() {
+    let resp;
+    try {
+        resp = await api.msListSites(syncFolderId);
+    } catch (err) {
+        alert(err.message);
+        return;
+    }
+    const all = resp.sites || [];
+    const selected = new Set(spSites.map((s) => s.id));
+    // Render a quick inline modal — anchored to the SP form so we don't
+    // need extra DOM scaffolding in index.html.
+    const overlay = document.createElement("div");
+    overlay.className = "modal-backdrop";
+    overlay.style.display = "flex";
+    overlay.innerHTML = `
+        <div class="modal" style="max-width:560px;">
+            <div class="modal-header">
+                <h3>Pick SharePoint sites</h3>
+                <button type="button" class="btn-text ms-picker-close">×</button>
+            </div>
+            <div class="modal-body">
+                <input type="search" class="ms-picker-filter" placeholder="Filter sites…"
+                    style="width:100%;margin-bottom:8px;">
+                <ul class="ms-picker-list" style="max-height:50vh;overflow:auto;padding-left:0;list-style:none;"></ul>
+            </div>
+            <div class="actions actions-right" style="padding:8px 16px;">
+                <button type="button" class="btn btn-secondary ms-picker-cancel">Cancel</button>
+                <button type="button" class="btn btn-primary ms-picker-ok">Use selection</button>
+            </div>
+        </div>`;
+    document.body.appendChild(overlay);
+    const list = overlay.querySelector(".ms-picker-list");
+    const filterInput = overlay.querySelector(".ms-picker-filter");
+    function paint(filter = "") {
+        const q = filter.toLowerCase();
+        list.innerHTML = "";
+        for (const s of all) {
+            if (q && !(s.displayName || "").toLowerCase().includes(q)) continue;
+            const li = document.createElement("li");
+            li.style.padding = "4px 0";
+            const cb = document.createElement("input");
+            cb.type = "checkbox";
+            cb.value = s.id;
+            cb.checked = selected.has(s.id);
+            cb.addEventListener("change", () => {
+                if (cb.checked) selected.add(s.id);
+                else selected.delete(s.id);
+            });
+            const label = document.createElement("label");
+            label.style.display = "flex";
+            label.style.gap = "8px";
+            label.style.alignItems = "center";
+            label.append(cb);
+            const text = document.createElement("span");
+            text.innerHTML = `<strong>${s.displayName || s.id}</strong>` +
+                (s.webUrl ? ` <small style="color:var(--muted, #666);">${s.webUrl}</small>` : "");
+            label.append(text);
+            li.append(label);
+            list.append(li);
+        }
+    }
+    paint();
+    filterInput.addEventListener("input", () => paint(filterInput.value));
+    const close = () => overlay.remove();
+    overlay.querySelector(".ms-picker-close").addEventListener("click", close);
+    overlay.querySelector(".ms-picker-cancel").addEventListener("click", close);
+    overlay.querySelector(".ms-picker-ok").addEventListener("click", () => {
+        const byId = new Map(all.map((s) => [s.id, s]));
+        spSites = [...selected].map((id) => byId.get(id)).filter(Boolean);
+        updateSpSitesUi();
+        close();
+    });
+}
+$("#sync-sp-pick-sites").addEventListener("click", msPickSites);
+
+// Teams user picker — same modal pattern, single select.
+async function msPickUser() {
+    let resp;
+    try {
+        resp = await api.msListUsers(syncFolderId);
+    } catch (err) {
+        alert(err.message);
+        return;
+    }
+    const all = resp.users || [];
+    const overlay = document.createElement("div");
+    overlay.className = "modal-backdrop";
+    overlay.style.display = "flex";
+    overlay.innerHTML = `
+        <div class="modal" style="max-width:520px;">
+            <div class="modal-header">
+                <h3>Pick a user</h3>
+                <button type="button" class="btn-text ms-picker-close">×</button>
+            </div>
+            <div class="modal-body">
+                <input type="search" class="ms-picker-filter" placeholder="Filter users…"
+                    style="width:100%;margin-bottom:8px;">
+                <ul class="ms-picker-list" style="max-height:50vh;overflow:auto;padding-left:0;list-style:none;"></ul>
+            </div>
+        </div>`;
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    overlay.querySelector(".ms-picker-close").addEventListener("click", close);
+    const list = overlay.querySelector(".ms-picker-list");
+    const filterInput = overlay.querySelector(".ms-picker-filter");
+    function paint(filter = "") {
+        const q = filter.toLowerCase();
+        list.innerHTML = "";
+        for (const u of all) {
+            const haystack = `${u.displayName} ${u.userPrincipalName} ${u.mail}`.toLowerCase();
+            if (q && !haystack.includes(q)) continue;
+            const li = document.createElement("li");
+            li.style.cursor = "pointer";
+            li.style.padding = "6px 0";
+            li.innerHTML = `<strong>${u.displayName || u.userPrincipalName}</strong>` +
+                (u.userPrincipalName ? ` <small style="color:var(--muted, #666);">${u.userPrincipalName}</small>` : "");
+            li.addEventListener("click", () => {
+                $("#sync-tm-user-id").value = u.userPrincipalName || u.id;
+                close();
+            });
+            list.append(li);
+        }
+    }
+    paint();
+    filterInput.addEventListener("input", () => paint(filterInput.value));
+}
+$("#sync-tm-pick-user").addEventListener("click", msPickUser);
+
+// ---------------------------------------------------------------------------
+// Post-save refresh for the MS panes.
+//
+// Function declarations in an ES module create non-writable bindings, so
+// we can't monkey-patch ``_doSave``. Instead we publish this helper on
+// ``window`` and the _doSave above calls it directly through the global
+// so the wiring stays clean even though the two halves live in separate
+// sections of this file.
+// ---------------------------------------------------------------------------
+
+function msAfterSave(out) {
+    if (out.source_type === "sharepoint" && out.sharepoint) {
+        $("#sync-sp-client-secret").value = "";
+        $("#sync-sp-client-secret").placeholder = out.sharepoint.has_client_secret
+            ? "(saved — type to replace)" : "(paste app secret)";
+        $("#sync-sp-cert-pem").value = "";
+        setMsConnState("sp", {
+            connected: out.sharepoint.connected,
+            hasSecret: out.sharepoint.has_client_secret,
+            hasCert: out.sharepoint.has_cert,
+        });
+        setSpSites(out.sharepoint.sites || []);
+        $("#sync-sp-all-sites").checked = !!out.sharepoint.all_sites;
+        updateSpSitesUi();
+        msRunScopeCheck("sp").catch(() => {});
+    }
+    if (out.source_type === "teams" && out.teams) {
+        $("#sync-tm-client-secret").value = "";
+        $("#sync-tm-client-secret").placeholder = out.teams.has_client_secret
+            ? "(saved — type to replace)" : "(paste app secret)";
+        $("#sync-tm-cert-pem").value = "";
+        setMsConnState("tm", {
+            connected: out.teams.connected,
+            hasSecret: out.teams.has_client_secret,
+            hasCert: out.teams.has_cert,
+        });
+        msRunScopeCheck("tm").catch(() => {});
+    }
+}
+window.__voittaMsAfterSave = msAfterSave;
