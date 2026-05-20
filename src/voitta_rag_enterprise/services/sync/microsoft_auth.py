@@ -53,6 +53,13 @@ MS_GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 # both connectors might need so the user only sees one consent screen.
 # A missing scope at runtime degrades the affected feature; it doesn't
 # abort the sync.
+#
+# Note: CallRecords.Read.All is **application-only** on Microsoft Graph
+# — it doesn't exist as a delegated permission. Asking for it here
+# causes AADSTS650053 ("scope … doesn't exist on the resource …") and
+# the whole consent fails. The app-only auth modes still request it via
+# /.default (i.e. whatever's granted in Azure AD), which is the only
+# way Teams attended-meeting dedup can actually work.
 DELEGATED_SCOPES = (
     "offline_access "
     "Sites.Read.All "
@@ -60,8 +67,7 @@ DELEGATED_SCOPES = (
     "Notes.Read.All "
     "User.Read.All "
     "OnlineMeetings.Read "
-    "OnlineMeetingTranscript.Read.All "
-    "CallRecords.Read.All"
+    "OnlineMeetingTranscript.Read.All"
 )
 
 # Application (app-only) permissions are not requested per-call — they're
@@ -120,7 +126,12 @@ FEATURE_SCOPES: list[dict[str, str]] = [
     },
     {
         "feature": "Teams meetings (attended via call records)",
-        "delegated": "CallRecords.Read.All",
+        # CallRecords.Read.All exists ONLY as an application permission on
+        # Microsoft Graph. With delegated auth attended-meeting dedup is
+        # not available at all — there's no scope we could have asked
+        # for. The scope-check endpoint surfaces this only when the
+        # active auth is app-only (see ``compute_missing_scopes``).
+        "delegated": "",
         "app": "CallRecords.Read.All",
         "impact": (
             "Meetings the user only attended (did not organize) will be "
@@ -393,6 +404,11 @@ def compute_missing_scopes(
     missing: list[dict[str, str]] = []
     for entry in FEATURE_SCOPES:
         required = entry[key]
+        if not required:
+            # Feature simply isn't available under this auth mode (e.g.
+            # CallRecords under delegated). Don't surface it as missing —
+            # there's nothing the admin can do to grant it here.
+            continue
         if required not in granted_set:
             missing.append(
                 {

@@ -50,12 +50,16 @@ def test_decode_token_scopes_garbage():
 
 
 def test_compute_missing_scopes_full_grant_delegated():
-    granted = " ".join(s["delegated"] for s in FEATURE_SCOPES)
+    # Empty-string entries (e.g. CallRecords under delegated, where the
+    # feature simply isn't available) are not asked for and are not
+    # surfaced as missing.
+    granted = " ".join(s["delegated"] for s in FEATURE_SCOPES if s["delegated"])
     token = _make_token({"scp": granted})
     report = compute_missing_scopes(token, app_only=False)
     assert report["missing"] == []
     for s in FEATURE_SCOPES:
-        assert s["delegated"] in report["granted"]
+        if s["delegated"]:
+            assert s["delegated"] in report["granted"]
 
 
 def test_compute_missing_scopes_partial_grant_app():

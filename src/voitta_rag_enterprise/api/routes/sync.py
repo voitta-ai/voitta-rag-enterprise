@@ -1272,10 +1272,39 @@ def ms_auth_init(
 @oauth_router.get("/oauth/microsoft/callback")
 async def ms_oauth_callback(
     request: Request,
-    code: str = Query(...),
+    code: str | None = Query(None),
     state: str = Query(...),
+    error: str | None = Query(None),
+    error_description: str | None = Query(None),
 ) -> HTMLResponse:
-    """Microsoft OAuth callback — works for both SharePoint and Teams rows."""
+    """Microsoft OAuth callback — works for both SharePoint and Teams rows.
+
+    Microsoft can redirect back with ``?error=...&error_description=...``
+    instead of ``?code=...`` (admin-consent missing, scope typo,
+    redirect-uri mismatch). We surface that verbatim so the admin can
+    fix the real issue instead of staring at a 422 schema error from
+    a missing ``code`` query param.
+    """
+    if error:
+        logger.warning(
+            "Microsoft OAuth callback returned error=%s desc=%s",
+            error, error_description,
+        )
+        body = (
+            f"<html><body style='font-family:sans-serif;padding:20px;'>"
+            f"<h3>Microsoft sign-in failed</h3>"
+            f"<p><strong>{error}</strong></p>"
+            f"<pre style='white-space:pre-wrap;background:#f4f4f4;padding:12px;'>"
+            f"{(error_description or '').strip()}</pre>"
+            f"<p>Close this tab and adjust the Azure AD app, then try again.</p>"
+            f"</body></html>"
+        )
+        return HTMLResponse(body, status_code=400)
+    if not code:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Microsoft callback did not include code or error",
+        )
     try:
         folder_id = int(base64.urlsafe_b64decode(state.encode()).decode())
     except Exception as e:
