@@ -181,6 +181,21 @@ function buildAuthProviderRow(p) {
     tdSecret.appendChild(buildAuthProviderInput(p.id, "client_secret", p.client_secret, "Client secret"));
     tr.appendChild(tdSecret);
 
+    // Tenant ID — only meaningful for Microsoft. Render an editor for
+    // Microsoft rows and a muted dash for everything else so the column
+    // stays aligned without confusing the admin into typing a tenant
+    // for a Google row.
+    const tdTenant = document.createElement("td");
+    if (p.provider === "microsoft") {
+        tdTenant.appendChild(
+            buildAuthProviderInput(p.id, "tenant_id", p.tenant_id || "", "Tenant ID")
+        );
+    } else {
+        tdTenant.className = "muted";
+        tdTenant.textContent = "—";
+    }
+    tr.appendChild(tdTenant);
+
     // Enabled toggle.
     const tdEnabled = document.createElement("td");
     const cb = document.createElement("input");
@@ -278,18 +293,25 @@ async function submitAddAuthProvider() {
     const label = $("#admin-auth-provider-label").value.trim();
     const clientId = $("#admin-auth-provider-client-id").value.trim();
     const clientSecret = $("#admin-auth-provider-client-secret").value;
+    const tenantId = $("#admin-auth-provider-tenant-id").value.trim();
     if (!clientId) { alert("Client ID is required"); return; }
+    if (provider === "microsoft" && !tenantId) {
+        alert("Tenant ID is required for Microsoft providers");
+        return;
+    }
     try {
         await api.adminCreateAuthProvider({
             provider,
             label,
             client_id: clientId,
             client_secret: clientSecret,
+            tenant_id: tenantId,
             enabled: true,
         });
         $("#admin-auth-provider-label").value = "";
         $("#admin-auth-provider-client-id").value = "";
         $("#admin-auth-provider-client-secret").value = "";
+        $("#admin-auth-provider-tenant-id").value = "";
         await refreshAdmin();
     } catch (err) {
         alert(err.message);
@@ -621,6 +643,29 @@ $("#admin-auth-provider-add").addEventListener("click", submitAddAuthProvider);
 $("#admin-auth-provider-client-secret").addEventListener("keydown", (e) => {
     if (e.key === "Enter") { e.preventDefault(); submitAddAuthProvider(); }
 });
+
+// Tenant ID is Microsoft-only. Toggle visibility + retune the
+// client_id/secret placeholders so the form reads correctly for each
+// provider.
+function updateAuthProviderTypeUi() {
+    const provider = $("#admin-auth-provider-type").value;
+    const tenantRow = $("#admin-auth-provider-tenant-row");
+    if (tenantRow) tenantRow.hidden = provider !== "microsoft";
+    const cid = $("#admin-auth-provider-client-id");
+    const secret = $("#admin-auth-provider-client-secret");
+    if (provider === "microsoft") {
+        cid.placeholder = "00000000-0000-0000-0000-000000000000";
+        secret.placeholder = "(paste Azure AD app secret)";
+    } else if (provider === "github") {
+        cid.placeholder = "Iv1.…";
+        secret.placeholder = "(paste GitHub app secret)";
+    } else {
+        cid.placeholder = "123…apps.googleusercontent.com";
+        secret.placeholder = "GOCSPX-…";
+    }
+}
+$("#admin-auth-provider-type").addEventListener("change", updateAuthProviderTypeUi);
+updateAuthProviderTypeUi();
 
 $("#btn-admin").addEventListener("click", openAdmin);
 $("#admin-close").addEventListener("click", closeAdmin);

@@ -128,6 +128,12 @@ def init_db() -> None:
             ("tm_include_attended", "INTEGER NOT NULL DEFAULT 1"),
         ):
             _ensure_column(raw_conn, "folder_sync_sources", col, decl)
+        # Microsoft auth providers need a tenant_id alongside the
+        # (client_id, client_secret) pair. NULL-safe default keeps existing
+        # Google/GitHub rows untouched.
+        _ensure_column(
+            raw_conn, "auth_providers", "tenant_id", "TEXT NOT NULL DEFAULT ''"
+        )
         raw_conn.commit()
     finally:
         raw_conn.close()

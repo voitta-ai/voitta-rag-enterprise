@@ -273,6 +273,10 @@ class AuthProvider(Base):
     label: Mapped[str] = mapped_column(default="")
     client_id: Mapped[str]
     client_secret: Mapped[str] = mapped_column(default="")
+    # Required for Microsoft (Azure AD tenant id or `*.onmicrosoft.com`
+    # domain); ignored for Google/GitHub. Stored on the same row so the
+    # sync UI's provider picker can prefill all three fields in one click.
+    tenant_id: Mapped[str] = mapped_column(default="")
     enabled: Mapped[bool] = mapped_column(default=True)
     # Marker for rows seeded by the .env bootstrap. Used only to log when a
     # missing seed-row gets re-created on the next restart; not exposed

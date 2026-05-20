@@ -162,6 +162,14 @@ function openSyncModal() {
     $("#sync-gd-provider-picker").value = "";
     $("#sync-gd-pane-oauth").classList.remove("provider-picked");
     nfsRefreshStatus();
+    // Reset MS picker selections; the populate path below fires the
+    // admin call once for both connectors. ``loadSyncSource`` calls
+    // ``loadMsForm`` which then preselects-by-client_id.
+    for (const kind of ["sp", "tm"]) {
+        const sel = $(`#sync-${kind}-provider-picker`);
+        if (sel) sel.value = "";
+    }
+    refreshMsProviderPickers();
     refreshGdProviderPicker()
         .finally(loadSyncSource)
         .finally(() => {
@@ -1227,6 +1235,79 @@ syncSources.subscribe((map) => {
 const MS_LOOPBACK_REDIRECT_URI =
     "http://localhost:53682/api/sync/oauth/microsoft/callback";
 
+// Admin-saved Microsoft providers, populated lazily from
+// /api/admin/auth-providers (admin-only). Reused by both the SharePoint
+// and Teams provider pickers — same tenant id is a valid pick for either
+// connector. Map<id, {id, label, tenant_id, client_id, client_secret, source}>.
+const msMicrosoftProviders = new Map();
+
+async function refreshMsProviderPickers() {
+    // Reset both pickers + the shared cache, then attempt the admin call.
+    // Non-admins (403) silently keep the pickers hidden.
+    msMicrosoftProviders.clear();
+    for (const kind of ["sp", "tm"]) {
+        const sel = $(`#sync-${kind}-provider-picker`);
+        sel.innerHTML = '<option value="">— Manual entry —</option>';
+        $(`#sync-${kind}-provider-row`).hidden = true;
+    }
+    let providers;
+    try {
+        providers = await api.adminListAuthProviders();
+    } catch (err) {
+        if (!String(err.message || "").startsWith("403")) {
+            console.warn("MS provider list failed", err);
+        }
+        return;
+    }
+    const enabled = (providers || []).filter(
+        (p) => p.provider === "microsoft" && p.enabled
+    );
+    if (!enabled.length) return;
+    for (const p of enabled) {
+        msMicrosoftProviders.set(p.id, p);
+    }
+    for (const kind of ["sp", "tm"]) {
+        const sel = $(`#sync-${kind}-provider-picker`);
+        for (const p of enabled) {
+            const opt = document.createElement("option");
+            opt.value = String(p.id);
+            const tail = p.source === "env" ? "  (.env)" : "";
+            opt.textContent = (p.label || p.client_id) + tail;
+            sel.append(opt);
+        }
+        $(`#sync-${kind}-provider-row`).hidden = false;
+    }
+}
+
+function applyMsProviderSelection(kind, providerId) {
+    if (!providerId) return;
+    const p = msMicrosoftProviders.get(Number(providerId));
+    if (!p) return;
+    const tenantInput = $(`#sync-${kind}-tenant-id`);
+    const cidInput = $(`#sync-${kind}-client-id`);
+    const secretInput = $(`#sync-${kind}-client-secret`);
+    tenantInput.value = p.tenant_id || "";
+    cidInput.value = p.client_id || "";
+    secretInput.value = p.client_secret || "";
+    // Fire ``input`` so setMsConnState picks up the new values and
+    // enables Connect.
+    tenantInput.dispatchEvent(new Event("input", { bubbles: true }));
+    cidInput.dispatchEvent(new Event("input", { bubbles: true }));
+    secretInput.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function preselectMsProviderByClientId(kind, clientId) {
+    const sel = $(`#sync-${kind}-provider-picker`);
+    if (!clientId) { sel.value = ""; return; }
+    for (const p of msMicrosoftProviders.values()) {
+        if (p.client_id === clientId) {
+            sel.value = String(p.id);
+            return;
+        }
+    }
+    sel.value = "";
+}
+
 // Selected sites for SharePoint (mirrors the gdFolders array). Mutated by
 // the picker modal + the saved-row loader.
 let spSites = [];
@@ -1350,6 +1431,7 @@ function loadMsForm(kind, cfg) {
     setMsAuthMode(kind, mode);
     $(`#sync-${kind}-tenant-id`).value = cfg.tenant_id || "";
     $(`#sync-${kind}-client-id`).value = cfg.client_id || "";
+    preselectMsProviderByClientId(kind, cfg.client_id || "");
     $(`#sync-${kind}-client-secret`).placeholder = cfg.has_client_secret
         ? "(saved — type to replace)" : "(paste app secret)";
     const certEl = $(`#sync-${kind}-cert-pem`);
@@ -1416,6 +1498,13 @@ $("#sync-sp-all-sites").addEventListener("change", updateSpSitesUi);
 document.querySelectorAll('input[name="sync-tm-user-mode"]').forEach((el) => {
     el.addEventListener("change", updateTmUserModeUi);
 });
+
+// Microsoft provider picker — selecting a row prefills tenant/client/
+// secret in the corresponding pane. Same wiring for SP and TM.
+$("#sync-sp-provider-picker").addEventListener("change", (e) =>
+    applyMsProviderSelection("sp", e.target.value));
+$("#sync-tm-provider-picker").addEventListener("change", (e) =>
+    applyMsProviderSelection("tm", e.target.value));
 
 // ---------------------------------------------------------------------------
 // Connect (OAuth popup) + sites picker + user picker

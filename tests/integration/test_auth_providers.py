@@ -354,18 +354,42 @@ def test_check_google_unknown_error_is_not_ok(
         assert "Missing code" in r["message"]
 
 
-def test_check_microsoft_returns_not_implemented(app: FastAPI) -> None:
-    """Microsoft / GitHub aren't wired yet — check returns ok=False, message."""
+def test_check_microsoft_requires_tenant_id(app: FastAPI) -> None:
+    """Microsoft check fails fast (no network) when tenant_id isn't set."""
     _make_admin(app, "boss@example.com")
-    # Insert directly to bypass the API rejection of the "microsoft" provider
-    # in case that policy ever changes — we just want to call the route.
+    from voitta_rag_enterprise.db.database import session_scope
+    from voitta_rag_enterprise.db.models import AuthProvider
+
+    # Insert directly — bypassing the API guard — to land a Microsoft row
+    # with no tenant. The /check endpoint should reject it without
+    # touching the network.
+    with session_scope() as s:
+        row = AuthProvider(
+            provider="microsoft", label="MS",
+            client_id="ms-id", client_secret="ms-secret",
+            tenant_id="",
+            enabled=True, source="user",
+            created_at=1, updated_at=1,
+        )
+        s.add(row)
+        s.flush()
+        pid = row.id
+    with TestClient(app) as c:
+        r = c.post(f"/api/admin/auth-providers/{pid}/check").json()
+        assert r["ok"] is False
+        assert "tenant" in r["message"].lower()
+
+
+def test_check_github_returns_not_implemented(app: FastAPI) -> None:
+    """GitHub probe still unwired — check returns ok=False, message."""
+    _make_admin(app, "boss@example.com")
     from voitta_rag_enterprise.db.database import session_scope
     from voitta_rag_enterprise.db.models import AuthProvider
 
     with session_scope() as s:
         row = AuthProvider(
-            provider="microsoft", label="MS",
-            client_id="ms-id", client_secret="ms-secret",
+            provider="github", label="GH",
+            client_id="gh-id", client_secret="gh-secret",
             enabled=True, source="user",
             created_at=1, updated_at=1,
         )

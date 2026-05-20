@@ -323,6 +323,7 @@ class AuthProviderOut(BaseModel):
     # admins already have access to the .env-stored values, so masking
     # in transport adds no defense.
     client_secret: str
+    tenant_id: str = ""  # Microsoft only; empty for Google/GitHub
     enabled: bool
     # ``source='env'`` rows are re-created on every restart by the
     # bootstrap upsert; the UI surfaces a small "from .env" pill so the
@@ -337,6 +338,7 @@ class _AuthProviderCreateIn(BaseModel):
     label: str = ""
     client_id: str
     client_secret: str = ""
+    tenant_id: str = ""
     enabled: bool = True
 
 
@@ -346,6 +348,7 @@ class _AuthProviderPatchIn(BaseModel):
     label: str | None = None
     client_id: str | None = None
     client_secret: str | None = None
+    tenant_id: str | None = None
     enabled: bool | None = None
 
 
@@ -361,6 +364,7 @@ def _to_out(row: AuthProvider) -> AuthProviderOut:
         label=row.label,
         client_id=row.client_id,
         client_secret=row.client_secret,
+        tenant_id=row.tenant_id or "",
         enabled=bool(row.enabled),
         source=row.source,
         created_at=row.created_at,
@@ -403,6 +407,13 @@ def create_auth_provider(
     provider = _normalise_provider(body.provider)
     if not body.client_id.strip():
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "client_id is required")
+    tenant_id = body.tenant_id.strip()
+    if provider == "microsoft" and not tenant_id:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Microsoft providers require a tenant_id (Azure AD tenant id "
+            "or *.onmicrosoft.com domain).",
+        )
     label = body.label.strip() or auth_providers_svc.PROVIDER_LABELS.get(provider, provider).title()
     now = int(time.time())
     row = AuthProvider(
@@ -410,6 +421,7 @@ def create_auth_provider(
         label=label,
         client_id=body.client_id.strip(),
         client_secret=body.client_secret,
+        tenant_id=tenant_id,
         enabled=bool(body.enabled),
         source="user",
         created_at=now,
@@ -447,6 +459,14 @@ def update_auth_provider(
         row.client_id = new_id
     if body.client_secret is not None:
         row.client_secret = body.client_secret
+    if body.tenant_id is not None:
+        new_tenant = body.tenant_id.strip()
+        if row.provider == "microsoft" and not new_tenant:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "Microsoft providers require a non-empty tenant_id.",
+            )
+        row.tenant_id = new_tenant
     if body.enabled is not None:
         row.enabled = bool(body.enabled)
     row.updated_at = int(time.time())
@@ -494,6 +514,7 @@ async def check_auth_provider(
         provider=row.provider,
         client_id=row.client_id,
         client_secret=row.client_secret,
+        tenant_id=row.tenant_id or "",
     )
     return _AuthProviderCheckOut(ok=result.ok, message=result.message)
 

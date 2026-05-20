@@ -111,6 +111,7 @@
                                     <th>Label</th>
                                     <th>Client ID</th>
                                     <th>Client secret</th>
+                                    <th>Tenant ID</th>
                                     <th>Enabled</th>
                                     <th></th>
                                 </tr>
@@ -131,13 +132,20 @@
                                     Provider
                                     <select id="admin-auth-provider-type">
                                         <option value="google">Google</option>
-                                        <option value="microsoft" disabled>Microsoft (coming soon)</option>
+                                        <option value="microsoft">Microsoft</option>
                                         <option value="github" disabled>GitHub (coming soon)</option>
                                     </select>
                                 </label>
                                 <label>
                                     Label
                                     <input id="admin-auth-provider-label" type="text" placeholder="e.g. Production Google">
+                                </label>
+                                <!-- Microsoft only — visibility toggled by
+                                     modals/admin.js when the Provider
+                                     dropdown switches. -->
+                                <label class="span-2" id="admin-auth-provider-tenant-row" hidden>
+                                    Tenant ID
+                                    <input id="admin-auth-provider-tenant-id" type="text" placeholder="contoso.onmicrosoft.com or 00000000-0000-0000-0000-000000000000">
                                 </label>
                                 <label class="span-2">
                                     Client ID
@@ -606,6 +614,17 @@
                         </button>
                     </div>
 
+                    <!-- Admin-saved Microsoft providers — picking one
+                         prefills tenant/client/secret. Hidden when the
+                         user is not an admin or no Microsoft rows exist
+                         in /api/admin/auth-providers. -->
+                    <div id="sync-sp-provider-row" class="sync-gd-provider-row" hidden>
+                        <label>Provider</label>
+                        <select id="sync-sp-provider-picker">
+                            <option value="">— Manual entry —</option>
+                        </select>
+                    </div>
+
                     <label>Tenant ID</label>
                     <input type="text" id="sync-sp-tenant-id"
                         placeholder="00000000-0000-0000-0000-000000000000 or contoso.onmicrosoft.com"
@@ -688,6 +707,13 @@
                             class="seg-tab" role="tab" aria-selected="false">
                             App + certificate
                         </button>
+                    </div>
+
+                    <div id="sync-tm-provider-row" class="sync-gd-provider-row" hidden>
+                        <label>Provider</label>
+                        <select id="sync-tm-provider-picker">
+                            <option value="">— Manual entry —</option>
+                        </select>
                     </div>
 
                     <label>Tenant ID</label>
