@@ -1,13 +1,15 @@
-"""XLSX parser via openpyxl.
+"""Excel parser — modern ``.xlsx``/``.xlsm`` via openpyxl, legacy
+``.xls`` via xlrd.
 
-Walks every worksheet (skipping hidden ones) and emits one markdown section
-per sheet. The ``## Sheet: <name>`` heading is the natural chunk boundary
-that downstream chunking already prefers.
+Both paths emit the same shape: one markdown section per worksheet
+keyed by ``## Sheet: <name>`` (the natural chunk boundary the chunker
+already prefers). Row/column caps come from indexing_caps so a
+spreadsheet with hundreds of thousands of rows doesn't drown the chunker.
 
-Per-chunk sheet attribution would require threading metadata through the
-chunker; out of scope for v1. For files synced from Google Drive the user
-gets sheet names in the markdown headings, and the file's Drive URL in the
-chunk payload.
+Per-chunk sheet attribution would require threading metadata through
+the chunker; out of scope for v1. For files synced from Google Drive
+the user gets sheet names in the markdown headings, and the file's
+Drive URL in the chunk payload.
 """
 
 from __future__ import annotations
@@ -26,9 +28,11 @@ logger = logging.getLogger(__name__)
 
 
 class XlsxParser(BaseParser):
-    extensions: ClassVar[list[str]] = [".xlsx", ".xlsm"]
+    extensions: ClassVar[list[str]] = [".xlsx", ".xlsm", ".xls"]
 
     def parse(self, file_path: Path) -> ParserResult:
+        if file_path.suffix.lower() == ".xls":
+            return _parse_xls(file_path)
         try:
             wb = load_workbook(
                 str(file_path),
@@ -55,6 +59,42 @@ class XlsxParser(BaseParser):
         return ParserResult(content="\n\n".join(sections))
 
 
+def _parse_xls(file_path: Path) -> ParserResult:
+    """Legacy ``.xls`` (BIFF) workbooks via xlrd.
+
+    Same row/column caps as the modern path, same output shape. xlrd
+    2.x dropped .xlsx support — it's strictly for .xls here.
+    """
+    try:
+        import xlrd  # noqa: PLC0415 — optional dep, lazy import
+    except ImportError:
+        return ParserResult.failure(
+            "xlrd not installed (needed for .xls). pip install xlrd."
+        )
+    try:
+        wb = xlrd.open_workbook(str(file_path))
+    except Exception as e:
+        return ParserResult.failure(f"xls open failed: {e}")
+
+    caps = get_caps()
+    max_rows = caps.xlsx_max_rows
+    max_cols = caps.xlsx_max_cols
+    sections: list[str] = []
+    for sheet_name in wb.sheet_names():
+        sheet = wb.sheet_by_name(sheet_name)
+        rows: list[list[str]] = []
+        for row_idx in range(min(sheet.nrows, max_rows)):
+            row = [
+                _cell_to_str(sheet.cell_value(row_idx, col_idx))
+                for col_idx in range(min(sheet.ncols, max_cols))
+            ]
+            rows.append(row)
+        rendered = _format_table(rows)
+        if rendered.strip():
+            sections.append(f"## Sheet: {sheet_name}\n\n{rendered}")
+    return ParserResult(content="\n\n".join(sections))
+
+
 def _render_sheet(sheet: Worksheet, *, max_rows: int, max_cols: int) -> str:
     """Render a worksheet as a pipe-style markdown table.
 
@@ -70,7 +110,17 @@ def _render_sheet(sheet: Worksheet, *, max_rows: int, max_cols: int) -> str:
             break
         row = [_cell_to_str(c) for c in raw[:max_cols]]
         rows.append(row)
+    return _format_table(rows)
 
+
+def _format_table(rows: list[list[str]]) -> str:
+    """Render a 2D ``str`` matrix as a pipe-style markdown table.
+
+    Trims trailing blank rows/columns so a sheet with five real rows but
+    1,000 empty placeholders doesn't drown the chunker. The first row is
+    treated as a header — that's the convention almost every spreadsheet
+    follows. Pure helper so both the openpyxl and xlrd paths share it.
+    """
     rows = _trim_trailing_blank(rows)
     if not rows:
         return ""
@@ -80,7 +130,6 @@ def _render_sheet(sheet: Worksheet, *, max_rows: int, max_cols: int) -> str:
         while len(r) < width:
             r.append("")
 
-    # Trim trailing blank columns (a header row with empty cells wastes width).
     while width > 1 and all(not r[width - 1] for r in rows):
         width -= 1
         for r in rows:

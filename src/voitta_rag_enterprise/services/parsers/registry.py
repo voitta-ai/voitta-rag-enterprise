@@ -38,6 +38,7 @@ def build_default_registry() -> ParserRegistry:
     from .pptx_parser import PptxParser
     from .svg_parser import SvgParser
     from .text_parser import TextParser
+    from .url_parser import UrlShortcutParser
     from .xlsx_parser import XlsxParser
 
     r = ParserRegistry()
@@ -54,6 +55,7 @@ def build_default_registry() -> ParserRegistry:
     r.register(ImageFileParser())
     r.register(CadStepParser())
     r.register(CadFCStdParser())
+    r.register(UrlShortcutParser())
     return r
 
 

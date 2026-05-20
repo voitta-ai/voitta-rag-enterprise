@@ -26,6 +26,11 @@ dependencies = [
     "mineru[all]>=2.0",
     "cairosvg>=2.7",
     "openpyxl>=3.1",
+    # ``xlrd`` reads the legacy .xls (BIFF) binary format. SharePoint
+    # tenants still carry plenty of these — old data dumps, exports
+    # from systems that haven't been migrated, etc. Modern xlrd (>=2)
+    # dropped .xlsx support; we use it strictly for .xls.
+    "xlrd>=2.0",
     "google-api-python-client>=2.140",
     "google-auth>=2.34",
     "google-auth-oauthlib>=1.2",
