@@ -750,9 +750,20 @@ async def _run_sync_inner(folder_id: int) -> None:
                 ),
             }
         elif source_type == "nfs":
-            cfg = {
-                "nfs_subpath": (source.nfs_subpath or "").strip("/"),
-            }
+            from .sync.nfs import canonicalise_subpaths
+            import json as _json
+            raw = (source.nfs_subpaths or "").strip()
+            paths: list[str] = []
+            if raw:
+                try:
+                    decoded = _json.loads(raw)
+                    if isinstance(decoded, list):
+                        paths = [str(x) for x in decoded]
+                except _json.JSONDecodeError:
+                    paths = []
+            if not paths and source.nfs_subpath:
+                paths = [source.nfs_subpath]
+            cfg = {"nfs_subpaths": canonicalise_subpaths(paths)}
         elif source_type in ("sharepoint", "teams"):
             from .sync.microsoft_auth import MicrosoftAuth
             ms_auth = MicrosoftAuth(

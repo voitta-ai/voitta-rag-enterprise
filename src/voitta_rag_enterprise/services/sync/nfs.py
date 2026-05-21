@@ -103,6 +103,48 @@ def _resolve_under(root: Path, rel: str) -> Path:
     return resolved
 
 
+def canonicalise_subpaths(subpaths: list[str]) -> list[str]:
+    """Normalise a list of POSIX-relative subpaths into a minimal set.
+
+    * Strip leading/trailing slashes; collapse duplicate slashes.
+    * Skip blanks.
+    * Reject ``..`` segments and absolute paths (delegated to
+      :func:`_resolve_under`, but pre-flighted here to keep this pure).
+    * Drop duplicates.
+    * If ``a/b`` and ``a/b/c`` are both selected, drop ``a/b/c`` (the
+      ancestor already covers it). This makes ``NfsConnector.sync``
+      idempotent regardless of how messy the UI lets the selection get.
+    * Sorted output (deterministic for progress + sidecar diffing).
+
+    The empty string ``""`` (i.e. the whole NFS root) absorbs every
+    other entry — if the user explicitly picks the root, that's the
+    only canonical subpath.
+    """
+    cleaned: set[str] = set()
+    for raw in subpaths or []:
+        if raw is None:
+            continue
+        s = "/".join(seg for seg in str(raw).split("/") if seg not in ("", "."))
+        # Defense against ``..`` / absolute paths — _resolve_under is
+        # authoritative; this is just a fast reject.
+        if any(part == ".." for part in s.split("/")) or s.startswith("/"):
+            continue
+        cleaned.add(s)
+    if "" in cleaned:
+        return [""]
+    # Drop entries whose ancestor is also in the set.
+    sorted_paths = sorted(cleaned)
+    result: list[str] = []
+    for path in sorted_paths:
+        if any(
+            path != ancestor and path.startswith(ancestor + "/")
+            for ancestor in result
+        ):
+            continue
+        result.append(path)
+    return result
+
+
 def list_children(rel: str) -> list[dict[str, str]]:
     """Return the immediate-subdirectory listing of ``<root>/<rel>``.
 
@@ -154,19 +196,29 @@ def list_children(rel: str) -> list[dict[str, str]]:
 
 
 class NfsConnector:
-    """Mirror a subtree of the admin's NFS root into the folder root."""
+    """Mirror one or more subtrees of the admin's NFS root into the
+    folder root.
+
+    Each selected subpath is walked independently. Files land at their
+    **full relative path** under the folder root — so picking
+    ``data/projectA`` and ``data/projectB`` produces
+    ``<folder_root>/data/projectA/...`` and
+    ``<folder_root>/data/projectB/...`` (preserving the parent
+    structure). This keeps two-subdirectory selections from colliding
+    in the local namespace.
+    """
 
     async def sync(
         self,
         *,
         folder_root: Path,
-        nfs_subpath: str,
+        nfs_subpaths: list[str],
         progress_cb: Callable[[str, int, int, dict | None], None] | None = None,
     ) -> NfsSyncStats:
         return await asyncio.to_thread(
             self._sync_sync,
             folder_root=folder_root,
-            nfs_subpath=nfs_subpath,
+            nfs_subpaths=nfs_subpaths,
             progress_cb=progress_cb,
         )
 
@@ -174,7 +226,7 @@ class NfsConnector:
         self,
         *,
         folder_root: Path,
-        nfs_subpath: str,
+        nfs_subpaths: list[str],
         progress_cb: Callable[[str, int, int, dict | None], None] | None,
     ) -> NfsSyncStats:
         def _emit(phase: str, done: int, total: int, detail: dict | None = None) -> None:
@@ -187,10 +239,19 @@ class NfsConnector:
         root_path = Path(root)
         if not root_path.is_dir():
             raise RuntimeError(f"NFS root does not exist: {root}")
-        source = _resolve_under(root_path, nfs_subpath)
-        if not source.is_dir():
+        if not nfs_subpaths:
             raise RuntimeError(
-                f"NFS subpath does not exist or is not a directory: {nfs_subpath!r}"
+                "NFS: pick at least one folder under the NFS root before syncing."
+            )
+
+        # Canonicalise: dedup, drop overlaps so we don't double-walk.
+        canonical = canonicalise_subpaths(nfs_subpaths)
+        if not canonical:
+            raise RuntimeError("NFS: no valid subpaths selected.")
+        if len(canonical) > 50:
+            logger.warning(
+                "NFS sync: %d subpaths selected — large selections may be slow",
+                len(canonical),
             )
 
         folder_root = folder_root.expanduser().resolve()
@@ -199,31 +260,38 @@ class NfsConnector:
         stats = NfsSyncStats()
         _emit("listing", 0, 0)
 
-        # Walk the source tree and produce ``(src_path, rel_path)``
-        # pairs. Sort the listing so the progress fraction is stable
-        # across runs and re-syncing a partially-copied tree resumes
-        # in a predictable order.
+        # Walk EACH selected subpath, producing ``(src_path, rel_path)``
+        # pairs where ``rel_path`` is anchored at ``nfs_root`` (full
+        # ``data/projectA/file.txt`` not just ``file.txt``). Sort the
+        # listing so the progress fraction is stable across runs.
         entries: list[tuple[Path, str]] = []
-        for dirpath, dirnames, filenames in os.walk(source, followlinks=False):
-            # Stable ordering and a chance to prune hidden dirs.
-            dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
-            filenames.sort()
-            for fname in filenames:
-                if fname.startswith("."):
-                    continue
-                src = Path(dirpath) / fname
-                if src.is_symlink():
-                    # We never follow symlinks during copy — same posture
-                    # as the Drive connector, avoids loops and surprise
-                    # exfiltration of files outside the chosen subtree.
-                    continue
-                try:
-                    if not src.is_file():
+        for subpath in canonical:
+            source = _resolve_under(root_path, subpath)
+            if not source.is_dir():
+                stats.errors.append(
+                    f"subpath {subpath!r} does not exist or is not a directory"
+                )
+                continue
+            for dirpath, dirnames, filenames in os.walk(source, followlinks=False):
+                dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
+                filenames.sort()
+                for fname in filenames:
+                    if fname.startswith("."):
                         continue
-                except OSError:
-                    continue
-                rel = src.relative_to(source).as_posix()
-                entries.append((src, rel))
+                    src = Path(dirpath) / fname
+                    if src.is_symlink():
+                        # We never follow symlinks during copy — same
+                        # posture as the Drive connector, avoids loops
+                        # and surprise exfiltration of files outside
+                        # the chosen subtree.
+                        continue
+                    try:
+                        if not src.is_file():
+                            continue
+                    except OSError:
+                        continue
+                    rel = src.resolve().relative_to(root_path.resolve()).as_posix()
+                    entries.append((src, rel))
 
         total = len(entries)
         _emit("downloading", 0, total)
@@ -319,5 +387,6 @@ __all__ = [
     "NfsSyncStats",
     "SOURCES_SIDECAR",
     "_resolve_under",
+    "canonicalise_subpaths",
     "list_children",
 ]

@@ -91,6 +91,11 @@ def _tick_once() -> None:
                 (src.tm_user_mode or "me") == "specific" and not src.tm_user_id
             ):
                 continue
+            # NFS: skip if neither subpaths (new) nor subpath (legacy) is set.
+            if src.source_type == "nfs" and not (
+                src.nfs_subpaths or src.nfs_subpath
+            ):
+                continue
             job_queue.enqueue(
                 s,
                 "sync",

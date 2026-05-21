@@ -134,10 +134,15 @@ class NfsSyncIn(BaseModel):
 
     The admin-defined NFS root lives in ``admin_store.settings`` and is
     *not* passed in the payload — the sync source records only the
-    user-chosen relative subpath below the root.
+    user-chosen relative subpaths below the root.
+
+    ``subpath`` is kept for backwards-compatibility: old clients post a
+    single string; new clients post ``subpaths: list[str]``. The
+    upsert handler folds the legacy field into the array if present.
     """
 
     subpath: str = ""
+    subpaths: list[str] = Field(default_factory=list)
 
 
 class SyncSourceIn(BaseModel):
@@ -202,7 +207,11 @@ class TeamsSyncOut(BaseModel):
 
 
 class NfsSyncOut(BaseModel):
+    # Multi-subpath selection. Always sent as ``subpaths``; the legacy
+    # single-string ``subpath`` field is echoed for old clients that
+    # still read it (= the first element of ``subpaths`` for compat).
     subpath: str
+    subpaths: list[str]
     # Snapshot of the current admin-side NFS root + its availability,
     # so the modal can show the resolved absolute path without a
     # second roundtrip and gate the Save button on availability.
@@ -249,6 +258,31 @@ def _nfs_status_snapshot() -> tuple[str, bool, str]:
     return root, True, "ok"
 
 
+def _decode_nfs_subpaths(src: FolderSyncSource) -> list[str]:
+    """Read the NFS row's selected subpaths.
+
+    Prefer the new ``nfs_subpaths`` JSON column; fall back to the
+    legacy single-string ``nfs_subpath`` so rows saved before the
+    multi-select migration still render correctly. Always returns a
+    canonical (deduped, no-overlap) list.
+    """
+    import json as _json
+    from ...services.sync.nfs import canonicalise_subpaths
+
+    raw = (src.nfs_subpaths or "").strip()
+    if raw:
+        try:
+            decoded = _json.loads(raw)
+            if isinstance(decoded, list):
+                return canonicalise_subpaths([str(x) for x in decoded])
+        except _json.JSONDecodeError:
+            pass
+    legacy = (src.nfs_subpath or "").strip()
+    if legacy:
+        return canonicalise_subpaths([legacy])
+    return []
+
+
 def _to_out(src: FolderSyncSource) -> SyncSourceOut:
     gh = None
     gd = None
@@ -278,8 +312,13 @@ def _to_out(src: FolderSyncSource) -> SyncSourceOut:
         )
     elif src.source_type == "nfs":
         root, available, status_str = _nfs_status_snapshot()
+        subpaths = _decode_nfs_subpaths(src)
         nfs = NfsSyncOut(
-            subpath=src.nfs_subpath or "",
+            # Legacy single-value echo: first element, or "" when the
+            # root itself is the only selection. Old clients can keep
+            # reading ``subpath`` until they migrate.
+            subpath=subpaths[0] if subpaths else "",
+            subpaths=subpaths,
             nfs_root=root,
             nfs_available=available,
             nfs_status=status_str,
@@ -438,6 +477,7 @@ def upsert_sync_source(
         src.source_type = "github"
         if existing is not None and existing.source_type != "github":
             src.nfs_subpath = None
+            src.nfs_subpaths = None
         src.gh_repo = gh_cfg.repo.strip()
         src.gh_path = gh_cfg.path.strip("/")
         src.gh_branches = encode_branches_field(gh_cfg.branches)
@@ -464,23 +504,33 @@ def upsert_sync_source(
                 f"NFS is not available ({status_str}); ask an admin to "
                 "configure the NFS root.",
             )
-        # Validate the chosen subpath: must resolve under the root, no
-        # ``..``, no symlink escapes. Lean on the connector helper for
-        # the canonical check so the rules stay in one place.
-        from ...services.sync.nfs import _resolve_under
+        # Validate every chosen subpath: must resolve under the root,
+        # no ``..``, no symlink escapes. Backwards-compat: if the
+        # client only sent ``subpath`` (old single-value field), fold
+        # it into the array.
+        from ...services.sync.nfs import _resolve_under, canonicalise_subpaths
 
-        subpath = (body.nfs.subpath or "").strip().strip("/")
-        try:
-            resolved = _resolve_under(Path(root), subpath)
-        except ValueError as e:
-            raise HTTPException(
-                status.HTTP_400_BAD_REQUEST, f"Invalid NFS subpath: {e}"
-            ) from e
-        if not resolved.exists() or not resolved.is_dir():
+        raw_paths: list[str] = list(body.nfs.subpaths or [])
+        if not raw_paths and (body.nfs.subpath or "").strip():
+            raw_paths = [body.nfs.subpath]
+        subpaths = canonicalise_subpaths(raw_paths)
+        if not subpaths:
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST,
-                f"NFS subpath does not exist or is not a directory: {subpath!r}",
+                "Pick at least one folder under the NFS root before saving.",
             )
+        for sp in subpaths:
+            try:
+                resolved = _resolve_under(Path(root), sp)
+            except ValueError as e:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST, f"Invalid NFS subpath {sp!r}: {e}"
+                ) from e
+            if not resolved.exists() or not resolved.is_dir():
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    f"NFS subpath does not exist or is not a directory: {sp!r}",
+                )
 
         src = existing or FolderSyncSource(
             folder_id=folder_id, source_type="nfs"
@@ -490,7 +540,11 @@ def upsert_sync_source(
             _clear_google_drive_fields(src)
             _clear_microsoft_fields(src)
         src.source_type = "nfs"
-        src.nfs_subpath = subpath
+        import json as _json
+        src.nfs_subpaths = _json.dumps(subpaths)
+        # Keep the legacy column populated with the first entry so old
+        # clients reading the unmigrated DB still see *something*.
+        src.nfs_subpath = subpaths[0] if subpaths else None
 
     elif body.source_type == "google_drive":
         if body.google_drive is None:
@@ -527,6 +581,7 @@ def upsert_sync_source(
             _clear_github_fields(src)
             _clear_microsoft_fields(src)
             src.nfs_subpath = None
+            src.nfs_subpaths = None
             # New source type → drop any stored refresh_token, it belongs to
             # whatever client we were using before.
             src.gd_refresh_token = None
@@ -819,6 +874,11 @@ def trigger_sync(
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST,
                 f"NFS is not available ({status_str})",
+            )
+        if not _decode_nfs_subpaths(src):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "Pick at least one folder under the NFS root before syncing.",
             )
     if src.source_type == "sharepoint":
         if not (src.sp_all_sites or sp_coerce_sites(src.sp_selected_sites)):

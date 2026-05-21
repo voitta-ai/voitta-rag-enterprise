@@ -217,18 +217,34 @@ function setSyncType(t) {
         updateGdRedirectHint();
     }
     if (t === "nfs") {
-        nfsRefreshStatus().then(() => nfsBrowseTo(nfsCurrentPath));
+        nfsRefreshStatus().then(() => {
+            // Rebuild with whatever is already in nfsSelected (set by
+            // loadSyncSource for existing rows, or empty for new ones).
+            const initial = [...nfsSelected];
+            nfsRebuildTree(initial);
+        });
     }
     if (t === "sharepoint") updateMsLoopbackHint("sp");
     if (t === "teams") updateMsLoopbackHint("tm");
 }
 
 // ---------------------------------------------------------------------------
-// NFS picker — server-side, scoped under the admin NFS root
+// NFS picker — tree with 3-state checkboxes
+//
+// Selection is stored as a canonical set of POSIX paths: never two
+// paths where one is the ancestor of the other (the ancestor wins;
+// the descendants are pruned). The user-visible interaction is
+// "click a checkbox to (de)select that subtree"; lazy-load children
+// on expand so a 100k-directory NFS share doesn't pre-fetch.
 // ---------------------------------------------------------------------------
 
-let nfsCurrentPath = "";   // POSIX relative path; "" = root
 let nfsAvailable = false;  // last status probe
+const nfsSelected = new Set();  // canonical set of rel_paths
+const nfsChildrenCache = new Map();  // rel_path -> [{name, rel_path}]
+// Track which list-elements need their checkbox state recomputed when
+// the selection changes (each node's render decides its own state based
+// on `nfsSelected`, but recomputing visible nodes is cheap enough).
+const nfsVisibleNodes = new Map();  // rel_path -> <li> element
 
 async function nfsRefreshStatus() {
     try {
@@ -254,46 +270,268 @@ async function nfsRefreshStatus() {
     }
 }
 
-async function nfsBrowseTo(rel) {
-    nfsCurrentPath = rel || "";
-    $("#sync-nfs-subpath").value = nfsCurrentPath;
-    const list = $("#sync-nfs-entries");
-    const hint = $("#sync-nfs-hint");
-    list.innerHTML = "";
-    if (!nfsAvailable) {
-        hint.textContent = "NFS is unavailable — ask an admin to configure the NFS root.";
-        return;
+// ---- Canonical-set operations ----
+
+function nfsIsAncestorOrSelf(ancestor, candidate) {
+    if (ancestor === "") return true;            // root covers everything
+    if (ancestor === candidate) return true;
+    return candidate.startsWith(ancestor + "/");
+}
+
+function nfsIsCovered(rel) {
+    for (const sel of nfsSelected) if (nfsIsAncestorOrSelf(sel, rel)) return true;
+    return false;
+}
+
+function nfsHasSelectedDescendant(rel) {
+    if (rel === "") return nfsSelected.size > 0;
+    for (const sel of nfsSelected) {
+        if (sel === rel) continue;
+        if (sel.startsWith(rel + "/")) return true;
     }
-    try {
-        const out = await api.nfsBrowse(nfsCurrentPath);
-        if (!out.entries.length) {
-            const li = document.createElement("li");
-            li.className = "muted";
-            li.textContent = "(no sub-folders here — this folder will sync as-is)";
-            list.append(li);
+    return false;
+}
+
+// Three-state report for a given rel_path.
+//   "checked"       = the whole subtree is selected (the path itself
+//                     OR an ancestor is in the set)
+//   "indeterminate" = some descendants are selected but not the whole
+//   "unchecked"     = no overlap
+function nfsNodeState(rel) {
+    if (nfsIsCovered(rel)) return "checked";
+    if (nfsHasSelectedDescendant(rel)) return "indeterminate";
+    return "unchecked";
+}
+
+function nfsSelect(rel) {
+    // Adding ``rel`` to the set means: drop any descendants of ``rel``
+    // that were previously selected (they're redundant), and skip the
+    // add if an ancestor already covers ``rel``.
+    for (const sel of nfsSelected) if (nfsIsAncestorOrSelf(sel, rel)) return;
+    for (const sel of [...nfsSelected]) {
+        if (sel !== rel && sel.startsWith(rel + "/")) nfsSelected.delete(sel);
+    }
+    nfsSelected.add(rel);
+}
+
+function nfsDeselect(rel) {
+    // If ``rel`` is directly in the set, drop it.
+    if (nfsSelected.has(rel)) { nfsSelected.delete(rel); return; }
+    // Otherwise an ancestor covers it — we need to split the ancestor
+    // into its siblings minus ``rel``. Because we lazy-load, we may
+    // not have the ancestor's children in cache; in that case we fall
+    // back to "drop the ancestor entirely" (user can re-pick siblings).
+    let covering = "";
+    for (const sel of nfsSelected) {
+        if (nfsIsAncestorOrSelf(sel, rel)) { covering = sel; break; }
+    }
+    if (!covering && !nfsSelected.has("")) return;  // nothing to do
+    nfsSelected.delete(covering);
+    // Walk down from ``covering`` to ``rel``, re-selecting siblings of
+    // each step we descend into. For each ancestor between covering
+    // and rel, fetch (or use cached) children and add every sibling
+    // that's NOT the path we're descending into.
+    nfsExpandCoverage(covering, rel).catch(() => {});
+}
+
+async function nfsExpandCoverage(coveringPath, removePath) {
+    // Walk the chain ``coveringPath → removePath`` one segment at a time.
+    let current = coveringPath;
+    const segs = removePath.slice(coveringPath.length).replace(/^\//, "").split("/");
+    for (const seg of segs) {
+        const next = current ? `${current}/${seg}` : seg;
+        const children = await nfsFetchChildren(current);
+        for (const child of children) {
+            if (child.rel_path !== next) {
+                // Skip if anything already covers this sibling (rare).
+                if (!nfsIsCovered(child.rel_path)) nfsSelected.add(child.rel_path);
+            }
         }
-        for (const e of out.entries) {
-            const li = document.createElement("li");
-            li.textContent = e.name;
-            li.title = e.rel_path;
-            li.addEventListener("click", () => nfsBrowseTo(e.rel_path));
-            list.append(li);
+        current = next;
+    }
+    nfsRefreshTreeUi();
+}
+
+// ---- Tree rendering ----
+
+async function nfsFetchChildren(rel) {
+    if (nfsChildrenCache.has(rel)) return nfsChildrenCache.get(rel);
+    const out = await api.nfsBrowse(rel);
+    const entries = out.entries || [];
+    nfsChildrenCache.set(rel, entries);
+    return entries;
+}
+
+function nfsBuildLi(rel, name, level) {
+    const li = document.createElement("li");
+    li.dataset.relPath = rel;
+    li.dataset.level = String(level);
+    li.style.padding = "2px 0 2px " + (level * 14) + "px";
+    li.style.listStyle = "none";
+
+    const toggle = document.createElement("span");
+    toggle.className = "nfs-toggle";
+    toggle.textContent = "▶";
+    toggle.style.cursor = "pointer";
+    toggle.style.marginRight = "4px";
+    toggle.style.display = "inline-block";
+    toggle.style.width = "12px";
+    toggle.style.userSelect = "none";
+
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.style.marginRight = "6px";
+
+    const label = document.createElement("span");
+    label.textContent = name || "(root)";
+    label.style.cursor = "pointer";
+    label.title = rel || "(root)";
+
+    li.append(toggle, cb, label);
+
+    const childUl = document.createElement("ul");
+    childUl.style.listStyle = "none";
+    childUl.style.padding = "0";
+    childUl.style.margin = "0";
+    childUl.hidden = true;
+    li.append(childUl);
+
+    // Apply current state.
+    nfsApplyCheckboxState(cb, nfsNodeState(rel));
+
+    let loaded = false;
+    async function expand() {
+        if (!loaded) {
+            try {
+                const children = await nfsFetchChildren(rel);
+                if (!children.length) {
+                    const empty = document.createElement("li");
+                    empty.style.padding = "2px 0 2px " + ((level + 1) * 14) + "px";
+                    empty.className = "muted";
+                    empty.textContent = "(empty)";
+                    childUl.append(empty);
+                } else {
+                    for (const child of children) {
+                        const childLi = nfsBuildLi(child.rel_path, child.name, level + 1);
+                        childUl.append(childLi);
+                    }
+                }
+                loaded = true;
+            } catch (err) {
+                const errLi = document.createElement("li");
+                errLi.style.padding = "2px 0 2px " + ((level + 1) * 14) + "px";
+                errLi.style.color = "#dc3545";
+                errLi.textContent = `error: ${err.message}`;
+                childUl.append(errLi);
+                loaded = true;
+            }
         }
-        hint.textContent = nfsCurrentPath
-            ? `Will sync ${nfsCurrentPath}/. Click an entry to descend further.`
-            : "Will sync the entire NFS root. Click an entry to scope down.";
-    } catch (err) {
-        hint.textContent = `Browse failed: ${err.message}`;
+        childUl.hidden = false;
+        toggle.textContent = "▼";
+    }
+    function collapse() {
+        childUl.hidden = true;
+        toggle.textContent = "▶";
+    }
+
+    toggle.addEventListener("click", () => {
+        if (childUl.hidden) expand(); else collapse();
+    });
+    label.addEventListener("click", () => {
+        if (childUl.hidden) expand(); else collapse();
+    });
+    cb.addEventListener("change", () => {
+        if (cb.checked) nfsSelect(rel);
+        else nfsDeselect(rel);
+        nfsRefreshTreeUi();
+        nfsUpdateCount();
+    });
+
+    nfsVisibleNodes.set(rel, li);
+    return li;
+}
+
+function nfsApplyCheckboxState(cb, state) {
+    if (state === "checked") {
+        cb.checked = true;
+        cb.indeterminate = false;
+    } else if (state === "indeterminate") {
+        cb.checked = false;
+        cb.indeterminate = true;
+    } else {
+        cb.checked = false;
+        cb.indeterminate = false;
     }
 }
 
-$("#sync-nfs-up").addEventListener("click", () => {
-    if (!nfsCurrentPath) return;
-    const parts = nfsCurrentPath.split("/");
-    parts.pop();
-    nfsBrowseTo(parts.join("/"));
+function nfsRefreshTreeUi() {
+    for (const [rel, li] of nfsVisibleNodes) {
+        const cb = li.querySelector(":scope > input[type=checkbox]");
+        if (cb) nfsApplyCheckboxState(cb, nfsNodeState(rel));
+    }
+}
+
+function nfsUpdateCount() {
+    const count = $("#sync-nfs-count");
+    if (!count) return;
+    if (nfsSelected.size === 0) {
+        count.textContent = "none selected";
+    } else if (nfsSelected.has("")) {
+        count.textContent = "entire NFS root selected";
+    } else {
+        count.textContent = `${nfsSelected.size} folder${nfsSelected.size === 1 ? "" : "s"} selected`;
+    }
+}
+
+async function nfsRebuildTree(initialSelection = []) {
+    nfsSelected.clear();
+    nfsVisibleNodes.clear();
+    nfsChildrenCache.clear();
+    for (const s of initialSelection) nfsSelected.add(s);
+    const treeUl = $("#sync-nfs-tree");
+    treeUl.innerHTML = "";
+    if (!nfsAvailable) {
+        const li = document.createElement("li");
+        li.className = "muted";
+        li.style.padding = "8px";
+        li.textContent = "NFS is unavailable — ask an admin to configure the NFS root.";
+        treeUl.append(li);
+        nfsUpdateCount();
+        return;
+    }
+    // Add the synthetic root node so the user can pick "entire root".
+    const rootLi = nfsBuildLi("", "(NFS root)", 0);
+    treeUl.append(rootLi);
+    // Auto-expand to reveal any pre-selected paths so the user sees
+    // their saved selection without hunting through the tree.
+    for (const sel of initialSelection) {
+        if (sel === "") continue;
+        await nfsExpandPath(sel);
+    }
+    nfsRefreshTreeUi();
+    nfsUpdateCount();
+}
+
+async function nfsExpandPath(targetRel) {
+    // Walk from root down to ``targetRel``, expanding each ancestor.
+    const segs = targetRel.split("/");
+    let current = "";
+    for (let i = 0; i < segs.length; i++) {
+        const li = nfsVisibleNodes.get(current);
+        if (!li) return;
+        const toggle = li.querySelector(":scope > .nfs-toggle");
+        if (toggle && toggle.textContent === "▶") toggle.click();
+        // Give the click handler a tick to populate children.
+        await new Promise((r) => setTimeout(r, 0));
+        current = current ? `${current}/${segs[i]}` : segs[i];
+    }
+}
+
+$("#sync-nfs-clear").addEventListener("click", () => {
+    nfsSelected.clear();
+    nfsRefreshTreeUi();
+    nfsUpdateCount();
 });
-$("#sync-nfs-clear").addEventListener("click", () => nfsBrowseTo(""));
 
 // Mirror of the user's current selection in the GD picker; flushed to the
 // form on every set. Keeps the rendered list and the form-config call in
@@ -470,8 +708,10 @@ async function loadSyncSource() {
             // an unavailable banner — the user can still see what was
             // configured but cannot trigger a sync.
             await nfsRefreshStatus();
-            nfsCurrentPath = src.nfs.subpath || "";
-            await nfsBrowseTo(nfsCurrentPath);
+            const subpaths = Array.isArray(src.nfs.subpaths) && src.nfs.subpaths.length
+                ? src.nfs.subpaths
+                : (src.nfs.subpath ? [src.nfs.subpath] : []);
+            await nfsRebuildTree(subpaths);
         } else if (src.source_type === "google_drive" && src.google_drive) {
             const gd = src.google_drive;
             $("#sync-gd-client-id").value = gd.client_id || "";
@@ -655,7 +895,15 @@ function syncBody() {
     const base = { auto_sync_enabled: autoEnabled, auto_sync_hours: autoHours };
     if (t === "github") return { ...base, source_type: "github", github: ghFormConfig() };
     if (t === "google_drive") return { ...base, source_type: "google_drive", google_drive: gdFormConfig() };
-    if (t === "nfs") return { ...base, source_type: "nfs", nfs: { subpath: nfsCurrentPath } };
+    if (t === "nfs") {
+        const subpaths = [...nfsSelected];
+        return {
+            ...base,
+            source_type: "nfs",
+            // ``subpath`` kept for backwards-compat with the old server.
+            nfs: { subpath: subpaths[0] || "", subpaths },
+        };
+    }
     if (t === "sharepoint") return { ...base, source_type: "sharepoint", sharepoint: spFormConfig() };
     if (t === "teams") return { ...base, source_type: "teams", teams: tmFormConfig() };
     throw new Error(`Unknown source_type: ${t}`);

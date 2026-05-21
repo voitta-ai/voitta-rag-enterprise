@@ -134,6 +134,9 @@ def init_db() -> None:
         _ensure_column(
             raw_conn, "auth_providers", "tenant_id", "TEXT NOT NULL DEFAULT ''"
         )
+        # NFS multi-subpath. JSON array of POSIX paths. Default NULL is
+        # safe — code reads nfs_subpath as a fallback when this is empty.
+        _ensure_column(raw_conn, "folder_sync_sources", "nfs_subpaths", "TEXT")
         raw_conn.commit()
     finally:
         raw_conn.close()

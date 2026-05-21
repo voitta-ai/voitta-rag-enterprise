@@ -220,10 +220,15 @@ class FolderSyncSource(Base):
     tm_user_mode: Mapped[str | None] = mapped_column(default=None)
     tm_user_id: Mapped[str | None] = mapped_column(default=None)
     tm_include_attended: Mapped[bool] = mapped_column(default=True)
-    # NFS — admin sets the root via settings, user picks a subpath
-    # under it via the sync UI; ``nfs_subpath`` is that POSIX path
-    # *relative* to the root (never absolute, never with ``..``).
+    # NFS — admin sets the root via settings, user picks one or more
+    # subpaths under it via the sync UI's tree picker.
+    # ``nfs_subpaths`` is a JSON array of POSIX paths *relative* to the
+    # root (never absolute, never with ``..``). The legacy
+    # ``nfs_subpath`` column held a single value; it's auto-migrated
+    # into a one-element array on first read and kept as a fallback
+    # source-of-truth for one release before removal.
     nfs_subpath: Mapped[str | None] = mapped_column(default=None)
+    nfs_subpaths: Mapped[str | None] = mapped_column(default=None)
     # Status
     sync_status: Mapped[str] = mapped_column(default="idle")
     sync_error: Mapped[str | None] = mapped_column(default=None)

@@ -144,18 +144,48 @@ def test_connector_copies_files_into_folder_root(
     stats = asyncio.run(
         nfs_mod.NfsConnector().sync(
             folder_root=folder_root,
-            nfs_subpath="project",
+            nfs_subpaths=["project"],
             progress_cb=None,
         )
     )
     assert stats.files_copied == 2  # spec.md + README.md
-    assert (folder_root / "docs" / "spec.md").read_text() == "# spec\n"
-    assert (folder_root / "README.md").read_text() == "# readme\n"
+    # Multi-subpath connector preserves the FULL relative path under
+    # the NFS root — so "project/" is part of the on-disk layout. This
+    # keeps two-subdirectory selections from colliding.
+    assert (folder_root / "project" / "docs" / "spec.md").read_text() == "# spec\n"
+    assert (folder_root / "project" / "README.md").read_text() == "# readme\n"
     # Hidden files were skipped.
-    assert not (folder_root / ".hidden").exists()
-    # Sidecar recorded fingerprints for both copied files.
+    assert not (folder_root / "project" / ".hidden").exists()
     sidecar = json.loads((folder_root / nfs_mod.SOURCES_SIDECAR).read_text())
-    assert set(sidecar.keys()) == {"docs/spec.md", "README.md"}
+    assert set(sidecar.keys()) == {"project/docs/spec.md", "project/README.md"}
+
+
+def test_connector_multi_subpath_disjoint_trees(
+    nfs_root: Path, tmp_path: Path
+) -> None:
+    """Two disjoint selections mirror into distinct namespaces.
+
+    Both ``data/projectA`` and ``data/projectB`` should land at their
+    full relative paths under the folder root with no collision.
+    """
+    (nfs_root / "data" / "projectA").mkdir(parents=True)
+    (nfs_root / "data" / "projectB").mkdir(parents=True)
+    (nfs_root / "data" / "projectA" / "a.txt").write_text("A")
+    (nfs_root / "data" / "projectB" / "a.txt").write_text("B")
+
+    folder_root = tmp_path / "folder"
+    folder_root.mkdir()
+    import asyncio
+    stats = asyncio.run(
+        nfs_mod.NfsConnector().sync(
+            folder_root=folder_root,
+            nfs_subpaths=["data/projectA", "data/projectB"],
+            progress_cb=None,
+        )
+    )
+    assert stats.files_copied == 2
+    assert (folder_root / "data" / "projectA" / "a.txt").read_text() == "A"
+    assert (folder_root / "data" / "projectB" / "a.txt").read_text() == "B"
 
 
 def test_connector_skips_unchanged_files(
@@ -173,12 +203,12 @@ def test_connector_skips_unchanged_files(
 
     asyncio.run(
         nfs_mod.NfsConnector().sync(
-            folder_root=folder_root, nfs_subpath="project", progress_cb=None
+            folder_root=folder_root, nfs_subpaths=["project"], progress_cb=None
         )
     )
     stats2 = asyncio.run(
         nfs_mod.NfsConnector().sync(
-            folder_root=folder_root, nfs_subpath="project", progress_cb=None
+            folder_root=folder_root, nfs_subpaths=["project"], progress_cb=None
         )
     )
     assert stats2.files_copied == 0
@@ -204,7 +234,7 @@ def test_connector_removes_files_gone_from_source(
 
     asyncio.run(
         nfs_mod.NfsConnector().sync(
-            folder_root=folder_root, nfs_subpath="project", progress_cb=None
+            folder_root=folder_root, nfs_subpaths=["project"], progress_cb=None
         )
     )
     # Manual upload was never claimed by NFS sidecar → still there.
@@ -214,13 +244,13 @@ def test_connector_removes_files_gone_from_source(
     (src_sub / "doomed.txt").unlink()
     stats = asyncio.run(
         nfs_mod.NfsConnector().sync(
-            folder_root=folder_root, nfs_subpath="project", progress_cb=None
+            folder_root=folder_root, nfs_subpaths=["project"], progress_cb=None
         )
     )
     assert stats.files_removed == 1
-    assert not (folder_root / "doomed.txt").exists()
+    assert not (folder_root / "project" / "doomed.txt").exists()
     # Other files unaffected.
-    assert (folder_root / "kept.txt").read_text() == "k"
+    assert (folder_root / "project" / "kept.txt").read_text() == "k"
     assert (folder_root / "manual_upload.md").exists()
 
 
@@ -237,6 +267,46 @@ def test_connector_rejects_unconfigured_root(
     with pytest.raises(RuntimeError, match="not configured"):
         asyncio.run(
             nfs_mod.NfsConnector().sync(
-                folder_root=folder_root, nfs_subpath="", progress_cb=None
+                folder_root=folder_root, nfs_subpaths=[""], progress_cb=None
             )
         )
+
+
+def test_connector_rejects_empty_selection(
+    nfs_root: Path, tmp_path: Path
+) -> None:
+    """No selection = error, even if the root is otherwise valid."""
+    folder_root = tmp_path / "folder"
+    folder_root.mkdir()
+    import asyncio
+    with pytest.raises(RuntimeError, match="pick at least one"):
+        asyncio.run(
+            nfs_mod.NfsConnector().sync(
+                folder_root=folder_root, nfs_subpaths=[], progress_cb=None
+            )
+        )
+
+
+# ---------------------------------------------------------------------------
+# canonicalise_subpaths — selection normalisation
+# ---------------------------------------------------------------------------
+
+
+def test_canonicalise_dedups_and_drops_descendants() -> None:
+    # ``a/b/c`` is redundant once ``a/b`` is selected — drop it.
+    assert nfs_mod.canonicalise_subpaths(["a/b/c", "a/b", "x"]) == ["a/b", "x"]
+
+
+def test_canonicalise_root_absorbs_everything() -> None:
+    # Picking "" (the root) makes any other selection redundant.
+    assert nfs_mod.canonicalise_subpaths(["", "a", "b/c"]) == [""]
+
+
+def test_canonicalise_rejects_traversal_and_absolute() -> None:
+    # ``..`` segments rejected; absolute paths likewise. The cleaner
+    # also collapses repeated slashes ("//") and leading "./".
+    assert nfs_mod.canonicalise_subpaths(["../etc", "a/../b", "ok"]) == ["ok"]
+
+
+def test_canonicalise_strips_redundant_slashes() -> None:
+    assert nfs_mod.canonicalise_subpaths(["a//b", "./a/b", "a/b/"]) == ["a/b"]

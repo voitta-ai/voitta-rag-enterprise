@@ -785,24 +785,23 @@
                      at a time so a deep tree never pre-fetches. -->
                 <div id="sync-form-nfs" hidden>
                     <p class="hint" style="margin:0 0 6px;">
-                        Files are copied into this folder's normal storage on every sync; the
-                        watcher then indexes them like uploaded files. Symlinks are skipped to
-                        prevent surprise traversals. Path safety is enforced server-side.
+                        Pick one or more folders to sync from the admin's NFS root.
+                        Parent checkboxes select everything underneath; partial
+                        selection shows as a dash. Folder structure is preserved on
+                        disk (two siblings won't collide). Symlinks are skipped.
                     </p>
                     <label>NFS root (set by admin)</label>
                     <input type="text" id="sync-nfs-root-display" readonly
                         placeholder="(set the NFS root in Admin → Storage)"
                         class="readonly-input">
 
-                    <label>Sub-folder under the NFS root</label>
-                    <div class="nfs-picker-row">
-                        <input type="text" id="sync-nfs-subpath" readonly
-                            placeholder="(pick below — leave blank to sync the entire root)">
-                        <button type="button" id="sync-nfs-up" class="btn btn-secondary btn-sm">Up</button>
-                        <button type="button" id="sync-nfs-clear" class="btn btn-secondary btn-sm">Clear</button>
+                    <label>Folders to sync</label>
+                    <div class="branches-row" style="margin-bottom:6px;">
+                        <button type="button" id="sync-nfs-clear" class="btn btn-secondary btn-sm">Clear selection</button>
+                        <span id="sync-nfs-count" class="hint" style="margin-left:auto;">none selected</span>
                     </div>
-                    <ul id="sync-nfs-entries" class="nfs-picker-list"></ul>
-                    <p class="hint" id="sync-nfs-hint">Click an entry to descend. The current path is what will be synced.</p>
+                    <ul id="sync-nfs-tree" class="nfs-tree" style="margin:0;padding:6px 0 6px 4px;max-height:40vh;overflow:auto;border:1px solid var(--border, #ccc);border-radius:4px;list-style:none;font-size:13px;"></ul>
+                    <p class="hint" id="sync-nfs-hint" style="margin-top:6px;">Click ▶ to expand, click a checkbox to (de)select that subtree.</p>
                 </div>
 
                 <!-- Auto-sync schedule. Common to all source types. The
