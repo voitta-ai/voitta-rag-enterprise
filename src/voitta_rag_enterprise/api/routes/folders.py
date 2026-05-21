@@ -102,7 +102,15 @@ def _sync_source_kind(source: FolderSyncSource | None) -> str:
     if source is None:
         return "regular"
     if source.source_type == "github":
-        return "github_private" if source.gh_auth_method else "github_public"
+        # ``gh_auth_method`` alone is not enough — the form defaults the
+        # radio to "ssh" even for repos the user is cloning over plain
+        # https without any creds. The repo only counts as private when
+        # an actual secret is on file (PAT or SSH private key).
+        has_creds = bool(
+            (source.gh_auth_method == "ssh" and source.gh_token)
+            or (source.gh_auth_method == "token" and source.gh_pat)
+        )
+        return "github_private" if has_creds else "github_public"
     if source.source_type == "google_drive":
         return "google_drive"
     if source.source_type == "nfs":
