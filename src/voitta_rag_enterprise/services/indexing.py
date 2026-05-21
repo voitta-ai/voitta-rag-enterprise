@@ -597,11 +597,20 @@ def _commit_indexing(
         file.mtime_ns = mtime_ns
         file.last_seen_at = now
         file.last_indexed_at = now
-        file.state = "extracted"
-        file.error = None
         # page_render rows are deliberately excluded from pending_embeds:
         # we don't run SigLIP on them, so there is no embed to wait on.
         file.pending_embeds = (1 if chunks else 0) + len(images)
+        if file.pending_embeds == 0:
+            # Empty file (no chunks, no images — typical of zero-byte
+            # __init__.py and similar marker files). Without this snap,
+            # the file sits in 'extracted' forever because the
+            # 'extracted → indexed' transition only happens inside
+            # _decrement_pending_embeds, which never runs when no embed
+            # jobs are enqueued.
+            file.state = "indexed"
+        else:
+            file.state = "extracted"
+        file.error = None
         _committed_file_id = file.id
 
         image_ids = [
