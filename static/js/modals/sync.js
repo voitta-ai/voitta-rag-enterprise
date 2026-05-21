@@ -399,9 +399,14 @@ function nfsBuildLi(rel, name, level) {
     // Apply current state.
     nfsApplyCheckboxState(cb, nfsNodeState(rel));
 
-    let loaded = false;
-    async function expand() {
-        if (!loaded) {
+    // Cached promise of "this node's children are fully built in the
+    // DOM". Used by both the user-click expand path and the rehydrate
+    // walker — neither has to second-guess whether the API call is
+    // still in flight; await the promise and proceed.
+    let loadedPromise = null;
+    async function ensureLoaded() {
+        if (loadedPromise) return loadedPromise;
+        loadedPromise = (async () => {
             try {
                 const children = await nfsFetchChildren(rel);
                 if (!children.length) {
@@ -416,16 +421,18 @@ function nfsBuildLi(rel, name, level) {
                         childUl.append(childLi);
                     }
                 }
-                loaded = true;
             } catch (err) {
                 const errLi = document.createElement("li");
                 errLi.style.padding = "2px 0 2px " + ((level + 1) * 14) + "px";
                 errLi.style.color = "#dc3545";
                 errLi.textContent = `error: ${err.message}`;
                 childUl.append(errLi);
-                loaded = true;
             }
-        }
+        })();
+        return loadedPromise;
+    }
+    async function expand() {
+        await ensureLoaded();
         childUl.hidden = false;
         toggle.textContent = "▼";
     }
@@ -433,6 +440,11 @@ function nfsBuildLi(rel, name, level) {
         childUl.hidden = true;
         toggle.textContent = "▶";
     }
+
+    // Expose to nfsExpandPath so the rehydrate walker can await the
+    // exact same load path the click handler uses — no second
+    // implementation, no setTimeout races.
+    li.__nfsExpand = expand;
 
     toggle.addEventListener("click", () => {
         if (childUl.hidden) expand(); else collapse();
@@ -483,7 +495,23 @@ function nfsUpdateCount() {
     }
 }
 
-async function nfsRebuildTree(initialSelection = []) {
+// Serialise rebuilds: setSyncType("nfs") fires one off in the
+// background, and loadSyncSource fires another with the real saved
+// selection a few ms later. If they race, both append a root node and
+// the user sees "folder multiplication". Chaining off this promise
+// guarantees rebuild N runs strictly after rebuild N-1 finishes, so the
+// later call's DOM wipe (treeUl.innerHTML = "") correctly clears the
+// earlier call's output.
+let nfsRebuildChain = Promise.resolve();
+
+function nfsRebuildTree(initialSelection = []) {
+    nfsRebuildChain = nfsRebuildChain
+        .catch(() => {})
+        .then(() => _nfsRebuildTreeImpl(initialSelection));
+    return nfsRebuildChain;
+}
+
+async function _nfsRebuildTreeImpl(initialSelection) {
     nfsSelected.clear();
     nfsVisibleNodes.clear();
     nfsChildrenCache.clear();
@@ -513,17 +541,26 @@ async function nfsRebuildTree(initialSelection = []) {
 }
 
 async function nfsExpandPath(targetRel) {
-    // Walk from root down to ``targetRel``, expanding each ancestor.
+    // Walk from the synthetic root down to ``targetRel``, awaiting
+    // each ancestor's expand promise before descending. This is the
+    // rehydrate path — when the modal opens with saved selection, we
+    // need every ancestor's children in the DOM (and the checkbox
+    // state recomputed) before the user starts clicking.
+    //
+    // Previously this called toggle.click() and waited setTimeout(0)
+    // for children to render. That's a race: if the API call hadn't
+    // resolved yet, nfsVisibleNodes.get(next) returned undefined and
+    // the walk silently aborted — leaving the tree half-expanded and
+    // checkbox state stale, which looked like "folder multiplication"
+    // to the user. Now we await li.__nfsExpand() (the same code path
+    // the click handler runs) — deterministic, no setTimeout.
     const segs = targetRel.split("/");
     let current = "";
-    for (let i = 0; i < segs.length; i++) {
+    for (const seg of segs) {
         const li = nfsVisibleNodes.get(current);
-        if (!li) return;
-        const toggle = li.querySelector(":scope > .nfs-toggle");
-        if (toggle && toggle.textContent === "▶") toggle.click();
-        // Give the click handler a tick to populate children.
-        await new Promise((r) => setTimeout(r, 0));
-        current = current ? `${current}/${segs[i]}` : segs[i];
+        if (!li || typeof li.__nfsExpand !== "function") return;
+        await li.__nfsExpand();
+        current = current ? `${current}/${seg}` : seg;
     }
 }
 
