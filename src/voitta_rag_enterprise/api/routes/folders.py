@@ -102,15 +102,24 @@ def _sync_source_kind(source: FolderSyncSource | None) -> str:
     if source is None:
         return "regular"
     if source.source_type == "github":
-        # ``gh_auth_method`` alone is not enough — the form defaults the
-        # radio to "ssh" even for repos the user is cloning over plain
-        # https without any creds. The repo only counts as private when
-        # an actual secret is on file (PAT or SSH private key).
-        has_creds = bool(
-            (source.gh_auth_method == "ssh" and source.gh_token)
-            or (source.gh_auth_method == "token" and source.gh_pat)
+        # The repo URL is the only reliable signal:
+        #   * ``git@host:org/repo`` or ``ssh://...``  — SSH URL, only
+        #     works with auth (either a stored SSH key OR the host's
+        #     own SSH agent / default key). Either way: private.
+        #   * ``https://`` with a stored PAT — explicitly private.
+        #   * everything else (plain ``https://github.com/...`` without
+        #     a PAT) — anonymous clone, treat as public.
+        # The previous heuristic looked at ``gh_auth_method`` which the
+        # form populates by default ("ssh" radio selection), so it
+        # lit up the lock on every github row.
+        url = (source.gh_repo or "").strip()
+        is_ssh_url = url.startswith("git@") or url.startswith("ssh://")
+        has_https_pat = (
+            url.startswith("https://")
+            and source.gh_auth_method == "token"
+            and bool(source.gh_pat)
         )
-        return "github_private" if has_creds else "github_public"
+        return "github_private" if (is_ssh_url or has_https_pat) else "github_public"
     if source.source_type == "google_drive":
         return "google_drive"
     if source.source_type == "nfs":
