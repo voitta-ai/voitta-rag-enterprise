@@ -6,6 +6,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from sqlalchemy import select
@@ -24,19 +25,30 @@ logger = logging.getLogger(__name__)
 
 
 class _Debouncer:
-    """Coalesce repeated calls for the same key within ``delay`` seconds."""
+    """Coalesce repeated calls for the same key within ``delay`` seconds.
 
-    def __init__(self, delay: float) -> None:
+    Callbacks are dispatched through a bounded ThreadPoolExecutor so that a
+    burst of filesystem events (e.g. a git sync landing hundreds of files at
+    once) cannot exhaust the SQLAlchemy connection pool by spawning an
+    unbounded number of concurrent threads.
+    """
+
+    def __init__(self, delay: float, max_workers: int = 4) -> None:
         self._delay = delay
         self._timers: dict[str, threading.Timer] = {}
         self._lock = threading.Lock()
+        self._executor = ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix="watcher-db"
+        )
 
     def schedule(self, key: str, fn: Callable[[], None]) -> None:
         with self._lock:
             existing = self._timers.pop(key, None)
             if existing is not None:
                 existing.cancel()
-            timer = threading.Timer(self._delay, fn)
+            # Timer fires a lightweight submit(); actual DB work runs inside
+            # the bounded executor so at most max_workers sessions are open.
+            timer = threading.Timer(self._delay, self._executor.submit, args=(fn,))
             timer.daemon = True
             self._timers[key] = timer
             timer.start()
@@ -46,6 +58,7 @@ class _Debouncer:
             for t in self._timers.values():
                 t.cancel()
             self._timers.clear()
+        self._executor.shutdown(wait=False)
 
 
 class _FolderHandler(FileSystemEventHandler):
