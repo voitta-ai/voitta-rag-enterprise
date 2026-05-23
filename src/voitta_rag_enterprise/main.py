@@ -128,6 +128,14 @@ def create_app() -> FastAPI:
     # viewers. Available on STEP / IGES / FCStd files. ``list_assets``
     # surfaces it conditionally on extension.
     from .services import cad_mesh  # noqa: F401
+    # Side-effect import: registers ``asset_type="md"``, which serves
+    # the parser's normalised text.md extract via a signed URL.
+    # Available whenever indexing produced a markdown blob — PDF /
+    # DOCX / XLSX / PPTX / ipynb / plain text / Google Workspace
+    # files synced into the index. Lets the LLM pipe the extract
+    # into ``fetch_to_python_storage`` → ``run_compute`` without
+    # consuming tool-result context the way ``get_file`` would.
+    from .services import markdown_extract  # noqa: F401
 
     # Bind the MCP route at /mcp internally; below we splice its routes into
     # the parent FastAPI app rather than mounting, so the URL is exactly /mcp

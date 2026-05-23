@@ -1441,6 +1441,7 @@ def list_assets(file_id: int) -> list[dict]:
     """
     from .services import asset_handlers as _ah
     from .services import cad_mesh as _cm
+    from .services import markdown_extract as _md
     from .services import original_file as _orig
 
     with session_scope() as s:
@@ -1454,6 +1455,14 @@ def list_assets(file_id: int) -> list[dict]:
     # "give me the bytes", so listing it at the top reduces the
     # need to scroll past parser-specific entries.
     out.append(_orig.spec_for(file_id, rel_path).as_dict())
+    # Synthetic "md" spec — the parser's text.md extract, served as
+    # a signed URL so the LLM can pipe it into run_compute via
+    # python_storage instead of pulling it through tool context.
+    # Only emitted when the CAS blob actually exists (skip image-
+    # only / pre-indexing files).
+    md_spec = _md.spec_for(file_id, cas_id, rel_path)
+    if md_spec is not None:
+        out.append(md_spec.as_dict())
     # Synthetic "cad_mesh" spec for CAD files — a whole-file GLB
     # export consumable by three.js / web viewers. The same handler
     # also accepts a slug to export a single component (using the
@@ -1508,6 +1517,19 @@ def request_asset(
       ``urls["file"]``. No ``slug`` or ``params``. Available on
       every indexed file. Use this anytime you want to *process*
       the file rather than read its markdown extract.
+
+    * ``"md"`` — the parser's normalised **markdown extract**, served
+      as ``text/markdown`` via ``urls["md"]``. Same content
+      ``get_file`` returns, but as a fetchable URL — chain into
+      ``fetch_to_python_storage`` → ``run_compute`` to do bulk
+      regex / dataframe / NLP work over a long DOCX/XLSX/PPTX
+      without piping the text through tool-result context.
+      No ``slug``, no ``params``. Available whenever indexing
+      produced a ``text.md`` blob (PDF, DOCX, XLSX, PPTX, ipynb,
+      plain text, and Google Workspace files synced into the
+      voitta-rag-enterprise index). Use ``original`` instead when
+      you need the source format (custom OCP, openpyxl, layout-
+      preserving parser, …).
 
     * ``"cad_projection"`` — render four PNG views (front / top /
       side / iso) of a STEP/FCStd subcomponent. Requires ``slug``
@@ -1581,6 +1603,7 @@ def build_app(transport: str = "streamable-http", path: str | None = None):
     from .services import cad_render  # noqa: F401
     from .services import original_file  # noqa: F401
     from .services import cad_mesh  # noqa: F401
+    from .services import markdown_extract  # noqa: F401
 
     app = mcp.http_app(transport=transport, stateless_http=True, path=path)
     app.add_middleware(BearerAuthMiddleware)

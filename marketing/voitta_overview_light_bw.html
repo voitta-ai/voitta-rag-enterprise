@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voitta — Unified Semantic Layer</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 100vw; height: 100vh; overflow: hidden;
+    background: #ffffff;
+    font-family: -apple-system, "SF Pro Display", "Helvetica Neue", "Segoe UI", sans-serif;
+  }
+  #page {
+    display: flex; flex-direction: column; width: 100vw; height: 100vh;
+  }
+  #diagram-wrap {
+    flex: 1; min-height: 0;
+    display: flex; align-items: center; justify-content: center;
+    padding: 10px 20px 14px;
+  }
+  #diagram { display: block; }
+
+  @keyframes dash-march    { to { stroke-dashoffset: -24; } }
+  @keyframes voitta-border { to { stroke-dashoffset: -1104; } }
+</style>
+</head>
+<body>
+<div id="page">
+  <div id="diagram-wrap">
+    <svg id="diagram" xmlns="http://www.w3.org/2000/svg"
+         viewBox="-30 -30 1340 644"
+         preserveAspectRatio="xMidYMid meet">
+      <defs>
+        <filter id="glow-text" x="-30%" y="-60%" width="160%" height="220%">
+          <feGaussianBlur in="SourceGraphic" stdDeviation="5" result="b"/>
+          <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+        <filter id="voitta-ambient" x="-80%" y="-60%" width="260%" height="220%">
+          <feGaussianBlur in="SourceGraphic" stdDeviation="48" result="b"/>
+          <feColorMatrix in="b" type="matrix"
+            values="0 0 0 0 0   0 0 0 0 0.62   0 0 0 0 0.68   0 0 0 0.5 0"/>
+        </filter>
+      </defs>
+
+      <!-- dotgrid -->
+      
+
+      <!-- ambient glow -->
+      
+
+      <!-- edges (behind nodes) -->
+      <path d="M 340 121.0 H 415.0 V 148.0 H 490" fill="none" stroke="#333333"  stroke-width="1.8" stroke-dasharray="8 4"  stroke-linecap="square"  style="animation:dash-march 1.50s linear infinite"/><path d="M 340 235.0 H 415.0 V 244.0 H 490" fill="none" stroke="#333333"  stroke-width="1.8" stroke-dasharray="8 4"  stroke-linecap="square"  style="animation:dash-march 1.35s linear infinite"/><path d="M 340 349.0 H 415.0 V 340.0 H 490" fill="none" stroke="#333333"  stroke-width="1.8" stroke-dasharray="8 4"  stroke-linecap="square"  style="animation:dash-march 1.60s linear infinite"/><path d="M 340 463.0 H 415.0 V 436.0 H 490" fill="none" stroke="#333333"  stroke-width="1.8" stroke-dasharray="8 4"  stroke-linecap="square"  style="animation:dash-march 1.25s linear infinite"/><path d="M 790 148.0 H 865.0 V 121.0 H 940" fill="none" stroke="#333333"  stroke-width="1.8" stroke-dasharray="8 4"  stroke-linecap="square"  style="animation:dash-march 1.50s linear infinite"/><path d="M 790 244.0 H 865.0 V 235.0 H 940" fill="none" stroke="#333333"  stroke-width="1.8" stroke-dasharray="8 4"  stroke-linecap="square"  style="animation:dash-march 1.35s linear infinite"/><path d="M 790 340.0 H 865.0 V 349.0 H 940" fill="none" stroke="#333333"  stroke-width="1.8" stroke-dasharray="8 4"  stroke-linecap="square"  style="animation:dash-march 1.60s linear infinite"/><path d="M 790 436.0 H 865.0 V 463.0 H 940" fill="none" stroke="#333333"  stroke-width="1.8" stroke-dasharray="8 4"  stroke-linecap="square"  style="animation:dash-march 1.25s linear infinite"/>
+      <polygon points="940,121.0 930,116.6 930,125.4"  fill="#333333"/><polygon points="940,235.0 930,230.6 930,239.4"  fill="#333333"/><polygon points="940,349.0 930,344.6 930,353.4"  fill="#333333"/><polygon points="940,463.0 930,458.6 930,467.4"  fill="#333333"/>
+
+      <!-- column labels -->
+      <text x="206.0" y="57.0"  text-anchor="middle" font-size="12" font-weight="600" fill="#111111" opacity="0.75"  style="letter-spacing:3px">DATA SOURCES</text><line x1="98.8" y1="67.0"  x2="313.2" y2="67.0"  stroke="#111111" stroke-width="0.7" opacity="0.2"/>
+      <text x="1074.0" y="57.0"  text-anchor="middle" font-size="12" font-weight="600" fill="#111111" opacity="0.75"  style="letter-spacing:3px">KNOWLEDGE</text><line x1="966.8" y1="67.0"  x2="1181.2" y2="67.0"  stroke="#111111" stroke-width="0.7" opacity="0.2"/>
+
+      <!-- nodes -->
+      <g transform="translate(72.0,75.0)"><rect width="268" height="92" rx="8" fill="#ffffff" stroke="#aaaaaa" stroke-width="1.5"/><line x1="18" y1="40" x2="250" y2="40" stroke="#aaaaaa" stroke-width="0.8"/><text x="134.0" y="22.4" text-anchor="middle"  font-size="10.5" font-weight="700" fill="#111111" style="letter-spacing:1px">DOCUMENTS & FILES</text><text x="134.0" y="60.0" text-anchor="middle"  font-size="11.5" fill="#111111" opacity="0.55">NFS · Shared Storage · ERP</text></g><g transform="translate(72.0,189.0)"><rect width="268" height="92" rx="8" fill="#ffffff" stroke="#aaaaaa" stroke-width="1.5"/><line x1="18" y1="40" x2="250" y2="40" stroke="#aaaaaa" stroke-width="0.8"/><text x="134.0" y="22.4" text-anchor="middle"  font-size="10.5" font-weight="700" fill="#111111" style="letter-spacing:1px">PROJECT & WORK TRACKING</text><text x="134.0" y="60.0" text-anchor="middle"  font-size="11.5" fill="#111111" opacity="0.55">Project Management · Change Control</text></g><g transform="translate(72.0,303.0)"><rect width="268" height="92" rx="8" fill="#ffffff" stroke="#aaaaaa" stroke-width="1.5"/><line x1="18" y1="40" x2="250" y2="40" stroke="#aaaaaa" stroke-width="0.8"/><text x="134.0" y="22.4" text-anchor="middle"  font-size="10.5" font-weight="700" fill="#111111" style="letter-spacing:1px">SOURCE & VERSION CONTROL</text><text x="134.0" y="60.0" text-anchor="middle"  font-size="11.5" fill="#111111" opacity="0.55">Code · Config · Release History</text></g><g transform="translate(72.0,417.0)"><rect width="268" height="92" rx="8" fill="#ffffff" stroke="#aaaaaa" stroke-width="1.5"/><line x1="18" y1="40" x2="250" y2="40" stroke="#aaaaaa" stroke-width="0.8"/><text x="134.0" y="22.4" text-anchor="middle"  font-size="10.5" font-weight="700" fill="#111111" style="letter-spacing:1px">ENGINEERING & DESIGN</text><text x="134.0" y="60.0" text-anchor="middle"  font-size="11.5" fill="#111111" opacity="0.55">PLM · CAD · BOMs · specifications</text></g><g transform="translate(490.0,52.0)"><rect width="300" height="480" rx="18" fill="#f9f9f9" stroke="#111111" stroke-width="1.5"/><rect width="300" height="480" rx="18" fill="none"  stroke="#111111" stroke-width="2" stroke-linecap="round"  stroke-dasharray="1104 429"  style="animation:voitta-border 3.2s linear infinite"/><line x1="22" y1="75.6" x2="278" y2="75.6" stroke="#111111" stroke-width="0.6" opacity="0.4"/><line x1="22" y1="432.0" x2="278" y2="432.0" stroke="#111111" stroke-width="0.6" opacity="0.4"/><text x="150.0" y="49.6" text-anchor="middle"  font-size="18" font-weight="800" fill="#111111"  style="letter-spacing:7px;">VOITTA</text><text x="150.0" y="70.6" text-anchor="middle"  font-size="11" fill="#111111" style="letter-spacing:4px;opacity:0.75">AI</text><circle cx="150.0" cy="253.8" r="135.4"  fill="none" stroke="#111111" stroke-width="0.8" opacity="0.70"  stroke-dasharray="636.5 203.1"/><circle cx="150.0" cy="253.8" r="85.5"  fill="none" stroke="#111111" stroke-width="1" opacity="1.00"  stroke-dasharray="325.0 213.8"  style="transform-box:fill-box;transform-origin:center;transform:rotate(110deg)"/><circle cx="150.0" cy="253.8" r="46.3" fill="none" stroke="#111111" stroke-width="1.2" opacity="1.00"/><circle cx="150.0" cy="253.8" r="4" fill="#111111" opacity="0.85" style=""/><line x1="198.6" y1="266.8" x2="261.2" y2="283.6"  stroke="#111111" stroke-width="0.8" opacity="1.00"/><circle cx="261.2" cy="283.6" r="2" fill="#111111" opacity="1.00"/><line x1="165.6" y1="301.7" x2="175.1" y2="331.1"  stroke="#111111" stroke-width="0.8" opacity="1.00"/><circle cx="175.1" cy="331.1" r="2" fill="#111111" opacity="1.00"/><line x1="114.4" y1="289.4" x2="63.8" y2="340.0"  stroke="#111111" stroke-width="0.8" opacity="1.00"/><circle cx="63.8" cy="340.0" r="2" fill="#111111" opacity="1.00"/><line x1="100.4" y1="245.1" x2="56.6" y2="237.3"  stroke="#111111" stroke-width="0.8" opacity="1.00"/><circle cx="56.6" cy="237.3" r="2" fill="#111111" opacity="1.00"/><line x1="131.1" y1="207.1" x2="122.1" y2="184.7"  stroke="#111111" stroke-width="0.8" opacity="1.00"/><circle cx="122.1" cy="184.7" r="2" fill="#111111" opacity="1.00"/><line x1="182.4" y1="215.2" x2="219.6" y2="170.8"  stroke="#111111" stroke-width="0.8" opacity="1.00"/><circle cx="219.6" cy="170.8" r="2" fill="#111111" opacity="1.00"/><line x1="150.0" y1="253.8" x2="75.5" y2="213.2" stroke="#111111" stroke-width="0.6" opacity="0.63"/><line x1="75.5" y1="213.2" x2="215.0" y2="226.7" stroke="#111111" stroke-width="0.5" opacity="0.42"/><circle cx="75.5" cy="213.2" r="3" fill="none" stroke="#111111" stroke-width="1" opacity="1.00"/><circle cx="75.5" cy="213.2" r="1.2" fill="#111111" opacity="1.00"/><line x1="150.0" y1="253.8" x2="215.0" y2="226.7" stroke="#111111" stroke-width="0.6" opacity="0.63"/><line x1="215.0" y1="226.7" x2="163.5" y2="324.2" stroke="#111111" stroke-width="0.5" opacity="0.42"/><circle cx="215.0" cy="226.7" r="3" fill="none" stroke="#111111" stroke-width="1" opacity="1.00"/><circle cx="215.0" cy="226.7" r="1.2" fill="#111111" opacity="1.00"/><line x1="150.0" y1="253.8" x2="163.5" y2="324.2" stroke="#111111" stroke-width="0.6" opacity="0.63"/><line x1="163.5" y1="324.2" x2="75.5" y2="213.2" stroke="#111111" stroke-width="0.5" opacity="0.42"/><circle cx="163.5" cy="324.2" r="3" fill="none" stroke="#111111" stroke-width="1" opacity="1.00"/><circle cx="163.5" cy="324.2" r="1.2" fill="#111111" opacity="1.00"/><text x="150.0" y="450.0" text-anchor="middle"  font-size="9" fill="#111111" style="letter-spacing:2px;opacity:0.6">WORKS ACROSS ALL CONNECTED SYSTEMS</text></g><g transform="translate(940.0,75.0)"><rect width="268" height="92" rx="8" fill="#ffffff" stroke="#aaaaaa" stroke-width="1.5"/><line x1="18" y1="40" x2="250" y2="40" stroke="#aaaaaa" stroke-width="0.8"/><text x="134.0" y="22.4" text-anchor="middle"  font-size="10.5" font-weight="700" fill="#111111" style="letter-spacing:1px">REPORTS & PRESENTATIONS</text><text x="134.0" y="60.0" text-anchor="middle"  font-size="11.5" fill="#111111" opacity="0.55">Built from live data</text></g><g transform="translate(940.0,189.0)"><rect width="268" height="92" rx="8" fill="#ffffff" stroke="#aaaaaa" stroke-width="1.5"/><line x1="18" y1="40" x2="250" y2="40" stroke="#aaaaaa" stroke-width="0.8"/><text x="134.0" y="22.4" text-anchor="middle"  font-size="10.5" font-weight="700" fill="#111111" style="letter-spacing:1px">ANSWERS & SUMMARIES</text><text x="134.0" y="60.0" text-anchor="middle"  font-size="11.5" fill="#111111" opacity="0.55">Conversational access to all your data</text></g><g transform="translate(940.0,303.0)"><rect width="268" height="92" rx="8" fill="#ffffff" stroke="#aaaaaa" stroke-width="1.5"/><line x1="18" y1="40" x2="250" y2="40" stroke="#aaaaaa" stroke-width="0.8"/><text x="134.0" y="22.4" text-anchor="middle"  font-size="10.5" font-weight="700" fill="#111111" style="letter-spacing:1px">DATA EXPORTS</text><text x="134.0" y="60.0" text-anchor="middle"  font-size="11.5" fill="#111111" opacity="0.55">Ready for analytics & machine learning</text></g><g transform="translate(940.0,417.0)"><rect width="268" height="92" rx="8" fill="#ffffff" stroke="#aaaaaa" stroke-width="1.5"/><line x1="18" y1="40" x2="250" y2="40" stroke="#aaaaaa" stroke-width="0.8"/><text x="134.0" y="22.4" text-anchor="middle"  font-size="10.5" font-weight="700" fill="#111111" style="letter-spacing:1px">AUTOMATED WORKFLOWS</text><text x="134.0" y="60.0" text-anchor="middle"  font-size="11.5" fill="#111111" opacity="0.55">Agentic, repeatable pipelines</text></g>
+    </svg>
+  </div>
+</div>
+<script>
+(function() {
+  const wrap = document.getElementById("diagram-wrap");
+  const svg  = document.getElementById("diagram");
+  const vbW  = 1340;
+  const vbH  = 644;
+  function resize() {
+    const availW = wrap.clientWidth  - 24;
+    const availH = wrap.clientHeight - 16;
+    const scale  = Math.min(availW / vbW, availH / vbH);
+    svg.setAttribute("width",  Math.round(vbW * scale));
+    svg.setAttribute("height", Math.round(vbH * scale));
+  }
+  resize();
+  window.addEventListener("resize", resize);
+})();
+</script>
+</body>
+</html>
