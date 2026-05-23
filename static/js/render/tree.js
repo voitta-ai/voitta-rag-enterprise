@@ -77,6 +77,16 @@ import { files, folders, jobs } from "../store.js";
 
 const $ = (sel) => document.querySelector(sel);
 
+let _folderFilter = "";
+
+export function setFolderFilter(q) { _folderFilter = q; }
+
+export function renderFoldersFiltered() {
+    const q = _folderFilter.trim().toLowerCase();
+    const list = q ? folders.get().filter((f) => f.display_name.toLowerCase().includes(q)) : folders.get();
+    renderFolders(list);
+}
+
 const rowCache = new Map();
 
 // ---------------------------------------------------------------------------
@@ -239,7 +249,7 @@ function onChevronClick(e) {
     const folderId = Number(li.dataset.folderId);
     const relDir = li.dataset.relDir || "";
     toggleExpanded(folderId, relDir);
-    renderFolders(folders.get());
+    renderFoldersFiltered();
 }
 
 function onRowClick(e) {
@@ -442,7 +452,7 @@ async function toggleFolderActive(folder, active) {
         folders.set(next);
     } catch (err) {
         alert(err.message);
-        renderFolders(folders.get()); // restore the original visual state
+        renderFoldersFiltered(); // restore the original visual state
     }
 }
 
@@ -453,7 +463,7 @@ async function toggleFolderShare(folder, shared) {
         folders.set(next);
     } catch (err) {
         alert(err.message);
-        renderFolders(folders.get());
+        renderFoldersFiltered();
     }
 }
 

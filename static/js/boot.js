@@ -16,7 +16,7 @@ import {
 import { renderJobs } from "./render/jobs.js";
 import { renderSidebar } from "./render/sidebar.js";
 import { updateJobsTabIndicator } from "./render/tabs.js";
-import { renderFolders } from "./render/tree.js";
+import { renderFoldersFiltered, setFolderFilter } from "./render/tree.js";
 // Register preview plugins in priority order. Each import has a side
 // effect of calling registerPlugin(); unsupported.js is always last.
 import "./render/preview/plugins/image.js";
@@ -39,14 +39,6 @@ import { connect } from "./ws.js";
 
 const $ = (sel) => document.querySelector(sel);
 
-let folderFilter = "";
-
-function filteredFolders() {
-    const q = folderFilter.trim().toLowerCase();
-    if (!q) return folders.get();
-    return folders.get().filter((f) => f.display_name.toLowerCase().includes(q));
-}
-
 // ----- Connection pill -----
 connStatus.subscribe((s) => {
     const el = $("#conn-status");
@@ -58,7 +50,7 @@ connStatus.subscribe((s) => {
 // modules can import scheduler functions without circular imports.
 setRenderers({
     full: () => {
-        renderFolders(filteredFolders());
+        renderFoldersFiltered();
         renderSidebar();
         updateToolbarState();
     },
@@ -137,8 +129,8 @@ async function bootstrap() {
 const folderSearchInput = $("#folder-search");
 if (folderSearchInput) {
     folderSearchInput.addEventListener("input", () => {
-        folderFilter = folderSearchInput.value;
-        renderFolders(filteredFolders());
+        setFolderFilter(folderSearchInput.value);
+        renderFoldersFiltered();
     });
 }
 
