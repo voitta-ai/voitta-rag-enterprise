@@ -39,6 +39,14 @@ import { connect } from "./ws.js";
 
 const $ = (sel) => document.querySelector(sel);
 
+let folderFilter = "";
+
+function filteredFolders() {
+    const q = folderFilter.trim().toLowerCase();
+    if (!q) return folders.get();
+    return folders.get().filter((f) => f.display_name.toLowerCase().includes(q));
+}
+
 // ----- Connection pill -----
 connStatus.subscribe((s) => {
     const el = $("#conn-status");
@@ -50,7 +58,7 @@ connStatus.subscribe((s) => {
 // modules can import scheduler functions without circular imports.
 setRenderers({
     full: () => {
-        renderFolders(folders.get());
+        renderFolders(filteredFolders());
         renderSidebar();
         updateToolbarState();
     },
@@ -103,10 +111,6 @@ async function bootstrap() {
     try {
         const rootInfo = await api.root();
         setRootInfo(rootInfo);
-        const hint = $("#root-hint");
-        hint.textContent = rootInfo.configured
-            ? `Managed root: ${rootInfo.root_path}`
-            : "VOITTA_ROOT_PATH not set — folder creation is disabled.";
         $("#btn-new-folder").disabled = !rootInfo.configured;
         const folderList = await api.listFolders();
         folders.set(folderList);
@@ -126,6 +130,16 @@ async function bootstrap() {
         console.warn("snapshot failed", err);
     }
     connect();
+}
+
+// ----- Folder search -----
+
+const folderSearchInput = $("#folder-search");
+if (folderSearchInput) {
+    folderSearchInput.addEventListener("input", () => {
+        folderFilter = folderSearchInput.value;
+        renderFolders(filteredFolders());
+    });
 }
 
 bootstrap();
