@@ -67,7 +67,66 @@ logger = logging.getLogger(__name__)
 
 _current_user: ContextVar[str | None] = ContextVar("voitta_mcp_user", default=None)
 
-mcp = FastMCP("voitta-rag-enterprise")
+_INSTRUCTIONS = """
+You are connected to Voitta RAG Enterprise — a filesystem-driven RAG index with
+hybrid text search (e5-base-v2 dense + BM25 sparse, RRF-fused) and cross-modal
+image search (SigLIP-2).
+
+## Recommended workflow
+
+1. **Orient first.** Start every session with `list_indexed_folders()` (no
+   prefix). This tells you which folders exist, how many files are indexed,
+   and which ones are active in the caller's MCP rotation. Folder `display_name`
+   values are your primary navigation handles — read them carefully before
+   formulating queries.
+
+2. **Search broadly, then narrow.** Run `search(query, limit=20)` across all
+   active folders first. Once you identify the relevant folder, re-run with
+   `folder_ids=[...]` to cut noise. Keep queries short and concrete — BM25
+   rewards exact token matches and the dense model handles paraphrase.
+
+3. **Expand context efficiently.** Prefer `get_chunk_range(file_id, start, end)`
+   over `get_file` for targeted reads — pull ±5 chunks around a hit rather than
+   inlining the full document. Reserve `get_file` for short documents (< ~20
+   chunks) where you need everything.
+
+4. **Images.** Use `search_images` for visual queries ("bar chart showing EMEA
+   growth"). Use `get_image(image_id)` to fetch bytes. Use `list_page_images` /
+   `get_page_image` for full-page layout context on PDFs.
+
+5. **Binary / structured files.** For spreadsheets, PDFs, CAD files — do not
+   inline them into context. Use `request_asset(file_id, "original")` →
+   `fetch_to_python_storage(url=...)` → `run_compute(code=...)` so the bytes
+   stay in Python storage and never enter the LLM context window.
+
+## Best practices to maintain
+
+- **Folder names matter.** `display_name` is the primary signal the LLM uses to
+  scope searches. Well-named folders ("Stella Google Drive", "McKinsey Quarterly
+  Reports") produce better results than generic ones ("GDrive", "Docs").
+
+- **File paths carry meaning.** The `rel_path` is embedded in every chunk
+  payload. Meaningful paths ("reports/2025/Q1-revenue.pdf") give the model
+  provenance context without a follow-up `get_file` call.
+
+- **Use `source_url` for deep-links.** Chunks from Google Drive or GitHub syncs
+  carry a `source_url` pointing back to the original. Always surface this link
+  when citing a result — it lets the user open the canonical source directly.
+
+- **Respect `active` flags.** `list_indexed_folders` returns an `active` field
+  per folder. Folders toggled off by the user should not be searched unless
+  they explicitly ask. You may mention that a relevant folder is inactive and
+  offer to include it.
+
+- **Scope image search.** `search_images` searches the SigLIP-2 collection
+  separately from text chunks — run it in parallel with `search` when the query
+  is likely to have a visual answer (charts, diagrams, photos, slides).
+
+See the project README ("Best practices" section) for the full guide on folder
+naming, file organisation, and search quality.
+"""
+
+mcp = FastMCP("voitta-rag-enterprise", instructions=_INSTRUCTIONS)
 
 
 def _resolved_user() -> str:

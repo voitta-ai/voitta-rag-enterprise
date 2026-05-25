@@ -221,6 +221,60 @@ The local terminal flow (`make dev`) is unaffected by any of this — it doesn't
 
 Bump `image_uri` in the customer's tfvars and `terraform apply -replace=module.voitta_rag.google_compute_instance.this`. The VM is recreated and re-pulls the image; the data PD is a separate resource so app state survives. Downtime ≈ image-pull time on the new VM (a few minutes for the ~14 GB cold pull). There is no blue/green path because the embedded Qdrant + SQLite cannot be safely run from two VMs at once.
 
+## Best practices
+
+Good RAG quality lives mostly in how content is organised — the pipeline's search quality scales with how well the folder structure and file names reflect meaning.
+
+### Folder naming
+
+The `display_name` you give a folder is the primary handle the LLM uses to navigate the index. It appears in every `list_indexed_folders` result and, when searching, guides the model toward the right scope.
+
+- **Be descriptive and specific.** "Stella Google Drive" is better than "GDrive"; "McKinsey Quarterly Reports" is better than "McKinsey". The LLM does substring matching against display names when deciding which folders to search.
+- **Mirror the source.** For synced sources (Google Drive, GitHub), name the folder after the source and its owner: "Acme Corp — Shared Drive" or "Voitta RAG Enterprise Source Git".
+- **Avoid abbreviations** unless they are unambiguous to the intended users.
+
+### File and directory organisation
+
+- **Keep related content together.** The hybrid search (dense + BM25 sparse) ranks chunks against each other across the whole corpus — files that share a folder compete less with unrelated content from other teams.
+- **Use meaningful subdirectory paths.** The `rel_path` field is stored on every indexed chunk and surfaced to the LLM via `file_path`. A file at `reports/2025/Q1-revenue.pdf` gives an LLM more context than `report1.pdf`.
+- **Avoid deep nesting for small collections.** Directories deeper than 3–4 levels rarely add signal and make `list_indexed_folders` directory listings harder to navigate.
+- **Name files after their content.** The filename is part of the chunk payload. "2025 Annual Report — Financials.pdf" is meaningfully different from "document.pdf" when a chunk from it surfaces in search results.
+
+### Sync hygiene
+
+- **Exclude generated / build artefacts** via the ignore pattern (`VOITTA_IGNORE_PATTERNS`). Binary lock files, compiled outputs, and auto-generated directories inflate the index with unjoinable chunks.
+- **For Git repos**, add `node_modules/`, `.venv/`, `dist/`, `build/` to the ignore list before the first sync — re-indexing after the fact works but wastes time.
+- **For Google Drive syncs**, organise the Drive folder before connecting it. Renaming files or moving them inside the Drive after indexing triggers a full re-extract for every changed file.
+
+### Search quality
+
+The index uses two search collections:
+
+| Collection | Model | What it's good at |
+|---|---|---|
+| `chunks` | e5-base-v2 (dense) + BM25 (sparse), RRF-fused | Semantic similarity + exact keyword matching |
+| `images` | SigLIP-2 (image + text encoder) | Visual search — find charts, diagrams, photos |
+
+Practical implications:
+
+- Queries work best when they use language close to what appears in the documents. BM25 rewards exact token matches; the dense model handles paraphrase.
+- Short, concrete queries ("Q4 revenue EMEA 2024") outperform long sentences for chunk retrieval.
+- For image search, describe what you expect to *see* in the image ("bar chart showing growth by region") rather than what you know the document *says about* it.
+- Use `folder_ids` to scope search when you already know which folder is relevant — it cuts noise and speeds up ranking.
+
+### MCP agent workflow
+
+The recommended pattern for an LLM agent using the MCP tools:
+
+1. **Orient** — call `list_indexed_folders()` (no prefix) to see what's available and which folders are active in the caller's rotation.
+2. **Search broadly** — call `search(query, limit=20)` with the full query. Let RRF-fused ranking surface the best chunks across all active folders.
+3. **Narrow** — re-run with `folder_ids=[...]` once you know which folder is relevant.
+4. **Expand context** — use `get_chunk_range(file_id, start, end)` to pull neighbouring chunks around a search hit; avoid `get_file` unless the document is short (< ~20 chunks).
+5. **For images** — use `search_images` for visual queries, then `get_image(image_id)` to fetch bytes. Use `list_page_images` / `get_page_image` when you need the full-page render for layout context.
+6. **For binary files** — use `request_asset(file_id, "original")` → `fetch_to_python_storage` → `run_compute` rather than inlining content into context.
+
+Always call `list_indexed_folders` before any search in a new session — folder names give grounding that makes query formulation significantly more effective.
+
 ## Status
 
 All eight implementation stages are complete. 200+ tests; CI runs lint + tests on every PR.
