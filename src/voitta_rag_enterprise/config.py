@@ -183,6 +183,10 @@ class Settings(BaseSettings):
     # Cookie lifetime for the signed session. 30 days is the same default the
     # voitta-rag app uses; tune via env when stricter rotation is needed.
     session_max_age_seconds: int = 60 * 60 * 24 * 30
+    # Adds the Secure attribute to the session cookie. Must be True in any
+    # deployment served over HTTPS. Set False only for local dev over plain
+    # http://localhost.
+    cookie_secure: bool = True
 
     # SQLAlchemy connection pool sizing. Defaults (5 / 10) are SQLAlchemy's
     # baked-in QueuePool defaults — too small for our profile, which races

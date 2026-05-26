@@ -312,11 +312,8 @@ def create_app() -> FastAPI:
         secret_key=settings.resolved_session_secret(),
         session_cookie="voitta_session",
         max_age=settings.session_max_age_seconds,
-        same_site="lax",
-        # ``https_only`` only flips Secure on; behind Cloudflare/Caddy where
-        # the origin sees plain HTTP this would prevent the cookie from being
-        # set, so leave it False and let the proxy handle TLS.
-        https_only=False,
+        same_site="lax",        # keep lax — Strict breaks the OAuth callback redirect
+        https_only=settings.cookie_secure,  # adds Secure attr; disable only for http://localhost dev
     )
 
     @app.get("/healthz", tags=["health"])
