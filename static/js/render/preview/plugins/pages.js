@@ -22,7 +22,7 @@ const plugin = {
         return PAGE_EXTS.has(_ext(file.rel_path));
     },
 
-    async mount(container, file) {
+    async mount(container, file, opts = {}) {
         container.classList.add("preview-pages");
         container.innerHTML = '<p class="preview-loading">Loading pages…</p>';
         _abortCtrl = new AbortController();
@@ -50,6 +50,7 @@ const plugin = {
                     wrapper.append(img);
                     container.append(wrapper);
                 }
+                if (opts.page != null) _scrollToPage(container, opts.page);
             } else {
                 // No page renders — fall back to extracted text.
                 await _mountText(container, file, signal);
@@ -58,6 +59,10 @@ const plugin = {
             if (signal.aborted) return;
             container.innerHTML = `<p class="preview-error">${err.message}</p>`;
         }
+    },
+
+    jumpTo(container, page) {
+        _scrollToPage(container, page);
     },
 
     unmount(container) {
@@ -88,6 +93,12 @@ async function _mountText(container, file, signal) {
         if (signal.aborted) return;
         container.innerHTML = '<p class="preview-hint">No preview available — file not yet indexed.</p>';
     }
+}
+
+function _scrollToPage(container, page) {
+    const wrappers = container.querySelectorAll(".preview-page-wrapper");
+    const target = wrappers[page];
+    if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 function _ext(relPath) {

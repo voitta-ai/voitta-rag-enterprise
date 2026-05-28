@@ -18,6 +18,8 @@ let _selectedRelDir = ""; // "" = folder root; otherwise "subdir/inner"
 let _selectedFileId = null; // null = dir/root selected; number = file selected
 
 const _expandedNodes = new Set(); // keys: `${folder_id}:${rel_dir}`
+const _expandedFiles = new Set(); // keys: file_id (number) — for artifact children
+let _selectedArtifactPage = null; // null = whole file; number = 0-based page index
 const _ghostDirs = new Map(); // folder_id → Set<rel_dir>
 
 export function nodeKey(folderId, relDir) {
@@ -60,6 +62,25 @@ export function expand(folderId, relDir) {
     _expandedNodes.add(nodeKey(folderId, relDir));
 }
 
+export function isFileExpanded(fileId) {
+    return _expandedFiles.has(fileId);
+}
+
+export function toggleFileExpanded(fileId) {
+    if (_expandedFiles.has(fileId)) _expandedFiles.delete(fileId);
+    else _expandedFiles.add(fileId);
+}
+
+export function getSelectedArtifactPage() {
+    return _selectedArtifactPage;
+}
+
+export function selectArtifact(folderId, relDir, fileId, page) {
+    setSelection(folderId, relDir, fileId);
+    _selectedArtifactPage = page;
+    scheduleFullRender();
+}
+
 export function getGhostDirs() {
     return _ghostDirs;
 }
@@ -83,5 +104,6 @@ export function removeGhostDir(folderId, relDir) {
 // callback so a click never rebuilds three times.
 export function selectNode(folderId, relDir, fileId = null) {
     setSelection(folderId, relDir, fileId);
+    _selectedArtifactPage = null;
     scheduleFullRender();
 }

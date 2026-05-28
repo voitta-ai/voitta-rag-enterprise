@@ -21,7 +21,7 @@ export function registerPlugin(plugin) {
     _plugins.push(plugin);
 }
 
-export function renderFilePreview(fileId) {
+export function renderFilePreview(fileId, opts = {}) {
     const file = files.get().find((f) => f.id === fileId);
     if (!file) return;
 
@@ -38,8 +38,13 @@ export function renderFilePreview(fileId) {
     if (dlBtn.href !== dlUrl) dlBtn.href = dlUrl;
     if (dlBtn.download !== basename) dlBtn.download = basename;
 
-    // Same file — plugin owns its own re-render idempotency.
-    if (fileId === _activeFileId) return;
+    // Same file — if only the page changed, jump without re-mounting.
+    if (fileId === _activeFileId) {
+        if (opts.page != null && _activePlugin?.jumpTo) {
+            _activePlugin.jumpTo($("#preview-body"), opts.page);
+        }
+        return;
+    }
 
     // Unmount the previous plugin.
     if (_activePlugin) {
@@ -54,7 +59,7 @@ export function renderFilePreview(fileId) {
     const plugin = _plugins.find((p) => p.canPreview(file));
     if (plugin) {
         _activePlugin = plugin;
-        plugin.mount(body, file);
+        plugin.mount(body, file, opts);
     }
 }
 
