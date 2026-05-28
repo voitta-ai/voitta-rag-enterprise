@@ -11,7 +11,9 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from pydantic import field_validator
+from typing import Literal
+
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -34,6 +36,7 @@ class Settings(BaseSettings):
     data_dir: Path = _default_data_dir()
     db_path: Path | None = None
     cas_dir: Path | None = None
+    qdrant_mode: Literal["embedded", "standalone"] = "embedded"
     qdrant_url: str | None = None
     qdrant_path: Path | None = None
 
@@ -222,6 +225,14 @@ class Settings(BaseSettings):
         if isinstance(v, str) and v:
             return Path(os.path.expanduser(v))
         return v
+
+    @model_validator(mode="after")
+    def _check_standalone_url(self) -> "Settings":
+        if self.qdrant_mode == "standalone" and not self.qdrant_url:
+            raise ValueError(
+                "VOITTA_QDRANT_URL is required when VOITTA_QDRANT_MODE=standalone"
+            )
+        return self
 
     def resolved_db_path(self) -> Path:
         return self.db_path or (self.data_dir / "voitta.db")

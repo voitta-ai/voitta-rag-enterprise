@@ -123,6 +123,53 @@ All settings carry the `VOITTA_` env-var prefix. See [.env.example](./.env.examp
 | `VOITTA_DISABLE_BACKGROUND`  | Skip watcher + workers (useful for tests)                     |
 | `VOITTA_PUBLIC_BASE_URL`     | Public origin for signed asset URLs (e.g. `https://rag.customer.com`). Set in prod so MCP clients receive absolute URLs; leave empty in local dev. |
 
+## Qdrant in Docker (standalone mode)
+
+For collections larger than ~20 k points, run Qdrant as a standalone Docker container instead of the embedded SQLite backend. The enterprise app switches backends via two env vars.
+
+### Start the container
+
+```bash
+# On the host that will serve Qdrant (e.g. 192.168.88.212)
+mkdir -p /mnt/ssddata/data/qdrant-enterprise
+
+docker run -d \
+  --name qdrant-enterprise \
+  --restart unless-stopped \
+  -p 6335:6333 \
+  -p 6336:6334 \
+  -v /mnt/ssddata/data/qdrant-enterprise:/qdrant/storage \
+  qdrant/qdrant
+```
+
+Verify it's up:
+
+```bash
+curl http://192.168.88.212:6335/collections
+```
+
+### Point the app at it
+
+In your `.env`:
+
+```
+VOITTA_QDRANT_MODE=standalone
+VOITTA_QDRANT_URL=http://192.168.88.212:6335
+```
+
+`VOITTA_QDRANT_URL` is required when mode is `standalone` — the app will refuse to start without it.
+
+### Migrate existing embedded data
+
+If you have an existing embedded Qdrant store, run the migration script **before** switching the env vars:
+
+```bash
+python -m scripts.migrate_qdrant \
+  --target-url http://192.168.88.212:6335
+```
+
+The script scrolls all points from the local SQLite store and uploads them to the Docker instance in batches. The embedded store is left untouched. Once you've verified the point counts match, flip `VOITTA_QDRANT_MODE=standalone` and restart.
+
 ## Deploying on GCP
 
 The supported production target is a single-instance, per-customer deployment in the customer's own GCP project. Everything is co-located: app, worker, embedded Qdrant, SQLite, and CAS share one persistent disk; uploads and Google Drive sync land in the same volume. There is no horizontal scaling — indexing is deliberately serial (see [config.py](./src/voitta_rag_enterprise/config.py)).

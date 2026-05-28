@@ -68,7 +68,7 @@ def get_client() -> QdrantClient:
         with _lock:
             if _client is None:
                 settings = get_settings()
-                if settings.qdrant_url:
+                if settings.qdrant_mode == "standalone":
                     _client = QdrantClient(url=settings.qdrant_url)
                 else:
                     path = settings.resolved_qdrant_path()
