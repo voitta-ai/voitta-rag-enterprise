@@ -272,12 +272,13 @@ function buildFileRow(fileId) {
     return li;
 }
 
-function _buildArtifactBase(fileId, artifactType, artifactIndex) {
+// One summary row per artifact type (images / layout) — clicking opens
+// the detail view in the preview pane rather than flooding the tree.
+function buildArtifactSummaryRow(fileId, type) {
     const li = document.createElement("li");
-    li.className = `tree-row artifact artifact-${artifactType}`;
+    li.className = `tree-row artifact artifact-${type}`;
     li.dataset.fileId = String(fileId);
-    li.dataset.artifactType = artifactType;
-    li.dataset.artifactIndex = String(artifactIndex);
+    li.dataset.artifactType = type;
 
     const nameCell = document.createElement("span");
     nameCell.className = "name-cell";
@@ -286,34 +287,16 @@ function _buildArtifactBase(fileId, artifactType, artifactIndex) {
     chevron.textContent = "·";
     const label = document.createElement("span");
     label.className = "label artifact-label";
+    const icon = document.createElement("span");
+    icon.className = "artifact-summary-icon";
+    icon.textContent = type === "images" ? "📷" : "⊞";
+    const text = document.createElement("span");
+    text.className = "artifact-summary-text";
+    label.append(icon, text);
     nameCell.append(chevron, label);
     li.append(nameCell);
     li.addEventListener("click", onArtifactClick);
-    li._refs = { nameCell, label };
-    return li;
-}
-
-function buildImageArtifactRow(fileId, index) {
-    const li = _buildArtifactBase(fileId, "image", index);
-    const thumb = document.createElement("img");
-    thumb.className = "artifact-thumb";
-    thumb.alt = "";
-    thumb.loading = "lazy";
-    const text = document.createElement("span");
-    li._refs.label.append(thumb, text);
-    li._refs.thumb = thumb;
-    li._refs.text = text;
-    return li;
-}
-
-function buildLayoutArtifactRow(fileId, index) {
-    const li = _buildArtifactBase(fileId, "layout", index);
-    const typeIcon = document.createElement("span");
-    typeIcon.className = "artifact-type-icon";
-    const text = document.createElement("span");
-    li._refs.label.append(typeIcon, text);
-    li._refs.typeIcon = typeIcon;
-    li._refs.text = text;
+    li._refs = { nameCell, icon, text };
     return li;
 }
 
@@ -338,10 +321,9 @@ function onArtifactClick(e) {
     const li = e.currentTarget;
     const fileId = Number(li.dataset.fileId);
     const type = li.dataset.artifactType;
-    const index = Number(li.dataset.artifactIndex);
     const folderId = Number(li.dataset.folderId);
     const relDir = li.dataset.relDir || "";
-    selectArtifact(folderId, relDir, fileId, type, index);
+    selectArtifact(folderId, relDir, fileId, type);
 }
 
 function onRowClick(e) {
@@ -463,42 +445,17 @@ function updateRootSwitches(li, folder) {
     }
 }
 
-const _LAYOUT_ICONS = {
-    title: "T",
-    text: "¶",
-    table: "⊞",
-    image: "🖼",
-    equation: "∑",
-    header: "H",
-    page_number: "#",
-    page_footnote: "†",
-};
-
-function updateImageArtifactRow(li, { file, index, img, depth }) {
+function updateArtifactSummaryRow(li, { file, type, count, depth }) {
     const r = li._refs;
     const pad = `${depth * 14}px`;
     if (r.nameCell.style.paddingLeft !== pad) r.nameCell.style.paddingLeft = pad;
-    const pageLabel = img.page ? ` · p.${img.page}` : "";
-    setIfChanged(r.text, "textContent", `Image ${index + 1}${pageLabel}`);
-    const src = `/api/images/${img.image_id}`;
-    if (r.thumb.getAttribute("src") !== src) r.thumb.setAttribute("src", src);
+    const label = count == null ? "…"
+        : type === "images" ? `Images · ${count}`
+        : `Layout · ${count} block${count === 1 ? "" : "s"}`;
+    setIfChanged(r.text, "textContent", label);
     const sel = getSelectedArtifact();
-    const isSelected = file.id === getSelectedFileId() && sel?.type === "image" && sel?.index === index;
-    setIfChanged(li, "className", `tree-row artifact artifact-image${isSelected ? " selected" : ""}`);
-}
-
-function updateLayoutArtifactRow(li, { file, index, block, depth }) {
-    const r = li._refs;
-    const pad = `${depth * 14}px`;
-    if (r.nameCell.style.paddingLeft !== pad) r.nameCell.style.paddingLeft = pad;
-    const icon = _LAYOUT_ICONS[block.type] || "·";
-    setIfChanged(r.typeIcon, "textContent", icon);
-    const snippet = block.text ? ` ${block.text}` : ` (${block.type})`;
-    setIfChanged(r.text, "textContent", `p.${block.page}${snippet}`);
-    if (r.text.title !== (block.text || "")) r.text.title = block.text || "";
-    const sel = getSelectedArtifact();
-    const isSelected = file.id === getSelectedFileId() && sel?.type === "layout" && sel?.index === index;
-    setIfChanged(li, "className", `tree-row artifact artifact-layout${isSelected ? " selected" : ""}`);
+    const isSelected = file.id === getSelectedFileId() && sel?.type === type;
+    setIfChanged(li, "className", `tree-row artifact artifact-${type}${isSelected ? " selected" : ""}`);
 }
 
 function updateFileRow(li, { file, depth }) {
@@ -716,42 +673,37 @@ function emitTreeRow({ targetRows, seenKeys, folder, node, relDir, displayName, 
         targetRows.push(fli);
         seenKeys.add(fkey);
 
-        // Emit artifact children (page images) for expandable files.
+        // Emit summary artifact rows for expandable files (one per type).
         if (_isExpandable(f.rel_path) && isFileExpanded(f.id)) {
             _loadArtifacts(f.id);
             const imgs = _imageCache.get(f.id);
             const blocks = _layoutCache.get(f.id);
 
-            if (Array.isArray(imgs)) {
-                for (let i = 0; i < imgs.length; i++) {
-                    const akey = `artifact:image:${f.id}:${i}`;
-                    let ali = rowCache.get(akey);
-                    if (!ali) {
-                        ali = buildImageArtifactRow(f.id, i);
-                        rowCache.set(akey, ali);
-                    }
-                    ali.dataset.folderId = String(folder.id);
-                    ali.dataset.relDir = fli.dataset.relDir;
-                    updateImageArtifactRow(ali, { file: f, index: i, img: imgs[i], depth: depth + 2 });
-                    targetRows.push(ali);
-                    seenKeys.add(akey);
-                }
+            // Images summary row — always emit while expanded so user can see
+            // "…" loading state, but skip once loaded if there are no images.
+            const imgLoading = !Array.isArray(imgs);
+            if (imgLoading || (Array.isArray(imgs) && imgs.length > 0)) {
+                const akey = `artifact:images:${f.id}`;
+                let ali = rowCache.get(akey);
+                if (!ali) { ali = buildArtifactSummaryRow(f.id, "images"); rowCache.set(akey, ali); }
+                ali.dataset.folderId = String(folder.id);
+                ali.dataset.relDir = fli.dataset.relDir;
+                updateArtifactSummaryRow(ali, { file: f, type: "images", count: imgLoading ? null : imgs.length, depth: depth + 2 });
+                targetRows.push(ali);
+                seenKeys.add(akey);
             }
 
-            if (Array.isArray(blocks)) {
-                for (let i = 0; i < blocks.length; i++) {
-                    const akey = `artifact:layout:${f.id}:${i}`;
-                    let ali = rowCache.get(akey);
-                    if (!ali) {
-                        ali = buildLayoutArtifactRow(f.id, i);
-                        rowCache.set(akey, ali);
-                    }
-                    ali.dataset.folderId = String(folder.id);
-                    ali.dataset.relDir = fli.dataset.relDir;
-                    updateLayoutArtifactRow(ali, { file: f, index: i, block: blocks[i], depth: depth + 2 });
-                    targetRows.push(ali);
-                    seenKeys.add(akey);
-                }
+            // Layout summary row — same logic.
+            const layoutLoading = !Array.isArray(blocks);
+            if (layoutLoading || (Array.isArray(blocks) && blocks.length > 0)) {
+                const akey = `artifact:layout:${f.id}`;
+                let ali = rowCache.get(akey);
+                if (!ali) { ali = buildArtifactSummaryRow(f.id, "layout"); rowCache.set(akey, ali); }
+                ali.dataset.folderId = String(folder.id);
+                ali.dataset.relDir = fli.dataset.relDir;
+                updateArtifactSummaryRow(ali, { file: f, type: "layout", count: layoutLoading ? null : blocks.length, depth: depth + 2 });
+                targetRows.push(ali);
+                seenKeys.add(akey);
             }
         }
     }

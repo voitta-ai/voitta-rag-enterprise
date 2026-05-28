@@ -19,7 +19,7 @@ let _selectedFileId = null; // null = dir/root selected; number = file selected
 
 const _expandedNodes = new Set(); // keys: `${folder_id}:${rel_dir}`
 const _expandedFiles = new Set(); // keys: file_id (number) — for artifact children
-// null = whole file selected; otherwise { type: 'image'|'layout', index: number }
+// null = whole file selected; otherwise { type: 'images'|'layout' }
 let _selectedArtifact = null;
 const _ghostDirs = new Map(); // folder_id → Set<rel_dir>
 
@@ -77,9 +77,9 @@ export function getSelectedArtifact() {
     return _selectedArtifact;
 }
 
-export function selectArtifact(folderId, relDir, fileId, type, index) {
+export function selectArtifact(folderId, relDir, fileId, type) {
     setSelection(folderId, relDir, fileId);
-    _selectedArtifact = { type, index };
+    _selectedArtifact = { type };
     scheduleFullRender();
 }
 

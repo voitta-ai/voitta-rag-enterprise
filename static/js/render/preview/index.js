@@ -38,12 +38,18 @@ export function renderFilePreview(fileId, opts = {}) {
     if (dlBtn.href !== dlUrl) dlBtn.href = dlUrl;
     if (dlBtn.download !== basename) dlBtn.download = basename;
 
-    // Same file — dispatch artifact jumps without re-mounting.
+    // Same file — let the plugin decide if it needs a full re-mount.
     if (fileId === _activeFileId) {
         if (_activePlugin?.jumpTo) {
-            _activePlugin.jumpTo($("#preview-body"), opts);
+            const needsRemount = _activePlugin.jumpTo($("#preview-body"), opts);
+            if (!needsRemount) return;
+            // Plugin signalled mode change — fall through to full re-mount.
+            _activePlugin.unmount($("#preview-body"));
+            _activePlugin = null;
+            _activeFileId = null;
+        } else {
+            return;
         }
-        return;
     }
 
     // Unmount the previous plugin.
