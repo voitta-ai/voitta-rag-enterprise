@@ -18,6 +18,7 @@ import sys
 from typing import Any
 
 from qdrant_client import QdrantClient
+from qdrant_client.http import models as qm
 
 from voitta_rag_enterprise.config import get_settings
 from voitta_rag_enterprise.services.vector_store import CHUNKS, IMAGES
@@ -81,7 +82,11 @@ def _migrate_collection(src: QdrantClient, dst: QdrantClient, name: str, total: 
         if not results:
             break
 
-        dst.upsert(collection_name=name, points=results)
+        points = [
+            qm.PointStruct(id=r.id, vector=r.vector, payload=r.payload)
+            for r in results
+        ]
+        dst.upsert(collection_name=name, points=points)
         uploaded += len(results)
 
         if bar is not None:
