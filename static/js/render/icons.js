@@ -88,10 +88,8 @@ function _sourceIcon(kind) {
             // Custom teal folder with network-topology glyph (hub + spokes).
             // Teal body immediately distinguishes it from all yellow folders.
             return `${M_FOLDER}/folder-network.svg`;
-        // TODO: vendor sharepoint / amazons3 / microsoftazure when
-        //       those connectors land. Simple Icons dropped Microsoft
-        //       and AWS in 2024 — pick a replacement set then.
         case "sharepoint":
+            return `${SIMPLE}/sharepoint.svg`;
         case "s3":
         case "azure_data_lake":
         case "regular":

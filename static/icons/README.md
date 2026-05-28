@@ -41,11 +41,12 @@ now mixes three providers. All are individually attributed:
   `github-dark.svg` (`fill="#f5f5f7"`) — the upstream SVG uses
   `fill="currentColor"` which an `<img>` element can't inherit.
 
-* **Not present:** Microsoft (SharePoint, Azure) and AWS (S3) —
-  Simple Icons removed these in 2024 over brand-guidelines concerns.
-  When those connectors land we'll vendor proper-coloured icons
-  from upstream brand resource pages (the same path the Google
-  icons took). See the TODO block in `static/js/render/icons.js`.
+* **Hand-crafted:** `sharepoint.svg` — a white "S" stroke on the official
+  SharePoint teal (#038387), drawn as a single cubic-bezier path. Simple Icons
+  dropped Microsoft icons in 2024 over brand-guidelines concerns; this is a
+  minimal clean-room approximation. Azure and S3 remain absent.
+
+* **Not present:** AWS (S3) and Microsoft Azure — see above.
 
 ## Why vendor at all
 
