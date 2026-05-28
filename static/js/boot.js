@@ -98,8 +98,18 @@ jobs.subscribe(() => {
 
 // ----- Bootstrap -----
 
+function hideBootOverlay() {
+    const el = $("#boot-overlay");
+    if (!el) return;
+    el.classList.add("hidden");
+    el.addEventListener("transitionend", () => el.remove(), { once: true });
+}
+
 async function bootstrap() {
-    if (!(await ensureAuthenticated())) return;
+    if (!(await ensureAuthenticated())) {
+        hideBootOverlay();
+        return;
+    }
     try {
         const rootInfo = await api.root();
         setRootInfo(rootInfo);
@@ -121,6 +131,7 @@ async function bootstrap() {
     } catch (err) {
         console.warn("snapshot failed", err);
     }
+    hideBootOverlay();
     connect();
 }
 
