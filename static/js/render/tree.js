@@ -58,7 +58,7 @@ function _applyLockBadge(glyphSpan, on) {
     }
 }
 import {
-    getSelectedArtifactPage,
+    getSelectedArtifact,
     getSelectedFileId,
     getSelectedFolderId,
     getSelectedRelDir,
@@ -102,20 +102,23 @@ function _isExpandable(relPath) {
     return dot >= 0 && _EXPANDABLE_EXTS.has(lower.slice(dot));
 }
 
-// Lazy page-image cache: fileId → undefined (unfetched) | "loading" | page[]
-const _pageCache = new Map();
+// Lazy artifact caches: fileId → undefined (unfetched) | "loading" | item[]
+const _imageCache = new Map();
+const _layoutCache = new Map();
 
-function _loadPageImages(fileId) {
-    if (_pageCache.has(fileId)) return;
-    _pageCache.set(fileId, "loading");
-    api.filePageImages(fileId)
-        .then((pages) => {
-            _pageCache.set(fileId, pages);
-            renderFoldersFiltered();
-        })
-        .catch(() => {
-            _pageCache.set(fileId, []);
-        });
+function _loadArtifacts(fileId) {
+    if (!_imageCache.has(fileId)) {
+        _imageCache.set(fileId, "loading");
+        api.fileImages(fileId)
+            .then((imgs) => { _imageCache.set(fileId, imgs); renderFoldersFiltered(); })
+            .catch(() => { _imageCache.set(fileId, []); });
+    }
+    if (!_layoutCache.has(fileId)) {
+        _layoutCache.set(fileId, "loading");
+        api.fileLayout(fileId)
+            .then((blocks) => { _layoutCache.set(fileId, blocks); renderFoldersFiltered(); })
+            .catch(() => { _layoutCache.set(fileId, []); });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -269,11 +272,12 @@ function buildFileRow(fileId) {
     return li;
 }
 
-function buildArtifactRow(fileId, pageIdx) {
+function _buildArtifactBase(fileId, artifactType, artifactIndex) {
     const li = document.createElement("li");
-    li.className = "tree-row artifact";
+    li.className = `tree-row artifact artifact-${artifactType}`;
     li.dataset.fileId = String(fileId);
-    li.dataset.artifactPage = String(pageIdx);
+    li.dataset.artifactType = artifactType;
+    li.dataset.artifactIndex = String(artifactIndex);
 
     const nameCell = document.createElement("span");
     nameCell.className = "name-cell";
@@ -282,18 +286,34 @@ function buildArtifactRow(fileId, pageIdx) {
     chevron.textContent = "·";
     const label = document.createElement("span");
     label.className = "label artifact-label";
+    nameCell.append(chevron, label);
+    li.append(nameCell);
+    li.addEventListener("click", onArtifactClick);
+    li._refs = { nameCell, label };
+    return li;
+}
+
+function buildImageArtifactRow(fileId, index) {
+    const li = _buildArtifactBase(fileId, "image", index);
     const thumb = document.createElement("img");
     thumb.className = "artifact-thumb";
     thumb.alt = "";
     thumb.loading = "lazy";
     const text = document.createElement("span");
-    label.append(thumb, text);
-    nameCell.append(chevron, label);
+    li._refs.label.append(thumb, text);
+    li._refs.thumb = thumb;
+    li._refs.text = text;
+    return li;
+}
 
-    li.append(nameCell);
-    li.addEventListener("click", onArtifactClick);
-
-    li._refs = { nameCell, thumb, text };
+function buildLayoutArtifactRow(fileId, index) {
+    const li = _buildArtifactBase(fileId, "layout", index);
+    const typeIcon = document.createElement("span");
+    typeIcon.className = "artifact-type-icon";
+    const text = document.createElement("span");
+    li._refs.label.append(typeIcon, text);
+    li._refs.typeIcon = typeIcon;
+    li._refs.text = text;
     return li;
 }
 
@@ -317,10 +337,11 @@ function onChevronClick(e) {
 function onArtifactClick(e) {
     const li = e.currentTarget;
     const fileId = Number(li.dataset.fileId);
-    const pageIdx = Number(li.dataset.artifactPage);
+    const type = li.dataset.artifactType;
+    const index = Number(li.dataset.artifactIndex);
     const folderId = Number(li.dataset.folderId);
     const relDir = li.dataset.relDir || "";
-    selectArtifact(folderId, relDir, fileId, pageIdx);
+    selectArtifact(folderId, relDir, fileId, type, index);
 }
 
 function onRowClick(e) {
@@ -442,23 +463,49 @@ function updateRootSwitches(li, folder) {
     }
 }
 
-function updateArtifactRow(li, { file, pageIdx, page, depth }) {
+const _LAYOUT_ICONS = {
+    title: "T",
+    text: "¶",
+    table: "⊞",
+    image: "🖼",
+    equation: "∑",
+    header: "H",
+    page_number: "#",
+    page_footnote: "†",
+};
+
+function updateImageArtifactRow(li, { file, index, img, depth }) {
     const r = li._refs;
     const pad = `${depth * 14}px`;
     if (r.nameCell.style.paddingLeft !== pad) r.nameCell.style.paddingLeft = pad;
-    const pageNum = page.page ?? pageIdx + 1;
-    setIfChanged(r.text, "textContent", `Page ${pageNum}`);
-    const src = `/api/images/${page.image_id}`;
+    const pageLabel = img.page ? ` · p.${img.page}` : "";
+    setIfChanged(r.text, "textContent", `Image ${index + 1}${pageLabel}`);
+    const src = `/api/images/${img.image_id}`;
     if (r.thumb.getAttribute("src") !== src) r.thumb.setAttribute("src", src);
-    const isSelected = file.id === getSelectedFileId() && getSelectedArtifactPage() === pageIdx;
-    setIfChanged(li, "className", `tree-row artifact${isSelected ? " selected" : ""}`);
+    const sel = getSelectedArtifact();
+    const isSelected = file.id === getSelectedFileId() && sel?.type === "image" && sel?.index === index;
+    setIfChanged(li, "className", `tree-row artifact artifact-image${isSelected ? " selected" : ""}`);
+}
+
+function updateLayoutArtifactRow(li, { file, index, block, depth }) {
+    const r = li._refs;
+    const pad = `${depth * 14}px`;
+    if (r.nameCell.style.paddingLeft !== pad) r.nameCell.style.paddingLeft = pad;
+    const icon = _LAYOUT_ICONS[block.type] || "·";
+    setIfChanged(r.typeIcon, "textContent", icon);
+    const snippet = block.text ? ` ${block.text}` : ` (${block.type})`;
+    setIfChanged(r.text, "textContent", `p.${block.page}${snippet}`);
+    if (r.text.title !== (block.text || "")) r.text.title = block.text || "";
+    const sel = getSelectedArtifact();
+    const isSelected = file.id === getSelectedFileId() && sel?.type === "layout" && sel?.index === index;
+    setIfChanged(li, "className", `tree-row artifact artifact-layout${isSelected ? " selected" : ""}`);
 }
 
 function updateFileRow(li, { file, depth }) {
     const r = li._refs;
     const pad = depth > 0 ? `${depth * 14}px` : "";
     if (r.nameCell.style.paddingLeft !== pad) r.nameCell.style.paddingLeft = pad;
-    const isSelected = file.id === getSelectedFileId() && getSelectedArtifactPage() === null;
+    const isSelected = file.id === getSelectedFileId() && getSelectedArtifact() === null;
     setIfChanged(li, "className", `tree-row file${isSelected ? " selected" : ""}`);
 
     const expandable = _isExpandable(file.rel_path);
@@ -671,19 +718,37 @@ function emitTreeRow({ targetRows, seenKeys, folder, node, relDir, displayName, 
 
         // Emit artifact children (page images) for expandable files.
         if (_isExpandable(f.rel_path) && isFileExpanded(f.id)) {
-            _loadPageImages(f.id);
-            const pages = _pageCache.get(f.id);
-            if (Array.isArray(pages)) {
-                for (let i = 0; i < pages.length; i++) {
-                    const akey = `artifact:${f.id}:${i}`;
+            _loadArtifacts(f.id);
+            const imgs = _imageCache.get(f.id);
+            const blocks = _layoutCache.get(f.id);
+
+            if (Array.isArray(imgs)) {
+                for (let i = 0; i < imgs.length; i++) {
+                    const akey = `artifact:image:${f.id}:${i}`;
                     let ali = rowCache.get(akey);
                     if (!ali) {
-                        ali = buildArtifactRow(f.id, i);
+                        ali = buildImageArtifactRow(f.id, i);
                         rowCache.set(akey, ali);
                     }
                     ali.dataset.folderId = String(folder.id);
                     ali.dataset.relDir = fli.dataset.relDir;
-                    updateArtifactRow(ali, { file: f, pageIdx: i, page: pages[i], depth: depth + 2 });
+                    updateImageArtifactRow(ali, { file: f, index: i, img: imgs[i], depth: depth + 2 });
+                    targetRows.push(ali);
+                    seenKeys.add(akey);
+                }
+            }
+
+            if (Array.isArray(blocks)) {
+                for (let i = 0; i < blocks.length; i++) {
+                    const akey = `artifact:layout:${f.id}:${i}`;
+                    let ali = rowCache.get(akey);
+                    if (!ali) {
+                        ali = buildLayoutArtifactRow(f.id, i);
+                        rowCache.set(akey, ali);
+                    }
+                    ali.dataset.folderId = String(folder.id);
+                    ali.dataset.relDir = fli.dataset.relDir;
+                    updateLayoutArtifactRow(ali, { file: f, index: i, block: blocks[i], depth: depth + 2 });
                     targetRows.push(ali);
                     seenKeys.add(akey);
                 }

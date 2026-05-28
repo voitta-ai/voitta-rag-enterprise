@@ -38,10 +38,10 @@ export function renderFilePreview(fileId, opts = {}) {
     if (dlBtn.href !== dlUrl) dlBtn.href = dlUrl;
     if (dlBtn.download !== basename) dlBtn.download = basename;
 
-    // Same file — if only the page changed, jump without re-mounting.
+    // Same file — dispatch artifact jumps without re-mounting.
     if (fileId === _activeFileId) {
-        if (opts.page != null && _activePlugin?.jumpTo) {
-            _activePlugin.jumpTo($("#preview-body"), opts.page);
+        if (_activePlugin?.jumpTo) {
+            _activePlugin.jumpTo($("#preview-body"), opts);
         }
         return;
     }

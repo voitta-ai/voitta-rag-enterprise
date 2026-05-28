@@ -656,7 +656,7 @@ input[type="text"], input[type="file"] {
 }
 .tree-row.file .label { color: var(--color-text-secondary); }
 
-/* Artifact rows (page children of expandable files) */
+/* Artifact rows (children of expandable files: extracted images + layout blocks) */
 .tree-row.artifact {
     grid-template-columns: 1fr;
 }
@@ -666,7 +666,14 @@ input[type="text"], input[type="file"] {
     gap: 6px;
     color: var(--color-text-secondary);
     font-size: 12px;
+    overflow: hidden;
 }
+.tree-row.artifact .label.artifact-label span:last-child {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+/* Image artifact — thumbnail */
 .artifact-thumb {
     width: 24px;
     height: 32px;
@@ -676,7 +683,28 @@ input[type="text"], input[type="file"] {
     border: 1px solid var(--color-border);
     background: var(--color-bg-secondary);
 }
+/* Layout artifact — block type icon */
+.artifact-type-icon {
+    width: 16px;
+    text-align: center;
+    flex-shrink: 0;
+    font-size: 11px;
+    opacity: 0.7;
+}
 .tree-row.artifact.selected .label.artifact-label { color: #fff; }
+.tree-row.artifact.selected .artifact-type-icon { opacity: 1; }
+/* Figure pin overlaid on page renders in the preview pane */
+.preview-figure-pin {
+    display: block;
+    max-width: 100%;
+    margin: 4px auto;
+    border: 2px solid transparent;
+    border-radius: 3px;
+    transition: border-color 0.15s;
+}
+.preview-figure-pin.highlighted {
+    border-color: var(--color-accent, #4a9eff);
+}
 
 .tree-row .num {
     text-align: right;

@@ -13,7 +13,7 @@
 
 import { api } from "../api.js";
 import { reconcileChildren, setIfChanged } from "../dom/reconcile.js";
-import { getSelectedArtifactPage, getSelectedFileId, getSelectedFolderId, getSelectedRelDir } from "../flows/selection.js";
+import { getSelectedArtifact, getSelectedFileId, getSelectedFolderId, getSelectedRelDir } from "../flows/selection.js";
 import { renderFilePreview, unmountPreview } from "./preview/index.js";
 import { files, folders, folderStats, reindexProgress, syncProgress } from "../store.js";
 
@@ -22,8 +22,7 @@ const $ = (sel) => document.querySelector(sel);
 export function renderSidebar() {
     const fileId = getSelectedFileId();
     if (fileId !== null) {
-        const page = getSelectedArtifactPage();
-        renderFilePreview(fileId, page != null ? { page } : {});
+        renderFilePreview(fileId, getSelectedArtifact() ?? {});
         return;
     }
 

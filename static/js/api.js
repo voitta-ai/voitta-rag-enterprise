@@ -184,6 +184,8 @@ export const api = {
     // File preview
     fileDownloadUrl: (fileId) => `/api/files/${fileId}/raw`,
     filePageImages: (fileId) => req("GET", `/api/files/${fileId}/page-images`),
+    fileImages: (fileId) => req("GET", `/api/files/${fileId}/images`),
+    fileLayout: (fileId) => req("GET", `/api/files/${fileId}/layout`),
     fileMeshUrl: (fileId) => `/api/files/${fileId}/stl`,
     fileEmail: (fileId) => req("GET", `/api/files/${fileId}/email`),
 

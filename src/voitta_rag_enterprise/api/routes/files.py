@@ -440,3 +440,45 @@ def get_file_images(
             )
         )
     return out
+
+
+class LayoutBlock(BaseModel):
+    page: int
+    type: str
+    text: str | None = None
+
+
+@router.get("/{file_id}/layout", response_model=list[LayoutBlock])
+def get_file_layout(
+    file_id: int,
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(current_user),
+) -> list[LayoutBlock]:
+    import json
+
+    file = db.get(File, file_id)
+    if file is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
+    if not file.file_cas_id:
+        raise HTTPException(status.HTTP_409_CONFLICT, "File not yet extracted")
+    try:
+        raw = cas_store.read_file_blob(file.file_cas_id, "page_layout.json")
+    except FileNotFoundError:
+        return []
+    try:
+        blocks = json.loads(raw)
+    except Exception:
+        return []
+    out = []
+    for blk in blocks:
+        if not isinstance(blk, dict):
+            continue
+        page = blk.get("page")
+        btype = blk.get("type") or "text"
+        if not isinstance(page, int):
+            continue
+        text = blk.get("text") or None
+        if isinstance(text, str):
+            text = text[:120].strip() or None
+        out.append(LayoutBlock(page=page, type=btype, text=text))
+    return out
