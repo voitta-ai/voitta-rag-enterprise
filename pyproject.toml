@@ -67,6 +67,7 @@ dev = [
     "httpx>=0.28",
     "ruff>=0.7",
     "mypy>=1.13",
+    "tqdm>=4.66",
 ]
 # Back-compat alias for ``pip install -e ".[ml]"`` references in older
 # docs / scripts. The ml deps are now in core; this stays empty so the

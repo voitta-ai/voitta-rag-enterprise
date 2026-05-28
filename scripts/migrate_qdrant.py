@@ -14,17 +14,18 @@ Run::
 from __future__ import annotations
 
 import argparse
-import logging
 import sys
 from typing import Any
 
 from qdrant_client import QdrantClient
-from qdrant_client.http import models as qm
 
 from voitta_rag_enterprise.config import get_settings
 from voitta_rag_enterprise.services.vector_store import CHUNKS, IMAGES
 
-logger = logging.getLogger(__name__)
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None  # type: ignore[assignment]
 
 BATCH_SIZE = 500
 
@@ -39,30 +40,35 @@ def _recreate_collection(
     if _collection_exists(dst, name):
         info = dst.get_collection(name)
         if info.points_count and not force:
-            logger.error(
-                "Target collection %r already has %d points. "
-                "Use --force to overwrite.",
-                name,
-                info.points_count,
+            print(
+                f"\n  ERROR: target collection {name!r} already has "
+                f"{info.points_count} points. Use --force to overwrite.",
+                file=sys.stderr,
             )
             sys.exit(1)
         dst.delete_collection(name)
-        logger.info("dropped existing target collection %r", name)
 
-    src_info = src.get_collection(name)
-    src_params = src_info.config.params
-
+    src_params = src.get_collection(name).config.params
     dst.create_collection(
         collection_name=name,
         vectors_config=src_params.vectors,
         sparse_vectors_config=src_params.sparse_vectors,
     )
-    logger.info("created target collection %r", name)
 
 
-def _migrate_collection(src: QdrantClient, dst: QdrantClient, name: str) -> int:
+def _migrate_collection(src: QdrantClient, dst: QdrantClient, name: str, total: int) -> int:
     offset: Any = None
-    total = 0
+    uploaded = 0
+
+    if tqdm is not None:
+        bar = tqdm(
+            total=total,
+            desc=f"  {name}",
+            unit="pts",
+            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
+        )
+    else:
+        bar = None
 
     while True:
         results, next_offset = src.scroll(
@@ -75,18 +81,25 @@ def _migrate_collection(src: QdrantClient, dst: QdrantClient, name: str) -> int:
         if not results:
             break
 
-        dst.upsert(
-            collection_name=name,
-            points=results,
-        )
-        total += len(results)
-        logger.info("  %s: %d points uploaded", name, total)
+        dst.upsert(collection_name=name, points=results)
+        uploaded += len(results)
+
+        if bar is not None:
+            bar.update(len(results))
+        else:
+            pct = int(uploaded / total * 100) if total else 0
+            print(f"\r  {name}: {uploaded}/{total} ({pct}%)", end="", flush=True)
 
         if next_offset is None:
             break
         offset = next_offset
 
-    return total
+    if bar is not None:
+        bar.close()
+    else:
+        print()
+
+    return uploaded
 
 
 def main() -> None:
@@ -105,20 +118,18 @@ def main() -> None:
         help="Overwrite existing collections on the target",
     )
     args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
     settings = get_settings()
     source_path = args.source_path or str(settings.resolved_qdrant_path())
     target_url = args.target_url or settings.qdrant_url
 
     if not target_url:
-        logger.error(
-            "No target URL. Pass --target-url or set VOITTA_QDRANT_URL."
-        )
+        print("ERROR: no target URL. Pass --target-url or set VOITTA_QDRANT_URL.", file=sys.stderr)
         sys.exit(1)
 
-    logger.info("Source: %s", source_path)
-    logger.info("Target: %s", target_url)
+    print(f"Source : {source_path}")
+    print(f"Target : {target_url}")
+    print()
 
     src = QdrantClient(path=source_path)
     dst = QdrantClient(url=target_url)
@@ -127,30 +138,39 @@ def main() -> None:
     to_migrate = [n for n in (CHUNKS, IMAGES) if n in src_collections]
 
     if not to_migrate:
-        logger.warning("No collections found in source (%s). Nothing to do.", source_path)
+        print(f"No collections found in source ({source_path}). Nothing to do.")
         src.close()
         dst.close()
         return
 
+    all_ok = True
     for name in to_migrate:
-        src_count = src.get_collection(name).points_count
-        logger.info("Migrating %r (%d points) ...", name, src_count)
+        src_count = src.get_collection(name).points_count or 0
+        print(f"[{name}]  {src_count:,} points")
         _recreate_collection(src, dst, name, args.force)
-        migrated = _migrate_collection(src, dst, name)
-        dst_count = dst.get_collection(name).points_count
-        status = "OK" if dst_count == src_count else "MISMATCH"
-        logger.info(
-            "%s: %r — source=%d migrated=%d target=%d [%s]",
-            status, name, src_count, migrated, dst_count, status,
-        )
-        if status != "OK":
-            logger.warning(
-                "Point count mismatch for %r — check for errors above.", name
-            )
+        migrated = _migrate_collection(src, dst, name, src_count)
+        dst_count = dst.get_collection(name).points_count or 0
+
+        if dst_count == src_count:
+            print(f"  ✓  {dst_count:,} points verified\n")
+        else:
+            print(f"  ✗  MISMATCH — source={src_count} migrated={migrated} target={dst_count}\n", file=sys.stderr)
+            all_ok = False
 
     src.close()
     dst.close()
-    logger.info("Done. Set VOITTA_QDRANT_MODE=standalone and restart the app.")
+
+    if all_ok:
+        print("Migration complete.")
+        print()
+        print("Next steps:")
+        print("  1. Add to your .env:")
+        print("       VOITTA_QDRANT_MODE=standalone")
+        print(f"       VOITTA_QDRANT_URL={target_url}")
+        print("  2. Restart the app.")
+    else:
+        print("Migration finished with errors — check output above.", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
