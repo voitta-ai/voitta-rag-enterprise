@@ -7,6 +7,7 @@ callback (which has to be at a fixed URL Google can return to) lives under
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 from pathlib import Path
@@ -41,6 +42,11 @@ from ...services.sync.google_drive import (
 from ...services.sync.google_drive import (
     list_folder_children as gd_list_folder_children,
     list_root_folders as gd_list_root_folders,
+)
+from ...services.sync.google_drive import (
+    GoogleDriveAuth,
+    GoogleDriveConnector,
+    GoogleWorkspaceAccessError,
 )
 from ...services.sync import microsoft_auth as msa
 from ...services.sync.sharepoint import (
@@ -92,6 +98,10 @@ class GoogleDriveSyncIn(BaseModel):
     # (the admin then registers only the localhost URL in GCP and runs
     # a small local nginx bridge). Default False = original behaviour.
     use_loopback: bool = False
+    # When True, sync downloads only ordinary binary files and skips
+    # Google-native Docs/Sheets/Slides/Forms — so it works even when the
+    # project hasn't enabled those Workspace APIs (only Drive is required).
+    files_only: bool = False
 
 
 class SharePointSite(BaseModel):
@@ -179,6 +189,26 @@ class GoogleDriveSyncOut(BaseModel):
     has_service_account: bool
     connected: bool  # true once a refresh_token has been stored
     use_loopback: bool = False
+    files_only: bool = False
+
+
+class GoogleDriveApiStatusOut(BaseModel):
+    """Result of probing which Workspace APIs the OAuth client can use."""
+
+    drive: bool
+    docs: bool
+    sheets: bool
+    slides: bool
+    forms: bool
+    # Convenience rollups for the UI: Drive is fatal if down; native_ok
+    # means all four export APIs (Docs/Sheets/Slides/Forms) are enabled.
+    drive_ok: bool
+    native_ok: bool
+    # True when the OAuth token lacks required scopes (reconnect, don't
+    # "enable API"). When set, the per-API flags below it are unreliable.
+    scope_problem: bool = False
+    # (api_label, gcp_activation_url) for each disabled API.
+    disabled: list[tuple[str, str]] = Field(default_factory=list)
 
 
 class SharePointSyncOut(BaseModel):
@@ -309,6 +339,7 @@ def _to_out(src: FolderSyncSource) -> SyncSourceOut:
             has_service_account=bool(src.gd_service_account_json),
             connected=bool(src.gd_refresh_token),
             use_loopback=bool(src.gd_use_loopback),
+            files_only=bool(src.gd_files_only),
         )
     elif src.source_type == "nfs":
         root, available, status_str = _nfs_status_snapshot()
@@ -605,6 +636,7 @@ def upsert_sync_source(
         if prev_loopback != bool(gd_cfg.use_loopback):
             src.gd_refresh_token = None
         src.gd_use_loopback = bool(gd_cfg.use_loopback)
+        src.gd_files_only = bool(gd_cfg.files_only)
 
     elif body.source_type in ("sharepoint", "teams"):
         src = _apply_microsoft_config(
@@ -771,6 +803,7 @@ def _clear_google_drive_fields(src: FolderSyncSource) -> None:
     src.gd_service_account_json = None
     src.gd_folder_id = None
     src.gd_use_loopback = False
+    src.gd_files_only = False
 
 
 def _publish_folder_changed(folder: Folder, *, has_sync_source: bool) -> None:
@@ -1110,6 +1143,55 @@ async def gd_browse_folder(
     except Exception as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
     return children
+
+
+@router.get("/google-drive/api-status", response_model=GoogleDriveApiStatusOut)
+async def gd_api_status(
+    folder_id: int,
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(current_user),
+) -> GoogleDriveApiStatusOut:
+    """Probe which Workspace APIs are enabled for this folder's OAuth client.
+
+    Powers the sync modal's "Test API availability" button. Drive being
+    down is fatal (nothing can sync); Docs/Sheets/Slides/Forms being down
+    is recoverable by enabling files-only sync. Never enforces a policy —
+    it just reports — so the UI can guide the user.
+    """
+    _check_owner(folder_id, db, user)
+    src = db.get(FolderSyncSource, folder_id)
+    if src is None or src.source_type != "google_drive":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No Google Drive source")
+    if not src.gd_refresh_token and not src.gd_service_account_json:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Connect via OAuth or save a service-account JSON before testing APIs",
+        )
+    auth = GoogleDriveAuth(
+        client_id=src.gd_client_id or "",
+        client_secret=src.gd_client_secret or "",
+        refresh_token=src.gd_refresh_token or "",
+        service_account_json=src.gd_service_account_json or "",
+    )
+    try:
+        st = await asyncio.to_thread(GoogleDriveConnector().probe_apis, auth)
+    except GoogleWorkspaceAccessError as e:
+        # probe_apis itself doesn't raise this, but token refresh / build
+        # can surface auth problems — relay as a 502 like other GD calls.
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e)) from e
+    except Exception as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e)) from e
+    return GoogleDriveApiStatusOut(
+        drive=st.drive,
+        docs=st.docs,
+        sheets=st.sheets,
+        slides=st.slides,
+        forms=st.forms,
+        drive_ok=st.drive,
+        native_ok=st.native_ok,
+        scope_problem=st.scope_problem,
+        disabled=st.disabled,
+    )
 
 
 @oauth_router.get("/oauth/google/callback")

@@ -191,6 +191,12 @@ class FolderSyncSource(Base):
     # Voitta hostname. A small nginx bridge running on the admin's box
     # proxies the callback back to this server.
     gd_use_loopback: Mapped[bool] = mapped_column(default=False)
+    # When True, sync downloads only ordinary binary files (PDF, DOCX,
+    # images, …) and skips Google-native Docs/Sheets/Slides/Forms. Lets
+    # sync run when the project hasn't enabled the Docs/Sheets/Slides/Forms
+    # APIs (only the Drive API is then required). Default 0 = export
+    # native files too (the all-or-nothing preflight applies).
+    gd_files_only: Mapped[bool] = mapped_column(default=False)
     # Microsoft (shared by ``sharepoint`` and ``teams`` source types).
     # ``ms_auth_method`` is one of: "oauth" (delegated, refresh-token),
     # "app_secret" (client-credentials with a client_secret), "app_cert"

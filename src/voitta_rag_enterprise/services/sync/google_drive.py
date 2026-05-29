@@ -92,6 +92,21 @@ NATIVE_SHEET = "application/vnd.google-apps.spreadsheet"
 NATIVE_SLIDES = "application/vnd.google-apps.presentation"
 NATIVE_FOLDER = "application/vnd.google-apps.folder"
 
+# Which Workspace API each native type's exporter depends on. Used to skip
+# only the native types whose API is disabled in the OAuth client's GCP
+# project (graceful degradation) instead of failing the whole sync or
+# skipping every native type. Keys are the exporter ``mime_type``s
+# (see google_workspace_exporters); values are attribute names on
+# :class:`WorkspaceApiStatus`. Drawings export via the Drive API itself, so
+# they only need ``drive`` (always required).
+NATIVE_MIME_TO_API: dict[str, str] = {
+    NATIVE_DOC: "docs",
+    NATIVE_SHEET: "sheets",
+    NATIVE_SLIDES: "slides",
+    "application/vnd.google-apps.drawing": "drive",
+    "application/vnd.google-apps.form": "forms",
+}
+
 # Sidecar dir for full Sheets workbook exports — also a member of the
 # default ignore_patterns so the indexer never sees these files.
 WORKBOOKS_DIR = ".voitta_workbooks"
@@ -120,6 +135,33 @@ class GoogleWorkspaceAccessError(RuntimeError):
         super().__init__(message)
         self.disabled_apis = disabled_apis or []
         self.scope_problem = scope_problem
+
+
+@dataclass
+class WorkspaceApiStatus:
+    """Per-API result of probing the five Workspace APIs (non-raising).
+
+    Each boolean is True when that API answered our bogus-id probe (i.e.
+    it's enabled in the OAuth client's GCP project). ``disabled`` carries
+    ``(label, activation_url)`` pairs for any API that returned 403
+    SERVICE_DISABLED, so the UI can link straight to the GCP enable page.
+    ``scope_problem`` flags the distinct "token missing scopes → reconnect"
+    case (probing stops at the first such response).
+    """
+
+    drive: bool = False
+    docs: bool = False
+    sheets: bool = False
+    slides: bool = False
+    forms: bool = False
+    scope_problem: bool = False
+    disabled: list[tuple[str, str]] = field(default_factory=list)
+
+    @property
+    def native_ok(self) -> bool:
+        """True when every native-export API (Docs/Sheets/Slides/Forms) is up."""
+        return self.docs and self.sheets and self.slides and self.forms
+
 
 # MIME-level blocklist: applied alongside ``VOITTA_IGNORE_PATTERNS`` so we
 # also catch items the filename globs can miss. Meet recordings, voice
@@ -528,10 +570,15 @@ class GoogleDriveConnector:
         folder_root: Path,
         auth: GoogleDriveAuth,
         drive_folders: list[dict[str, str]],
+        files_only: bool = False,
         progress_cb: Callable[[str, int, int, dict[str, Any] | None], None]
         | None = None,
     ) -> GoogleDriveSyncStats:
         """Mirror Drive content into ``folder_root``.
+
+        ``files_only=True`` downloads ordinary binary files (PDF, DOCX,
+        images, …) and skips Google-native Docs/Sheets/Slides/Forms — only
+        the Drive API needs to be enabled in that mode.
 
         ``progress_cb(phase, done, total, detail)`` — optional. Called
         from the worker thread at every phase boundary, per Drive API
@@ -563,6 +610,7 @@ class GoogleDriveConnector:
             auth=auth,
             progress_cb=progress_cb,
             drive_folders=drive_folders,
+            files_only=files_only,
         )
 
     # -- service plumbing ---------------------------------------------------
@@ -660,6 +708,24 @@ class GoogleDriveConnector:
         creds = self._build_credentials(auth, access_token)
         return build("forms", "v1", credentials=creds, cache_discovery=False)
 
+    def probe_apis(self, auth: GoogleDriveAuth) -> WorkspaceApiStatus:
+        """Probe which Workspace APIs are enabled for ``auth`` (blocking).
+
+        Builds the five services and runs :func:`probe_workspace_apis`.
+        Never raises for a disabled/scope problem — that's encoded in the
+        returned :class:`WorkspaceApiStatus`. Powers the sync modal's
+        "Test API availability" button. Run via ``asyncio.to_thread``;
+        the googleapiclient calls block.
+        """
+        access_token = self._sync_access_token(auth) if auth.refresh_token else None
+        drive, docs = self._build_services(auth, access_token)
+        sheets = self._build_sheets_for_thread(auth, access_token)
+        slides = self._build_slides_for_thread(auth, access_token)
+        forms = self._build_forms_for_thread(auth, access_token)
+        return probe_workspace_apis(
+            drive=drive, docs=docs, sheets=sheets, slides=slides, forms=forms
+        )
+
     def _sync_access_token(self, auth: GoogleDriveAuth) -> str:
         """Synchronous token refresh for use from ``_sync_sync`` (worker thread)."""
         key = (auth.client_id, auth.refresh_token)
@@ -692,6 +758,7 @@ class GoogleDriveConnector:
         folder_root: Path,
         auth: GoogleDriveAuth,
         drive_folders: list[dict[str, str]],
+        files_only: bool = False,
         progress_cb: Callable[[str, int, int, dict[str, Any] | None], None]
         | None = None,
     ) -> GoogleDriveSyncStats:
@@ -715,25 +782,49 @@ class GoogleDriveConnector:
         access_token = self._sync_access_token(auth) if auth.refresh_token else None
         drive, docs = self._build_services(auth, access_token)
 
-        # Preflight every Workspace API the exporter pool will call. If
-        # the project hasn't enabled the Sheets / Slides / Forms APIs
-        # (or the OAuth refresh_token predates the scope expansion), we
-        # discover that NOW with five cheap probes — instead of after
-        # listing 50,000 files only to fail-burst the entire materialise
-        # pool with 403 SERVICE_DISABLED. All-or-nothing: if any API is
-        # missing, the sync stops with a single clear error message
-        # carrying the GCP "Enable API" URL for each disabled service.
+        # Decide which native Workspace types we can actually export, by
+        # probing every API once (five cheap bogus-id calls) up front —
+        # instead of discovering API-not-enabled mid-sync after listing
+        # 50,000 files and fail-bursting the materialise pool with 403
+        # SERVICE_DISABLED. Drive is always required (fatal if disabled or
+        # the token lost its scope). For the rest we degrade gracefully:
+        # export native types whose API is enabled, skip only those whose
+        # API is off. ``files_only`` forces "skip every native type" (mirror
+        # binaries only) regardless of which APIs are on.
         _emit("validating")
-        sheets_svc = self._build_sheets_for_thread(auth, access_token)
-        slides_svc = self._build_slides_for_thread(auth, access_token)
-        forms_svc = self._build_forms_for_thread(auth, access_token)
-        preflight_workspace_apis(
-            drive=drive,
-            docs=docs,
-            sheets=sheets_svc,
-            slides=slides_svc,
-            forms=forms_svc,
-        )
+        enabled_native_mimes: frozenset[str]
+        if files_only:
+            preflight_drive_only(drive)
+            enabled_native_mimes = frozenset()
+        else:
+            sheets_svc = self._build_sheets_for_thread(auth, access_token)
+            slides_svc = self._build_slides_for_thread(auth, access_token)
+            forms_svc = self._build_forms_for_thread(auth, access_token)
+            status = probe_workspace_apis(
+                drive=drive,
+                docs=docs,
+                sheets=sheets_svc,
+                slides=slides_svc,
+                forms=forms_svc,
+            )
+            # Drive disabled / missing scope is fatal — nothing can sync.
+            # Re-run the Drive-only check so we raise the same actionable
+            # error (with the GCP enable URL / reconnect hint).
+            if not status.drive or status.scope_problem:
+                preflight_drive_only(drive)
+            enabled_native_mimes = frozenset(
+                mime
+                for mime, api in NATIVE_MIME_TO_API.items()
+                if getattr(status, api, False)
+            )
+            skipped_types = sorted(
+                set(NATIVE_MIME_TO_API) - enabled_native_mimes
+            )
+            if skipped_types:
+                logger.info(
+                    "native types skipped (Workspace API not enabled): %s",
+                    ", ".join(skipped_types),
+                )
 
         # Same ignore matcher the watcher uses, so policy is consistent
         # whether files arrive over Drive or via local fs. Matching here
@@ -818,6 +909,7 @@ class GoogleDriveConnector:
                     on_page=tick,
                     skipped_counter=skipped_during_listing,
                     pending_native=pending_native,
+                    enabled_native_mimes=enabled_native_mimes,
                 )
             except Exception as e:
                 logger.exception("Drive enumeration failed for %s", folder_id)
@@ -1098,6 +1190,7 @@ class GoogleDriveConnector:
         on_page: Callable[[], None] | None = None,
         skipped_counter: list[int] | None = None,
         pending_native: list[tuple[dict[str, Any], str]] | None = None,
+        enabled_native_mimes: frozenset[str] = frozenset(),
     ) -> None:
         """Recursive Drive listing.
 
@@ -1131,6 +1224,7 @@ class GoogleDriveConnector:
                     on_page=on_page,
                     skipped_counter=skipped_counter,
                     pending_native=pending_native,
+                    enabled_native_mimes=enabled_native_mimes,
                 )
             if on_page is not None:
                 on_page()
@@ -1150,6 +1244,7 @@ class GoogleDriveConnector:
         on_page: Callable[[], None] | None = None,
         skipped_counter: list[int] | None = None,
         pending_native: list[tuple[dict[str, Any], str]] | None = None,
+        enabled_native_mimes: frozenset[str] = frozenset(),
     ) -> None:
         name = item["name"]
         mime = item["mimeType"]
@@ -1157,6 +1252,22 @@ class GoogleDriveConnector:
 
         registry = get_default_registry()
         is_native_known = registry.find(mime) is not None
+
+        # Native Google type whose exporter API isn't available for this
+        # sync (its Workspace API is disabled in the GCP project, or
+        # files-only mode is on). Skip it gracefully — folders still
+        # recurse, binary files still sync, and native types whose API
+        # *is* enabled fall through to the exporter pool below.
+        if (
+            is_native_known
+            and mime != NATIVE_FOLDER
+            and mime not in enabled_native_mimes
+        ):
+            logger.debug("skipping native type (API unavailable): %s (%s)", mime, rel_here)
+            stats.files_skipped += 1
+            if skipped_counter is not None:
+                skipped_counter[0] += 1
+            return
 
         # Apply two skip layers BEFORE we recurse / produce:
         #   1. VOITTA_IGNORE_PATTERNS — filename globs (covers ``*.mp4``,
@@ -1189,6 +1300,7 @@ class GoogleDriveConnector:
                 on_page=on_page,
                 skipped_counter=skipped_counter,
                 pending_native=pending_native,
+                enabled_native_mimes=enabled_native_mimes,
             )
             return
 
@@ -1471,30 +1583,30 @@ def _run_preflight_probe(service: Any, api_id: str) -> Any:
         return e
 
 
-def preflight_workspace_apis(
+def probe_workspace_apis(
     *,
     drive: Any,
     docs: Any,
     sheets: Any,
     slides: Any,
     forms: Any,
-) -> None:
+) -> WorkspaceApiStatus:
     """Probe every Workspace API once with a deliberately bogus id.
 
     Each enabled API returns 404 NOT_FOUND for an unknown resource;
-    each *disabled* API returns 403 SERVICE_DISABLED. We catch the
-    distinction here and raise :class:`GoogleWorkspaceAccessError` if
-    anything is missing — all-or-nothing, per the documented contract.
+    each *disabled* API returns 403 SERVICE_DISABLED. We classify each
+    probe and return a :class:`WorkspaceApiStatus` — this never raises,
+    so callers can either render the result (the UI "Test API
+    availability" button) or enforce a policy (:func:`preflight_workspace_apis`).
 
     The current OAuth scope set covers all five APIs at once, so a
-    scope-insufficient response on any probe means the user's
-    refresh_token predates the scope expansion and they need to
-    reconnect. We surface that distinctly.
+    scope-insufficient response means the refresh_token predates the
+    scope expansion and the user needs to reconnect. We surface that
+    distinctly and stop probing (re-consent fixes every later probe).
 
-    Five Drive API round-trips on every sync; cheap (parallel-ish via
-    underlying httplib2 keepalive) and the one-shot diagnostic is worth
-    the cost vs. discovering API-not-enabled mid-sync after listing
-    50,000 files.
+    Five Drive API round-trips; cheap (parallel-ish via underlying
+    httplib2 keepalive) and the one-shot diagnostic is worth the cost vs.
+    discovering API-not-enabled mid-sync after listing 50,000 files.
     """
     services = {
         "drive": drive,
@@ -1503,42 +1615,94 @@ def preflight_workspace_apis(
         "slides": slides,
         "forms": forms,
     }
-    disabled: list[tuple[str, str]] = []
-    scope_problem = False
-    scope_evidence_api = ""
+    status = WorkspaceApiStatus()
     for label, api_name, api_id in _PREFLIGHT_PROBES:
         err = _run_preflight_probe(services[api_id], api_id)
         if err is None:
             # Bogus id surprisingly resolved (impossible in practice).
             # Treat as "API enabled, move on".
+            setattr(status, api_id, True)
             continue
         if _is_service_disabled(err):
-            disabled.append((label, _extract_activation_url(api_name, err)))
+            status.disabled.append((label, _extract_activation_url(api_name, err)))
             continue
         if _is_scope_insufficient(err):
-            scope_problem = True
-            scope_evidence_api = label
+            status.scope_problem = True
             # Stop probing — re-consent fixes every subsequent probe.
             break
         # Anything else (404 NOT_FOUND, 400 INVALID_ARGUMENT) means the
         # API responded — it's enabled, just rejected our bogus id.
-        # The whole point of the preflight: that's the success signal.
+        setattr(status, api_id, True)
+    return status
 
-    if scope_problem:
+
+def preflight_workspace_apis(
+    *,
+    drive: Any,
+    docs: Any,
+    sheets: Any,
+    slides: Any,
+    forms: Any,
+) -> None:
+    """All-or-nothing preflight: raise if any Workspace API is unusable.
+
+    Thin policy wrapper over :func:`probe_workspace_apis`. Behaviour is
+    unchanged from before the probe/preflight split — used by the default
+    (non files-only) sync path so a missing Sheets/Slides/Forms API fails
+    fast with an actionable, URL-carrying error instead of fail-bursting
+    the materialise pool mid-sync.
+    """
+    status = probe_workspace_apis(
+        drive=drive, docs=docs, sheets=sheets, slides=slides, forms=forms
+    )
+    _raise_for_status(status)
+
+
+def preflight_drive_only(drive: Any) -> None:
+    """Files-only preflight: require just the Drive API.
+
+    Used when the folder is configured for files-only sync — we never
+    touch Docs/Sheets/Slides/Forms, so only the Drive API must be enabled
+    (and the token must carry at least the Drive scope). A missing Drive
+    API is fatal: nothing can be listed or downloaded without it.
+    """
+    err = _run_preflight_probe(drive, "drive")
+    if err is None:
+        return
+    if _is_scope_insufficient(err):
         raise GoogleWorkspaceAccessError(
-            f"OAuth token is missing required scopes (detected on "
-            f"{scope_evidence_api}). Reconnect Google Drive in the sync "
-            f"modal to grant access to Docs / Sheets / Slides / Forms.",
+            "OAuth token is missing the Drive scope. Reconnect Google "
+            "Drive in the sync modal to re-grant access.",
             scope_problem=True,
         )
-    if disabled:
-        names = ", ".join(label for label, _ in disabled)
-        details = "\n".join(f"  • {label}: {url}" for label, url in disabled)
+    if _is_service_disabled(err):
+        url = _extract_activation_url("drive.googleapis.com", err)
+        raise GoogleWorkspaceAccessError(
+            "The Google Drive API is not enabled in the project this OAuth "
+            f"client belongs to. Enable it, then retry sync:\n  • Google "
+            f"Drive: {url}",
+            disabled_apis=[("Google Drive", url)],
+        )
+    # Any other HttpError (404 for the bogus id, etc.) means Drive answered.
+
+
+def _raise_for_status(status: WorkspaceApiStatus) -> None:
+    """Raise :class:`GoogleWorkspaceAccessError` if ``status`` shows a problem."""
+    if status.scope_problem:
+        raise GoogleWorkspaceAccessError(
+            "OAuth token is missing required scopes. Reconnect Google "
+            "Drive in the sync modal to grant access to Docs / Sheets / "
+            "Slides / Forms.",
+            scope_problem=True,
+        )
+    if status.disabled:
+        names = ", ".join(label for label, _ in status.disabled)
+        details = "\n".join(f"  • {label}: {url}" for label, url in status.disabled)
         raise GoogleWorkspaceAccessError(
             f"The following Google Cloud APIs are not enabled in the "
             f"project this OAuth client belongs to: {names}. Enable each "
             f"in the GCP console, then retry sync:\n{details}",
-            disabled_apis=disabled,
+            disabled_apis=status.disabled,
         )
 
 

@@ -751,6 +751,7 @@ async def _run_sync_inner(folder_id: int) -> None:
 
             cfg = {
                 "drive_folders": coerce_folders_field(source.gd_folder_id),
+                "files_only": bool(source.gd_files_only),
                 "auth": GoogleDriveAuth(
                     client_id=source.gd_client_id or "",
                     client_secret=source.gd_client_secret or "",

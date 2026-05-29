@@ -148,6 +148,9 @@ function openSyncModal() {
     $("#sync-gd-sa-json").value = "";
     $("#sync-gd-sa-json").placeholder = '{"type":"service_account","client_email":"…","private_key":"…"}';
     $("#sync-gd-use-loopback").checked = false;
+    $("#sync-gd-files-only").checked = false;
+    $("#sync-gd-api-result").hidden = true;
+    $("#sync-gd-test-hint").textContent = "";
     setGdAuthMode("oauth");
     setGdConnState({ connected: false, hasClientSecret: false });
     // Auto-sync defaults: off, 6h. loadSyncSource overrides from the row.
@@ -626,6 +629,9 @@ function setGdAuthMode(mode) {
         pickBtn.title = saReady
             ? "Pick a folder shared with the service account"
             : "Save a service-account JSON first";
+        const testBtn = $("#sync-gd-test-apis");
+        testBtn.disabled = !saReady;
+        testBtn.title = saReady ? "Probe which Workspace APIs are enabled" : "Save a service-account JSON first";
         idInput.placeholder = "Or paste a folder ID and press Enter";
         $("#sync-gd-folders-hint").innerHTML =
             "Pick from folders shared with the service account, or paste a Drive " +
@@ -676,6 +682,9 @@ function setGdConnState({ connected, hasClientSecret }) {
     if (gdAuthMode === "oauth") {
         pickBtn.disabled = !connected;
         pickBtn.title = connected ? "Pick a Drive folder" : "Connect first";
+        const testBtn = $("#sync-gd-test-apis");
+        testBtn.disabled = !connected;
+        testBtn.title = connected ? "Probe which Workspace APIs are enabled" : "Connect first";
     }
 }
 
@@ -758,6 +767,8 @@ async function loadSyncSource() {
             $("#sync-gd-client-secret").placeholder = gd.has_client_secret ? "(saved — type to replace)" : "GOCSPX-…";
             $("#sync-gd-sa-json").placeholder = gd.has_service_account ? "(service account JSON saved — paste a new one to replace)" : '{"type":"service_account","client_email":"…","private_key":"…"}';
             $("#sync-gd-use-loopback").checked = !!gd.use_loopback;
+            $("#sync-gd-files-only").checked = !!gd.files_only;
+            $("#sync-gd-api-result").hidden = true;
             updateGdRedirectHint();
             // Pick the right tab. If the saved config has a service-account
             // key (and only that), surface SA mode; otherwise default to
@@ -904,6 +915,7 @@ function gdFormConfig() {
     // back-end PUT validator preserves stored secrets when blank values
     // arrive (so "saved" placeholders aren't wiped on every save).
     const useLoopback = !!$("#sync-gd-use-loopback")?.checked;
+    const filesOnly = !!$("#sync-gd-files-only")?.checked;
     if (gdAuthMode === "sa") {
         return {
             client_id: "",
@@ -911,6 +923,7 @@ function gdFormConfig() {
             folders: gdFolders,
             service_account_json: $("#sync-gd-sa-json").value,
             use_loopback: useLoopback,
+            files_only: filesOnly,
         };
     }
     return {
@@ -919,6 +932,7 @@ function gdFormConfig() {
         folders: gdFolders,
         service_account_json: "",
         use_loopback: useLoopback,
+        files_only: filesOnly,
     };
 }
 
@@ -1001,6 +1015,116 @@ $("#sync-gd-client-secret").addEventListener("input", () =>
 // register in GCP. Doesn't save by itself — the value is sent with
 // the next gdFormConfig() Save.
 $("#sync-gd-use-loopback").addEventListener("change", updateGdRedirectHint);
+
+// "Test API availability" — probe which Workspace APIs the OAuth client
+// can reach. Drive down = fatal; Docs/Sheets/Slides/Forms down = offer
+// files-only. Doesn't save; the result just guides the user before they
+// pick folders / save / trigger.
+$("#sync-gd-test-apis").addEventListener("click", async () => {
+    const btn = $("#sync-gd-test-apis");
+    const prev = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Testing…";
+    $("#sync-gd-test-hint").textContent = "";
+    try {
+        const out = await api.gdApiStatus(syncFolderId);
+        renderGdApiStatus(out);
+    } catch (err) {
+        const panel = $("#sync-gd-api-result");
+        panel.hidden = false;
+        panel.innerHTML = "";
+        panel.style.borderLeft = "3px solid var(--color-warning)";
+        panel.style.padding = "8px 10px";
+        const p = document.createElement("p");
+        p.className = "hint";
+        p.textContent = `API test failed: ${err.message}`;
+        panel.appendChild(p);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = prev;
+    }
+});
+
+const _GD_API_ROWS = [
+    ["drive", "Google Drive"],
+    ["docs", "Google Docs"],
+    ["sheets", "Google Sheets"],
+    ["slides", "Google Slides"],
+    ["forms", "Google Forms"],
+];
+
+// Render the GoogleDriveApiStatusOut payload into the result panel: a
+// ✓/✗ row per API (with a GCP "enable" link for disabled ones) plus an
+// overall verdict. When only the native-export APIs are down we auto-tick
+// files-only so the user can save + sync immediately; when Drive itself
+// is down we flag it as fatal.
+function renderGdApiStatus(out) {
+    const panel = $("#sync-gd-api-result");
+    panel.hidden = false;
+    panel.innerHTML = "";
+    panel.style.borderLeft = "3px solid var(--color-warning)";
+    panel.style.padding = "8px 10px";
+
+    if (out.scope_problem) {
+        const h = document.createElement("strong");
+        h.textContent = "OAuth token is missing required scopes.";
+        panel.appendChild(h);
+        const p = document.createElement("p");
+        p.className = "hint";
+        p.style.margin = "4px 0 0";
+        p.textContent = "Reconnect Google Drive (click Connect) to re-grant access, then test again.";
+        panel.appendChild(p);
+        return;
+    }
+
+    const disabledUrls = new Map((out.disabled || []).map(([label, url]) => [label, url]));
+    const ul = document.createElement("ul");
+    ul.style.margin = "4px 0";
+    ul.style.paddingLeft = "18px";
+    for (const [key, label] of _GD_API_ROWS) {
+        const li = document.createElement("li");
+        const ok = !!out[key];
+        li.textContent = `${ok ? "✓" : "✗"} ${label}`;
+        li.style.color = ok ? "var(--color-text)" : "var(--color-warning)";
+        if (!ok && disabledUrls.has(label)) {
+            li.appendChild(document.createTextNode(" — "));
+            const a = document.createElement("a");
+            a.href = disabledUrls.get(label);
+            a.target = "_blank";
+            a.rel = "noopener";
+            a.textContent = "enable in GCP";
+            li.appendChild(a);
+        }
+        ul.appendChild(li);
+    }
+    panel.appendChild(ul);
+
+    const msg = document.createElement("p");
+    msg.className = "hint";
+    msg.style.margin = "4px 0 0";
+    if (!out.drive_ok) {
+        panel.style.borderLeftColor = "var(--color-danger, #ff3b30)";
+        const strong = document.createElement("strong");
+        strong.textContent = "The Google Drive API is disabled — sync cannot run.";
+        msg.appendChild(strong);
+        msg.appendChild(document.createTextNode(
+            " Enable it in the GCP console (link above), then test again."));
+    } else if (!out.native_ok) {
+        const strong = document.createElement("strong");
+        strong.textContent = "Some native-export APIs are disabled.";
+        msg.appendChild(strong);
+        msg.appendChild(document.createTextNode(
+            " Sync will automatically skip only those native types (✗ above) " +
+            "and still export the ones whose API is enabled (✓), plus all binary " +
+            "files (PDF, DOCX, images, …). No action needed — enable the missing " +
+            "APIs in GCP if you also want those types indexed."));
+    } else {
+        msg.appendChild(document.createTextNode(
+            "All Workspace APIs are enabled — full sync (including native " +
+            "Docs / Sheets / Slides / Forms) will work."));
+    }
+    panel.appendChild(msg);
+}
 
 $("#sync-close").addEventListener("click", closeSyncModal);
 $("#sync-backdrop").addEventListener("click", (e) => {
@@ -1091,6 +1215,7 @@ async function _doSave() {
         // / dedupes in the next render).
         setGdFolders(gd.folders || []);
         _snapshotSavedGdFolders(gd.folders || []);
+        $("#sync-gd-files-only").checked = !!gd.files_only;
         setGdConnState({ connected: gd.connected, hasClientSecret: gd.has_client_secret });
     }
     // Sharepoint / Teams post-save refresh — defined further down in the

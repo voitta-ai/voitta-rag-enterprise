@@ -20,6 +20,7 @@ from voitta_rag_enterprise.services.sync.google_drive import (
     NATIVE_SLIDES,
     GoogleDriveAuth,
     GoogleDriveConnector,
+    WorkspaceApiStatus,
 )
 
 # ---------------------------------------------------------------------------
@@ -217,6 +218,7 @@ def _patch_services(
     sheets: _FakeSheets | None = None,
     slides: _FakeSlides | None = None,
     forms: _FakeForms | None = None,
+    api_status: WorkspaceApiStatus | None = None,
 ) -> None:
     """Patch every per-thread service builder so production code paths
     reach the fakes instead of trying to mint real Google credentials.
@@ -225,6 +227,11 @@ def _patch_services(
     arg as ``None`` — the corresponding builder still gets patched (to
     return an empty fake) so the lazy factory inside the connector
     doesn't blow up if some unrelated code path triggers it.
+
+    ``api_status`` overrides the result of the API capability probe the
+    connector runs at sync start; the default reports every API enabled
+    so native exporters run. Pass a partial status to simulate a project
+    with some Workspace APIs disabled (graceful-degradation tests).
     """
     sheets = sheets or _FakeSheets()
     slides = slides or _FakeSlides()
@@ -254,15 +261,20 @@ def _patch_services(
     monkeypatch.setattr(
         connector, "_sync_access_token", lambda *a, **k: "fake-token"
     )
-    # The preflight runs five real ``execute()`` calls against the
-    # production-side service stubs to validate that each Workspace API
-    # is enabled. Our fakes here don't model that behaviour (they're
-    # narrowly scoped per-test), so we no-op the preflight — every test
-    # in this module is exercising the post-preflight code path.
-    # Dedicated preflight coverage lives in ``test_google_drive_preflight``.
+    # The API probe / preflight run real ``execute()`` calls against the
+    # production-side service stubs to detect which Workspace APIs are
+    # enabled. Our fakes here don't model that, so we stub the probe to a
+    # fixed status (all-enabled by default) and no-op the Drive-only
+    # preflight. Dedicated probe/preflight coverage lives in
+    # ``test_google_drive_preflight``.
     import voitta_rag_enterprise.services.sync.google_drive as _gd
 
+    status = api_status or WorkspaceApiStatus(
+        drive=True, docs=True, sheets=True, slides=True, forms=True
+    )
+    monkeypatch.setattr(_gd, "probe_workspace_apis", lambda **kwargs: status)
     monkeypatch.setattr(_gd, "preflight_workspace_apis", lambda **kwargs: None)
+    monkeypatch.setattr(_gd, "preflight_drive_only", lambda drive: None)
 
 
 # ---------------------------------------------------------------------------
@@ -574,6 +586,61 @@ async def test_doc_without_tabs_renders_a_single_md(
     root = (tmp_path / "root").resolve()
     md = (root / "Root" / "Plain.md").read_text()
     assert "legacy body" in md
+
+
+@pytest.mark.asyncio
+async def test_graceful_skip_native_when_api_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When a Workspace API is disabled, the connector exports the native
+    types whose API IS enabled and skips only the disabled ones — instead
+    of failing the whole sync or skipping every native type. Here Docs is
+    enabled (exports) but Slides is disabled (skipped)."""
+    listings = {
+        "ROOT": [
+            {
+                "id": "doc2",
+                "name": "Plain",
+                "mimeType": NATIVE_DOC,
+                "modifiedTime": "2026-05-10T00:00:00Z",
+                "webViewLink": "https://docs.google.com/document/d/doc2/edit",
+            },
+            {
+                "id": "deck1",
+                "name": "Deck",
+                "mimeType": NATIVE_SLIDES,
+                "modifiedTime": "2026-05-10T00:00:00Z",
+                "webViewLink": "https://docs.google.com/presentation/d/deck1/edit",
+            },
+        ]
+    }
+    drive = _FakeDrive(_FakeFiles(listings, export_payloads={}, download_payloads={}))
+    docs = _FakeDocs({
+        "doc2": {"body": {"content": [
+            {"paragraph": {"elements": [{"textRun": {"content": "kept doc", "textStyle": {}}}]}}
+        ]}}
+    })
+    connector = GoogleDriveConnector()
+    # Docs enabled, Slides disabled (Drive always on).
+    _patch_services(
+        connector, drive, docs, monkeypatch,
+        api_status=WorkspaceApiStatus(
+            drive=True, docs=True, sheets=True, slides=False, forms=True
+        ),
+    )
+
+    stats = await connector.sync(
+        folder_root=tmp_path / "root",
+        auth=_make_auth(),
+        drive_folders=[{"id": "ROOT", "name": "Root"}],
+    )
+    assert stats.errors == []
+    root = (tmp_path / "root").resolve()
+    # Doc exported (API enabled)...
+    assert (root / "Root" / "Plain.md").read_text().find("kept doc") >= 0
+    # ...Slides skipped (API disabled) — no output, counted as skipped.
+    assert not list(root.rglob("Deck*"))
+    assert stats.files_skipped >= 1
     sidecar = json.loads((root / ".voitta_sources.json").read_text())
     assert sidecar["Root/Plain.md"]["url"].startswith("https://docs.google.com/document/d/doc2/edit")
 
@@ -669,6 +736,57 @@ async def test_unsupported_native_type_is_skipped(
     assert (root / "Root" / "kept.dat").exists()
     # The unsupported native type produced no on-disk file.
     assert not list(root.rglob("Wiki*"))
+
+
+@pytest.mark.asyncio
+async def test_files_only_skips_native_keeps_binaries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """files_only=True: native Docs/Sheets/etc. are skipped entirely (no
+    Workspace-API export), while ordinary binary files still download.
+    This is the mode that lets sync run when the Docs/Sheets/Slides/Forms
+    APIs are disabled in the GCP project."""
+    listings = {
+        "ROOT": [
+            {
+                "id": "doc1",
+                "name": "Spec",
+                "mimeType": NATIVE_DOC,  # has an exporter; would normally render
+                "modifiedTime": "2026-01-01T00:00:00Z",
+            },
+            {
+                "id": "f1",
+                "name": "report.pdf",
+                "mimeType": "application/pdf",
+                "size": "3",
+                "modifiedTime": "2026-01-01T00:00:00Z",
+                "md5Checksum": "x",
+                "webViewLink": "https://drive.google.com/file/d/f1/view",
+            },
+        ]
+    }
+    drive = _FakeDrive(
+        _FakeFiles(
+            listings,
+            export_payloads={},
+            download_payloads={"f1": b"pdf"},
+        )
+    )
+    connector = GoogleDriveConnector()
+    _patch_services(connector, drive, _FakeDocs({}), monkeypatch)
+
+    stats = await connector.sync(
+        folder_root=tmp_path / "root",
+        auth=_make_auth(),
+        drive_folders=[{"id": "ROOT", "name": "Root"}],
+        files_only=True,
+    )
+    root = (tmp_path / "root").resolve()
+    # Binary file synced.
+    assert (root / "Root" / "report.pdf").read_bytes() == b"pdf"
+    # Native Doc skipped — no markdown export anywhere on disk.
+    assert not list(root.rglob("Spec*"))
+    assert stats.files_skipped >= 1
 
 
 @pytest.mark.asyncio

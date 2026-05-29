@@ -156,6 +156,8 @@ export const api = {
         req("GET", `/api/folders/${folderId}/sync/google-drive/folders`),
     gdBrowseFolder: (folderId, parentId, driveId = "") =>
         req("GET", `/api/folders/${folderId}/sync/google-drive/browse?parent_id=${encodeURIComponent(parentId)}${driveId ? `&drive_id=${encodeURIComponent(driveId)}` : ""}`),
+    gdApiStatus: (folderId) =>
+        req("GET", `/api/folders/${folderId}/sync/google-drive/api-status`),
     // NFS — capability probe + scoped directory picker. The picker
     // walks one level at a time so a deep tree doesn't fetch all at
     // once; the server resolves and validates every ``rel`` against

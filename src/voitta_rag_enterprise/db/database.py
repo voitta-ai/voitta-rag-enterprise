@@ -110,6 +110,16 @@ def init_db() -> None:
             "gd_use_loopback",
             "INTEGER NOT NULL DEFAULT 0",
         )
+        # Files-only Drive sync: skip native Docs/Sheets/Slides/Forms so a
+        # project that hasn't enabled those APIs can still sync binary
+        # files. Default 0 = export native files too. NULL-safe for
+        # existing github/nfs/sharepoint rows that never read it.
+        _ensure_column(
+            raw_conn,
+            "folder_sync_sources",
+            "gd_files_only",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
         # Microsoft (SharePoint + Teams) — shared auth columns plus the
         # per-connector specifics. Defaults are NULL/0 so existing
         # github/google_drive/nfs rows stay untouched.

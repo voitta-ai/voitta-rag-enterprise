@@ -18,7 +18,9 @@ from httplib2 import Response
 
 from voitta_rag_enterprise.services.sync.google_drive import (
     GoogleWorkspaceAccessError,
+    preflight_drive_only,
     preflight_workspace_apis,
+    probe_workspace_apis,
 )
 
 
@@ -305,3 +307,71 @@ def test_preflight_scope_problem_short_circuits_remaining_probes() -> None:
     # Forms was after Docs in the probe order — should be skipped.
     assert "forms.get" not in sentinel
     assert "docs.get" in sentinel
+
+
+# ---------------------------------------------------------------------------
+# probe_workspace_apis — structured, non-raising
+# ---------------------------------------------------------------------------
+
+
+def test_probe_reports_all_enabled() -> None:
+    st = probe_workspace_apis(**_services())
+    assert (st.drive, st.docs, st.sheets, st.slides, st.forms) == (
+        True, True, True, True, True,
+    )
+    assert st.native_ok is True
+    assert st.scope_problem is False
+    assert st.disabled == []
+
+
+def test_probe_reports_partial_disabled_without_raising() -> None:
+    """Slides + Forms disabled (this deployment's real situation): probe
+    flags exactly those two, Drive/Docs/Sheets stay up, and it does NOT
+    raise — the caller decides what to do."""
+    st = probe_workspace_apis(
+        **_services(
+            slides=_service_disabled("slides.googleapis.com"),
+            forms=_service_disabled("forms.googleapis.com"),
+        )
+    )
+    assert st.drive and st.docs and st.sheets
+    assert st.slides is False and st.forms is False
+    assert st.native_ok is False
+    names = {label for label, _ in st.disabled}
+    assert names == {"Google Slides", "Google Forms"}
+
+
+def test_probe_flags_scope_problem() -> None:
+    st = probe_workspace_apis(**_services(docs=_scope_insufficient()))
+    assert st.scope_problem is True
+
+
+# ---------------------------------------------------------------------------
+# preflight_drive_only — files-only mode requires just Drive
+# ---------------------------------------------------------------------------
+
+
+def test_drive_only_passes_when_drive_enabled() -> None:
+    """Drive responds 404 to the bogus id → enabled. No exception even
+    though we never probe the (possibly disabled) native APIs."""
+    preflight_drive_only(_drive_stub(_not_found()))
+
+
+def test_drive_only_ignores_disabled_native_apis() -> None:
+    """The whole point of files-only: Docs/Sheets/Slides/Forms can be
+    disabled and Drive sync still proceeds. preflight_drive_only only
+    looks at Drive, so it never even sees the others."""
+    preflight_drive_only(_drive_stub(_not_found()))  # no native services passed
+
+
+def test_drive_only_raises_when_drive_disabled() -> None:
+    with pytest.raises(GoogleWorkspaceAccessError) as ei:
+        preflight_drive_only(_drive_stub(_service_disabled("drive.googleapis.com")))
+    assert ei.value.disabled_apis[0][0] == "Google Drive"
+    assert "drive.googleapis.com" in str(ei.value)
+
+
+def test_drive_only_raises_on_scope_problem() -> None:
+    with pytest.raises(GoogleWorkspaceAccessError) as ei:
+        preflight_drive_only(_drive_stub(_scope_insufficient()))
+    assert ei.value.scope_problem is True
