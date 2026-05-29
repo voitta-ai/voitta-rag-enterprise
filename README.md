@@ -15,6 +15,36 @@ Filesystem-driven RAG with first-class image support, content-addressable extrac
 
 ## Quickstart
 
+> **System dependencies (native / non-Docker installs).** `pip install -e .`
+> pulls the Python wheels, but several of them `dlopen` native libraries at
+> runtime that pip can't ship. On Debian/Ubuntu install them once *before*
+> `make install`:
+>
+> ```bash
+> sudo apt-get update && sudo apt-get install -y \
+>     libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 \
+>     libcairo2 libpango-1.0-0 libpangocairo-1.0-0 libgdk-pixbuf-2.0-0 \
+>     poppler-utils fonts-liberation \
+>     libegl1 libgl1-mesa-dri libosmesa6
+> # libjpeg is pulled in transitively by the libs above; if you want it
+> # explicit it's `libjpeg62-turbo` on Debian, `libjpeg-turbo8` on Ubuntu.
+> ```
+>
+> Without these, **PDF ingestion fails**: MinerU/OpenCV need `libGL.so.1` (from
+> `libgl1`) plus `libglib2.0-0`, and every PDF otherwise errors with
+> `ImportError: libGL.so.1: cannot open shared object file` — the file lands in
+> `state=error` while non-PDF files index fine. The CAD render path needs the
+> EGL/Mesa trio (`libegl1`, `libgl1-mesa-dri`, `libosmesa6`); `poppler-utils`,
+> `libcairo2`/pango and `fonts-liberation` cover PDF rasterisation and glyphs.
+> **Docker users can skip this** — the [Dockerfile](./Dockerfile) already
+> installs all of them.
+>
+> Fixing this *after* ingesting? Reinstalling the libs is not enough on a
+> running server — MinerU runs as a long-lived daemon subprocess, so **restart
+> the app** to pick up the new libraries, then **Reindex** the affected folder.
+> A plain sync will *not* repair them: sync only fetches new/changed files, it
+> never re-extracts files already on disk.
+
 ```bash
 # 1. Install (defaults to fake embedders — no model downloads required)
 make install
@@ -257,7 +287,7 @@ For per-customer deployment instructions including the manual GCP-console OAuth 
 
 Built by GitHub Actions on tag and published to GHCR. Customers consume it by tag — they do not build anything.
 
-- Base: `python:3.12-slim` + apt deps for MinerU (cairo, poppler, fonts) and headless CAD rendering (`libegl1`, `libgl1-mesa-dri`, `libosmesa6` — the EGL + Mesa Gallium llvmpipe path VTK uses when no GPU is attached).
+- Base: `python:3.12-slim` + apt deps for MinerU/OpenCV (`libgl1`, `libglib2.0-0`, cairo, poppler, fonts — `libgl1` provides the `libGL.so.1` OpenCV `dlopen`s; missing it makes every PDF fail to extract) and headless CAD rendering (`libegl1`, `libgl1-mesa-dri`, `libosmesa6` — the EGL + Mesa Gallium llvmpipe path VTK uses when no GPU is attached). The full list lives in the [Dockerfile](./Dockerfile); native installs must install the same packages (see the Quickstart system-dependencies note).
 - Python deps: `cadquery-ocp` for OpenCASCADE 7.x bindings (~500 MB wheel) and `vtk` for the offscreen renderer (~80 MB wheel) ship in core — no extras flag.
 - Models baked into the image at build time: e5-base, SigLIP-2, fastembed BM25, and MinerU's pipeline weights. This makes the image ~6–8 GB but gives instant cold-start and works in egress-restricted environments.
 - Pinned by version tag (`v0.x.y`); the customer's tfvars references a specific tag.
