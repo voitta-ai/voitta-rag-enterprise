@@ -29,6 +29,7 @@ import "./render/preview/plugins/unsupported.js";
 import "./modals/admin.js";  // self-wires Admin button + admin modal
 import { ensureAuthenticated } from "./modals/login.js";
 import { setRootInfo } from "./modals/new-folder.js";
+import { setRenameRootInfo } from "./modals/rename-folder.js";  // self-wires #rename-* modal
 import "./modals/settings.js";  // self-wires user-pill click + Settings modal
 import "./modals/sync.js";  // self-wires #btn-sync + sync modal + GD picker
 import "./flows/upload.js";  // self-wires Upload button + file input
@@ -113,6 +114,7 @@ async function bootstrap() {
     try {
         const rootInfo = await api.root();
         setRootInfo(rootInfo);
+        setRenameRootInfo(rootInfo);
         $("#btn-new-folder").disabled = !rootInfo.configured;
         const folderList = await api.listFolders();
         folders.set(folderList);

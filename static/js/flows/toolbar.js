@@ -8,6 +8,7 @@
 import { api } from "../api.js";
 import { renderFolders } from "../render/tree.js";
 import { closeModal, openModal } from "../modals/new-folder.js";
+import { openRenameModal } from "../modals/rename-folder.js";
 import { addGhostDir, expand, getSelectedFileId, getSelectedFolderId, getSelectedRelDir, removeGhostDir, setSelection } from "./selection.js";
 import { scheduleFullRender } from "../render/render-loop.js";
 import { files, folders, jobs } from "../store.js";
@@ -66,6 +67,10 @@ export function updateToolbarState() {
         (!!selectedFileId && isRegular)
     );
     $("#btn-remove").disabled = !canRemove;
+    // Rename is a top-level, owner-only action (it can move the directory
+    // on disk + relabel the folder). Disabled for subdirs, files, and
+    // read-only (someone else's shared) folders.
+    $("#btn-rename").disabled = !folder || !isOwned || !isRoot;
 }
 
 async function createSubfolder() {
@@ -173,6 +178,12 @@ $("#btn-remove").addEventListener("click", async () => {
     } catch (err) {
         alert(err.message);
     }
+});
+
+$("#btn-rename").addEventListener("click", () => {
+    const folder = folders.get().find((f) => f.id === getSelectedFolderId());
+    if (!folder) return;
+    openRenameModal(folder);
 });
 
 $("#btn-retry-all").addEventListener("click", async () => {

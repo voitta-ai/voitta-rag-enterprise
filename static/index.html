@@ -262,6 +262,7 @@
                     <button id="btn-upload-folder" class="btn btn-secondary" disabled title="Upload a folder (with its full subdirectory tree preserved)">📁 Upload folder</button>
                     <button id="btn-reindex" class="btn btn-secondary" disabled title="Hard re-index every file under the selected folder or subfolder">↻ Reindex</button>
                     <button id="btn-sync" class="btn btn-secondary" disabled title="Configure or run a remote sync (e.g. GitHub) for this folder">🔄 Sync</button>
+                    <button id="btn-rename" class="btn btn-secondary" disabled title="Rename the selected folder (label and/or directory on disk)">✏ Rename</button>
                     <button id="btn-remove" class="btn btn-secondary" disabled title="Unregister the selected folder">🗑 Remove</button>
                 </div>
                 <input type="file" id="upload-input" multiple hidden>
@@ -395,6 +396,32 @@
                 <p class="hint">Created under <code id="modal-root"></code>.</p>
                 <div class="actions actions-right">
                     <button id="managed-create" class="btn btn-primary">Create folder</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: rename folder -->
+    <div id="rename-backdrop" class="modal-backdrop" hidden>
+        <div class="modal">
+            <div class="modal-header">
+                <h3>Rename folder</h3>
+                <button id="rename-close" class="btn-text">×</button>
+            </div>
+
+            <div class="modal-body">
+                <label>Display name</label>
+                <input type="text" id="rename-display" placeholder="My documents">
+                <p class="hint">The label shown in the sidebar. Cosmetic only.</p>
+                <label>Folder name on disk</label>
+                <input type="text" id="rename-dir" placeholder="project-x">
+                <p class="hint">
+                    Renames the directory under <code id="rename-root"></code>.
+                    Search index, embeddings and files are all preserved — no
+                    re-index needed. Blocked while jobs are running.
+                </p>
+                <div class="actions actions-right">
+                    <button id="rename-save" class="btn btn-primary">Save</button>
                 </div>
             </div>
         </div>

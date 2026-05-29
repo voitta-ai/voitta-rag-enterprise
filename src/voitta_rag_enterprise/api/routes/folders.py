@@ -203,6 +203,47 @@ def _resolve_managed(name: str) -> Path:
     return target
 
 
+def _folder_has_active_job(db: Session, folder_id: int) -> bool:
+    """True if any indexing/sync work is in flight for ``folder_id``.
+
+    Used to gate a *physical* rename: a queued/running job captured the
+    folder's OLD path (or operates on files under it), so renaming the
+    directory out from under it would orphan whatever it writes. Jobs
+    carry no ``folder_id`` column — the linkage lives in the JSON payload
+    (``folder_id`` for folder-level jobs like ``reindex_folder`` / ``sync``;
+    ``file_id`` / ``image_id`` for per-file jobs). We resolve those the
+    same way the reindex endpoint does. A ``sync_status='syncing'`` source
+    counts too, since a connector run may be mid-write.
+    """
+    src = db.execute(
+        select(FolderSyncSource).where(FolderSyncSource.folder_id == folder_id)
+    ).scalar_one_or_none()
+    if src is not None and src.sync_status == "syncing":
+        return True
+
+    inflight = db.execute(
+        select(Job).where(Job.state.in_(("queued", "running")))
+    ).scalars()
+    for j in inflight:
+        try:
+            payload = json.loads(j.payload)
+        except (TypeError, ValueError):
+            continue
+        if payload.get("folder_id") == folder_id:
+            return True
+        fid = payload.get("file_id")
+        if not isinstance(fid, int) and "image_id" in payload:
+            row = db.execute(
+                select(Image.file_id).where(Image.id == int(payload["image_id"]))
+            ).first()
+            fid = row[0] if row is not None else None
+        if isinstance(fid, int):
+            f = db.get(File, fid)
+            if f is not None and f.folder_id == folder_id:
+                return True
+    return False
+
+
 def _to_file_out(f: File) -> FileOut:
     return FileOut(
         id=f.id,
@@ -740,6 +781,130 @@ def set_active_endpoint(
         owned=is_folder_owner(db, folder_id, user.id),
         active=bool(body.active),
     )
+
+
+class RenameIn(BaseModel):
+    """Rename a managed folder.
+
+    ``display_name`` updates the sidebar label only — cosmetic, zero
+    cascade. ``name`` additionally renames the physical directory under
+    ``$VOITTA_ROOT_PATH`` and rewrites ``folders.path``. Everything heavy
+    is rename-invariant: Qdrant points are keyed by ``folder_id`` + the
+    file's *relative* path, CAS entries by content hash, and ``files``
+    rows by ``(folder_id, rel_path)`` — none embed the top-level name, so
+    a physical rename needs no re-index or vector migration. Pass either
+    field or both; at least one is required.
+    """
+
+    display_name: str | None = None
+    name: str | None = None
+
+
+@router.patch("/{folder_id}/rename", response_model=FolderOut)
+def rename_folder(
+    folder_id: int,
+    body: RenameIn,
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(current_user),
+) -> FolderOut:
+    """Owner-only. Update the display label and/or rename the dir on disk.
+
+    The physical-rename path mirrors ``delete_folder``'s load-bearing
+    order: validate + collision-check, refuse while jobs are in flight,
+    unwatch BEFORE the move (so the watcher doesn't fire delete+create
+    churn for every file as the tree moves), ``os.rename``, rewrite
+    ``folders.path``, then re-anchor the watcher to the new path.
+    """
+    folder = _require_owner(db, folder_id, user)
+
+    new_display = body.display_name.strip() if body.display_name is not None else None
+    new_name = body.name.strip() if body.name is not None else None
+    if not new_display and not new_name:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Nothing to rename: provide display_name and/or name.",
+        )
+
+    current_name = Path(folder.path).name
+    physically_renamed = False
+
+    if new_name and new_name != current_name:
+        new_path = _resolve_managed(new_name)  # validates + abs path under root
+
+        clash = db.execute(
+            select(Folder).where(Folder.path == str(new_path))
+        ).scalar_one_or_none()
+        if clash is not None:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"A folder named {new_name!r} is already registered (id={clash.id}).",
+            )
+        if new_path.exists():
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"A directory named {new_name!r} already exists under the root.",
+            )
+
+        # Defensive: only rename folders that genuinely live under the root
+        # (same guard delete_folder uses before touching disk). A hand-edited
+        # DB row pointing elsewhere must not be moved.
+        settings = get_settings()
+        old_path = Path(folder.path)
+        if settings.root_path is not None:
+            resolved_root = Path(settings.root_path).expanduser().resolve()
+            if not old_path.resolve().is_relative_to(resolved_root):
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    "Folder lives outside VOITTA_ROOT_PATH; refusing to rename on disk.",
+                )
+
+        # A running/queued job captured the OLD path — renaming now would
+        # orphan its output. Make the user wait for a quiescent folder.
+        if _folder_has_active_job(db, folder_id):
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "Folder has indexing or sync jobs in progress; wait for them "
+                "to finish before renaming the directory.",
+            )
+
+        unwatch_folder_in_default(folder_id)
+        try:
+            os.rename(old_path, new_path)
+        except OSError as e:
+            # Re-attach the watcher to the still-valid old path and surface.
+            watch_folder_in_default(folder)
+            raise HTTPException(
+                status.HTTP_500_INTERNAL_SERVER_ERROR, f"Rename failed: {e}"
+            )
+        folder.path = str(new_path)
+        physically_renamed = True
+
+    if new_display:
+        folder.display_name = new_display
+    elif physically_renamed and folder.display_name in ("", current_name):
+        # Label was just the old dir name (the create-time default) — keep
+        # it tracking the physical name so it doesn't read stale.
+        folder.display_name = new_name
+
+    db.commit()
+    db.refresh(folder)
+
+    # Re-anchor the watcher AFTER commit so it picks up the new folder.path.
+    if physically_renamed:
+        watch_folder_in_default(folder)
+
+    sync_src = db.execute(
+        select(FolderSyncSource).where(FolderSyncSource.folder_id == folder_id)
+    ).scalar_one_or_none()
+    out = _to_folder_out(
+        folder,
+        has_sync_source=sync_src is not None,
+        sync_source_kind=_sync_source_kind(sync_src),
+        owned=True,
+        active=folder_active_for_user(db, folder_id, user.id),
+    )
+    events.publish("folders", {"type": "folder.upserted", "folder": out.model_dump()})
+    return out
 
 
 @router.get("", response_model=list[FolderOut])

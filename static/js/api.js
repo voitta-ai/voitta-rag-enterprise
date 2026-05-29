@@ -38,6 +38,11 @@ export const api = {
     deleteSubdir: (folderId, rel) => req("DELETE", `/api/folders/${folderId}/dirs?rel=${encodeURIComponent(rel)}`),
     setFolderShare: (id, shared) => req("PATCH", `/api/folders/${id}/share`, { shared }),
     setFolderActive: (id, active) => req("PATCH", `/api/folders/${id}/active`, { active }),
+    // ``name`` is optional — omit it (or pass undefined, which JSON.stringify
+    // drops) for a label-only rename that never touches disk; include it to
+    // also rename the directory under VOITTA_ROOT_PATH.
+    renameFolder: (id, { display_name, name }) =>
+        req("PATCH", `/api/folders/${id}/rename`, { display_name, name }),
     listFiles: (folderId) => req("GET", `/api/folders/${folderId}/files`),
     folderStats: (folderId) => req("GET", `/api/folders/${folderId}/stats`),
     listAllFiles: async () => {
