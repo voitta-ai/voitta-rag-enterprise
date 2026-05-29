@@ -15,6 +15,38 @@ from typing import ClassVar
 
 from .base import BaseParser, ParserResult
 
+# Bytes sampled from the head of an extensionless file to decide whether it
+# is plain text. Big enough to catch an embedded NUL / bad encoding, small
+# enough to stay cheap on large blobs.
+_TEXT_SNIFF_BYTES = 8192
+
+
+def _looks_like_text(file_path: Path, sniff_bytes: int = _TEXT_SNIFF_BYTES) -> bool:
+    """Best-effort "is this a UTF-8 text file?" check by sampling the head.
+
+    An embedded NUL byte is the classic binary tell; a sample that then
+    decodes as UTF-8 is treated as text. We tolerate a multi-byte sequence
+    being sliced at the sample boundary by re-checking with a lenient decode
+    and requiring the bulk of the sample to be printable. Empty files are
+    not text — there's nothing to index.
+    """
+    try:
+        with file_path.open("rb") as fh:
+            chunk = fh.read(sniff_bytes)
+    except OSError:
+        return False
+    if not chunk or b"\x00" in chunk:
+        return False
+    try:
+        chunk.decode("utf-8")
+        return True
+    except UnicodeDecodeError:
+        text = chunk.decode("utf-8", errors="ignore")
+        if not text:
+            return False
+        printable = sum(ch.isprintable() or ch in "\n\r\t\f\v" for ch in text)
+        return printable / len(text) >= 0.90
+
 
 class TextParser(BaseParser):
     # Anything that's plain UTF-8 text. Files matching either ``extensions``
@@ -96,7 +128,18 @@ class TextParser(BaseParser):
     def can_parse(self, file_path: Path) -> bool:
         if file_path.name in self.filenames:
             return True
-        return file_path.suffix.lower() in self.extensions
+        if file_path.suffix.lower() in self.extensions:
+            return True
+        # Extensionless files are common from synced sources — Google Meet
+        # "29 13:00 PST - Chat" exports, Fireflies notes, etc. Extension
+        # matching can't see them, so for a file with NO extension at all we
+        # sniff the content and accept it when it reads as UTF-8 text rather
+        # than dropping it as unsupported. A file with an *unknown* extension
+        # is left alone: an explicit extension we don't list is a deliberate
+        # signal, whereas no extension is just missing metadata.
+        if file_path.suffix == "":
+            return _looks_like_text(file_path)
+        return False
 
     def parse(self, file_path: Path) -> ParserResult:
         try:

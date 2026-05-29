@@ -106,6 +106,47 @@ def test_text_parser_matches_extensionless_file_in_subdir(tmp_path: Path) -> Non
     assert "MIT License" in r.content
 
 
+def test_text_parser_sniffs_unknown_extensionless_text(tmp_path: Path) -> None:
+    """A no-extension file that isn't in ``filenames`` is accepted when its
+    content reads as text — e.g. Google Meet chat exports named like
+    ``29 13:00 PST - Chat`` that Drive serves with no extension."""
+    parser = TextParser()
+    p = tmp_path / "29 13:00 PST - Chat"
+    p.write_text("14:02 Alice: hi\n14:03 Bob: hello\n", encoding="utf-8")
+    assert parser.can_parse(p)
+    r = parser.parse(p)
+    assert r.success
+    assert "Alice" in r.content
+    # And the registry routes it to TextParser end-to-end.
+    assert get_default_registry().find(p) is not None
+
+
+def test_text_parser_rejects_extensionless_binary(tmp_path: Path) -> None:
+    """A no-extension file with binary content (NUL bytes) is NOT treated as
+    text, so binary blobs don't get mis-indexed."""
+    parser = TextParser()
+    p = tmp_path / "blob"
+    p.write_bytes(b"\x89PNG\r\n\x00\x00\x00\rIHDR\x00\x00")
+    assert not parser.can_parse(p)
+
+
+def test_text_parser_rejects_empty_extensionless(tmp_path: Path) -> None:
+    """An empty no-extension file has nothing to index → not text."""
+    parser = TextParser()
+    p = tmp_path / "empty"
+    p.write_bytes(b"")
+    assert not parser.can_parse(p)
+
+
+def test_text_parser_unknown_extension_still_rejected(tmp_path: Path) -> None:
+    """An *unknown* extension is a deliberate signal we don't handle — the
+    content sniff only applies to files with no extension at all."""
+    parser = TextParser()
+    p = tmp_path / "data.weirdext"
+    p.write_text("plain text but odd extension", encoding="utf-8")
+    assert not parser.can_parse(p)
+
+
 def test_image_file_parser_returns_one_image(tmp_path: Path) -> None:
     p = tmp_path / "logo.png"
     p.write_bytes(_png_bytes())
