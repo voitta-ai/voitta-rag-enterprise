@@ -143,9 +143,18 @@ export function summariseSubtree(node, folderActive) {
         if (errored > 0) status = "error";
         else if (indexed + unsupported === total) status = "indexed";
         else if (folderActive && (embedding > 0 || pending > 0)) status = "indexing";
-        // No active jobs for this folder but some files aren't terminal —
-        // they're stragglers, not work in flight. Reading 'indexing' here
-        // is a lie; treat the subtree as done so the UI matches the queue.
+        // Non-terminal files with no observable job touching this folder.
+        // Two ways to land here: (a) crash stragglers — files stuck pending
+        // because a worker died mid-extract — or (b) deep-queue blind spot:
+        // the SPA's jobs store is capped at the most recent 50 entries
+        // (ws.js), so when thousands of extracts are queued the bulk of them
+        // never show up in ``subtreeFoldersWithActiveWork``. Either way the
+        // honest answer is "files are not indexed", not "indexed" — render
+        // 'pending' (warning yellow) so the user can see the gap. If the
+        // queue catches up to this folder, the next ``file.upserted`` will
+        // flip the row to ``indexed`` (green); if nothing ever processes
+        // it, the yellow pill is exactly what they need to see.
+        else if (embedding > 0 || pending > 0) status = "pending";
         else status = "indexed";
     }
     return { total, indexed, unsupported, errored, status };
