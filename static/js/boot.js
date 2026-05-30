@@ -71,8 +71,11 @@ files.subscribe(() => {
 reindexProgress.subscribe(() => {
     // Progress events arrive at ~5/s during a wipe. The badge lives in
     // the sidebar only — the tree doesn't read progress state — so we
-    // skip the tree rebuild entirely.
+    // skip the tree rebuild entirely. We also refresh the Jobs panel so
+    // the inline phase suffix on the running reindex_folder row
+    // ("Reindex folder  #14041 — wiping 800/1613") advances in lockstep.
     scheduleSidebarRender();
+    scheduleJobsRender();
 });
 syncProgress.subscribe(() => {
     scheduleSidebarRender();
@@ -84,8 +87,28 @@ folderStats.subscribe(() => {
     // — no need to rebuild the tree.
     scheduleSidebarRender();
 });
+// 1-second tick: advances the "running 12s" tail on each Jobs-panel row.
+// We don't want a permanent setInterval ticking when nothing is running
+// (the panel would needlessly re-render every second forever) so the tick
+// self-suspends whenever the jobs store has zero running rows, and the
+// jobs.subscribe handler below revives it the moment one appears.
+let _jobsTickHandle = null;
+function _jobsTickerStartIfNeeded() {
+    if (_jobsTickHandle !== null) return;
+    if (!jobs.get().some((j) => j.state === "running")) return;
+    _jobsTickHandle = setInterval(() => {
+        if (!jobs.get().some((j) => j.state === "running")) {
+            clearInterval(_jobsTickHandle);
+            _jobsTickHandle = null;
+            return;
+        }
+        scheduleJobsRender();
+    }, 1000);
+}
+
 jobs.subscribe(() => {
     scheduleJobsRender();
+    _jobsTickerStartIfNeeded();
     updateJobsTabIndicator();
     // The tree's per-subtree status reads jobs.get() to decide between
     // "indexing" and "indexed" (see hasActiveWork in summariseSubtree). The

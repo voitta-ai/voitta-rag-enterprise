@@ -160,12 +160,18 @@ function handleEvent(event) {
             files.update((list) => list.filter(f => f.id !== event.file_id));
             return;
         case "job.started": {
+            // started_at_ms is a client-side stamp used by the Jobs panel
+            // to render a live "running 12s" suffix on the status pill.
+            // The server doesn't ship the claim time on this event, but
+            // we know we observed the start within ws transit so the
+            // client clock is a tight enough proxy for a human counter.
             const j = {
                 id: event.job_id,
                 kind: event.kind,
                 state: "running",
                 payload: event.payload,
                 display_path: event.display_path || null,
+                started_at_ms: Date.now(),
             };
             jobs.update((list) => [j, ...list.filter(x => x.id !== j.id)].slice(0, 50));
             return;

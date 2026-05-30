@@ -797,6 +797,55 @@ input[type="text"], input[type="file"] {
     color: var(--color-text-secondary);
 }
 
+/* Job-row states. ``error`` is already coloured by the rule above; the
+   other three were previously unstyled and rendered as bare text. */
+.status-tag.running { background: rgba(0, 113, 227, 0.15); color: var(--color-accent); }
+.status-tag.queued  { background: rgba(142, 142, 147, 0.18); color: var(--color-text-secondary); }
+.status-tag.done    { background: rgba(52, 199, 89, 0.15); color: var(--color-success); }
+
+/* Pulsing dot on a running pill. Adds a quiet "this is alive" signal
+   without rebuilding the row on every animation frame: it's a pure CSS
+   animation, not a JS tick. ``currentColor`` keeps the dot in sync with
+   the pill's text colour if it gets restyled. */
+@keyframes status-pulse {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.35; }
+}
+.status-tag.running::before {
+    content: '';
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background-color: currentColor;
+    margin-right: 6px;
+    animation: status-pulse 1.2s ease-in-out infinite;
+    flex: 0 0 auto;
+}
+
+/* Tabular nums everywhere a counter advances inside a status pill or id
+   chip, so "12s -> 13s" / "#9 -> #10" doesn't twitch the surrounding row. */
+.status-tag, .job-rows .job-id { font-variant-numeric: tabular-nums; }
+
+/* The top line of a job row: a primary verb plus a muted #id. */
+.job-rows .top { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.job-rows .top .label {
+    color: var(--color-text);
+    font-size: 12px;
+    font-weight: 500;
+    /* Allow the label to truncate when the phase suffix gets long
+       ("Reindex folder — wiping 1234/5678") rather than wrapping over
+       two lines and shoving the path further down. */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.job-rows .top .job-id {
+    color: var(--color-text-tertiary);
+    font-size: 11px;
+    flex: 0 0 auto;
+}
+
 /* ---------- Sidebar ---------- */
 
 .sidebar {

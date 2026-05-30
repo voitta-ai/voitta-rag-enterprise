@@ -14,7 +14,7 @@
 
 import { api } from "../api.js";
 import { reconcileChildren, setIfChanged } from "../dom/reconcile.js";
-import { jobs } from "../store.js";
+import { jobs, reindexProgress } from "../store.js";
 
 const $ = (sel) => document.querySelector(sel);
 const jobRowCache = new Map();
@@ -33,15 +33,28 @@ function buildJobRow(jobId) {
 
     const col = document.createElement("div");
     col.className = "col";
-    const top = document.createElement("span");
+    // Lines inside the col are <div>s rather than <span>s on purpose:
+    // a flex-column of block children copies as one-line-per-child in
+    // every browser, so selecting a row no longer pastes as
+    // "Extract  #17945branches/main/...queued".
+    const top = document.createElement("div");
+    top.className = "top";
+    // The top line is split into a primary label and a muted #id chip
+    // so the action ("Extract") dominates and the id stays available
+    // for cross-referencing logs without shouting on every row.
+    const topLabel = document.createElement("span");
+    topLabel.className = "label";
+    const topId = document.createElement("span");
+    topId.className = "job-id";
+    top.append(topLabel, topId);
     // Per-row file-path line: rendered for jobs whose payload references
     // a file (extract / embed_text / embed_image / delete_file). Hidden
     // for sync / reindex_folder rows where folder context is shown
     // elsewhere.
-    const path = document.createElement("span");
+    const path = document.createElement("div");
     path.className = "path";
     path.hidden = true;
-    const err = document.createElement("span");
+    const err = document.createElement("div");
     err.className = "err";
     err.hidden = true;
     col.append(top, path, err);
@@ -83,18 +96,60 @@ function buildJobRow(jobId) {
     });
 
     li.append(col, tag, cancel, retry);
-    li._refs = { top, path, err, tag, cancel, retry };
+    li._refs = { topLabel, topId, path, err, tag, cancel, retry };
     return li;
 }
 
+// Compact wall-clock duration: 12s / 3m 04s / 1h 12m. Sized so it fits
+// inside the status pill without making the row jump as the value grows.
+function formatElapsed(ms) {
+    const s = Math.max(0, Math.floor(ms / 1000));
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m}m ${String(s % 60).padStart(2, "0")}s`;
+    const h = Math.floor(m / 60);
+    return `${h}h ${String(m % 60).padStart(2, "0")}m`;
+}
+
+// Human verbs for the kind enum. Falls back to the raw kind for any
+// future kind we haven't taught the SPA about, so a new worker type
+// still renders something instead of crashing the row.
+const KIND_LABEL = {
+    extract:        "Extract",
+    embed_text:     "Embed text",
+    embed_image:    "Embed image",
+    delete_file:    "Delete",
+    sync:           "Sync",
+    reindex_folder: "Reindex folder",
+};
+
 function updateJobRow(li, j) {
     const r = li._refs;
-    const top = `${j.kind} #${j.id}`;
-    setIfChanged(r.top, "textContent", top);
+    let labelText = KIND_LABEL[j.kind] || j.kind;
+    // Surface the active reindex phase inline on running reindex_folder
+    // rows so the label reads "Reindex folder — wiping 800/1613" instead
+    // of just "Reindex folder". boot.js calls scheduleJobsRender on every
+    // reindexProgress tick so this string refreshes as the worker advances.
+    // ``phase === 'done'`` clears the entry from the store, so we never see it.
+    if (j.state === "running" && j.kind === "reindex_folder") {
+        const fid = j.payload && j.payload.folder_id;
+        if (fid != null) {
+            const prog = reindexProgress.get().get(fid);
+            if (prog && prog.phase) {
+                const done = prog.done ?? 0;
+                const total = prog.total ?? 0;
+                labelText += total
+                    ? ` — ${prog.phase} ${done}/${total}`
+                    : ` — ${prog.phase}`;
+            }
+        }
+    }
+    setIfChanged(r.topLabel, "textContent", labelText);
+    setIfChanged(r.topId, "textContent", `#${j.id}`);
 
     // ``display_path`` arrives on the running event AND on the recent-jobs
     // first-load (same name on both wire shapes). Show only when present;
-    // otherwise the row is just ``kind #id``.
+    // otherwise the row is just ``label #id``.
     if (j.display_path) {
         setIfChanged(r.path, "textContent", j.display_path);
         if (r.path.hidden) r.path.hidden = false;
@@ -111,7 +166,16 @@ function updateJobRow(li, j) {
     }
 
     setIfChanged(r.tag, "className", `status-tag ${j.state}`);
-    setIfChanged(r.tag, "textContent", j.state);
+    // For running rows, append a live elapsed-time tail ("running 12s") so
+    // the row reports forward motion even between server events. ws.js
+    // stamps ``started_at_ms`` on job.started; if it's missing (e.g. the row
+    // arrived via /api/jobs/recent without a client stamp) we render just
+    // the status word — the tail will start ticking on the next event.
+    let statusText = j.state;
+    if (j.state === "running" && j.started_at_ms) {
+        statusText += " " + formatElapsed(Date.now() - j.started_at_ms);
+    }
+    setIfChanged(r.tag, "textContent", statusText);
 
     // Cancel button: visible while the job can still be aborted. Done /
     // error rows hide it (terminal). Reset disabled when the row
