@@ -299,8 +299,21 @@ class ImagePoint:
     layout_summary: dict | None = None
 
 
+# Max points per Qdrant upsert request. Qdrant rejects request bodies over
+# its ``service.max_request_size_mb`` (32 MB by default) with a 400. A big
+# spreadsheet can produce thousands of chunks — one per row — whose combined
+# JSON payload (768-d dense vector + sparse + row text, ~20 KB/point) blows
+# past that in a single upsert. Batching keeps each request well under the
+# cap: 256 points * ~20 KB ≈ 5 MB. Lower it if rows can be very large.
+_UPSERT_BATCH_POINTS = 256
+
+
 def replace_chunks_for_file(file_id: int, points: list[ChunkPoint]) -> None:
-    """Atomic: drop every point owned by ``file_id``, then upsert ``points``."""
+    """Atomic-ish: drop every point owned by ``file_id``, then upsert ``points``.
+
+    The upsert is batched so files that produce thousands of chunks (large
+    spreadsheets) don't exceed Qdrant's per-request size limit.
+    """
 
     def _do() -> None:
         client = get_client()
@@ -318,22 +331,21 @@ def replace_chunks_for_file(file_id: int, points: list[ChunkPoint]) -> None:
         )
         if not points:
             return
-        client.upsert(
-            CHUNKS,
-            points=[
-                qm.PointStruct(
-                    id=p.chunk_id,
-                    vector={
-                        "dense": p.dense,
-                        "sparse": qm.SparseVector(
-                            indices=p.sparse.indices, values=p.sparse.values
-                        ),
-                    },
-                    payload=_chunk_payload(p),
-                )
-                for p in points
-            ],
-        )
+        structs = [
+            qm.PointStruct(
+                id=p.chunk_id,
+                vector={
+                    "dense": p.dense,
+                    "sparse": qm.SparseVector(
+                        indices=p.sparse.indices, values=p.sparse.values
+                    ),
+                },
+                payload=_chunk_payload(p),
+            )
+            for p in points
+        ]
+        for start in range(0, len(structs), _UPSERT_BATCH_POINTS):
+            client.upsert(CHUNKS, points=structs[start : start + _UPSERT_BATCH_POINTS])
 
     run_on_qdrant(_do)
 
@@ -589,6 +601,46 @@ def delete_chunks_for_file(file_id: int) -> None:
                 )
             ),
         )
+
+    run_on_qdrant(_do)
+
+
+# Max file_ids per delete filter. Keeps the ``MatchAny`` request small even
+# when a whole folder is reindexed (thousands of files); Qdrant deletes by
+# filter in one pass per call.
+_DELETE_FILTER_BATCH = 500
+
+
+def delete_chunks_for_files(file_ids: list[int]) -> None:
+    """Drop every chunk point belonging to any of ``file_ids`` in O(1) calls.
+
+    Scoped to exactly the given files — used by ``reindex_folder`` so a
+    *partial* reindex (a subset of a folder's files) wipes only those files'
+    points, not the whole folder. Batches the ``MatchAny`` filter so a
+    full-folder reindex (every file_id) still issues a handful of deletes
+    rather than thousands.
+    """
+    if not file_ids:
+        return
+
+    def _do() -> None:
+        client = get_client()
+        if not client.collection_exists(CHUNKS):
+            return
+        for start in range(0, len(file_ids), _DELETE_FILTER_BATCH):
+            batch = file_ids[start : start + _DELETE_FILTER_BATCH]
+            client.delete(
+                CHUNKS,
+                points_selector=qm.FilterSelector(
+                    filter=qm.Filter(
+                        must=[
+                            qm.FieldCondition(
+                                key="file_id", match=qm.MatchAny(any=list(batch))
+                            )
+                        ]
+                    )
+                ),
+            )
 
     run_on_qdrant(_do)
 

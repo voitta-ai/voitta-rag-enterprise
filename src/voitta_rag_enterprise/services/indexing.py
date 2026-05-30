@@ -1036,16 +1036,13 @@ def _run_reindex_sync(folder_id: int | None, file_ids: list[int]) -> None:
                 folder_id, phase="wiping", done=wiped, total=total
             )
 
-        # 2b. One Qdrant call per collection, scoped by folder_id (chunks)
-        # or by file_ids set (images, which can be CAS-shared with files
-        # in *other* folders).
-        if folder_id is not None:
-            vector_store.delete_chunks_for_folder(folder_id)
-        else:
-            # Defensive: caller didn't pass a folder_id (shouldn't happen
-            # for the normal reindex path, but leave a fallback).
-            for fid in file_ids:
-                vector_store.delete_chunks_for_file(fid)
+        # 2b. Wipe Qdrant chunk points for exactly the files being
+        # re-extracted — scoped to ``file_ids``, NOT the whole folder. A
+        # folder-wide delete here would nuke every other file's vectors on a
+        # *partial* reindex (e.g. reindexing one file), leaving them indexed
+        # in SQLite but absent from Qdrant. Batched filter-deletes keep a
+        # full-folder reindex to a handful of round-trips.
+        vector_store.delete_chunks_for_files(file_ids)
         deleted_image_points = vector_store.remove_files_from_image_points(file_ids)
         if deleted_image_points:
             logger.info(
