@@ -20,6 +20,7 @@ from .base import (
     NativeDriveExporter,
     ProducerContext,
     RemoteEntry,
+    execute_with_retry,
 )
 
 
@@ -229,7 +230,7 @@ def _make_form_producer(
 ) -> Callable[[Path, Any, ProducerContext], None]:
     def _produce(dest: Path, drive: Any, ctx: ProducerContext) -> None:  # noqa: ARG001
         forms = ctx.forms()
-        form = forms.forms().get(formId=form_id).execute()
+        form = execute_with_retry(forms.forms().get(formId=form_id), label="forms")
         body = render_form_markdown(form)
         text = f"{FINGERPRINT_PREFIX}{fingerprint}{FINGERPRINT_SUFFIX}\n{body}"
         _atomic_write_text(dest, text)

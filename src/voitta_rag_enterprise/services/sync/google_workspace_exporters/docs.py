@@ -49,6 +49,7 @@ from .base import (
     NativeDriveExporter,
     ProducerContext,
     RemoteEntry,
+    execute_with_retry,
     safe_filename,
 )
 
@@ -76,11 +77,11 @@ class DocumentExporter(NativeDriveExporter):
         modified_time = item.get("modifiedTime", "")
         web_url = item.get("webViewLink") or _doc_view_url(doc_id)
 
-        document = (
+        document = execute_with_retry(
             ctx.docs()
             .documents()
-            .get(documentId=doc_id, includeTabsContent=True)
-            .execute()
+            .get(documentId=doc_id, includeTabsContent=True),
+            label="docs",
         )
         if not has_tabs(document):
             # Docs created via the API or before the tabs feature shipped

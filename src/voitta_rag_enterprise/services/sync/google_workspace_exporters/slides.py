@@ -37,6 +37,7 @@ from .base import (
     NativeDriveExporter,
     ProducerContext,
     RemoteEntry,
+    execute_with_retry,
     safe_filename,
 )
 
@@ -139,11 +140,11 @@ class PresentationExporter(NativeDriveExporter):
 
         # Pull the structural payload once; the producers below run on
         # the captured snapshot.
-        deck = (
+        deck = execute_with_retry(
             ctx.slides()
             .presentations()
-            .get(presentationId=deck_id)
-            .execute()
+            .get(presentationId=deck_id),
+            label="slides",
         )
         slides = deck.get("slides") or []
         if not slides:
@@ -338,15 +339,15 @@ def _make_thumbnail_producer(
         # httpx GET on contentUrl, which is free).
         _thumbnail_limiter.acquire()
         slides = ctx.slides()
-        resp = (
+        resp = execute_with_retry(
             slides.presentations()
             .pages()
             .getThumbnail(
                 presentationId=deck_id,
                 pageObjectId=slide_id,
                 thumbnailProperties_thumbnailSize=THUMBNAIL_SIZE,
-            )
-            .execute()
+            ),
+            label="slides",
         )
         content_url = resp.get("contentUrl")
         if not content_url:

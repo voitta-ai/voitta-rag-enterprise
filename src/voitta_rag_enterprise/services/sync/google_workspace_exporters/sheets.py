@@ -34,6 +34,7 @@ from .base import (
     NativeDriveExporter,
     ProducerContext,
     RemoteEntry,
+    execute_with_retry,
     safe_filename,
 )
 
@@ -76,14 +77,14 @@ class SpreadsheetExporter(NativeDriveExporter):
         # ``spreadsheets.get`` with a small fields mask gets us the sheet
         # list + properties without dragging the cell contents over the
         # wire. Cells are fetched per-sheet by the producers below.
-        spreadsheet = (
+        spreadsheet = execute_with_retry(
             ctx.sheets()
             .spreadsheets()
             .get(
                 spreadsheetId=sheet_id,
                 fields="sheets(properties(sheetId,title,gridProperties(rowCount,columnCount)))",
-            )
-            .execute()
+            ),
+            label="sheets",
         )
         sheets = spreadsheet.get("sheets") or []
 
@@ -237,7 +238,7 @@ def _make_sheet_producer(
         # paging. Sheets accepts up to column ZZZ today; ZZ is 702
         # columns which is well past anything a user-facing sheet has.
         cell_range = f"'{_escape_a1_quotes(sheet_title)}'!A1:ZZ{MAX_ROWS_PER_SHEET}"
-        resp = (
+        resp = execute_with_retry(
             sheets.spreadsheets()
             .values()
             .get(
@@ -245,8 +246,8 @@ def _make_sheet_producer(
                 range=cell_range,
                 valueRenderOption="FORMATTED_VALUE",
                 dateTimeRenderOption="FORMATTED_STRING",
-            )
-            .execute()
+            ),
+            label="sheets",
         )
         rows = resp.get("values") or []
         body = render_sheet_markdown(

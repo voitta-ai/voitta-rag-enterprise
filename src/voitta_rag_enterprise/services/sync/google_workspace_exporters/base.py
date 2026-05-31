@@ -27,15 +27,90 @@ they need — see :class:`ProducerContext`.
 
 from __future__ import annotations
 
+import logging
+import random
 import re
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
 
+logger = logging.getLogger(__name__)
 
 _SAFE_NAME_RE = re.compile(r"[<>:\"/\\|?*\x00-\x1f]")
+
+# Workspace read quotas are per-minute-per-user (Docs is 300/min). The
+# native-export pool fans out parallel ``.execute()`` calls and will burst
+# past that ceiling on any folder with a lot of Docs/Sheets/Slides — every
+# overflow request comes back 429 and, without a retry, lands as a
+# permanently-empty export. Route every Workspace ``.execute()`` through
+# ``execute_with_retry`` so 429 (and transient 5xx) self-heal: honour any
+# ``Retry-After`` header, else exponential backoff + jitter. Because the
+# quota resets on the minute boundary, the backoff is allowed to grow to
+# the better part of a minute before giving up.
+_RETRY_STATUSES = frozenset({403, 429, 500, 502, 503, 504})
+_RETRYABLE_429_REASONS = ("rateLimitExceeded", "userRateLimitExceeded")
+
+
+def execute_with_retry(
+    request: Any,
+    *,
+    max_attempts: int = 6,
+    base_delay: float = 2.0,
+    max_delay: float = 64.0,
+    label: str = "workspace",
+) -> Any:
+    """``request.execute()`` with backoff on rate-limit / transient errors.
+
+    ``request`` is a googleapiclient ``HttpRequest`` (the thing you'd
+    normally call ``.execute()`` on). Retries on 429 and 5xx; a 403 is
+    only retried when its reason is a rate-limit (Drive reports user-rate
+    overruns as 403 ``userRateLimitExceeded``, not 429), so genuine
+    permission 403s still fail fast. Honours ``Retry-After`` when Google
+    sends it, otherwise exponential backoff with full jitter.
+    """
+    from googleapiclient.errors import HttpError
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return request.execute()
+        except HttpError as e:
+            status = getattr(e.resp, "status", None)
+            try:
+                status = int(status)
+            except (TypeError, ValueError):
+                raise
+            if status not in _RETRY_STATUSES or attempt == max_attempts:
+                raise
+            # A 403 is usually a hard permission error — only back off when
+            # Google flags it as a rate-limit overrun.
+            if status == 403 and not any(
+                r in str(e) for r in _RETRYABLE_429_REASONS
+            ):
+                raise
+            retry_after = e.resp.get("retry-after") if e.resp else None
+            if retry_after is not None:
+                try:
+                    delay = float(retry_after)
+                except (TypeError, ValueError):
+                    delay = base_delay * (2 ** (attempt - 1))
+            else:
+                # Full jitter: random point in [0, capped exponential].
+                ceiling = min(max_delay, base_delay * (2 ** (attempt - 1)))
+                delay = random.uniform(0, ceiling)
+            logger.warning(
+                "%s API %d, retry %d/%d in %.1fs",
+                label,
+                status,
+                attempt,
+                max_attempts,
+                delay,
+            )
+            time.sleep(delay)
+    # Unreachable: the final attempt either returns or re-raises above.
+    raise RuntimeError("execute_with_retry exhausted without returning")
 
 
 def safe_filename(name: str, fallback: str = "tab") -> str:
