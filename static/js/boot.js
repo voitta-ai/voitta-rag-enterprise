@@ -34,7 +34,7 @@ import "./modals/settings.js";  // self-wires user-pill click + Settings modal
 import "./modals/sync.js";  // self-wires #btn-sync + sync modal + GD picker
 import "./flows/upload.js";  // self-wires Upload button + file input
 import { updateToolbarState } from "./flows/toolbar.js";
-import { connStatus, files, folders, folderStats, jobs, reindexProgress, syncProgress } from "./store.js";
+import { activeFolders, connStatus, files, folders, folderStats, jobs, reindexProgress, syncProgress } from "./store.js";
 import { addGhostDir } from "./flows/selection.js";
 import { connect } from "./ws.js";
 
@@ -86,6 +86,13 @@ folderStats.subscribe(() => {
     // by_extension / health badge), so a sidebar-only render is enough
     // — no need to rebuild the tree.
     scheduleSidebarRender();
+});
+activeFolders.subscribe(() => {
+    // Drives the per-row "indexing" pill in the tree (see
+    // summariseSubtree in flows/tree-model.js). The set is small and
+    // changes at queue-event rate, not per file, so a full render is
+    // cheap and correctly re-applies the pill to every visible row.
+    scheduleFullRender();
 });
 // 1-second tick: advances the "running 12s" tail on each Jobs-panel row.
 // We don't want a permanent setInterval ticking when nothing is running
@@ -143,6 +150,16 @@ async function bootstrap() {
         folders.set(folderList);
         files.set(await api.listAllFiles());
         jobs.set(await api.recentJobs());
+        // Seed the active-folders set so the tree pills are correct
+        // before the first folder.active_changed event arrives. The
+        // call is cheap (server returns a flat list of ids), so we
+        // fold any error into a logged warning rather than blocking
+        // the rest of the snapshot.
+        try {
+            activeFolders.set(new Set(await api.activeFolderIds()));
+        } catch (err) {
+            console.warn("active-ids seed failed", err);
+        }
         // Seed ghost dirs from the real filesystem so empty subdirectories
         // appear in the tree even before any files are indexed into them.
         await Promise.allSettled(

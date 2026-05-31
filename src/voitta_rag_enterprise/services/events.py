@@ -68,6 +68,11 @@ _COALESCE_KEYS: dict[str, str] = {
     # last_synced_at). Emitted at each sync state transition; the modal
     # and sidebar only care about the latest, so coalesce by folder.
     "folder.sync_source_changed": "folder_id",
+    # Boolean snapshot: does this folder have any queued/running job?
+    # Maintained by ``services.folder_active``. Toggles can burst during
+    # a reindex (one per file as work falls off the queue tail) so we
+    # coalesce — only the latest active/inactive value matters.
+    "folder.active_changed": "folder_id",
 }
 
 
@@ -94,6 +99,9 @@ def _event_key(event: dict[str, Any]) -> tuple[str, Any] | None:
     if etype == "folder.sync_source_changed":
         fid = event.get("folder_id")
         return ("folder.sync_source_changed", fid) if fid is not None else None
+    if etype == "folder.active_changed":
+        fid = event.get("folder_id")
+        return ("folder.active_changed", fid) if fid is not None else None
     jid = event.get("job_id")
     return (etype, jid) if jid is not None else None
 

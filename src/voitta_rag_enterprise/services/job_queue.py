@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from ..db.database import session_scope
 from ..db.models import Job
-from . import events
+from . import events, folder_active
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +44,7 @@ def enqueue(
     if dedup_key:
         existing = _find_inflight(session, dedup_key)
         if existing is not None:
+            # Dedup hit — no new row, no folder-active transition to publish.
             return existing
     job = Job(
         kind=kind,
@@ -62,6 +63,13 @@ def enqueue(
             if existing is not None:
                 return existing
         raise
+    # New queued row — bump the folder-active counter. We resolve folder
+    # in the caller's session so the lookup participates in their
+    # transaction; if the caller rolls back, the in-memory count drifts
+    # high until the next ``folder_active.init_from_db`` sweep. Rollback
+    # of an enqueue is rare in this codebase (callers commit immediately)
+    # so we accept the rare drift over the complexity of post-commit hooks.
+    folder_active.on_enqueued(folder_active.folder_id_for_payload(session, payload))
     return job.id
 
 
@@ -187,26 +195,44 @@ def _resolve_display_path(session, payload: dict) -> str | None:
 
 def mark_done(job_id: int) -> None:
     kind: str | None = None
+    folder_id: int | None = None
     with session_scope() as session:
         job = session.get(Job, job_id)
         if job is None:
             return
+        # Resolve folder *before* flipping state so a concurrent reader
+        # that joins jobs↔files can still link them via state='running'.
+        # Not strictly required (we hold the row) but keeps the lookup
+        # symmetric with mark_error and the cancel path.
+        try:
+            payload = json.loads(job.payload) if job.payload else {}
+        except json.JSONDecodeError:
+            payload = {}
+        folder_id = folder_active.folder_id_for_payload(session, payload)
         job.state = "done"
         job.finished_at = int(time.time())
         kind = job.kind
+    folder_active.on_finished(folder_id)
     events.publish("jobs", {"type": "job.finished", "job_id": job_id, "kind": kind, "state": "done"})
 
 
 def mark_error(job_id: int, error: str) -> None:
     kind: str | None = None
+    folder_id: int | None = None
     with session_scope() as session:
         job = session.get(Job, job_id)
         if job is None:
             return
+        try:
+            payload = json.loads(job.payload) if job.payload else {}
+        except json.JSONDecodeError:
+            payload = {}
+        folder_id = folder_active.folder_id_for_payload(session, payload)
         job.state = "error"
         job.error = error
         job.finished_at = int(time.time())
         kind = job.kind
+    folder_active.on_finished(folder_id)
     events.publish(
         "jobs",
         {

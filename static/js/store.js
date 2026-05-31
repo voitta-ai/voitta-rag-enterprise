@@ -26,6 +26,14 @@ export const folders = createStore([]);   // [{id, path, display_name, ...}]
 export const files = createStore([]);     // [{id, folder_id, rel_path, state, ...}]
 export const jobs = createStore([]);      // [{id, kind, state, ...}]
 export const connStatus = createStore("disconnected");
+// Set<folder_id> — folders the backend currently has at least one
+// queued/running job for. Seeded on bootstrap via
+// ``GET /api/folders/active-ids`` and maintained from
+// ``folder.active_changed`` WS events. Replaces the previous
+// client-side derivation off the (truncated, 50-row) ``jobs`` store
+// which mislabelled un-indexed folders as 'indexed' on deep queues.
+// See services/folder_active.py for the server-side counter.
+export const activeFolders = createStore(new Set());
 // folder_id → { phase, done, total } while a reindex_folder job is mid-wipe.
 // Empty map means "no folder is currently in a reindex wipe phase".
 export const reindexProgress = createStore(new Map());

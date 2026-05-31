@@ -31,6 +31,9 @@ async function req(method, path, body) {
 export const api = {
     root: () => req("GET", "/api/folders/root"),
     listFolders: () => req("GET", "/api/folders"),
+    // One-shot bootstrap of the activeFolders set. Subsequent updates
+    // arrive via the folder.active_changed WS event.
+    activeFolderIds: () => req("GET", "/api/folders/active-ids"),
     addFolderByName: (name) => req("POST", "/api/folders", { name }),
     deleteFolder: (id) => req("DELETE", `/api/folders/${id}`),
     listFolderDirs: (folderId) => req("GET", `/api/folders/${folderId}/dirs`),

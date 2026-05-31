@@ -311,6 +311,29 @@ def folder_root(
     return RootInfo(root_path=str(settings.root_path), configured=True)
 
 
+@router.get("/active-ids", response_model=list[int])
+def active_folder_ids(
+    user: CurrentUser = Depends(current_user),
+) -> list[int]:
+    """Folder ids that currently have at least one queued/running job.
+
+    The SPA calls this once on bootstrap to seed its ``activeFolders``
+    set; subsequent updates arrive as ``folder.active_changed`` WS
+    events. We intentionally ship a flat id list (not stats) — the only
+    consumer is the tree pill ("indexing" vs "indexed"), and a 19-int
+    JSON array stays under 200 bytes regardless of queue depth.
+
+    No ACL filtering: the active set is a property of the indexer
+    pipeline, not of any user's view, and a folder id alone leaks no
+    content. The same id would already be in the caller's
+    ``GET /api/folders`` response or not — either way the visibility
+    decision lives there.
+    """
+    from ...services.folder_active import get_active_ids
+
+    return get_active_ids()
+
+
 class UploadOut(BaseModel):
     rel_path: str
     size_bytes: int

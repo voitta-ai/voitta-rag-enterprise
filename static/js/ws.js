@@ -1,6 +1,6 @@
 // WebSocket connection manager with backoff reconnect.
 
-import { connStatus, folders, files, jobs, reindexProgress, syncProgress, syncSources, folderStats } from "./store.js";
+import { activeFolders, connStatus, folders, files, jobs, reindexProgress, syncProgress, syncSources, folderStats } from "./store.js";
 
 const MAX_BACKOFF_MS = 30_000;
 const TOPICS = ["folders", "files", "jobs", "stats"];
@@ -79,6 +79,22 @@ function handleEvent(event) {
             folderStats.update((map) => {
                 const next = new Map(map);
                 next.set(event.folder_id, event.stats);
+                return next;
+            });
+            return;
+        case "folder.active_changed":
+            // Server-pushed signal: this folder now has (or no longer
+            // has) at least one queued/running job. Drives the
+            // "indexing" pill across the tree, replacing the previous
+            // client-side derivation off the 50-row ``jobs`` window.
+            // ``folder.active_changed`` events are coalesced per
+            // folder_id by services/events.py, so the SPA only ever
+            // sees the latest boolean for each folder. Swap to a fresh
+            // Set so identity-based subscribers re-fire.
+            activeFolders.update((set) => {
+                const next = new Set(set);
+                if (event.active) next.add(event.folder_id);
+                else next.delete(event.folder_id);
                 return next;
             });
             return;

@@ -72,12 +72,11 @@ import {
 } from "../flows/selection.js";
 import { scheduleFullRender } from "./render-loop.js";
 import {
-    activeFolderIds,
     buildTree,
     summariseSubtree,
     userStateLabel,
 } from "../flows/tree-model.js";
-import { files, folders, jobs } from "../store.js";
+import { activeFolders, files, folders } from "../store.js";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -590,7 +589,11 @@ export function renderFolders(list) {
     }
     rowCache.delete("empty");
     const allFiles = files.get();
-    const activeFolders = activeFolderIds(files.get(), jobs.get());
+    // Server-pushed set of folder_ids currently having queued/running
+    // work. Read once per render so the snapshot is stable across the
+    // tree traversal below; subscribers in boot.js trigger a re-render
+    // when the set changes.
+    const activeFolderSet = activeFolders.get();
     const targetRows = [];
     const seenKeys = new Set();
 
@@ -606,7 +609,7 @@ export function renderFolders(list) {
             displayName: folder.display_name,
             depth: 0,
             isRoot: true,
-            folderActive: activeFolders.has(folder.id),
+            folderActive: activeFolderSet.has(folder.id),
         });
     }
     reconcileChildren(ul, targetRows, seenKeys, rowCache);

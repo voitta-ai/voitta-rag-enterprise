@@ -88,33 +88,13 @@ export function buildTree(folderFiles, folderId) {
     return root;
 }
 
-export function activeFolderIds(filesList, jobsList) {
-    /* Map queued + running jobs back to folder ids so the per-row
-       "indexing" pill only lights up on folders with work actually in
-       flight. Previously the check was global ("any job running
-       anywhere?") which made every folder containing a stale
-       non-terminal file (left behind by a past abandoned job) flash to
-       'indexing' the moment another folder's reindex started.
-
-       Job payload shapes (see services/job_queue.py + scanner / indexing):
-       - extract / embed_text / delete_file: {file_id}
-       - reindex_folder / sync:               {folder_id}
-       embed_image runs inline within extract, never queued separately. */
-    const fileFolder = new Map();
-    for (const f of filesList) fileFolder.set(f.id, f.folder_id);
-    const out = new Set();
-    for (const j of jobsList) {
-        if (j.state !== "queued" && j.state !== "running") continue;
-        const p = j.payload || {};
-        if (p.folder_id != null) {
-            out.add(p.folder_id);
-        } else if (p.file_id != null) {
-            const fid = fileFolder.get(p.file_id);
-            if (fid != null) out.add(fid);
-        }
-    }
-    return out;
-}
+// NOTE: the old ``activeFolderIds(files, jobs)`` derivation was removed
+// in favour of the server-pushed ``activeFolders`` store in store.js.
+// Deriving from the SPA's local jobs store broke on deep queues — that
+// store is sliced to 50 entries in ws.js, so on a bulk reindex the vast
+// majority of queued extracts never appeared in it and folders showed
+// as 'indexed' while thousands of their files were still pending. See
+// services/folder_active.py for the server-side counter.
 
 export function summariseSubtree(node, folderActive) {
     /* Aggregates file totals across the subtree rooted at node.
@@ -143,17 +123,13 @@ export function summariseSubtree(node, folderActive) {
         if (errored > 0) status = "error";
         else if (indexed + unsupported === total) status = "indexed";
         else if (folderActive && (embedding > 0 || pending > 0)) status = "indexing";
-        // Non-terminal files with no observable job touching this folder.
-        // Two ways to land here: (a) crash stragglers — files stuck pending
-        // because a worker died mid-extract — or (b) deep-queue blind spot:
-        // the SPA's jobs store is capped at the most recent 50 entries
-        // (ws.js), so when thousands of extracts are queued the bulk of them
-        // never show up in ``subtreeFoldersWithActiveWork``. Either way the
-        // honest answer is "files are not indexed", not "indexed" — render
-        // 'pending' (warning yellow) so the user can see the gap. If the
-        // queue catches up to this folder, the next ``file.upserted`` will
-        // flip the row to ``indexed`` (green); if nothing ever processes
-        // it, the yellow pill is exactly what they need to see.
+        // No active jobs but some files are non-terminal. With the
+        // server-pushed activeFolders set this branch is now reliable:
+        // it means there's truly nothing in flight for this folder
+        // (e.g. crash stragglers, files that were skipped because the
+        // worker is on another folder, or an admin paused the queue).
+        // Render 'pending' (warning yellow) — accurate and visually
+        // distinct from both 'indexing' (active) and 'indexed' (done).
         else if (embedding > 0 || pending > 0) status = "pending";
         else status = "indexed";
     }

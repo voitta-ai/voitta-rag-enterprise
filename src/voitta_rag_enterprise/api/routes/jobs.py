@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ...db.models import File, Job
-from ...services import job_queue
+from ...services import folder_active, job_queue
 from ...services.acl import CurrentUser
 from ..deps import current_user, db_session
 
@@ -224,8 +224,17 @@ def cancel_all(
 
     cancelled = 0
     cancelled_file_ids: list[int] = []
+    # Collect folder_ids so we can drop their active counts after commit.
+    # Resolving *before* the state flip keeps the lookup deterministic
+    # against a parallel claim_one (which would only narrow the result).
+    affected_folders: list[int | None] = []
     queued = db.execute(select(Job).where(Job.state == "queued")).scalars().all()
     for job in queued:
+        try:
+            payload = json.loads(job.payload) if job.payload else {}
+        except json.JSONDecodeError:
+            payload = {}
+        affected_folders.append(folder_active.folder_id_for_payload(db, payload))
         job.state = "done"
         job.error = "cancelled"
         cancelled += 1
@@ -244,6 +253,13 @@ def cancel_all(
             killed = 1
 
     db.commit()
+
+    # Drop the active counts for every cancelled job *after* commit so a
+    # SPA reading active=False can trust that the underlying row is no
+    # longer 'queued'. Events coalesce by folder_id so N drops on the
+    # same folder collapse to one delivered event.
+    for fid in affected_folders:
+        folder_active.on_finished(fid)
 
     # Publish file.upserted for every file whose state we just flipped to
     # 'error', so the SPA's by-extension counters reflect the cancel
@@ -350,6 +366,15 @@ def cancel_job(
 
     was_running = job.state == "running"
     job_kind = job.kind
+    # Resolve folder *before* flipping state — the running-branch below
+    # reads/mutates the file row off the same payload and we want the
+    # active-tracker decrement to use the same folder_id the file lookup
+    # will resolve to.
+    try:
+        cancel_payload = json.loads(job.payload) if job.payload else {}
+    except json.JSONDecodeError:
+        cancel_payload = {}
+    cancel_folder_id = folder_active.folder_id_for_payload(db, cancel_payload)
     job.state = "done"
     job.error = "cancelled"
     job.finished_at = int(time.time())
@@ -406,6 +431,10 @@ def cancel_job(
             )
 
     db.commit()
+
+    # Drop this folder's active count *after* commit so a SPA that races
+    # the active=False event back to the DB will see the cancelled row.
+    folder_active.on_finished(cancel_folder_id)
 
     # Publish job.finished + file.upserted so the SPA flips both rows
     # immediately, without waiting for the next /recent or /files poll.

@@ -173,6 +173,12 @@ def create_app() -> FastAPI:
                     requeued,
                     killed,
                 )
+            # Bootstrap the folder-active tracker *after* the abandoned-job
+            # sweep so we don't count rows that are about to be flipped to
+            # 'error'. Subsequent enqueue/finish hooks maintain it incrementally.
+            from .services import folder_active
+
+            folder_active.init_from_db()
             extracts_repaired = reconcile_abandoned_extracts()
             if extracts_repaired:
                 logger.warning(
