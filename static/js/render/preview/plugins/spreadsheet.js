@@ -63,7 +63,7 @@ const plugin = {
 };
 
 async function _loadSheetJs() {
-    _XLSX = await import("https://esm.sh/xlsx@0.18.5");
+    _XLSX = await import("/static/js/vendor/xlsx.js");
 }
 
 function _renderWorkbook(container, wb) {

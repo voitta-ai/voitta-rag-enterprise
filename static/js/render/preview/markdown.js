@@ -1,12 +1,14 @@
 // Shared markdown loader + renderer for preview plugins.
-// `marked` is lazy-loaded from esm.sh on first call and cached at
-// module scope so subsequent plugins reuse it without a second fetch.
+// `marked` is lazy-loaded from a locally-vendored bundle on first call and
+// cached at module scope so subsequent plugins reuse it without a second
+// fetch. Vendored under /static/js/vendor so the UI has no external-CDN
+// dependency (works on locked-down / offline networks).
 
 let _marked = null;
 
 export async function getMarked() {
     if (_marked) return _marked;
-    const mod = await import("https://esm.sh/marked@13");
+    const mod = await import("/static/js/vendor/marked.js");
     _marked = mod.marked;
     _marked.setOptions({ gfm: true, breaks: false });
     return _marked;

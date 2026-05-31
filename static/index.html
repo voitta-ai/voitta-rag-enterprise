@@ -965,6 +965,16 @@
         ·
         <a href="/LICENSING.md" target="_blank" rel="noopener">Commercial license</a>
     </footer>
+    <!-- Resolve the bare "three" specifier (used by cad.js and the locally
+         vendored three.js addons) to our single vendored core build. Must
+         precede any module script. Keeps the UI free of external CDNs. -->
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "/static/js/vendor/three/three.module.js"
+        }
+    }
+    </script>
     <script type="module" src="/static/js/boot.js"></script>
 </body>
 </html>

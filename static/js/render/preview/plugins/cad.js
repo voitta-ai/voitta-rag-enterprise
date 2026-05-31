@@ -1,8 +1,8 @@
 // Preview plugin: CAD files (STEP, IGES) with Three.js WebGL viewer.
 //
 // Three.js and its STLLoader/OrbitControls addons are loaded lazily from
-// esm.sh only when the first CAD file is previewed — no impact on initial
-// page load.
+// the locally-vendored build (/static/js/vendor/three) only when the first
+// CAD file is previewed — no impact on initial page load, no external CDN.
 //
 // Pipeline:
 //   1. GET /api/files/{id}/stl  →  backend converts STEP/IGES to binary STL
@@ -37,11 +37,14 @@ const plugin = {
         const { signal } = _abortCtrl;
 
         try {
-            // Load Three.js lazily.
+            // Load Three.js lazily from the locally-vendored build. The
+            // "three" specifier resolves via the importmap in index.html so
+            // the addons below share this exact core instance (a duplicate
+            // would break their instanceof checks).
             const [THREE, { OrbitControls }, { STLLoader }] = await Promise.all([
-                import("https://esm.sh/three@0.168.0"),
-                import("https://esm.sh/three@0.168.0/examples/jsm/controls/OrbitControls.js"),
-                import("https://esm.sh/three@0.168.0/examples/jsm/loaders/STLLoader.js"),
+                import("three"),
+                import("/static/js/vendor/three/addons/controls/OrbitControls.js"),
+                import("/static/js/vendor/three/addons/loaders/STLLoader.js"),
             ]);
             if (signal.aborted) return;
 
