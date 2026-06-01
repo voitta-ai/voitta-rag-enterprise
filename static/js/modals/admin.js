@@ -56,8 +56,9 @@ const ADMIN_TABS = ["access", "users", "groups", "oauth", "caps", "storage"];
 
 function setAdminTab(name) {
     if (!ADMIN_TABS.includes(name)) name = "access";
-    // Always land on the users list (not a stuck editor) when (re)entering.
+    // Always land on the list views (not a stuck editor) when (re)entering.
     if (typeof closeUserEditor === "function") closeUserEditor();
+    if (typeof closeGroupEditor === "function") closeGroupEditor();
     for (const t of ADMIN_TABS) {
         const btn = $(`#admin-tab-btn-${t}`);
         const pane = $(`#admin-tab-pane-${t}`);
@@ -719,16 +720,22 @@ async function saveUserEditor() {
 // Groups tab
 // ---------------------------------------------------------------------------
 
-let _selectedGroupId = null;
+let _editingGroupId = null;   // null = adding (when editor open)
+let _groupEditorOpen = false;
 let _gdMemberSelect = null;
+let _groupFilter = "";
 
+// List view: clickable group rows. The editor is a full pane that swaps with
+// this list (same pattern as the user editor), not a side panel.
 function renderGroups(groups, users) {
     const list = $("#admin-groups-list");
     if (!list) return;
     list.innerHTML = "";
-    for (const g of groups) {
+    const q = _groupFilter.trim().toLowerCase();
+    const rows = q ? groups.filter((g) => g.name.toLowerCase().includes(q)) : groups;
+    for (const g of rows) {
         const li = document.createElement("li");
-        li.className = "admin-group-row" + (g.id === _selectedGroupId ? " selected" : "");
+        li.className = "admin-group-row";
         const name = document.createElement("span");
         name.className = "admin-group-name";
         name.textContent = g.name;
@@ -736,27 +743,58 @@ function renderGroups(groups, users) {
         count.className = "admin-group-count";
         count.textContent = `${g.member_count} member${g.member_count === 1 ? "" : "s"}`;
         li.append(name, count);
-        li.addEventListener("click", () => { _selectedGroupId = g.id; renderAdminFromState(adminState.get()); });
+        li.addEventListener("click", () => openGroupEditor(g));
         list.appendChild(li);
     }
-    // If a group is selected, (re)render its detail panel from fresh state.
-    const sel = groups.find((g) => g.id === _selectedGroupId);
-    if (sel) renderGroupDetail(sel, users);
-    else $("#admin-group-detail").hidden = true;
+    const countEl = $("#admin-groups-count");
+    if (countEl) {
+        countEl.textContent = rows.length === groups.length
+            ? `${groups.length} group${groups.length === 1 ? "" : "s"}`
+            : `${rows.length} of ${groups.length} groups`;
+    }
+
+    // If the editor is open for an existing group, keep its member list fresh
+    // after live add/remove (the WS push lands here). If that group was
+    // deleted out from under us, bail back to the list.
+    if (_groupEditorOpen && _editingGroupId != null) {
+        const g = groups.find((x) => x.id === _editingGroupId);
+        if (g) refreshGroupMembers(g, users);
+        else closeGroupEditor();
+    }
 }
 
-function renderGroupDetail(group, users) {
-    $("#admin-group-detail").hidden = false;
-    $("#admin-group-detail-title").textContent = `Group: ${group.name}`;
-    const nameEl = $("#admin-gd-name");
-    const descEl = $("#admin-gd-desc");
-    if (document.activeElement !== nameEl) nameEl.value = group.name;
-    if (document.activeElement !== descEl) descEl.value = group.description || "";
+function openGroupEditor(group) {
+    _groupEditorOpen = true;
+    _editingGroupId = group ? group.id : null;
+    $("#admin-group-editor-title").textContent = group ? "Edit group" : "New group";
+    const nameEl = $("#admin-ge-name");
+    const descEl = $("#admin-ge-desc");
+    nameEl.value = group ? group.name : "";
+    descEl.value = group ? (group.description || "") : "";
+    $("#admin-ge-error").hidden = true;
+    // Members only make sense once the group exists.
+    $("#admin-ge-members-block").hidden = !group;
+    $("#admin-ge-delete").hidden = !group;
+    if (group) refreshGroupMembers(group, adminState.get()?.users || []);
 
-    // Members = users whose groups include this group's name.
+    $("#admin-groups-list-view").hidden = true;
+    $("#admin-group-editor").hidden = false;
+    nameEl.focus();
+}
+
+function closeGroupEditor() {
+    $("#admin-group-editor").hidden = true;
+    $("#admin-groups-list-view").hidden = false;
+    _groupEditorOpen = false;
+    _editingGroupId = null;
+    _gdMemberSelect = null;
+}
+
+// Members list + add-member picker for the (existing) group being edited.
+function refreshGroupMembers(group, users) {
     const members = users.filter((u) => (u.groups || []).includes(group.name));
-    $("#admin-gd-members-label").textContent = `Members (${members.length})`;
-    const ul = $("#admin-gd-members");
+    $("#admin-ge-members-label").textContent = `Members (${members.length})`;
+    const ul = $("#admin-ge-members");
     ul.innerHTML = "";
     for (const u of members) {
         const li = document.createElement("li");
@@ -764,7 +802,7 @@ function renderGroupDetail(group, users) {
         const label = document.createElement("span");
         label.textContent = u.display_name ? `${u.display_name} <${u.email}>` : u.email;
         const x = document.createElement("button");
-        x.className = "btn btn-secondary btn-sm";
+        x.className = "admin-icon-btn admin-icon-danger";
         x.textContent = "✕";
         x.title = "Remove from group";
         x.addEventListener("click", async () => {
@@ -775,8 +813,7 @@ function renderGroupDetail(group, users) {
         ul.appendChild(li);
     }
 
-    // Add-member picker: users not already in the group.
-    const host = $("#admin-gd-addmember");
+    const host = $("#admin-ge-addmember");
     host.innerHTML = "";
     const nonMembers = users.filter((u) => !(u.groups || []).includes(group.name));
     const byLabel = new Map(nonMembers.map((u) => [u.email, u.id]));
@@ -786,13 +823,11 @@ function renderGroupDetail(group, users) {
         allowCreate: false,
         placeholder: "add a user by email…",
         onChange: async (vals) => {
-            // Single-add semantics: when a value is picked, add and clear.
             const email = vals[vals.length - 1];
             const uid = byLabel.get(email);
             if (uid == null) return;
-            // Drop focus first so the incoming admin.snapshot push isn't
-            // skipped by the editing focus-guard in wireAdminStore — that's
-            // what refreshes the member list after the add.
+            // Drop focus so the incoming admin.snapshot push isn't skipped by
+            // the editing focus-guard — that's what refreshes the member list.
             if (document.activeElement) document.activeElement.blur();
             _gdMemberSelect.setValues([]);
             try { await api.adminAddGroupMember(group.id, uid); }
@@ -800,6 +835,25 @@ function renderGroupDetail(group, users) {
         },
     });
     host.appendChild(_gdMemberSelect.el);
+}
+
+async function saveGroupEditor() {
+    const errEl = $("#admin-ge-error");
+    errEl.hidden = true;
+    const name = $("#admin-ge-name").value.trim();
+    const description = $("#admin-ge-desc").value.trim();
+    if (!name) { errEl.textContent = "Group name is required."; errEl.hidden = false; return; }
+    try {
+        if (_editingGroupId == null) {
+            await api.adminCreateGroup(name, description);
+        } else {
+            await api.adminUpdateGroup(_editingGroupId, { name, description });
+        }
+        closeGroupEditor();
+    } catch (err) {
+        errEl.textContent = err.message;
+        errEl.hidden = false;
+    }
 }
 
 // Wire each input + button pair so click and Enter both submit. Without
@@ -882,43 +936,26 @@ $("#admin-ue-cancel").addEventListener("click", closeUserEditor);
 $("#admin-ue-back").addEventListener("click", closeUserEditor);
 $("#admin-ue-save").addEventListener("click", saveUserEditor);
 
-// Groups tab: create + detail name/desc save + delete.
-async function submitNewGroup() {
-    const input = $("#admin-group-new-name");
-    const name = input.value.trim();
-    if (!name) return;
-    try {
-        const g = await api.adminCreateGroup(name, "");
-        input.value = "";
-        _selectedGroupId = g.id;  // select the just-created group
-    } catch (err) { alert(err.message); }
-}
-$("#admin-group-add-btn").addEventListener("click", submitNewGroup);
-$("#admin-group-new-name").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") { e.preventDefault(); submitNewGroup(); }
+// Groups tab: filter + new + full-pane editor (mirrors Users).
+$("#admin-group-filter").addEventListener("input", (e) => {
+    _groupFilter = e.target.value;
+    renderGroups(adminState.get()?.groups || [], adminState.get()?.users || []);
 });
-
-async function saveGroupMeta() {
-    if (_selectedGroupId == null) return;
-    const name = $("#admin-gd-name").value.trim();
-    const description = $("#admin-gd-desc").value.trim();
-    if (!name) return;
-    try { await api.adminUpdateGroup(_selectedGroupId, { name, description }); }
-    catch (err) { alert(err.message); }
-}
-// Commit name/description on blur (focus-guard in wireAdminStore keeps live
-// pushes from clobbering the field while it's focused).
-$("#admin-gd-name").addEventListener("blur", saveGroupMeta);
-$("#admin-gd-desc").addEventListener("blur", saveGroupMeta);
-
-$("#admin-group-delete").addEventListener("click", async () => {
-    if (_selectedGroupId == null) return;
-    const g = (adminState.get()?.groups || []).find((x) => x.id === _selectedGroupId);
+$("#admin-group-add-btn").addEventListener("click", () => openGroupEditor(null));
+$("#admin-ge-back").addEventListener("click", closeGroupEditor);
+$("#admin-ge-cancel").addEventListener("click", closeGroupEditor);
+$("#admin-ge-save").addEventListener("click", saveGroupEditor);
+$("#admin-ge-name").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); saveGroupEditor(); }
+});
+$("#admin-ge-delete").addEventListener("click", async () => {
+    if (_editingGroupId == null) return;
+    const g = (adminState.get()?.groups || []).find((x) => x.id === _editingGroupId);
     if (!g) return;
     if (!confirm(`Delete group "${g.name}"?\n\nMembers are not deleted — they just lose this group.`)) return;
     try {
-        await api.adminDeleteGroup(_selectedGroupId);
-        _selectedGroupId = null;
+        await api.adminDeleteGroup(_editingGroupId);
+        closeGroupEditor();
     } catch (err) { alert(err.message); }
 });
 
