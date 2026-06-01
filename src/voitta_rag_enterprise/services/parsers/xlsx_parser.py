@@ -22,9 +22,29 @@ from openpyxl import load_workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
 from ..indexing_caps import get_caps
-from .base import BaseParser, ParserResult
+from ._ooxml import MIN_IMG_DIM, image_dimensions, iter_package_media
+from .base import BaseParser, ExtractedImage, ParserResult
 
 logger = logging.getLogger(__name__)
+
+
+def _harvest_sheet_images(file_path: Path) -> list[ExtractedImage]:
+    """Embedded pictures from an ``.xlsx``/``.xlsm`` package.
+
+    openpyxl's ``read_only`` mode (used for the text pass to stay memory-safe on
+    huge sheets) doesn't load drawings, so images are read straight from the OPC
+    package instead. They float over cells with no stable text offset, so all
+    land at position 0. Tiny decorative glyphs are filtered out.
+    """
+    images: list[ExtractedImage] = []
+    for _name, blob, mime in iter_package_media(file_path, media_prefix="xl/media/"):
+        width, height = image_dimensions(blob)
+        if width and height and max(width, height) < MIN_IMG_DIM:
+            continue
+        images.append(
+            ExtractedImage(bytes=blob, mime=mime, position=0, width=width, height=height)
+        )
+    return images
 
 
 class XlsxParser(BaseParser):
@@ -56,7 +76,13 @@ class XlsxParser(BaseParser):
         finally:
             wb.close()
 
-        return ParserResult(content="\n\n".join(sections))
+        # Embedded pictures (logos, screenshots, photos placed on sheets). The
+        # text pass above runs read-only and never sees them, so harvest from
+        # the package. Charts are vector/XML, not rasters, so they're not
+        # included. Legacy ``.xls`` (handled in ``_parse_xls``) is BIFF, not a
+        # zip, so it has no media-harvest path.
+        images = _harvest_sheet_images(file_path)
+        return ParserResult(content="\n\n".join(sections), images=images)
 
 
 def _parse_xls(file_path: Path) -> ParserResult:
