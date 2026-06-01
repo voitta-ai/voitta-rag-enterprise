@@ -21,6 +21,7 @@
 9. [Sync OAuth runtime flows](#9-sync-oauth-runtime-flows)
 10. [Data model](#10-data-model)
 11. [Locking model](#11-locking-model)
+12. [Logging & observability](#12-logging--observability)
 
 ---
 
@@ -856,6 +857,89 @@ flowchart TB
 The default worker pool size is **1**, so two workers can't collide in the
 pipeline even without `_EXTRACT_LOCK` — but the lock remains necessary for the
 REST-thread/worker-thread reindex race.
+
+---
+
+## 12. Logging & observability
+
+> **TL;DR — where the logs are:** `~/.voitta-rag-enterprise/logs/`. The
+> per-job detail stream is `indexing.log`. Watch a sync/extract live with
+> `tail -f ~/.voitta-rag-enterprise/logs/indexing.log`.
+
+Application logging is **file-only by design** — `logging_config.setup_logging`
+([logging_config.py](../src/voitta_rag_enterprise/logging_config.py)) installs
+`RotatingFileHandler`s and then `_strip_console_handlers()` removes every
+stdout/stderr handler *except* uvicorn's. So a `screen`/`systemd` console shows
+only uvicorn's banner + HTTP access lines — **the absence of app logs on the
+console is intentional, not a sign logging is off.** Look in the files.
+
+```mermaid
+flowchart TB
+    subgraph src["Loggers"]
+        APP["voitta_rag_enterprise.*<br/>(worker · indexing · sync · …)"]
+        ROOT["root + third-party<br/>(uvicorn.error, qdrant, …)"]
+        TP["noisy third-party<br/>mineru · transformers · PIL · urllib3 …"]
+        LG["loguru (mineru internals)"]
+        UV["uvicorn / uvicorn.access"]
+    end
+
+    APP -->|DEBUG| IDX[("logs/indexing.log<br/>per-job DEBUG, ctx-tagged")]
+    ROOT -->|INFO| APPLOG[("logs/app.log<br/>INFO catch-all")]
+    TP -->|pinned WARNING| APPLOG
+    LG -->|WARNING| MIN[("logs/mineru.log")]
+    UV -->|kept on console| CON["console / screen session"]
+
+    IDX & APPLOG & MIN -.->|RotatingFileHandler<br/>10 MB × 5 backups| ROT["…log.1 … .log.5"]
+```
+
+### Files (under `<data_dir>/logs/`)
+
+`<data_dir>` defaults to `~/.voitta-rag-enterprise` and is overridable with
+`VOITTA_DATA_DIR` (`main.py` calls `setup_logging(settings.data_dir / "logs")`).
+
+| File | Level | Contents |
+|------|-------|----------|
+| `indexing.log` | **DEBUG** | Everything from the `voitta_rag_enterprise` package — worker claim/done, the per-stage extract pipeline, **sync connectors**, embeds. The first place to look. |
+| `app.log` | INFO (`VOITTA_LOG_LEVEL`) | Root catch-all + third-party (uvicorn.error, qdrant_client, …). Noisy libs (mineru, transformers, PIL, urllib3, …) pinned to WARNING. |
+| `mineru.log` | WARNING | MinerU/loguru internals (its own sink, redirected off stderr). |
+
+Each rotates at **10 MB**, keeping **5 backups** (`.log.1` … `.log.5`).
+
+### Per-job context tagging
+
+`bind_context(**fields)` attaches a `ctx` field to every record in scope, so
+worker/indexing/sync lines carry `[job_id=… kind=… folder_id=… file_id=…]`.
+That makes one resource's full lifecycle a single grep:
+
+```bash
+LOGS=~/.voitta-rag-enterprise/logs
+
+# Everything that happened for one job (e.g. a sync):
+grep "job_id=20821" "$LOGS"/indexing.log*
+
+# One file's full extract → chunk → embed trace, across worker threads:
+grep "file_id=6655" "$LOGS"/indexing.log*
+
+# All sync activity (begin / per-branch / done summary):
+grep "services.sync" "$LOGS"/indexing.log*
+
+# Live tail while you trigger a sync/reindex from the UI:
+tail -f "$LOGS"/indexing.log
+```
+
+A successful GitHub sync, for instance, reads end-to-end as:
+
+```
+worker  [job_id=20821 kind=sync] worker-0 claim job
+indexing [folder_id=31] sync begin folder=… type=github
+sync.github [folder_id=31] git sync: …agnitio-platform-fe.git branches=['rory-roman']
+sync.github [folder_id=31] branch synced: rory-roman in 2.2s
+indexing [folder_id=31] sync done … {'branches_synced': 1, 'commits_written': 0, 'errors': []}
+worker  [job_id=20821 kind=sync] worker-0 job done
+```
+
+`commits_written: 0` with no following `extract` jobs = the remote was
+unchanged, so nothing was re-indexed (a fast, correct "done" — not a skip).
 
 ---
 
