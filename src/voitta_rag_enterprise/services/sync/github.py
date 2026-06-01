@@ -502,6 +502,21 @@ class GitHubConnector(SyncConnector):
     source_type = "github"
     supports_progress = False  # git sync doesn't emit progress callbacks
 
+    def resolve_config(self, row) -> dict:
+        return {
+            "repo_url": row.gh_repo or "",
+            "subfolder": row.gh_path or "",
+            "branches": coerce_branches_field(row.gh_branches),
+            "all_branches": bool(row.gh_all_branches),
+            "extended": bool(row.gh_extended),
+            "auth": GitAuth(
+                method=row.gh_auth_method or "",
+                ssh_key=row.gh_token or "",
+                username=row.gh_username or "",
+                pat=row.gh_pat or "",
+            ),
+        }
+
     async def sync(
         self,
         *,

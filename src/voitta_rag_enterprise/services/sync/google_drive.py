@@ -568,6 +568,18 @@ class GoogleDriveConnector(SyncConnector):
     # In-process cache: (client_id, refresh_token) → (access_token, expires_at)
     _token_cache: ClassVar[dict[tuple[str, str], tuple[str, float]]] = {}
 
+    def resolve_config(self, row) -> dict:
+        return {
+            "drive_folders": coerce_folders_field(row.gd_folder_id),
+            "files_only": bool(row.gd_files_only),
+            "auth": GoogleDriveAuth(
+                client_id=row.gd_client_id or "",
+                client_secret=row.gd_client_secret or "",
+                refresh_token=row.gd_refresh_token or "",
+                service_account_json=row.gd_service_account_json or "",
+            ),
+        }
+
     async def sync(
         self,
         *,

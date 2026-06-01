@@ -217,6 +217,20 @@ class SharePointConnector(SyncConnector):
     source_type = "sharepoint"
     supports_progress = True
 
+    def resolve_config(self, row) -> dict:
+        return {
+            "auth": msa.MicrosoftAuth(
+                tenant_id=row.ms_tenant_id or "",
+                client_id=row.ms_client_id or "",
+                client_secret=row.ms_client_secret or "",
+                cert_pem=row.ms_cert_pem or "",
+                refresh_token=row.ms_refresh_token or "",
+                method=row.ms_auth_method or "",
+            ),
+            "sites": coerce_sites_field(row.sp_selected_sites),
+            "all_sites": bool(row.sp_all_sites),
+        }
+
     async def sync(
         self,
         *,

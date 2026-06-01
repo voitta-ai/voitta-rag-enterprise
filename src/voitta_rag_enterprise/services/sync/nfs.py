@@ -212,6 +212,22 @@ class NfsConnector(SyncConnector):
     source_type = "nfs"
     supports_progress = True
 
+    def resolve_config(self, row) -> dict:
+        import json as _json
+
+        raw = (row.nfs_subpaths or "").strip()
+        paths: list[str] = []
+        if raw:
+            try:
+                decoded = _json.loads(raw)
+                if isinstance(decoded, list):
+                    paths = [str(x) for x in decoded]
+            except _json.JSONDecodeError:
+                paths = []
+        if not paths and row.nfs_subpath:
+            paths = [row.nfs_subpath]
+        return {"nfs_subpaths": canonicalise_subpaths(paths)}
+
     async def sync(
         self,
         *,

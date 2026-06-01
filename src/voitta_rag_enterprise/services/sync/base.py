@@ -22,7 +22,10 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from ...db.models import FolderSyncSource
 
 # Progress callback bridged into the WS event stream by ``indexing.run_sync``:
 # ``progress(phase, done, total, detail)``. Connectors that don't report
@@ -54,5 +57,16 @@ class SyncConnector(ABC):
         sync-source row (plus ``progress_cb`` when ``supports_progress``). The
         signature is intentionally loose (``**config``) — each connector names
         the keys it needs.
+        """
+        ...
+
+    @abstractmethod
+    def resolve_config(self, row: "FolderSyncSource") -> dict[str, Any]:
+        """Build the kwargs dict ``sync`` expects from the folder's row.
+
+        Reads only ``row`` fields; must be called while ``row`` is still
+        attached to an open session. Excludes ``progress_cb`` — the core adds
+        that when ``supports_progress`` is set. This is what lets
+        ``indexing.run_sync`` stay free of per-``source_type`` branching.
         """
         ...

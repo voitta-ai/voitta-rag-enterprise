@@ -713,8 +713,6 @@ def _publish_sync_source_changed(folder_id: int) -> None:
 
 async def _run_sync_inner(folder_id: int) -> None:
     from .sync import get_connector
-    from .sync.github import GitAuth, coerce_branches_field
-    from .sync.google_drive import GoogleDriveAuth
 
     with session_scope() as s:
         folder = s.get(Folder, folder_id)
@@ -729,92 +727,25 @@ async def _run_sync_inner(folder_id: int) -> None:
         folder_path = folder.path
         source_type = source.source_type
 
-        # Snapshot every value we need so we can release the session before
-        # the (slow) network/disk work.
-        cfg: dict[str, object]
-        if source_type == "github":
-            cfg = {
-                "repo_url": source.gh_repo or "",
-                "subfolder": source.gh_path or "",
-                "branches": coerce_branches_field(source.gh_branches),
-                "all_branches": bool(source.gh_all_branches),
-                "extended": bool(source.gh_extended),
-                "auth": GitAuth(
-                    method=source.gh_auth_method or "",
-                    ssh_key=source.gh_token or "",
-                    username=source.gh_username or "",
-                    pat=source.gh_pat or "",
-                ),
-            }
-        elif source_type == "google_drive":
-            from .sync.google_drive import coerce_folders_field
-
-            cfg = {
-                "drive_folders": coerce_folders_field(source.gd_folder_id),
-                "files_only": bool(source.gd_files_only),
-                "auth": GoogleDriveAuth(
-                    client_id=source.gd_client_id or "",
-                    client_secret=source.gd_client_secret or "",
-                    refresh_token=source.gd_refresh_token or "",
-                    service_account_json=source.gd_service_account_json or "",
-                ),
-            }
-        elif source_type == "nfs":
-            from .sync.nfs import canonicalise_subpaths
-            import json as _json
-            raw = (source.nfs_subpaths or "").strip()
-            paths: list[str] = []
-            if raw:
-                try:
-                    decoded = _json.loads(raw)
-                    if isinstance(decoded, list):
-                        paths = [str(x) for x in decoded]
-                except _json.JSONDecodeError:
-                    paths = []
-            if not paths and source.nfs_subpath:
-                paths = [source.nfs_subpath]
-            cfg = {"nfs_subpaths": canonicalise_subpaths(paths)}
-        elif source_type in ("sharepoint", "teams"):
-            from .sync.microsoft_auth import MicrosoftAuth
-            ms_auth = MicrosoftAuth(
-                tenant_id=source.ms_tenant_id or "",
-                client_id=source.ms_client_id or "",
-                client_secret=source.ms_client_secret or "",
-                cert_pem=source.ms_cert_pem or "",
-                refresh_token=source.ms_refresh_token or "",
-                method=source.ms_auth_method or "",
-            )
-            if source_type == "sharepoint":
-                from .sync.sharepoint import coerce_sites_field
-                cfg = {
-                    "auth": ms_auth,
-                    "sites": coerce_sites_field(source.sp_selected_sites),
-                    "all_sites": bool(source.sp_all_sites),
-                }
-            else:
-                cfg = {
-                    "auth": ms_auth,
-                    "user_mode": source.tm_user_mode or "me",
-                    "user_id": source.tm_user_id or "",
-                    "include_attended": bool(source.tm_include_attended),
-                }
-        else:
-            raise NotImplementedError(f"unknown source_type: {source_type!r}")
+        # Each connector builds its own kwargs from the row (the per-type
+        # switchboard used to live here). Done while the session is open since
+        # it reads ``source`` fields; we then release the session before the
+        # slow network/disk work below.
+        connector = get_connector(source_type)
+        cfg: dict[str, object] = connector.resolve_config(source)
 
         source.sync_status = "syncing"
         source.sync_error = None
 
     _publish_sync_source_changed(folder_id)
     logger.info("sync begin folder=%s type=%s", folder_path, source_type)
-    connector = get_connector(source_type)
 
     # Bridge the connector's progress callback into the WS event stream so
     # the SPA can show a live "Syncing — listing 1/3" / "Syncing — 47/200"
     # pill. Sync runs on a worker thread (via ``asyncio.to_thread`` inside
     # ``GoogleDriveConnector.sync``) but ``events.publish`` is thread-safe
     # — it round-trips through ``run_coroutine_threadsafe`` if the asyncio
-    # loop has been wired in. Connectors that don't accept ``progress_cb``
-    # (currently just GitHub) silently drop the kwarg via the **cfg dict.
+    # loop has been wired in.
     def _on_progress(
         phase: str,
         done: int,
@@ -832,7 +763,7 @@ async def _run_sync_inner(folder_id: int) -> None:
             event["detail"] = detail
         events.publish("folders", event)
 
-    if source_type in ("google_drive", "nfs", "sharepoint", "teams"):
+    if connector.supports_progress:
         cfg["progress_cb"] = _on_progress
 
     # Initial event from the worker side, before the connector starts —

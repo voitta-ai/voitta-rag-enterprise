@@ -139,6 +139,21 @@ class TeamsConnector(SyncConnector):
     source_type = "teams"
     supports_progress = True
 
+    def resolve_config(self, row) -> dict:
+        return {
+            "auth": msa.MicrosoftAuth(
+                tenant_id=row.ms_tenant_id or "",
+                client_id=row.ms_client_id or "",
+                client_secret=row.ms_client_secret or "",
+                cert_pem=row.ms_cert_pem or "",
+                refresh_token=row.ms_refresh_token or "",
+                method=row.ms_auth_method or "",
+            ),
+            "user_mode": row.tm_user_mode or "me",
+            "user_id": row.tm_user_id or "",
+            "include_attended": bool(row.tm_include_attended),
+        }
+
     async def sync(
         self,
         *,
