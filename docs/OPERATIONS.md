@@ -346,11 +346,15 @@ flowchart TB
 ```
 
 - **Folder ACL:** `_event_folder_id(event)` ∈ the connection's cached
-  `visible` set (owned + granted + shared). Admin / single-user have
-  `visible = None` → no folder filter. Removals filter against the **union**
-  of the pre- and post-refresh visible sets so `folder.removed` /
-  `file.deleted` for a folder you *could* see still arrive (a folder you never
-  could see stays filtered — no leak).
+  `visible` set (owned + granted + shared). **Admins get a real `visible` set
+  just like everyone else** — `is_admin` never widens folder/file/job
+  visibility, only the `admin` topic (an empty folder one user creates is
+  invisible to every other user, admin or not). `visible = None` (no folder
+  filter) is reserved for **single-user mode**, where the lone identity owns
+  everything. This mirrors `routes/folders.list_folders` exactly. Removals
+  filter against the **union** of the pre- and post-refresh visible sets so
+  `folder.removed` / `file.deleted` for a folder you *could* see still arrive
+  (a folder you never could see stays filtered — no leak).
 - **ACL freshness:** folder add/remove/share/grant/revoke bump a global
   `acl_version`; the pump recomputes `visible` off-thread on the next tick.
 - **admin plane:** `admin.*` delivered only to admin connections.
