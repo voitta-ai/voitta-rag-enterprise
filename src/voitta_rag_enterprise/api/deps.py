@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
+from typing import Any
 
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
+from ..config import get_settings
 from ..db.database import get_session_factory
 from ..db.models import User
-from ..services.acl import CurrentUser, get_or_create_user, resolve_user_email
+from ..services.acl import (
+    ROOT_EMAIL,
+    CurrentUser,
+    get_or_create_user,
+    resolve_user_email,
+)
 
 
 def db_session() -> Iterator[Session]:
@@ -80,6 +87,52 @@ def current_user(
             sess.pop("acting_as_user_id", None)
         return me
     return CurrentUser(id=target.id, email=target.email)
+
+
+def resolve_ws_user(
+    session: Mapping[str, Any] | None,
+    db: Session,
+) -> tuple[CurrentUser, bool] | None:
+    """Resolve ``(effective_user, real_is_admin)`` for a WebSocket connection.
+
+    Mirrors :func:`current_user` — including the admin "view as"
+    impersonation — but works from a raw session mapping (``ws.session``)
+    rather than a ``Request``, and returns ``None`` instead of raising when
+    the caller is not signed in. The WS handler turns ``None`` into a
+    ``close(4401)``.
+
+    The returned bool is the *real* user's admin flag (impersonation never
+    confers admin). The event broker uses it to bypass per-folder ACL
+    filtering for admins, who can see everything.
+    """
+    from ..services.admin_store import is_super_admin
+
+    s = get_settings()
+    session_email = session.get("user_email") if session else None
+    if s.single_user:
+        email = ROOT_EMAIL
+    elif s.dev_user:
+        email = s.dev_user
+    elif session_email:
+        email = session_email
+    else:
+        return None
+
+    real = get_or_create_user(db, email)
+    if is_super_admin(email) and not real.is_admin:
+        real.is_admin = True
+    db.commit()
+    real_is_admin = bool(real.is_admin)
+    effective = CurrentUser(id=real.id, email=real.email)
+
+    # Impersonation ("view as") — only honoured for a real admin.
+    target_id = session.get("acting_as_user_id") if session else None
+    if target_id is not None and real_is_admin:
+        target = db.get(User, int(target_id))
+        if target is not None:
+            effective = CurrentUser(id=target.id, email=target.email)
+
+    return effective, real_is_admin
 
 
 def admin_user(

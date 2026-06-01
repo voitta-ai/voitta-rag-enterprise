@@ -11,16 +11,40 @@
 // its own close + tab + form-submit handlers at module load.
 
 import { api } from "../api.js";
+import { adminState } from "../store.js";
 
 const $ = (sel) => document.querySelector(sel);
 
 export function openAdmin() {
+    wireAdminStore();
     $("#admin-backdrop").hidden = false;
+    // Render immediately from the live store (no HTTP fetch). The WS delivers
+    // an ``admin.snapshot`` on connect and re-pushes after every admin
+    // mutation, so the store is the single source of truth.
     refreshAdmin();
 }
 
 export function closeAdmin() {
     $("#admin-backdrop").hidden = true;
+}
+
+// Re-render the (open) admin modal whenever the admin state changes — covers
+// the connect snapshot and any mutation, including ones made in another admin's
+// tab. Guard against clobbering an input the admin is actively editing: skip
+// the re-render while focus is on an input inside the modal; the next push or a
+// reopen reconciles. Wired once.
+let adminStoreWired = false;
+function wireAdminStore() {
+    if (adminStoreWired) return;
+    adminStoreWired = true;
+    adminState.subscribe((state) => {
+        if (!state) return;
+        const backdrop = $("#admin-backdrop");
+        if (backdrop.hidden) return;
+        const ae = document.activeElement;
+        if (ae && ae.tagName === "INPUT" && backdrop.contains(ae)) return;
+        renderAdminFromState(state);
+    });
 }
 
 // Admin modal tabs — Sign-in gate / Users / OAuth providers / Data
@@ -42,24 +66,24 @@ function setAdminTab(name) {
     }
 }
 
-async function refreshAdmin() {
-    try {
-        const [allow, users, providers, caps, settings] = await Promise.all([
-            api.adminAllowlist(),
-            api.adminListUsers(),
-            api.adminListAuthProviders(),
-            api.adminGetIndexingCaps(),
-            api.adminGetSettings(),
-        ]);
-        renderList("#admin-domains", allow.domains, "domain", api.adminRemoveDomain);
-        renderList("#admin-blocked", allow.blocked, "email", api.adminUnblock);
-        renderUsersTable(users);
-        renderAuthProvidersTable(providers);
-        renderCapsTable(caps);
-        renderStorageSettings(settings);
-    } catch (err) {
-        alert(err.message);
-    }
+// Render the whole modal from a state object (the shape build_admin_state()
+// produces on the server: { allowlist, users, auth_providers, indexing_caps,
+// settings }). ``null`` before the first snapshot — render nothing.
+function renderAdminFromState(state) {
+    if (!state) return;
+    renderList("#admin-domains", state.allowlist.domains, "domain", api.adminRemoveDomain);
+    renderList("#admin-blocked", state.allowlist.blocked, "email", api.adminUnblock);
+    renderUsersTable(state.users);
+    renderAuthProvidersTable(state.auth_providers);
+    renderCapsTable(state.indexing_caps);
+    renderStorageSettings(state.settings);
+}
+
+// Render the current store value. Mutations no longer refetch — the server
+// pushes a fresh ``admin.snapshot`` after each change and the subscription in
+// wireAdminStore() re-renders. This just paints whatever's already known.
+function refreshAdmin() {
+    renderAdminFromState(adminState.get());
 }
 
 // ---------------------------------------------------------------------------

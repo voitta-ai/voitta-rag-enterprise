@@ -76,6 +76,58 @@ _COALESCE_KEYS: dict[str, str] = {
 }
 
 
+def _event_folder_id(event: dict[str, Any]) -> int | None:
+    """Return the folder this event belongs to, for per-connection ACL routing.
+
+    Every folder-scoped event on the ``folders`` / ``files`` / ``jobs`` topics
+    carries (or is enriched at publish time to carry) a folder id so the WS pump
+    can drop events for folders a connection's user can't see. ``None`` means the
+    event is not folder-scoped (delivered to everyone) — e.g. global counters.
+
+    Shapes handled (see the publish sites):
+    - ``file.upserted``  → ``event["file"]["folder_id"]``
+    - ``folder.added`` / ``folder.upserted`` → ``event["folder"]["id"]``
+    - everything else folder-scoped → a flat ``event["folder_id"]``
+      (``file.deleted`` and ``job.*`` are enriched with this at publish time).
+    """
+    etype = event.get("type")
+    if etype == "file.upserted":
+        return (event.get("file") or {}).get("folder_id")
+    if etype in ("folder.added", "folder.upserted"):
+        return (event.get("folder") or {}).get("id")
+    fid = event.get("folder_id")
+    return fid if isinstance(fid, int) else None
+
+
+# ---------------------------------------------------------------------------
+# ACL freshness
+#
+# A connection caches the set of folders its user can see. Anything that can
+# change that set (a folder added/removed/shared, an ACL grant/revoke) bumps
+# this global version; the WS pump notices the bump and recomputes the cached
+# set from the DB on its next tick. One integer, mutated under no lock — a
+# monotonic counter only ever read for inequality, so a torn read just defers
+# the refresh by one tick.
+# ---------------------------------------------------------------------------
+_acl_version = 0
+
+
+def acl_version() -> int:
+    return _acl_version
+
+
+def bump_acl_version() -> None:
+    """Signal that folder visibility may have changed for some user(s).
+
+    Cheap and global: every live WS connection will recompute its visible-folder
+    set on the next pump tick. Called from folder add/remove/share and ACL
+    grant/revoke. ``publish`` also calls it automatically for structural folder
+    events so most callers never need to.
+    """
+    global _acl_version
+    _acl_version += 1
+
+
 def _event_key(event: dict[str, Any]) -> tuple[str, Any] | None:
     """Return the dedup key for ``event`` or ``None`` if it must be appended.
 
@@ -124,6 +176,11 @@ def publish(topic: str, event: dict[str, Any]) -> None:
     Safe to call from any thread. No-op if the loop hasn't been installed
     yet (e.g. tests with ``VOITTA_DISABLE_BACKGROUND=true``).
     """
+    # Structural folder changes can alter who-can-see-what; invalidate every
+    # connection's cached visible set so the pump recomputes it.
+    if event.get("type") in ("folder.added", "folder.removed"):
+        bump_acl_version()
+
     loop = _loop
     if loop is None or loop.is_closed():
         return
@@ -147,8 +204,24 @@ class Subscription:
     pump awaits ``wait()`` and then drains via ``drain()``.
     """
 
-    def __init__(self, topics: Iterable[str], capacity: int = DEFAULT_CAPACITY) -> None:
+    def __init__(
+        self,
+        topics: Iterable[str],
+        capacity: int = DEFAULT_CAPACITY,
+        *,
+        user_id: int | None = None,
+        is_admin: bool = False,
+        visible: set[int] | None = None,
+    ) -> None:
         self.topics = tuple(topics)
+        # Per-connection ACL state. ``visible is None`` means "see everything"
+        # (admin or single-user mode) — no filtering. Otherwise only events for
+        # folders in this set reach the client. ``acl_version_seen`` lets the WS
+        # pump know when ``visible`` is stale vs the global ``_acl_version``.
+        self.user_id = user_id
+        self.is_admin = is_admin
+        self.visible = visible
+        self.acl_version_seen = _acl_version
         # Ordered dicts give us O(1) replace-or-append plus FIFO eviction.
         # Coalesced events live keyed by (type, id); discrete events use a
         # synthetic monotonically-increasing key so they never collide.
@@ -247,6 +320,22 @@ class Subscription:
         self._delivered += len(out)
         return out
 
+    def event_visible(self, event: dict[str, Any]) -> bool:
+        """Whether this connection's user is allowed to see ``event``.
+
+        ``visible is None`` (admin / single-user) sees everything. Otherwise a
+        folder-scoped event is delivered only if its folder is in the cached
+        visible set; non-folder-scoped events (``_event_folder_id`` → None) are
+        always delivered. The WS pump refreshes ``visible`` before filtering, so
+        this read is against an up-to-date set.
+        """
+        if self.visible is None:
+            return True
+        fid = _event_folder_id(event)
+        if fid is None:
+            return True
+        return fid in self.visible
+
     @property
     def stats(self) -> dict[str, int]:
         return {
@@ -258,9 +347,22 @@ class Subscription:
 
 
 @asynccontextmanager
-async def subscribe(topics: Iterable[str]) -> AsyncIterator[Subscription]:
-    """Subscribe to ``topics`` for the duration of the ``async with`` block."""
-    sub = Subscription(topics)
+async def subscribe(
+    topics: Iterable[str],
+    *,
+    user_id: int | None = None,
+    is_admin: bool = False,
+    visible: set[int] | None = None,
+) -> AsyncIterator[Subscription]:
+    """Subscribe to ``topics`` for the duration of the ``async with`` block.
+
+    ``user_id`` / ``is_admin`` / ``visible`` set the per-connection ACL scope;
+    ``visible is None`` disables filtering (admin / single-user). The caller (WS
+    pump) is responsible for refreshing ``visible`` when ``acl_version`` moves.
+    """
+    sub = Subscription(
+        topics, user_id=user_id, is_admin=is_admin, visible=visible
+    )
     sub.attach()
     try:
         yield sub

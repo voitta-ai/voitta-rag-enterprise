@@ -1407,7 +1407,10 @@ def _delete_file_sync(file_id: int) -> None:
         if file is not None:
             folder_id = file.folder_id
             s.delete(file)
-    events.publish("files", {"type": "file.deleted", "file_id": file_id})
+    events.publish(
+        "files",
+        {"type": "file.deleted", "file_id": file_id, "folder_id": folder_id},
+    )
     if folder_id is not None:
         with session_scope() as s:
             publish_folder_stats(s, folder_id)

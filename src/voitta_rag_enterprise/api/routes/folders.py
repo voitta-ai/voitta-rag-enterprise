@@ -296,7 +296,10 @@ def create_folder(
     for fid in scan.touched_ids:
         publish_file_upserted(fid)
     for fid in scan.vanished_ids:
-        events.publish("files", {"type": "file.deleted", "file_id": fid})
+        events.publish(
+            "files",
+            {"type": "file.deleted", "file_id": fid, "folder_id": folder.id},
+        )
     return out
 
 
@@ -727,6 +730,8 @@ def grant(
     _require_owner(db, folder_id, user)
     grant_folder(db, folder_id, body.user_id)
     db.commit()
+    # Visibility changed for the grantee — make live WS connections recompute.
+    events.bump_acl_version()
 
 
 @router.post("/{folder_id}/revoke", status_code=status.HTTP_204_NO_CONTENT)
@@ -739,6 +744,8 @@ def revoke(
     _require_owner(db, folder_id, user)
     revoke_folder(db, folder_id, body.user_id)
     db.commit()
+    # Visibility changed for the revokee — make live WS connections recompute.
+    events.bump_acl_version()
 
 
 class ShareIn(BaseModel):
@@ -773,6 +780,9 @@ def set_share(
         owned=True,
         active=folder_active_for_user(db, folder_id, user.id),
     )
+    # A shared-flag flip changes visibility for *every* user — recompute all
+    # connections' visible sets, then push the new state.
+    events.bump_acl_version()
     # Push so other connected SPAs see the new sharing state without polling.
     events.publish("folders", {"type": "folder.upserted", "folder": out.model_dump()})
     return out

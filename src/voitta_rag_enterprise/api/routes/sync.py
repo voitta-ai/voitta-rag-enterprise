@@ -661,7 +661,19 @@ def upsert_sync_source(
         # Toolbar visibility & label depend on has_sync_source — push the
         # update so the UI doesn't need to refetch the folder list.
         _publish_folder_changed(folder, has_sync_source=True)
-    return _to_out(src)
+    out = _to_out(src)
+    # Push the full (secret-masked) config so an open sync modal in any tab
+    # reflects the save live, with no post-save refetch. Secrets are already
+    # reduced to has_* booleans by ``_to_out``.
+    events.publish(
+        "folders",
+        {
+            "type": "folder.sync_config_changed",
+            "folder_id": folder_id,
+            "config": out.model_dump(),
+        },
+    )
+    return out
 
 
 def _clear_github_fields(src: FolderSyncSource) -> None:
@@ -837,6 +849,15 @@ def delete_sync_source(
     db.delete(src)
     db.commit()
     _publish_folder_changed(folder, has_sync_source=False)
+    # config=None tells the client to drop any cached config for this folder.
+    events.publish(
+        "folders",
+        {
+            "type": "folder.sync_config_changed",
+            "folder_id": folder_id,
+            "config": None,
+        },
+    )
 
 
 @router.delete("/error", response_model=SyncSourceOut)

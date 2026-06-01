@@ -18,7 +18,7 @@
 
 import { api } from "../api.js";
 import { getSelectedFolderId } from "../flows/selection.js";
-import { folders, syncSources } from "../store.js";
+import { folders, syncConfigs, syncSources } from "../store.js";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -53,9 +53,9 @@ async function refreshGdProviderPicker() {
     try {
         providers = await api.adminListAuthProviders();
     } catch (err) {
-        // 403 = not admin → silently keep the picker hidden so the
-        // existing manual-entry flow is unchanged. Anything else, log
-        // for diagnostics but keep going.
+        // The list is readable by any authenticated user, so a failure
+        // here is unexpected (network / not signed in). Log it and fall
+        // back to the manual-entry flow with the picker hidden.
         if (!String(err.message || "").startsWith("403")) {
             console.warn("provider list failed", err);
         }
@@ -722,7 +722,23 @@ function setGhAuth(method) {
 
 async function loadSyncSource() {
     try {
-        const src = await api.getSync(syncFolderId);
+        // Read the config from the live store first. It's kept fresh by the
+        // ``folder.sync_config_changed`` WS push (on save, in this or any tab),
+        // so reopening after a change needs no refetch. Lazy-load + seed only
+        // when this folder's config isn't cached yet — the heavy per-folder
+        // connector blob is intentionally not in the global snapshot.
+        const cache = syncConfigs.get();
+        let src;
+        if (cache.has(syncFolderId)) {
+            src = cache.get(syncFolderId);  // may be null (config deleted)
+        } else {
+            src = await api.getSync(syncFolderId);
+            syncConfigs.update((m) => {
+                const next = new Map(m);
+                next.set(syncFolderId, src || null);
+                return next;
+            });
+        }
         if (!src) return;
         $("#sync-type").value = src.source_type;
         setSyncType(src.source_type);
@@ -1646,7 +1662,7 @@ const MS_LOOPBACK_REDIRECT_URI =
     "http://localhost:53682/api/sync/oauth/microsoft/callback";
 
 // Admin-saved Microsoft providers, populated lazily from
-// /api/admin/auth-providers (admin-only). Reused by both the SharePoint
+// /api/admin/auth-providers (readable by any signed-in user). Reused by both the SharePoint
 // and Teams provider pickers — same tenant id is a valid pick for either
 // connector. Map<id, {id, label, tenant_id, client_id, client_secret, source}>.
 const msMicrosoftProviders = new Map();

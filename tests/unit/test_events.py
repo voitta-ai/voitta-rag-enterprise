@@ -183,6 +183,59 @@ async def test_discrete_events_appended_each_time(env: None) -> None:
         events.uninstall_loop()
 
 
+def test_event_folder_id_extraction() -> None:
+    """Every folder-scoped event shape resolves to its folder id; global
+    events resolve to None (delivered to everyone)."""
+    f = events._event_folder_id
+    assert f({"type": "file.upserted", "file": {"folder_id": 5}}) == 5
+    assert f({"type": "folder.added", "folder": {"id": 9}}) == 9
+    assert f({"type": "folder.upserted", "folder": {"id": 9}}) == 9
+    assert f({"type": "folder.removed", "folder_id": 3}) == 3
+    assert f({"type": "folder.stats_changed", "folder_id": 3}) == 3
+    assert f({"type": "file.deleted", "file_id": 1, "folder_id": 4}) == 4
+    assert f({"type": "job.finished", "job_id": 1, "folder_id": 8}) == 8
+    # Global / unscoped — no folder id.
+    assert f({"type": "job.finished", "job_id": 1, "folder_id": None}) is None
+    assert f({"type": "job.started", "job_id": 1}) is None
+
+
+def test_event_visible_filters_by_folder() -> None:
+    sub = events.Subscription(["files"], user_id=1, is_admin=False, visible={5, 6})
+    assert sub.event_visible({"type": "file.upserted", "file": {"folder_id": 5}})
+    assert not sub.event_visible({"type": "file.upserted", "file": {"folder_id": 9}})
+    # Job in a visible folder passes; in an invisible one is dropped.
+    assert sub.event_visible({"type": "job.finished", "job_id": 1, "folder_id": 6})
+    assert not sub.event_visible({"type": "job.finished", "job_id": 1, "folder_id": 9})
+    # Unscoped/global events are always delivered.
+    assert sub.event_visible({"type": "job.finished", "job_id": 1, "folder_id": None})
+
+
+def test_event_visible_admin_and_single_user_see_everything() -> None:
+    # visible=None models admin / single-user: no filtering at all.
+    sub = events.Subscription(["files"], user_id=2, is_admin=True, visible=None)
+    assert sub.event_visible({"type": "file.upserted", "file": {"folder_id": 999}})
+    assert sub.event_visible({"type": "folder.removed", "folder_id": 999})
+
+
+def test_bump_acl_version_increments() -> None:
+    before = events.acl_version()
+    events.bump_acl_version()
+    assert events.acl_version() == before + 1
+
+
+def test_structural_folder_events_bump_acl_version(env: None) -> None:
+    """folder.added / folder.removed invalidate every connection's cached
+    visible set so the WS pump recomputes it."""
+    before = events.acl_version()
+    events.publish("folders", {"type": "folder.added", "folder": {"id": 1}})
+    events.publish("folders", {"type": "folder.removed", "folder_id": 1})
+    assert events.acl_version() == before + 2
+    # A non-structural folder event must NOT bump.
+    steady = events.acl_version()
+    events.publish("folders", {"type": "folder.stats_changed", "folder_id": 1})
+    assert events.acl_version() == steady
+
+
 @pytest.mark.asyncio
 async def test_uninstall_clears_topics(env: None) -> None:
     events.install_loop(asyncio.get_running_loop())

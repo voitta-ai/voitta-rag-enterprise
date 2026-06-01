@@ -92,7 +92,15 @@ function buildJobRow(jobId) {
     retry.title = "Retry";
     retry.hidden = true;
     retry.addEventListener("click", async () => {
-        try { await api.retryJob(jobId); } catch (e) { alert(e.message); }
+        // Optimistic: disable so a double-click can't enqueue two retries.
+        // The row reconciles from the WS job.* events; on error we re-enable.
+        retry.disabled = true;
+        try {
+            await api.retryJob(jobId);
+        } catch (e) {
+            retry.disabled = false;
+            alert(e.message);
+        }
     });
 
     li.append(col, tag, cancel, retry);

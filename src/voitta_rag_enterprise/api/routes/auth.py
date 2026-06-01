@@ -28,7 +28,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ...config import get_settings
+from ...db.database import session_scope
 from ...db.models import ApiKey
+from ...services import events
 from ...services.acl import CurrentUser, get_or_create_user
 from ...services.admin_store import is_email_allowed, is_super_admin
 from ..deps import current_user, db_session
@@ -389,6 +391,35 @@ def _to_out(k: ApiKey) -> ApiKeyOut:
     )
 
 
+def build_keys_state(db: Session, user_id: int) -> list[dict]:
+    """A user's API keys, newest first — the shape the settings modal renders.
+
+    Feeds both the WS connect snapshot and the on-mutation push (the plaintext
+    token is never included here; it's returned only in the create response)."""
+    rows = (
+        db.execute(
+            select(ApiKey)
+            .where(ApiKey.user_id == user_id)
+            .order_by(ApiKey.created_at.desc(), ApiKey.id.desc())
+        )
+        .scalars()
+        .all()
+    )
+    return [_to_out(k).model_dump() for k in rows]
+
+
+def publish_keys_state(user_id: int) -> None:
+    """Push the user's key list to *their* WS connection(s).
+
+    The ``keys.*`` plane is strictly per-user: the WS pump only delivers these
+    to the connection whose ``user_id`` matches the event's."""
+    with session_scope() as db:
+        items = build_keys_state(db, user_id)
+    events.publish(
+        "keys", {"type": "keys.snapshot", "user_id": user_id, "items": items}
+    )
+
+
 @router.get("/keys", response_model=list[ApiKeyOut])
 def list_keys(
     db: Session = Depends(db_session),
@@ -433,6 +464,7 @@ def create_key(
     db.commit()
     db.refresh(row)
     logger.info("api_key.create user=%s id=%d name=%r", user.email, row.id, name)
+    publish_keys_state(user.id)
     return ApiKeyCreatedOut(**_to_out(row).model_dump(), token=token)
 
 
@@ -450,3 +482,4 @@ def delete_key(
     db.delete(row)
     db.commit()
     logger.info("api_key.delete user=%s id=%d", user.email, key_id)
+    publish_keys_state(user.id)

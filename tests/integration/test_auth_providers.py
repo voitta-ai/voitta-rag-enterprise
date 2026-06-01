@@ -38,7 +38,9 @@ def _make_admin(app: FastAPI, email: str) -> int:
 @pytest.mark.parametrize(
     ("path", "method"),
     [
-        ("/api/admin/auth-providers", "get"),
+        # Mutations stay admin-only. GET is intentionally NOT here — see
+        # ``test_non_admin_can_list`` below: any signed-in user may read the
+        # catalog so admin-defined OAuth apps work as shared sync shortcuts.
         ("/api/admin/auth-providers", "post"),
         ("/api/admin/auth-providers/1", "patch"),
         ("/api/admin/auth-providers/1", "delete"),
@@ -50,6 +52,17 @@ def test_non_admin_is_blocked(app: FastAPI, path: str, method: str) -> None:
     with TestClient(app) as c:
         resp = c.request(method, path, json={})
         assert resp.status_code == 403
+
+
+def test_non_admin_can_list(app: FastAPI) -> None:
+    """GET /auth-providers is readable by any authenticated user (by design):
+    an admin defines OAuth apps once and every user picks them as sign-in /
+    sync shortcuts. Only the mutating routes are admin-gated."""
+    auth_as(app, "regular@x.com")
+    with TestClient(app) as c:
+        resp = c.get("/api/admin/auth-providers")
+        assert resp.status_code == 200
+        assert resp.json() == []
 
 
 # ---------------------------------------------------------------------------

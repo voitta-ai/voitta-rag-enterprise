@@ -6,18 +6,34 @@
 // only show the prefix — there's no recover-the-token path.
 
 import { api } from "../api.js";
+import { keysState } from "../store.js";
 
 const $ = (sel) => document.querySelector(sel);
 
 export function openSettings() {
+    wireKeysStore();
     $("#settings-backdrop").hidden = false;
     $("#key-reveal").hidden = true;
     $("#key-name").value = "";
-    refreshKeys();
+    // Render from the live store; the WS delivers the user's keys on connect
+    // and re-pushes after every create/delete. No HTTP fetch on open.
+    renderKeys(keysState.get());
 }
 
 export function closeSettings() {
     $("#settings-backdrop").hidden = true;
+}
+
+// Re-render the (open) keys panel whenever the user's key set changes. Wired
+// once. Keys aren't editable inline, so a plain re-render is safe.
+let keysStoreWired = false;
+function wireKeysStore() {
+    if (keysStoreWired) return;
+    keysStoreWired = true;
+    keysState.subscribe((keys) => {
+        if ($("#settings-backdrop").hidden) return;
+        renderKeys(keys);
+    });
 }
 
 function fmtTime(ts) {
@@ -26,14 +42,8 @@ function fmtTime(ts) {
     return d.toLocaleString();
 }
 
-async function refreshKeys() {
-    let keys = [];
-    try {
-        keys = await api.listKeys();
-    } catch (err) {
-        alert(err.message);
-        return;
-    }
+function renderKeys(keys) {
+    keys = keys || [];
     const tbody = $("#keys-tbody");
     tbody.innerHTML = "";
     $("#keys-empty").hidden = keys.length > 0;
@@ -66,7 +76,8 @@ async function deleteKey(k) {
     if (!confirm(`Delete key "${k.name}"?\n\nAny client still using its token will stop working immediately.`)) return;
     try {
         await api.deleteKey(k.id);
-        await refreshKeys();
+        // No refetch — the server pushes a fresh keys.snapshot; the store
+        // subscription re-renders the table.
     } catch (err) {
         alert(err.message);
     }
@@ -108,7 +119,7 @@ $("#key-create").addEventListener("click", async () => {
     $("#key-reveal-claude").textContent = claudeDesktop;
     $("#key-reveal-cli").textContent = cli;
     $("#key-reveal").hidden = false;
-    await refreshKeys();
+    // No refetch — the keys.snapshot push re-renders the table via the store.
 });
 
 $("#key-reveal-copy").addEventListener("click", async () => {

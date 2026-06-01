@@ -2,6 +2,9 @@
 
 All routes here are guarded by ``admin_user`` — only the *real* user's
 ``is_admin`` flag matters; impersonation does NOT confer admin rights.
+The one exception is ``GET /auth-providers``, which is read-only and open
+to any authenticated user so admin-defined OAuth apps work as shared
+sign-in/sync shortcuts; its mutating siblings remain admin-only.
 
 Three concerns covered:
 
@@ -28,12 +31,13 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ...db.database import session_scope
 from ...db.models import AuthProvider, User
-from ...services import admin_store
+from ...services import admin_store, events
 from ...services import auth_providers as auth_providers_svc
 from ...services import indexing_caps
 from ...services.acl import CurrentUser
-from ..deps import admin_user, db_session
+from ..deps import admin_user, current_user, db_session
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +86,9 @@ def add_domain(
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
     logger.info("admin: %s added domain %s", me.email, body.domain)
-    return get_allowlist(me)
+    out = get_allowlist(me)
+    publish_admin_state()
+    return out
 
 
 @router.delete("/allowlist/domains/{domain}", response_model=AllowlistOut)
@@ -92,7 +98,9 @@ def remove_domain(
 ) -> AllowlistOut:
     admin_store.remove_allowed_domain(domain)
     logger.info("admin: %s removed domain %s", me.email, domain)
-    return get_allowlist(me)
+    out = get_allowlist(me)
+    publish_admin_state()
+    return out
 
 
 @router.post("/allowlist/users", response_model=AllowlistOut)
@@ -105,7 +113,9 @@ def add_email(
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
     logger.info("admin: %s allowed %s", me.email, body.email)
-    return get_allowlist(me)
+    out = get_allowlist(me)
+    publish_admin_state()
+    return out
 
 
 @router.delete("/allowlist/users/{email}", response_model=AllowlistOut)
@@ -115,7 +125,9 @@ def remove_email(
 ) -> AllowlistOut:
     admin_store.remove_allowed_user(email)
     logger.info("admin: %s removed allowed user %s", me.email, email)
-    return get_allowlist(me)
+    out = get_allowlist(me)
+    publish_admin_state()
+    return out
 
 
 @router.post("/blocklist", response_model=AllowlistOut)
@@ -128,7 +140,9 @@ def add_block(
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
     logger.info("admin: %s blocked %s", me.email, body.email)
-    return get_allowlist(me)
+    out = get_allowlist(me)
+    publish_admin_state()
+    return out
 
 
 @router.delete("/blocklist/{email}", response_model=AllowlistOut)
@@ -138,7 +152,9 @@ def remove_block(
 ) -> AllowlistOut:
     admin_store.remove_blocked_user(email)
     logger.info("admin: %s unblocked %s", me.email, email)
-    return get_allowlist(me)
+    out = get_allowlist(me)
+    publish_admin_state()
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -201,6 +217,7 @@ def create_user(
     )
 
     super_set = {sa.lower() for sa in get_settings().super_admin_list()}
+    publish_admin_state()
     return AdminUserOut(
         id=user.id,
         email=user.email,
@@ -257,6 +274,7 @@ def set_admin_flag(
         "admin: %s set is_admin=%s for %s", me.email, body.is_admin, target.email
     )
     super_set = {sa.lower() for sa in get_settings().super_admin_list()}
+    publish_admin_state()
     return AdminUserOut(
         id=target.id,
         email=target.email,
@@ -386,8 +404,11 @@ def _normalise_provider(value: str) -> str:
 @router.get("/auth-providers", response_model=list[AuthProviderOut])
 def list_auth_providers(
     db: Session = Depends(db_session),
-    _: CurrentUser = Depends(admin_user),
+    _: CurrentUser = Depends(current_user),
 ) -> list[AuthProviderOut]:
+    # Read-only and open to any authenticated user *by design*: an admin
+    # defines OAuth apps once, and every user picks them as sign-in/sync
+    # shortcuts. The mutating routes below stay admin-only.
     rows = (
         db.execute(select(AuthProvider).order_by(AuthProvider.id))
         .scalars()
@@ -433,6 +454,7 @@ def create_auth_provider(
     logger.info(
         "admin: %s created auth provider id=%d provider=%s", me.email, row.id, provider
     )
+    publish_admin_state()
     return _to_out(row)
 
 
@@ -474,6 +496,7 @@ def update_auth_provider(
     logger.info(
         "admin: %s updated auth provider id=%d", me.email, provider_id
     )
+    publish_admin_state()
     return _to_out(row)
 
 
@@ -492,6 +515,7 @@ def delete_auth_provider(
         "admin: %s deleted auth provider id=%d (provider=%s, source=%s)",
         me.email, provider_id, row.provider, row.source,
     )
+    publish_admin_state()
     # Source='env' rows reappear on the next restart — that's by design.
 
 
@@ -563,6 +587,7 @@ def update_indexing_caps(
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
     logger.info("admin: %s updated indexing caps: keys=%s", me.email, sorted(body))
+    publish_admin_state()
     return IndexingCapsOut(
         values=indexing_caps.as_dict(),
         defaults=indexing_caps.defaults_dict(),
@@ -655,4 +680,66 @@ def update_admin_settings(
     if updates:
         admin_store.save_settings(updates)
         logger.info("admin: %s updated settings: keys=%s", me.email, sorted(updates))
+        publish_admin_state()
     return _admin_settings_out()
+
+
+# ---------------------------------------------------------------------------
+# WebSocket snapshot + push
+#
+# The admin modal is WS-backed: it renders from a single ``admin.snapshot``
+# frame (sent on connect to admins, see ``api.snapshot``) and re-renders on the
+# same frame pushed after every admin mutation above. No HTTP-on-open, no
+# post-mutation refetch. Delivery is admin-only (the WS pump drops ``admin.*``
+# events for non-admin connections).
+# ---------------------------------------------------------------------------
+
+
+def build_admin_state(db: Session) -> dict:
+    """Full admin-console state, mirroring the five admin GET endpoints.
+
+    The shape matches what the SPA's admin modal renders so one builder feeds
+    both the connect snapshot and the on-mutation push.
+    """
+    from ...config import get_settings
+
+    super_list = get_settings().super_admin_list()
+    super_set = {sa.lower() for sa in super_list}
+    users = db.execute(select(User).order_by(User.email)).scalars().all()
+    providers = db.execute(select(AuthProvider).order_by(AuthProvider.id)).scalars().all()
+    return {
+        "allowlist": AllowlistOut(
+            domains=admin_store.list_allowed_domains(),
+            users=admin_store.list_allowed_users(),
+            blocked=admin_store.list_blocked_users(),
+            super_admins=super_list,
+        ).model_dump(),
+        "users": [
+            AdminUserOut(
+                id=u.id,
+                email=u.email,
+                display_name=u.display_name,
+                is_admin=bool(u.is_admin),
+                is_super_admin=u.email.lower() in super_set,
+            ).model_dump()
+            for u in users
+        ],
+        "auth_providers": [_to_out(r).model_dump() for r in providers],
+        "indexing_caps": IndexingCapsOut(
+            values=indexing_caps.as_dict(),
+            defaults=indexing_caps.defaults_dict(),
+            bounds=indexing_caps.bounds_dict(),
+        ).model_dump(),
+        "settings": _admin_settings_out().model_dump(),
+    }
+
+
+def publish_admin_state() -> None:
+    """Push the full admin state to every admin WS connection.
+
+    Low-volume (admin mutations are rare), so re-sending the whole state on each
+    change keeps the client logic to a single replace with no delta merging.
+    """
+    with session_scope() as db:
+        state = build_admin_state(db)
+    events.publish("admin", {"type": "admin.snapshot", "state": state})

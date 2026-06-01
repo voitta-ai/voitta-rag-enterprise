@@ -1,19 +1,26 @@
-"""WebSocket endpoint — clients receive live state updates over a topic stream.
+"""WebSocket endpoint — the single channel for server→client state.
 
-v1 is server→client after the initial handshake. The client's only inbound
-message is the opening ``subscribe``; subsequent messages from the client
-are ignored at the application layer (starlette/uvicorn handle the
-WebSocket-level ping/pong).
+Flow per connection:
 
-The pump drains the subscription's coalesced buffer in batches and sends
-the events as a single JSON array per ``WebSocket.send_text`` call. Under
-heavy indexing this gives us two important properties:
+1. **Auth** — the handshake is authenticated from the signed session cookie
+   (same identity as the REST API). Unauthenticated connections are closed with
+   ``4401`` unless single-user mode is on.
+2. **Subscribe** — the client's first frame is ``{type:"subscribe", topics}``.
+3. **Snapshot** — the server sends the full current state for each subscribed
+   topic, scoped to the user's visible folders, then a ``{type:"synced"}``
+   sentinel. This is what makes reconnect bulletproof: the client REPLACES its
+   stores from the snapshot, so anything missed while offline converges back to
+   server truth with no page reload.
+4. **Deltas** — the pump drains the coalesced event buffer in batches and
+   streams them, filtered per-connection by folder ACL.
 
-* one ``send_text`` per scheduling tick instead of N — tens of thousands
-  of events become a much smaller number of TCP frames, and the loop
-  spends less time blocked on socket writability;
-* the buffer dedupes ``file.upserted`` / ``job.*`` per id, so the client
-  only sees one final state per resource even if upstream produced 30.
+After the handshake the channel is server→client only; further client frames
+are ignored at the application layer (starlette/uvicorn handle ping/pong).
+
+ACL filtering: each connection caches the set of folders its user can see.
+Anything that can change that set bumps ``events.acl_version()``; the pump
+notices and recomputes the set (off-thread, so the event loop never blocks on
+the DB) before filtering the next batch.
 """
 
 from __future__ import annotations
@@ -25,27 +32,79 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
 
+from ..config import get_settings
+from ..db.database import get_session_factory
 from ..services import events
+from ..services.acl import visible_folder_ids
+from .deps import resolve_ws_user
+from .snapshot import build_snapshot
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-VALID_TOPICS = ("folders", "files", "jobs", "stats")
+VALID_TOPICS = ("folders", "files", "jobs", "stats", "admin", "keys")
 
 # How long the pump idles between drain checks when nothing is happening.
-# Far longer than the old 100ms — the wakeup Event short-circuits this on
-# any actual publish, so a higher value just means less CPU when idle.
+# The wakeup Event short-circuits this on any actual publish, so a higher
+# value just means less CPU when idle.
 IDLE_TIMEOUT = 5.0
-# Cap per drain — keeps any single send small enough to not stall the
-# socket for too long, but large enough that the typical burst leaves in
-# one shot.
+# Cap per drain — keeps any single send small enough to not stall the socket
+# for too long, but large enough that the typical burst leaves in one shot.
 MAX_BATCH = 512
+
+# Application-level close code for an unauthenticated connection (4000-4999 is
+# the private-use range). The SPA treats this as "stop reconnecting, send the
+# user to sign in" rather than the transient-network reconnect path.
+WS_CLOSE_UNAUTHENTICATED = 4401
+
+
+def _resolve_visible(user_id: int) -> set[int]:
+    """Compute a user's visible-folder set in a fresh session (off event loop)."""
+    factory = get_session_factory()
+    db = factory()
+    try:
+        return set(visible_folder_ids(db, user_id))
+    finally:
+        db.close()
+
+
+def _authenticate(ws: WebSocket) -> tuple[int | None, bool, set[int] | None] | None:
+    """Resolve ``(user_id, is_admin, visible)`` for the connection.
+
+    Returns ``None`` when the caller is not signed in (multi-user) — the handler
+    closes the socket. ``visible is None`` means see-everything (admin or
+    single-user); otherwise it's the user's visible-folder set.
+    """
+    session = ws.session if "session" in ws.scope else None
+    factory = get_session_factory()
+    db = factory()
+    try:
+        resolved = resolve_ws_user(session, db)
+        if resolved is None:
+            return None
+        user, is_admin = resolved
+        if get_settings().single_user or is_admin:
+            return user.id, is_admin, None
+        return user.id, is_admin, set(visible_folder_ids(db, user.id))
+    finally:
+        db.close()
 
 
 @router.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
     await ws.accept()
+
+    auth = _authenticate(ws)
+    if auth is None:
+        try:
+            await ws.send_json({"type": "error", "message": "unauthenticated"})
+            await ws.close(code=WS_CLOSE_UNAUTHENTICATED)
+        except (WebSocketDisconnect, RuntimeError):
+            pass
+        return
+    user_id, is_admin, visible = auth
+
     try:
         first = await ws.receive_json()
     except (WebSocketDisconnect, ValueError):
@@ -61,7 +120,9 @@ async def ws_endpoint(ws: WebSocket) -> None:
             pass
         return
 
-    topics = [t for t in (first.get("topics") or VALID_TOPICS) if t in VALID_TOPICS]
+    topics = tuple(
+        t for t in (first.get("topics") or VALID_TOPICS) if t in VALID_TOPICS
+    )
     if not topics:
         try:
             await ws.send_json({"type": "error", "message": "no valid topics"})
@@ -72,26 +133,128 @@ async def ws_endpoint(ws: WebSocket) -> None:
 
     await ws.send_json({"type": "subscribed", "topics": list(topics)})
 
-    async with events.subscribe(topics) as sub:
+    async with events.subscribe(
+        topics, user_id=user_id, is_admin=is_admin, visible=visible
+    ) as sub:
+        # Snapshot AFTER attach: any delta arriving during snapshot build is
+        # buffered and applied after, and because the client treats snapshots
+        # as replace and deltas as upsert, the race is benign.
+        try:
+            await _send_snapshot(ws, sub, user_id, is_admin, visible, topics)
+        except (WebSocketDisconnect, RuntimeError):
+            return
         try:
             await _pump(ws, sub)
         except (WebSocketDisconnect, asyncio.CancelledError):
             return
 
 
-async def _pump(ws: WebSocket, sub: events.Subscription) -> None:
-    """Forward coalesced events to the client until the WS disconnects.
+async def _send_snapshot(
+    ws: WebSocket,
+    sub: events.Subscription,
+    user_id: int | None,
+    is_admin: bool,
+    visible: set[int] | None,
+    topics: tuple[str, ...],
+) -> None:
+    """Build and send the full state snapshot, then a ``synced`` sentinel."""
+    frames = await asyncio.to_thread(
+        _build_snapshot_frames, user_id, is_admin, visible, topics
+    )
+    for frame in frames:
+        await ws.send_text(json.dumps(frame))
+    await ws.send_text(json.dumps({"type": "synced"}))
 
-    Each iteration: wait for a publish (or for IDLE_TIMEOUT to expire so we
-    can recheck client_state and let the loop schedule pings), then drain
-    everything buffered into a single ``batch`` frame.
+
+def _build_snapshot_frames(
+    user_id: int | None,
+    is_admin: bool,
+    visible: set[int] | None,
+    topics: tuple[str, ...],
+) -> list[dict]:
+    factory = get_session_factory()
+    db = factory()
+    try:
+        return build_snapshot(
+            db,
+            user_id=user_id or 0,
+            is_admin=is_admin,
+            visible=visible,
+            topics=topics,
+        )
+    finally:
+        db.close()
+
+
+async def _refresh_acl_if_stale(sub: events.Subscription) -> set[int] | None:
+    """Recompute the connection's visible set if the global ACL version moved.
+
+    Returns the visible set *as it was before* the refresh (so the pump can
+    filter the just-drained batch against the union of old and new — see
+    ``_pump``). Runs the DB query in a thread so the event loop never blocks.
+    Admin / single-user connections (``visible is None``) never filter.
+    """
+    before = sub.visible
+    if sub.visible is None or sub.user_id is None:
+        return before
+    current = events.acl_version()
+    if current == sub.acl_version_seen:
+        return before
+    sub.visible = await asyncio.to_thread(_resolve_visible, sub.user_id)
+    sub.acl_version_seen = current
+    return before
+
+
+def _deliverable(
+    event: dict, sub: events.Subscription, allowed: set[int] | None
+) -> bool:
+    """Per-connection delivery predicate covering all three scoping planes.
+
+    - ``admin.*`` events go only to admin connections.
+    - ``keys.*`` events go only to the connection whose user they belong to
+      (enforced even for admins — API keys are personal, not folder data).
+    - everything else is folder-scoped: delivered when its folder is in
+      ``allowed`` (``None`` = admin/single-user sees all), or when it has no
+      folder (global events like gc_cas jobs).
+    """
+    etype = event.get("type", "")
+    if etype.startswith("admin."):
+        return sub.is_admin
+    if etype.startswith("keys."):
+        return event.get("user_id") == sub.user_id
+    if allowed is None:
+        return True
+    fid = events._event_folder_id(event)
+    return fid is None or fid in allowed
+
+
+async def _pump(ws: WebSocket, sub: events.Subscription) -> None:
+    """Forward coalesced, ACL-filtered events to the client until disconnect.
+
+    Each iteration: wait for a publish (or IDLE_TIMEOUT), refresh the visible
+    set if ACL changed, drain the buffer, drop events for folders this user
+    can't see, then send what remains as one frame.
+
+    Removal subtlety: deleting a folder makes it *no longer visible*, but the
+    client still needs the ``folder.removed`` / ``file.deleted`` event to drop
+    it from its store. So we filter against the UNION of the pre- and
+    post-refresh visible sets: a folder the user *could* see (and is now gone)
+    still passes, while a folder they never could see stays filtered out (no
+    leak). Revocation via unshare/ungrant fully propagates on the next
+    reconnect snapshot.
     """
     while ws.client_state == WebSocketState.CONNECTED:
         try:
             await sub.wait(timeout=IDLE_TIMEOUT)
         except asyncio.CancelledError:
             return
-        events_out = sub.drain(max_events=MAX_BATCH)
+        before = await _refresh_acl_if_stale(sub)
+        drained = sub.drain(max_events=MAX_BATCH)
+        # ``allowed`` is the union of pre/post-refresh visible folders, or None
+        # for admin/single-user (no folder filtering). Topic scoping for the
+        # admin/keys planes is applied regardless of folder visibility.
+        allowed = None if sub.visible is None else sub.visible | (before or set())
+        events_out = [e for e in drained if _deliverable(e, sub, allowed)]
         if not events_out:
             continue
         payload = (

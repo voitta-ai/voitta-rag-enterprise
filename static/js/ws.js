@@ -1,12 +1,20 @@
 // WebSocket connection manager with backoff reconnect.
 
-import { activeFolders, connStatus, folders, files, jobs, reindexProgress, syncProgress, syncSources, folderStats } from "./store.js";
+import { activeFolders, adminState, connStatus, folders, files, jobs, keysState, reindexProgress, syncConfigs, syncProgress, syncSources, folderStats } from "./store.js";
 
 const MAX_BACKOFF_MS = 30_000;
-const TOPICS = ["folders", "files", "jobs", "stats"];
+// ``admin`` and ``keys`` are subscribed by everyone; the server only delivers
+// admin.* to admins and keys.* to the owning user, so non-recipients just get
+// nothing on those planes.
+const TOPICS = ["folders", "files", "jobs", "stats", "admin", "keys"];
+
+// Application close code the server uses for an unauthenticated handshake.
+// We stop reconnecting and bounce to login rather than hammering /ws.
+const WS_CLOSE_UNAUTHENTICATED = 4401;
 
 let socket = null;
 let backoff = 500;
+let stopped = false;
 
 export function connect() {
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -15,7 +23,10 @@ export function connect() {
 
     socket.addEventListener("open", () => {
         backoff = 500;
-        connStatus.set("connected");
+        // "syncing" until the server's snapshot + ``synced`` sentinel land.
+        // On a reconnect the stores still hold the (possibly stale) previous
+        // state during this window; the snapshot replaces them wholesale.
+        connStatus.set("syncing");
         socket.send(JSON.stringify({ type: "subscribe", topics: TOPICS }));
     });
 
@@ -32,8 +43,18 @@ export function connect() {
         }
     });
 
-    socket.addEventListener("close", () => {
+    socket.addEventListener("close", (e) => {
+        if (e.code === WS_CLOSE_UNAUTHENTICATED) {
+            // Session expired / not signed in — reconnecting won't help.
+            stopped = true;
+            connStatus.set("unauthenticated");
+            // Reload so the app's auth gate (ensureAuthenticated) takes over
+            // and routes the user to sign-in.
+            location.reload();
+            return;
+        }
         connStatus.set("disconnected");
+        if (stopped) return;
         setTimeout(connect, backoff);
         backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
     });
@@ -43,9 +64,56 @@ export function connect() {
     });
 }
 
+// Apply a full-state snapshot frame by REPLACING the store wholesale, so
+// anything deleted while the socket was down disappears. Deltas that arrive
+// afterwards merge on top. This is the mechanism that makes reconnect
+// bulletproof: every (re)connect re-snapshots and the client converges to
+// server truth without a page reload.
+function applySnapshot(topic, items) {
+    switch (topic) {
+        case "folders":
+            folders.set(items);
+            return;
+        case "active":
+            activeFolders.set(new Set(items));
+            return;
+        case "files":
+            files.set(items);
+            return;
+        case "jobs":
+            jobs.set(items);
+            return;
+    }
+}
+
 function handleEvent(event) {
     switch (event.type) {
         case "subscribed":
+            return;
+        case "snapshot":
+            applySnapshot(event.topic, event.items || []);
+            return;
+        case "synced":
+            // Baseline delivered; live deltas follow. The pill goes green.
+            connStatus.set("connected");
+            return;
+        case "admin.snapshot":
+            // Full admin-console state (connect snapshot + every admin
+            // mutation). Replace wholesale — the admin modal renders from it.
+            adminState.set(event.state);
+            return;
+        case "keys.snapshot":
+            // The signed-in user's API keys; replace wholesale.
+            keysState.set(event.items || []);
+            return;
+        case "folder.sync_config_changed":
+            // Per-folder connector config (secret-masked). null = deleted.
+            syncConfigs.update((map) => {
+                const next = new Map(map);
+                if (event.config === null) next.delete(event.folder_id);
+                else next.set(event.folder_id, event.config);
+                return next;
+            });
             return;
         case "folder.added":
             folders.update((list) => [...list.filter(f => f.id !== event.folder.id), event.folder]);

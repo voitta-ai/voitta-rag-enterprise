@@ -58,3 +58,21 @@ export const folderStats = createStore(new Map());
 // (which carries the per-phase listing/downloading counters that come
 // from the connector).
 export const syncSources = createStore(new Map());
+// Full admin-console state, delivered as a single ``admin.snapshot`` WS frame
+// (on connect to admins, and re-pushed after every admin mutation). The admin
+// modal renders from this store instead of fetching the five admin GET
+// endpoints on open — so a change made in one admin's tab shows up live in
+// another's. ``null`` until the first snapshot arrives (non-admins never get
+// one). Shape: { allowlist, users, auth_providers, indexing_caps, settings }.
+export const adminState = createStore(null);
+// The signed-in user's API keys (newest first), delivered as a per-user
+// ``keys.snapshot`` WS frame on connect and after each create/delete. The
+// settings modal renders from this instead of GET /api/auth/keys on open.
+export const keysState = createStore([]);
+// folder_id → SyncSourceOut config (secret-masked). Pushed via
+// ``folder.sync_config_changed`` on save/delete so an open sync modal reflects
+// config edits live (and after-save) without a refetch. Lazily seeded by the
+// modal with a one-time GET when opened for a folder not yet in the map —
+// the heavy per-folder connector config is intentionally NOT in the global
+// snapshot. A ``null`` value marks a folder whose config was deleted.
+export const syncConfigs = createStore(new Map());

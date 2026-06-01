@@ -163,6 +163,9 @@ def claim_one() -> ClaimedJob | None:
         # event lands. Without this the SPA only knows the file_id and
         # would have to round-trip back to /api/files for every claim.
         display_path = _resolve_display_path(session, claimed.payload)
+        # Resolve the owning folder so the WS layer can ACL-route this event
+        # (drop it for connections whose user can't see the folder).
+        folder_id = folder_active.folder_id_for_payload(session, claimed.payload)
     events.publish(
         "jobs",
         {
@@ -171,6 +174,7 @@ def claim_one() -> ClaimedJob | None:
             "kind": claimed.kind,
             "payload": claimed.payload,
             "display_path": display_path,
+            "folder_id": folder_id,
         },
     )
     return claimed
@@ -213,7 +217,16 @@ def mark_done(job_id: int) -> None:
         job.finished_at = int(time.time())
         kind = job.kind
     folder_active.on_finished(folder_id)
-    events.publish("jobs", {"type": "job.finished", "job_id": job_id, "kind": kind, "state": "done"})
+    events.publish(
+        "jobs",
+        {
+            "type": "job.finished",
+            "job_id": job_id,
+            "kind": kind,
+            "state": "done",
+            "folder_id": folder_id,
+        },
+    )
 
 
 def mark_error(job_id: int, error: str) -> None:
@@ -241,5 +254,6 @@ def mark_error(job_id: int, error: str) -> None:
             "kind": kind,
             "state": "error",
             "error": error,
+            "folder_id": folder_id,
         },
     )

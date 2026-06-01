@@ -146,35 +146,36 @@ async function bootstrap() {
         setRootInfo(rootInfo);
         setRenameRootInfo(rootInfo);
         $("#btn-new-folder").disabled = !rootInfo.configured;
-        const folderList = await api.listFolders();
-        folders.set(folderList);
-        files.set(await api.listAllFiles());
-        jobs.set(await api.recentJobs());
-        // Seed the active-folders set so the tree pills are correct
-        // before the first folder.active_changed event arrives. The
-        // call is cheap (server returns a flat list of ids), so we
-        // fold any error into a logged warning rather than blocking
-        // the rest of the snapshot.
-        try {
-            activeFolders.set(new Set(await api.activeFolderIds()));
-        } catch (err) {
-            console.warn("active-ids seed failed", err);
-        }
-        // Seed ghost dirs from the real filesystem so empty subdirectories
-        // appear in the tree even before any files are indexed into them.
-        await Promise.allSettled(
-            folderList.map(async (f) => {
-                try {
-                    const dirs = await api.listFolderDirs(f.id);
-                    for (const rel of dirs) addGhostDir(f.id, rel);
-                } catch (_) { /* best-effort */ }
-            })
-        );
+        // The folders / files / jobs / active-folders stores are no longer
+        // seeded over HTTP here — the WebSocket delivers a full snapshot on
+        // connect (and re-delivers it on every reconnect), making it the
+        // single source of truth. See ws.js applySnapshot / connect().
     } catch (err) {
-        console.warn("snapshot failed", err);
+        console.warn("root info failed", err);
     }
+    // Ghost dirs (empty subdirectories visible in the tree before anything is
+    // indexed into them) come from the filesystem, not the WS state plane, so
+    // they're still seeded over HTTP — but reactively off the folders store so
+    // they pick up folders from the WS snapshot and any later folder.added.
+    seedGhostDirsFromFolders();
     hideBootOverlay();
     connect();
+}
+
+// Lazily seed ghost dirs for every folder we haven't seen yet, re-running
+// whenever the folders store changes (WS snapshot, folder.added). Idempotent:
+// each folder id is fetched at most once.
+function seedGhostDirsFromFolders() {
+    const seeded = new Set();
+    folders.subscribe((list) => {
+        for (const f of list) {
+            if (seeded.has(f.id)) continue;
+            seeded.add(f.id);
+            api.listFolderDirs(f.id)
+                .then((dirs) => { for (const rel of dirs) addGhostDir(f.id, rel); })
+                .catch(() => { /* best-effort */ });
+        }
+    });
 }
 
 // ----- Folder search -----
