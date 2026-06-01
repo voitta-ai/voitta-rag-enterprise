@@ -160,96 +160,60 @@ function paintNfsStatus(el, settings) {
 // ---------------------------------------------------------------------------
 
 function renderAuthProvidersTable(providers) {
-    const tbody = $("#admin-auth-providers-table tbody");
+    const list = $("#admin-auth-providers-list");
     const empty = $("#admin-auth-providers-empty");
-    tbody.innerHTML = "";
+    list.innerHTML = "";
     if (!providers.length) {
         empty.hidden = false;
         return;
     }
     empty.hidden = true;
     for (const p of providers) {
-        tbody.appendChild(buildAuthProviderRow(p));
+        list.appendChild(buildAuthProviderCard(p));
     }
 }
 
-// One row in the auth providers table. Inputs are live-editable; changes
-// fire PATCH requests on blur (or Enter), so the admin can correct a
-// pasted client_id without an explicit "save" click. The Check button
-// rolls a credential probe through the backend; a small status pill
-// appears next to it for ~5s.
-function buildAuthProviderRow(p) {
-    const tr = document.createElement("tr");
-    tr.dataset.providerId = String(p.id);
+// One provider as a card (not a table row): a header with the provider
+// name + enabled toggle + Check/Delete actions, and a labeled field grid
+// below. Cards align cleanly and scale, where a 7-column table of inline
+// inputs did not. Field inputs are live-editable — changes PATCH on blur/Enter.
+function buildAuthProviderCard(p) {
+    const card = document.createElement("div");
+    card.className = "admin-provider-card";
+    card.dataset.providerId = String(p.id);
 
-    // Provider name (read-only after creation; switching providers would
-    // be a different OAuth flow entirely).
-    const tdProvider = document.createElement("td");
-    tdProvider.textContent = p.provider;
+    // ----- header: title + enabled + actions -----
+    const head = document.createElement("div");
+    head.className = "provider-card-head";
+
+    const title = document.createElement("span");
+    title.className = "provider-card-title";
+    title.textContent = p.provider;
     if (p.source === "env") {
         const badge = document.createElement("span");
-        badge.className = "badge-super";
-        badge.style.background = "#3b82f6";
+        badge.className = "badge-super provider-env-badge";
         badge.textContent = ".env";
-        badge.title = "Seeded from .env on startup. Deleting this row only sticks until the next restart while the env vars remain set.";
-        tdProvider.appendChild(badge);
+        badge.title = "Seeded from .env on startup. Deleting only sticks until the next restart while the env vars remain set.";
+        title.appendChild(badge);
     }
-    tr.appendChild(tdProvider);
 
-    // Label, client_id, client_secret — inline editors.
-    const tdLabel = document.createElement("td");
-    tdLabel.appendChild(buildAuthProviderInput(p.id, "label", p.label, "Label"));
-    tr.appendChild(tdLabel);
-
-    const tdClientId = document.createElement("td");
-    tdClientId.appendChild(buildAuthProviderInput(p.id, "client_id", p.client_id, "Client ID"));
-    tr.appendChild(tdClientId);
-
-    const tdSecret = document.createElement("td");
-    tdSecret.appendChild(buildAuthProviderInput(p.id, "client_secret", p.client_secret, "Client secret"));
-    tr.appendChild(tdSecret);
-
-    // Tenant ID — only meaningful for Microsoft. Render an editor for
-    // Microsoft rows and a muted dash for everything else so the column
-    // stays aligned without confusing the admin into typing a tenant
-    // for a Google row.
-    const tdTenant = document.createElement("td");
-    if (p.provider === "microsoft") {
-        tdTenant.appendChild(
-            buildAuthProviderInput(p.id, "tenant_id", p.tenant_id || "", "Tenant ID")
-        );
-    } else {
-        tdTenant.className = "muted";
-        tdTenant.textContent = "—";
-    }
-    tr.appendChild(tdTenant);
-
-    // Enabled toggle.
-    const tdEnabled = document.createElement("td");
+    const enabledLabel = document.createElement("label");
+    enabledLabel.className = "admin-inline-check provider-enabled";
     const cb = document.createElement("input");
     cb.type = "checkbox";
     cb.checked = !!p.enabled;
-    cb.title = p.enabled ? "Disable" : "Enable";
     cb.addEventListener("change", async () => {
-        try {
-            await api.adminUpdateAuthProvider(p.id, { enabled: cb.checked });
-        } catch (err) {
-            cb.checked = !cb.checked;
-            alert(err.message);
-        }
+        try { await api.adminUpdateAuthProvider(p.id, { enabled: cb.checked }); }
+        catch (err) { cb.checked = !cb.checked; alert(err.message); }
     });
-    tdEnabled.appendChild(cb);
-    tr.appendChild(tdEnabled);
+    enabledLabel.append(cb, document.createTextNode("Enabled"));
 
-    // Actions: Check + Delete.
-    const tdActions = document.createElement("td");
     const checkBtn = document.createElement("button");
     checkBtn.className = "btn btn-secondary btn-xs";
     checkBtn.textContent = "Check";
     checkBtn.title = "Probe the provider's token endpoint to verify these credentials";
     const checkStatus = document.createElement("span");
-    checkStatus.className = "hint";
-    checkStatus.style.marginLeft = "8px";
+    checkStatus.className = "hint provider-check-status";
     checkBtn.addEventListener("click", async () => {
         checkBtn.disabled = true;
         checkStatus.textContent = "Checking…";
@@ -263,30 +227,44 @@ function buildAuthProviderRow(p) {
             checkStatus.style.color = "#dc3545";
         } finally {
             checkBtn.disabled = false;
-            // Auto-clear after a beat so the row doesn't stay loud.
             setTimeout(() => { checkStatus.textContent = ""; }, 8000);
         }
     });
+
     const delBtn = document.createElement("button");
     delBtn.className = "admin-icon-btn admin-icon-danger";
     delBtn.textContent = "🗑";
     delBtn.title = p.source === "env"
         ? "Delete (will be re-created on next restart while .env still has these values)"
         : "Delete";
-    delBtn.style.marginLeft = "6px";
     delBtn.addEventListener("click", async () => {
         if (!confirm(`Delete ${p.provider} provider "${p.label || p.client_id}"?`)) return;
-        try {
-            await api.adminDeleteAuthProvider(p.id);
-            await refreshAdmin();
-        } catch (err) {
-            alert(err.message);
-        }
+        try { await api.adminDeleteAuthProvider(p.id); await refreshAdmin(); }
+        catch (err) { alert(err.message); }
     });
-    tdActions.append(checkBtn, checkStatus, delBtn);
-    tr.appendChild(tdActions);
 
-    return tr;
+    const actions = document.createElement("div");
+    actions.className = "provider-card-actions";
+    actions.append(enabledLabel, checkBtn, delBtn);
+    head.append(title, actions);
+
+    // ----- body: labeled field grid (same shape as the add-provider card) -----
+    const grid = document.createElement("div");
+    grid.className = "admin-form-grid";
+    const field = (label, key, span2) => {
+        const l = document.createElement("label");
+        if (span2) l.className = "span-2";
+        l.append(document.createTextNode(label));
+        l.append(buildAuthProviderInput(p.id, key, p[key] || "", label));
+        return l;
+    };
+    grid.append(field("Label", "label"));
+    if (p.provider === "microsoft") grid.append(field("Tenant ID", "tenant_id"));
+    grid.append(field("Client ID", "client_id", true));
+    grid.append(field("Client secret", "client_secret", true));
+
+    card.append(head, grid, checkStatus);
+    return card;
 }
 
 function buildAuthProviderInput(providerId, field, value, placeholder) {
@@ -295,7 +273,6 @@ function buildAuthProviderInput(providerId, field, value, placeholder) {
     input.value = value || "";
     input.placeholder = placeholder;
     input.style.width = "100%";
-    input.style.minWidth = field === "client_id" ? "240px" : "120px";
     let original = value || "";
     const commit = async () => {
         if (input.value === original) return;

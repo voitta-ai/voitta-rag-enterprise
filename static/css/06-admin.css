@@ -346,42 +346,32 @@
    the global ``td:last-child {width:80px}`` rule because we need room
    for the inline check status. */
 .admin-auth-providers { margin-top: 0; }
-/* Fixed layout with explicit widths so the 7 columns fit the modal instead of
-   overflowing into a horizontal scroll. The credential columns get the most
-   room; inputs fill their cell (width:100%) and shrink with it. */
-.admin-auth-providers .admin-table { table-layout: fixed; width: 100%; }
-.admin-auth-providers .admin-table th,
-.admin-auth-providers .admin-table td { padding: 8px 8px; }
-.admin-auth-providers .admin-table th:nth-child(1),
-.admin-auth-providers .admin-table td:nth-child(1) { width: 92px; }    /* Provider */
-.admin-auth-providers .admin-table th:nth-child(2),
-.admin-auth-providers .admin-table td:nth-child(2) { width: 12%; }     /* Label    */
-.admin-auth-providers .admin-table th:nth-child(5),
-.admin-auth-providers .admin-table td:nth-child(5) { width: 13%; }     /* Tenant   */
-.admin-auth-providers .admin-table th:nth-child(6),
-.admin-auth-providers .admin-table td:nth-child(6) { width: 56px; text-align: center; }  /* Enabled */
-.admin-auth-providers .admin-table th:last-child,
-.admin-auth-providers .admin-table td:last-child {
-    width: 150px; text-align: left;
-}
-/* Client ID (3) + Client Secret (4) absorb the rest. */
-.admin-auth-providers .admin-table td input[type="text"] {
-    width: 100%;
-    box-sizing: border-box;
-    padding: 4px 8px;
+
+/* Each provider is a card (not a table row) — a header with the provider name,
+   enabled toggle, and Check/Delete actions, over a labeled field grid. Cards
+   align cleanly at any width where a 7-column table of inline inputs did not. */
+.admin-provider-cards { display: flex; flex-direction: column; gap: 12px; }
+.admin-provider-card {
     border: 1px solid var(--color-border-light);
-    border-radius: 4px;
+    border-radius: var(--radius-md);
     background: var(--color-bg);
-    color: var(--color-text);
-    font-size: 12px;
-    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    padding: 12px 14px;
 }
-/* Actions: Check (xs) + delete icon on one line; the transient check-status
-   text wraps onto the next line rather than widening the column. */
-.admin-auth-providers .admin-table td:last-child {
-    white-space: normal;
+.provider-card-head {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; margin-bottom: 12px;
 }
-.admin-auth-providers .admin-table td:last-child .hint { display: block; margin: 4px 0 0; }
+.provider-card-title {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-weight: 600; text-transform: capitalize;
+}
+.provider-env-badge { background: #3b82f6; }
+.provider-card-actions { display: flex; align-items: center; gap: 10px; }
+.provider-enabled { font-size: 12px; text-transform: none; letter-spacing: 0; }
+.provider-check-status { display: block; margin-top: 8px; font-size: 12px; }
+/* Field inputs fill their grid column. */
+.admin-provider-card .admin-form-grid { margin-bottom: 0; }
+.admin-provider-card .admin-form-grid input[type="text"] { width: 100%; box-sizing: border-box; }
 
 /* Add-provider card: a collapsible, labeled form. Rendered as a 2x2
    grid so each field has room to breathe and the credentials sit on

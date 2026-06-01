@@ -193,20 +193,7 @@
                             <h4>OAuth providers</h4>
                             <span class="hint">Credentials catalog. Rows tagged <em>from .env</em> reappear after restart while their env vars are set. This is a list only — login flow currently uses the .env values directly.</span>
                         </header>
-                        <table id="admin-auth-providers-table" class="admin-table">
-                            <thead>
-                                <tr>
-                                    <th>Provider</th>
-                                    <th>Label</th>
-                                    <th>Client ID</th>
-                                    <th>Client secret</th>
-                                    <th>Tenant ID</th>
-                                    <th>Enabled</th>
-                                    <th></th>
-                                </tr>
-                            </thead>
-                            <tbody></tbody>
-                        </table>
+                        <div id="admin-auth-providers-list" class="admin-provider-cards"></div>
                         <p id="admin-auth-providers-empty" class="hint" hidden>No providers yet. Add one below or set <code>VOITTA_GOOGLE_AUTH_CLIENT_ID</code> in <code>.env</code>.</p>
 
 
