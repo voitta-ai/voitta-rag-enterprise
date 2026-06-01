@@ -42,6 +42,7 @@ from urllib.parse import unquote, urlparse
 import httpx
 
 from . import microsoft_auth as msa
+from .base import SyncConnector
 from .microsoft_exporters import (
     RemoteEntry,
     atomic_write_bytes,
@@ -210,10 +211,11 @@ async def list_all_sites(auth: msa.MicrosoftAuth) -> list[dict[str, str]]:
 # ---------------------------------------------------------------------------
 
 
-class SharePointConnector:
+class SharePointConnector(SyncConnector):
     """Sync selected SharePoint sites into ``folder_root``."""
 
     source_type = "sharepoint"
+    supports_progress = True
 
     async def sync(
         self,

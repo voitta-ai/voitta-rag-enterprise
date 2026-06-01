@@ -47,6 +47,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
+from .base import SyncConnector
+
 logger = logging.getLogger(__name__)
 
 # One process-wide lock around every git call. Cheap (we just hold it for the
@@ -494,8 +496,11 @@ def _format_commit_md(
 # ---------------------------------------------------------------------------
 
 
-class GitHubConnector:
+class GitHubConnector(SyncConnector):
     """Sync a folder against a git repository (HTTPS or SSH)."""
+
+    source_type = "github"
+    supports_progress = False  # git sync doesn't emit progress callbacks
 
     async def sync(
         self,

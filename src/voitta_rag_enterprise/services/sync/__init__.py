@@ -10,9 +10,11 @@ Supported ``source_type`` values: ``github``, ``google_drive``, ``nfs``,
 ``sharepoint``, ``teams``.
 """
 
+from .base import SyncConnector
 from .github import GitHubConnector
 from .google_drive import GoogleDriveConnector
 from .nfs import NfsConnector
+from .registry import SyncRegistry, get_registry
 from .sharepoint import SharePointConnector
 from .teams import TeamsConnector
 
@@ -21,20 +23,19 @@ __all__ = [
     "GoogleDriveConnector",
     "NfsConnector",
     "SharePointConnector",
+    "SyncConnector",
+    "SyncRegistry",
     "TeamsConnector",
     "get_connector",
+    "get_registry",
 ]
 
 
-def get_connector(source_type: str):
-    if source_type == "github":
-        return GitHubConnector()
-    if source_type == "google_drive":
-        return GoogleDriveConnector()
-    if source_type == "nfs":
-        return NfsConnector()
-    if source_type == "sharepoint":
-        return SharePointConnector()
-    if source_type == "teams":
-        return TeamsConnector()
-    raise ValueError(f"unknown sync source_type: {source_type!r}")
+def get_connector(source_type: str) -> SyncConnector:
+    """Resolve a connector for ``source_type`` via the registry.
+
+    Thin wrapper kept for call-site stability (``indexing.run_sync`` and
+    ``routes/sync.py`` import this name). Dispatch lives in :mod:`registry`;
+    adding a connector is a registration there, not an edit here.
+    """
+    return get_registry().get(source_type)

@@ -44,6 +44,7 @@ from typing import Any
 import httpx
 
 from . import microsoft_auth as msa
+from .base import SyncConnector
 from .microsoft_exporters import (
     RemoteEntry,
     atomic_write_text,
@@ -132,10 +133,11 @@ async def list_tenant_users(
 # ---------------------------------------------------------------------------
 
 
-class TeamsConnector:
+class TeamsConnector(SyncConnector):
     """Mirror Teams meetings into ``folder_root/meetings/...``."""
 
     source_type = "teams"
+    supports_progress = True
 
     async def sync(
         self,

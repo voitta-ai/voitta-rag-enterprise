@@ -60,6 +60,7 @@ from urllib.parse import urlencode
 
 import httpx
 
+from .base import SyncConnector
 from .google_workspace_exporters import (
     ExportContext,
     ProducerContext,
@@ -558,8 +559,11 @@ def _token_error(op: str, resp: httpx.Response) -> str:
 # ---------------------------------------------------------------------------
 
 
-class GoogleDriveConnector:
+class GoogleDriveConnector(SyncConnector):
     """Mirror a Google Drive folder/Drive into ``folder_root``."""
+
+    source_type = "google_drive"
+    supports_progress = True
 
     # In-process cache: (client_id, refresh_token) → (access_token, expires_at)
     _token_cache: ClassVar[dict[tuple[str, str], tuple[str, float]]] = {}

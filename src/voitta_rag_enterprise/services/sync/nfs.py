@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..admin_store import get_nfs_root
+from .base import SyncConnector
 
 logger = logging.getLogger(__name__)
 
@@ -195,7 +196,7 @@ def list_children(rel: str) -> list[dict[str, str]]:
 # ---------------------------------------------------------------------------
 
 
-class NfsConnector:
+class NfsConnector(SyncConnector):
     """Mirror one or more subtrees of the admin's NFS root into the
     folder root.
 
@@ -207,6 +208,9 @@ class NfsConnector:
     structure). This keeps two-subdirectory selections from colliding
     in the local namespace.
     """
+
+    source_type = "nfs"
+    supports_progress = True
 
     async def sync(
         self,
