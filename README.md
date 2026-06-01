@@ -140,6 +140,34 @@ make test
 make lint
 ```
 
+## Logs
+
+Application logging is **file-only by design** — the console (your `screen` /
+`systemd` session) shows only uvicorn's banner and HTTP access lines. App logs
+live under **`$VOITTA_DATA_DIR/logs/`** (default `~/.voitta-rag-enterprise/logs/`):
+
+| File | Level | Contents |
+|------|-------|----------|
+| `indexing.log` | DEBUG | The whole `voitta_rag_enterprise` package — worker, extract pipeline, **sync connectors**, embeds. Start here. |
+| `app.log` | INFO | Root catch-all + third-party (uvicorn.error, qdrant_client, …). |
+| `mineru.log` | WARNING | MinerU/loguru internals. |
+
+Each rotates at 10 MB × 5 backups. Records are tagged with per-job context
+(`[job_id=… kind=… folder_id=… file_id=…]`), so one grep follows a whole
+lifecycle:
+
+```bash
+LOGS=~/.voitta-rag-enterprise/logs            # or $VOITTA_DATA_DIR/logs
+tail -f "$LOGS"/indexing.log                  # watch live while you trigger work
+grep "job_id=20821" "$LOGS"/indexing.log*     # one job (e.g. a sync) end-to-end
+grep "file_id=6655" "$LOGS"/indexing.log*     # one file's extract → embed trace
+grep "services.sync" "$LOGS"/indexing.log*    # all sync activity
+```
+
+> Seeing no app output on the console is **expected**, not a sign logging is
+> off — see [docs/OPERATIONS.md §12](./docs/OPERATIONS.md#12-logging--observability)
+> for the full routing, context-tagging, and a worked sync trace.
+
 ## Configuration
 
 All settings carry the `VOITTA_` env-var prefix. See [.env.example](./.env.example) for the full list. The most useful for local dev:
