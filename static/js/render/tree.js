@@ -101,22 +101,36 @@ function _isExpandable(relPath) {
     return dot >= 0 && _EXPANDABLE_EXTS.has(lower.slice(dot));
 }
 
+function _isPdf(relPath) {
+    return relPath.toLowerCase().endsWith(".pdf");
+}
+
 // Lazy artifact caches: fileId → undefined (unfetched) | "loading" | item[]
 const _imageCache = new Map();
 const _layoutCache = new Map();
 
-function _loadArtifacts(fileId) {
+function _loadArtifacts(fileId, relPath) {
     if (!_imageCache.has(fileId)) {
         _imageCache.set(fileId, "loading");
         api.fileImages(fileId)
+            // Re-render on both paths so the row never sticks on "…": success
+            // shows the real count (or removes it when empty), error clears it.
             .then((imgs) => { _imageCache.set(fileId, imgs); renderFoldersFiltered(); })
-            .catch(() => { _imageCache.set(fileId, []); });
+            .catch(() => { _imageCache.set(fileId, []); renderFoldersFiltered(); });
     }
     if (!_layoutCache.has(fileId)) {
-        _layoutCache.set(fileId, "loading");
-        api.fileLayout(fileId)
-            .then((blocks) => { _layoutCache.set(fileId, blocks); renderFoldersFiltered(); })
-            .catch(() => { _layoutCache.set(fileId, []); });
+        // Page layout (page_layout.json) is emitted only by the PDF parser, so
+        // for every other expandable type (pptx/docx/doc/odp/odt) the fetch is
+        // guaranteed empty — skip it instead of flashing an always-empty
+        // "Layout …" row that then vanishes.
+        if (_isPdf(relPath)) {
+            _layoutCache.set(fileId, "loading");
+            api.fileLayout(fileId)
+                .then((blocks) => { _layoutCache.set(fileId, blocks); renderFoldersFiltered(); })
+                .catch(() => { _layoutCache.set(fileId, []); renderFoldersFiltered(); });
+        } else {
+            _layoutCache.set(fileId, []);
+        }
     }
 }
 
@@ -444,6 +458,33 @@ function updateRootSwitches(li, folder) {
     }
 }
 
+// Non-clickable muted child shown when an expanded file has no images and no
+// layout — so the row stays visibly open instead of appearing to self-collapse.
+function buildArtifactEmptyRow(fileId) {
+    const li = document.createElement("li");
+    li.className = "tree-row artifact artifact-empty";
+    li.dataset.fileId = String(fileId);
+    const nameCell = document.createElement("span");
+    nameCell.className = "name-cell";
+    const chevron = document.createElement("span");
+    chevron.className = "chevron leaf";
+    chevron.textContent = "·";
+    const label = document.createElement("span");
+    label.className = "label artifact-label";
+    label.style.opacity = "0.6";
+    label.style.fontStyle = "italic";
+    label.textContent = "No previews";
+    nameCell.append(chevron, label);
+    li.append(nameCell);
+    li._refs = { nameCell };
+    return li;
+}
+
+function updateArtifactEmptyRow(li, { depth }) {
+    const pad = `${depth * 14}px`;
+    if (li._refs.nameCell.style.paddingLeft !== pad) li._refs.nameCell.style.paddingLeft = pad;
+}
+
 function updateArtifactSummaryRow(li, { file, type, count, depth }) {
     const r = li._refs;
     const pad = `${depth * 14}px`;
@@ -678,7 +719,7 @@ function emitTreeRow({ targetRows, seenKeys, folder, node, relDir, displayName, 
 
         // Emit summary artifact rows for expandable files (one per type).
         if (_isExpandable(f.rel_path) && isFileExpanded(f.id)) {
-            _loadArtifacts(f.id);
+            _loadArtifacts(f.id, f.rel_path);
             const imgs = _imageCache.get(f.id);
             const blocks = _layoutCache.get(f.id);
 
@@ -705,6 +746,24 @@ function emitTreeRow({ targetRows, seenKeys, folder, node, relDir, displayName, 
                 ali.dataset.folderId = String(folder.id);
                 ali.dataset.relDir = fli.dataset.relDir;
                 updateArtifactSummaryRow(ali, { file: f, type: "layout", count: layoutLoading ? null : blocks.length, depth: depth + 2 });
+                targetRows.push(ali);
+                seenKeys.add(akey);
+            }
+
+            // Empty state — both artifact types fetched and came back empty
+            // (e.g. a docx with no embedded figures). Without this the file
+            // renders zero children while still flagged "expanded", which
+            // reads as "it collapsed by itself". A muted row keeps it visibly
+            // open and explains why there's nothing to drill into.
+            const imgsEmpty = Array.isArray(imgs) && imgs.length === 0;
+            const blocksEmpty = Array.isArray(blocks) && blocks.length === 0;
+            if (imgsEmpty && blocksEmpty) {
+                const akey = `artifact:empty:${f.id}`;
+                let ali = rowCache.get(akey);
+                if (!ali) { ali = buildArtifactEmptyRow(f.id); rowCache.set(akey, ali); }
+                ali.dataset.folderId = String(folder.id);
+                ali.dataset.relDir = fli.dataset.relDir;
+                updateArtifactEmptyRow(ali, { depth: depth + 2 });
                 targetRows.push(ali);
                 seenKeys.add(akey);
             }
