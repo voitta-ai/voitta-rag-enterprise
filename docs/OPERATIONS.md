@@ -225,11 +225,25 @@ sub-32px glyphs are skipped. docx additionally keeps a positioned inline walk so
 its figures anchor to the right chunk; swept (non-inline) and all xlsx images
 land at position 0.
 
-> Because `page_layout.json` is PDF-only, the tree's *layout* row is shown only
-> for PDFs. Expandability is gated on content: PDFs are always expandable;
-> docx/xlsx/pptx are expandable only when they have ≥1 extracted image
-> (`image_count` rides on the file payload), so a picture-free office doc shows
-> no chevron at all rather than expanding to nothing.
+### File-tree expandability
+
+The chevron is gated on *content*, decided up front from the file payload (which
+carries `image_count`) — no fetch, so a picture-free office doc shows no chevron
+rather than expanding to an empty "No previews". When expanded, the view loads
+an *images* row and (PDF only, since `page_layout.json` is PDF-only) a *layout*
+row.
+
+```mermaid
+flowchart TB
+    F["file row (rel_path, image_count)"] --> E{"ext in expandable set?<br/>pdf·docx·xlsx·pptx·…"}
+    E -->|no| NX["no chevron<br/>(xls, txt, …)"]
+    E -->|yes| P{"is PDF?"}
+    P -->|yes| EXP["expandable → images + layout rows"]
+    P -->|no| IC{"image_count &gt; 0?"}
+    IC -->|yes| EXI["expandable → images row"]
+    IC -->|no| NX2["no chevron"]
+    EXP -.rare: both empty.-> NP["'No previews' safety row"]
+```
 
 ---
 
