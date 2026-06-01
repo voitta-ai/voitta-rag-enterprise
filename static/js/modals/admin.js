@@ -56,6 +56,8 @@ const ADMIN_TABS = ["access", "users", "groups", "oauth", "caps", "storage"];
 
 function setAdminTab(name) {
     if (!ADMIN_TABS.includes(name)) name = "access";
+    // Always land on the users list (not a stuck editor) when (re)entering.
+    if (typeof closeUserEditor === "function") closeUserEditor();
     for (const t of ADMIN_TABS) {
         const btn = $(`#admin-tab-btn-${t}`);
         const pane = $(`#admin-tab-pane-${t}`);
@@ -644,6 +646,13 @@ function renderUsersTable(users) {
 
         tbody.appendChild(tr);
     }
+    const countEl = $("#admin-users-count");
+    if (countEl) {
+        const shown = rows.length, total = users.length;
+        countEl.textContent = shown === total
+            ? `${total} user${total === 1 ? "" : "s"}`
+            : `${shown} of ${total} users`;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -664,6 +673,7 @@ function openUserEditor(user) {
     const emailEl = $("#admin-ue-email");
     emailEl.value = user ? user.email : "";
     emailEl.disabled = !!user;  // email is the key — immutable once created
+    $("#admin-ue-email-hint").hidden = !user;
     $("#admin-ue-name").value = user ? (user.display_name || "") : "";
     $("#admin-ue-admin").checked = user ? user.is_admin : false;
     $("#admin-ue-admin").disabled = user ? user.is_super_admin : false;
@@ -682,11 +692,15 @@ function openUserEditor(user) {
     });
     host.appendChild(_ueGroupSelect.el);
 
+    // Full-pane swap: hide the list, show the editor.
+    $("#admin-users-list-view").hidden = true;
     $("#admin-user-editor").hidden = false;
+    (user ? $("#admin-ue-name") : emailEl).focus();
 }
 
 function closeUserEditor() {
     $("#admin-user-editor").hidden = true;
+    $("#admin-users-list-view").hidden = false;
     _editingUserId = null;
     _ueGroupSelect = null;
 }
@@ -883,6 +897,7 @@ $("#admin-user-filter").addEventListener("input", (e) => {
 });
 $("#admin-user-add-btn").addEventListener("click", () => openUserEditor(null));
 $("#admin-ue-cancel").addEventListener("click", closeUserEditor);
+$("#admin-ue-back").addEventListener("click", closeUserEditor);
 $("#admin-ue-save").addEventListener("click", saveUserEditor);
 
 // Groups tab: create + detail name/desc save + delete.

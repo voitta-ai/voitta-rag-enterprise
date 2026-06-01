@@ -1353,8 +1353,24 @@ input[type="text"], input[type="file"] {
  *   - The Users table is the dense piece — 32px rows, monospace email,
  *     small action buttons.
  */
-.admin-modal { max-width: 880px; }
-.admin-body { padding: 16px 20px; gap: 14px; }
+.admin-modal { max-width: 1040px; }
+/* A floor on the body height so short tabs (Storage, an empty Groups list)
+   don't collapse the dialog to a sliver — the modal keeps a stable, roomy
+   footprint across tabs. */
+.admin-body { padding: 16px 20px; gap: 14px; min-height: 460px; }
+
+/* Consistent control sizing across the whole admin panel — every text input
+   and select shares one height + full-width-within-column so forms read as a
+   tidy stack rather than a ragged set of differently-sized boxes. */
+.admin-body input[type="text"],
+.admin-body input[type="email"],
+.admin-body input[type="search"],
+.admin-body input[type="number"],
+.admin-body select {
+    height: 36px;
+    box-sizing: border-box;
+}
+.admin-body .btn-sm { min-width: 84px; justify-content: center; }
 
 .admin-grid {
     display: grid;
@@ -1468,47 +1484,93 @@ input[type="text"], input[type="file"] {
 
 /* ---------- User management + Groups ---------- */
 
-/* Master-detail layout: list on the left, editor/detail slide-over on right. */
-.admin-split { display: flex; gap: 16px; align-items: flex-start; }
-.admin-split > .admin-section { flex: 1; min-width: 0; }
-.admin-split > .admin-editor { flex: 0 0 320px; }
-
-.admin-toolbar { display: flex; gap: 8px; margin-bottom: 10px; }
+.admin-toolbar { display: flex; gap: 8px; margin-bottom: 12px; align-items: center; }
 .admin-toolbar input { flex: 1; }
+.admin-toolbar .btn-sm { flex: 0 0 auto; }
+.admin-table-count {
+    margin: 10px 2px 0; font-size: 12px; color: var(--color-text-tertiary);
+}
 
-/* The actions column holds Edit / View as / 🗑 — let it size to content
-   instead of the 80px cap used elsewhere. */
-.admin-users .admin-table td:last-child { width: auto; white-space: nowrap; }
-.admin-users .row-actions { display: flex; gap: 4px; justify-content: flex-end; }
+/* Uniform table rows + aligned columns across Users / OAuth / Caps so all
+   tabs share one density. Fixed-width Admin + Actions columns keep the
+   variable Email/Name/Groups columns from jumping between rows. */
+.admin-table th {
+    text-transform: uppercase; letter-spacing: 0.04em;
+    font-size: 10px; color: var(--color-text-tertiary); font-weight: 600;
+}
+.admin-table td, .admin-table th { padding: 9px 10px; vertical-align: middle; }
+.admin-table tbody tr { height: 44px; }
+.admin-table .col-admin { width: 70px; text-align: center; }
+.admin-users .admin-table td:nth-child(3) { text-align: center; }
+/* Actions column sizes to content (Edit / View as / 🗑) instead of the 80px
+   cap the generic admin tables use. */
+.admin-users .admin-table .col-actions,
+.admin-users .admin-table td:last-child { width: 1%; white-space: nowrap; }
+.admin-users .row-actions { display: flex; gap: 6px; justify-content: flex-end; }
 .admin-cell-groups { color: var(--color-text-secondary); font-size: 12px; }
 .btn-danger { color: var(--color-error); }
 
-/* Slide-over editor / group detail panel. */
+/* ----- Full-pane user editor (swaps with the list) ----- */
+.admin-editor-pane {
+    display: flex; flex-direction: column;
+    min-height: 420px;
+}
+.admin-editor-head {
+    display: flex; align-items: center; gap: 14px;
+    padding-bottom: 12px; margin-bottom: 16px;
+    border-bottom: 1px solid var(--color-border-light);
+}
+.admin-editor-head h4 { margin: 0; font-size: 15px; }
+.admin-back-btn {
+    border: none; background: none; cursor: pointer;
+    color: var(--color-accent, #007aff); font-size: 13px; padding: 0;
+}
+.admin-back-btn:hover { text-decoration: underline; }
+/* The form lives in a single centered column so fields don't stretch to an
+   awkward full 1000px width on a wide modal. */
+.admin-editor-body { flex: 1; display: flex; justify-content: center; }
+.admin-form-col {
+    width: 100%; max-width: 560px;
+    display: flex; flex-direction: column; gap: 16px;
+}
+.admin-editor-footer {
+    display: flex; justify-content: flex-end; gap: 8px;
+    padding-top: 14px; margin-top: 16px;
+    border-top: 1px solid var(--color-border-light);
+}
+.admin-editor-error { color: var(--color-error); font-size: 12px; }
+
+.admin-field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.admin-field > span { color: var(--color-text-secondary); font-weight: 500; }
+.admin-field input { width: 100%; }
+.admin-field-hint { font-size: 11px; color: var(--color-text-tertiary); }
+.admin-field .admin-inline-check { font-weight: 400; color: var(--color-text); }
+
+/* ----- Groups tab: master-detail (list fixed, detail fills) ----- */
+.admin-split { display: flex; gap: 20px; align-items: flex-start; }
+.admin-split > .admin-section:first-child { flex: 0 0 280px; }
+.admin-split > .admin-editor { flex: 1; min-width: 0; }
 .admin-editor {
     background: var(--color-bg-elevated);
     border: 1px solid var(--color-border-light);
     border-radius: var(--radius-lg);
     padding: var(--lg);
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
+    display: flex; flex-direction: column; gap: 14px;
 }
-.admin-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
-.admin-field > span { color: var(--color-text-secondary); }
-.admin-field input { width: 100%; }
-.admin-editor-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
-.admin-editor-error { color: var(--color-error); font-size: 12px; }
 
-/* Groups list (master). */
 .admin-groups-list { display: flex; flex-direction: column; gap: 2px; }
 .admin-group-row {
     display: flex; justify-content: space-between; align-items: center;
-    padding: 6px 8px; border-radius: var(--radius-md, 6px); cursor: pointer;
+    padding: 9px 10px; border-radius: var(--radius-md, 6px); cursor: pointer;
 }
 .admin-group-row:hover { background: var(--color-bg); }
 .admin-group-row.selected { background: rgba(0, 122, 255, 0.12); }
 .admin-group-count { color: var(--color-text-tertiary); font-size: 11px; }
-.admin-list-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 2px 0; }
+.admin-list-row {
+    display: flex; justify-content: space-between; align-items: center;
+    gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--color-border-light);
+}
+.admin-list-row:last-child { border-bottom: none; }
 
 /* Chip multi-select (groups on the user editor, members on the group panel). */
 .chip-select { position: relative; }

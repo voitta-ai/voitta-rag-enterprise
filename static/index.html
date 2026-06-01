@@ -86,50 +86,61 @@
                     </div>
                 </div>
 
-                <!-- Tab: Users -->
+                <!-- Tab: Users — two swappable views: list and full-pane editor -->
                 <div id="admin-tab-pane-users" class="admin-tab-pane" role="tabpanel" hidden>
-                    <div class="admin-split">
-                        <section class="admin-section admin-users">
-                            <header>
-                                <h4>Users</h4>
-                                <span class="hint">Add a user to allow them in, set their name, admin rights, and group membership. "View as" to impersonate.</span>
-                            </header>
-                            <div class="admin-toolbar">
-                                <input id="admin-user-filter" type="search" placeholder="Filter users…" />
-                                <button id="admin-user-add-btn" class="btn btn-primary btn-sm">+ Add user</button>
-                            </div>
-                            <table id="admin-users-table" class="admin-table">
-                                <thead><tr><th>Email</th><th>Name</th><th>Admin</th><th>Groups</th><th></th></tr></thead>
-                                <tbody></tbody>
-                            </table>
-                        </section>
+                    <!-- List view -->
+                    <section id="admin-users-list-view" class="admin-section admin-users">
+                        <header>
+                            <h4>Users</h4>
+                            <span class="hint">Manage who can sign in, their role, and group membership. "View as" to impersonate.</span>
+                        </header>
+                        <div class="admin-toolbar">
+                            <input id="admin-user-filter" type="search" placeholder="Filter users…" />
+                            <button id="admin-user-add-btn" class="btn btn-primary btn-sm">+ Add user</button>
+                        </div>
+                        <table id="admin-users-table" class="admin-table">
+                            <thead><tr><th>Email</th><th>Name</th><th class="col-admin">Admin</th><th>Groups</th><th class="col-actions"></th></tr></thead>
+                            <tbody></tbody>
+                        </table>
+                        <p class="admin-table-count" id="admin-users-count"></p>
+                    </section>
 
-                        <!-- Slide-over editor: add or edit a single user. -->
-                        <section id="admin-user-editor" class="admin-section admin-editor" hidden>
-                            <header><h4 id="admin-user-editor-title">Edit user</h4></header>
-                            <label class="admin-field">Email
-                                <input id="admin-ue-email" type="email" placeholder="user@customer.com" />
-                            </label>
-                            <label class="admin-field">Display name
-                                <input id="admin-ue-name" type="text" placeholder="Jane Doe" />
-                            </label>
-                            <label class="admin-inline-check">
-                                <input id="admin-ue-admin" type="checkbox" /> Administrator
-                            </label>
-                            <label class="admin-inline-check" id="admin-ue-signin-row">
-                                <input id="admin-ue-signin" type="checkbox" checked /> Allow sign-in (allowlist)
-                            </label>
-                            <div class="admin-field">
-                                <span>Groups</span>
-                                <div id="admin-ue-groups"></div>
+                    <!-- Full-pane editor view (swaps with the list) -->
+                    <section id="admin-user-editor" class="admin-editor-pane" hidden>
+                        <header class="admin-editor-head">
+                            <button id="admin-ue-back" class="admin-back-btn" type="button">‹ Back to users</button>
+                            <h4 id="admin-user-editor-title">Edit user</h4>
+                        </header>
+                        <div class="admin-editor-body">
+                            <div class="admin-form-col">
+                                <label class="admin-field">Email
+                                    <input id="admin-ue-email" type="email" placeholder="user@customer.com" />
+                                    <span class="admin-field-hint" id="admin-ue-email-hint" hidden>Immutable once created.</span>
+                                </label>
+                                <label class="admin-field">Display name
+                                    <input id="admin-ue-name" type="text" placeholder="Jane Doe" />
+                                </label>
+                                <div class="admin-field">
+                                    <span>Role</span>
+                                    <label class="admin-inline-check">
+                                        <input id="admin-ue-admin" type="checkbox" /> Administrator
+                                    </label>
+                                    <label class="admin-inline-check" id="admin-ue-signin-row">
+                                        <input id="admin-ue-signin" type="checkbox" checked /> Allow sign-in (add to allowlist)
+                                    </label>
+                                </div>
+                                <div class="admin-field">
+                                    <span>Groups</span>
+                                    <div id="admin-ue-groups"></div>
+                                </div>
+                                <div id="admin-ue-error" class="admin-editor-error" hidden></div>
                             </div>
-                            <div id="admin-ue-error" class="admin-editor-error" hidden></div>
-                            <div class="admin-editor-actions">
-                                <button id="admin-ue-cancel" class="btn btn-secondary btn-sm">Cancel</button>
-                                <button id="admin-ue-save" class="btn btn-primary btn-sm">Save</button>
-                            </div>
-                        </section>
-                    </div>
+                        </div>
+                        <footer class="admin-editor-footer">
+                            <button id="admin-ue-cancel" class="btn btn-secondary btn-sm">Cancel</button>
+                            <button id="admin-ue-save" class="btn btn-primary btn-sm">Save changes</button>
+                        </footer>
+                    </section>
                 </div>
 
                 <!-- Tab: Groups -->
