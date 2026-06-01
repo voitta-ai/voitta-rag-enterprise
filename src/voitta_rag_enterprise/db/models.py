@@ -314,3 +314,27 @@ class Job(Base):
     # JSON summary returned by the handler on success (sync stats, etc.);
     # NULL for handlers that report nothing. Shown in the Jobs panel detail.
     result: Mapped[str | None] = mapped_column(default=None)
+
+
+class Group(Base):
+    """Organizational user group. Membership only — no folder-ACL effect yet."""
+
+    __tablename__ = "groups"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str]
+    description: Mapped[str | None] = mapped_column(default=None)
+    created_at: Mapped[int] = mapped_column(default=_now_s)
+
+
+class UserGroup(Base):
+    """user ↔ group membership (composite PK, cascade-delete both ways)."""
+
+    __tablename__ = "user_groups"
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    group_id: Mapped[int] = mapped_column(
+        ForeignKey("groups.id", ondelete="CASCADE"), primary_key=True
+    )

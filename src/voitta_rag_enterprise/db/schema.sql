@@ -107,6 +107,22 @@ CREATE TABLE IF NOT EXISTS folder_acl (
     PRIMARY KEY (folder_id, user_id)
 );
 
+-- Organizational user groups. Purely a labelling/membership layer for now —
+-- groups do NOT affect folder visibility (that wiring is a later feature).
+CREATE TABLE IF NOT EXISTS groups (
+    id          INTEGER PRIMARY KEY,
+    name        TEXT NOT NULL UNIQUE,
+    description TEXT,
+    created_at  INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS user_groups (
+    user_id  INTEGER NOT NULL REFERENCES users(id)  ON DELETE CASCADE,
+    group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+    PRIMARY KEY (user_id, group_id)
+);
+CREATE INDEX IF NOT EXISTS idx_user_groups_group ON user_groups(group_id);
+
 -- Per-user, per-folder MCP-search opt-out. ``active=0`` means the folder
 -- is hidden from this user's MCP search calls (and the SPA renders the
 -- toggle off, but the folder is still visible/expandable). Default-on is
