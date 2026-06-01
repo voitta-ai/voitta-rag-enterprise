@@ -4,7 +4,15 @@
     <meta charset="UTF-8">
     <title>Voitta RAG Enterprise</title>
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-    <link rel="stylesheet" href="/static/styles.css">
+    <!-- Stylesheet split into ordered sections (was one 2.1k-line styles.css).
+         Load order == original cascade order; keep it that way when adding. -->
+    <link rel="stylesheet" href="/static/css/01-base.css">
+    <link rel="stylesheet" href="/static/css/02-buttons.css">
+    <link rel="stylesheet" href="/static/css/03-tree.css">
+    <link rel="stylesheet" href="/static/css/04-panels.css">
+    <link rel="stylesheet" href="/static/css/05-modal.css">
+    <link rel="stylesheet" href="/static/css/06-admin.css">
+    <link rel="stylesheet" href="/static/css/07-preview.css">
 </head>
 <body>
     <header class="app-header">

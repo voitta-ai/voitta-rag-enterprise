@@ -1,0 +1,268 @@
+/* Voitta RAG Enterprise — Apple-flavoured UI, lifted from voitta-rag's palette. */
+
+:root {
+    --color-bg: #f5f5f7;
+    --color-bg-elevated: #ffffff;
+    --color-bg-hover: #e8e8ed;
+    --color-text-primary: #1d1d1f;
+    --color-text-secondary: #86868b;
+    --color-text-tertiary: #aeaeb2;
+    --color-accent: #0071e3;
+    --color-accent-hover: #0077ed;
+    --color-border: #d2d2d7;
+    --color-border-light: #e5e5ea;
+    --color-success: #34c759;
+    --color-error: #ff3b30;
+    --color-warning: #ff9500;
+
+    --font: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
+        "Helvetica Neue", Helvetica, Arial, sans-serif;
+
+    --xs: 4px;
+    --sm: 8px;
+    --md: 16px;
+    --lg: 24px;
+    --radius-sm: 6px;
+    --radius-md: 10px;
+    --radius-lg: 14px;
+    --radius-full: 9999px;
+
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06);
+    --t: 150ms ease;
+}
+
+[data-theme="dark"] {
+    --color-bg: #1d1d1f;
+    --color-bg-elevated: #2c2c2e;
+    --color-bg-hover: #3a3a3c;
+    --color-text-primary: #f5f5f7;
+    --color-text-secondary: #a1a1a6;
+    --color-text-tertiary: #636366;
+    --color-accent: #0a84ff;
+    --color-accent-hover: #409cff;
+    --color-border: #3a3a3c;
+    --color-border-light: #48484a;
+}
+
+* { box-sizing: border-box; }
+
+/* Re-assert the [hidden] attribute against display:flex/grid rules below. */
+[hidden] { display: none !important; }
+
+html, body { height: 100%; }
+
+body {
+    margin: 0;
+    background: var(--color-bg);
+    color: var(--color-text-primary);
+    font: 13px/1.4 var(--font);
+    -webkit-font-smoothing: antialiased;
+    /* Vertical flex so the main pane fills exactly the remaining viewport
+       under the sticky header — lets the folder list scroll internally
+       instead of pushing the page below the fold. */
+    display: flex;
+    flex-direction: column;
+}
+
+/* ---------- Header ---------- */
+
+.app-header {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: var(--color-bg-elevated);
+    border-bottom: 1px solid var(--color-border-light);
+}
+.header-content {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 24px;
+    max-width: 1600px;
+    margin: 0 auto;
+}
+.logo {
+    font-weight: 600;
+    font-size: 15px;
+    color: var(--color-text-primary);
+    text-decoration: none;
+}
+.header-actions { display: flex; align-items: center; gap: 12px; }
+
+.status-pill {
+    display: inline-flex;
+    padding: 2px 10px;
+    border-radius: var(--radius-full);
+    font-size: 11px;
+    font-weight: 500;
+    text-transform: lowercase;
+}
+.status-pill.connected {
+    background: rgba(52, 199, 89, 0.15);
+    color: var(--color-success);
+}
+.status-pill.disconnected {
+    background: rgba(255, 59, 48, 0.15);
+    color: var(--color-error);
+}
+
+/* ---------- Bootstrap loading overlay ---------- */
+
+#boot-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    background: var(--color-bg);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: opacity 0.3s ease;
+}
+#boot-overlay.hidden {
+    opacity: 0;
+    pointer-events: none;
+}
+.boot-spinner {
+    width: 40px;
+    height: 40px;
+    border: 3px solid var(--color-border);
+    border-top-color: var(--color-accent);
+    border-radius: 50%;
+    animation: boot-spin 0.7s linear infinite;
+}
+@keyframes boot-spin {
+    to { transform: rotate(360deg); }
+}
+
+/* ---------- Layout ---------- */
+
+.app-main {
+    /* Fill the height left by the sticky app header so children can claim
+       their share of the viewport with min-height:0 + flex:1. Without
+       min-height:0 a flex child refuses to shrink below its intrinsic
+       content size and the grid below would force the whole page to scroll. */
+    width: 100%;
+    max-width: 1600px;
+    margin: 0 auto;
+    padding: var(--lg);
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    /* Box-sizing safety: padding shouldn't make us overflow. */
+    box-sizing: border-box;
+}
+.browser-container {
+    display: flex;
+    flex-direction: column;
+    gap: var(--md);
+    flex: 1;
+    min-height: 0;
+}
+.toolbar {
+    display: flex;
+    gap: var(--sm);
+    align-items: center;
+    flex-wrap: wrap;
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border-light);
+    border-radius: var(--radius-lg);
+    padding: 8px 12px;
+}
+.toolbar-group { display: flex; gap: 6px; align-items: center; }
+.toolbar-divider {
+    width: 1px;
+    height: 22px;
+    background: var(--color-border);
+    margin: 0 4px;
+}
+.upload-progress {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+    min-width: 220px;
+    max-width: 480px;
+}
+.upload-progress-label {
+    font-size: 11px;
+    color: var(--color-text-secondary);
+    white-space: nowrap;
+}
+.upload-progress-bar {
+    flex: 1;
+    min-width: 120px;
+    height: 6px;
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: 3px;
+    overflow: hidden;
+}
+.upload-progress-fill {
+    height: 100%;
+    width: 0;
+    background: var(--color-accent);
+    transition: width 100ms linear;
+}
+.upload-file-list {
+    flex-basis: 100%;
+    margin: 4px 0 0;
+    padding: 0;
+    list-style: none;
+    max-height: 140px;
+    overflow-y: auto;
+    font-size: 11px;
+    color: var(--color-text-secondary);
+}
+.upload-file-list li {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 0;
+}
+.upload-file-list li .name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.upload-file-list li .pct {
+    font-variant-numeric: tabular-nums;
+    color: var(--color-text-secondary);
+    min-width: 36px;
+    text-align: right;
+}
+.upload-file-list li.done .pct,
+.upload-file-list li.done .name { color: var(--color-accent); }
+.upload-file-list li.failed .pct,
+.upload-file-list li.failed .name { color: #c33; }
+.browser-layout {
+    display: grid;
+    grid-template-columns: 1fr 360px;
+    gap: var(--lg);
+    align-items: stretch;
+    flex: 1;
+    min-height: 0;
+    position: relative;
+}
+/* Active drag-and-drop highlight on the browser pane. Outlines the
+   whole grid so it's obvious the drop is being accepted; the
+   pointer-events guard keeps child interactivity working during a
+   drag (without it, dragover would not bubble correctly). */
+.browser-layout.drop-active::after {
+    content: "Drop folders or files here";
+    position: absolute;
+    inset: 0;
+    border: 2px dashed var(--accent, #5b8def);
+    border-radius: 8px;
+    background: rgba(91, 141, 239, 0.08);
+    color: var(--accent, #5b8def);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 600;
+    pointer-events: none;
+    z-index: 10;
+}
+

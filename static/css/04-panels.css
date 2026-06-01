@@ -1,0 +1,354 @@
+/* ---------- Status pills ---------- */
+
+.status-tag {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 90px;
+    padding: 2px 8px;
+    border-radius: var(--radius-full);
+    font-size: 11px;
+    font-weight: 500;
+    white-space: nowrap;
+}
+.status-tag.indexed { background: rgba(52, 199, 89, 0.15); color: var(--color-success); }
+.status-tag.indexing,
+.status-tag.embedding,
+.status-tag.extracting,
+.status-tag.extracted {
+    background: rgba(0, 113, 227, 0.15);
+    color: var(--color-accent);
+}
+.status-tag.pending { background: rgba(255, 149, 0, 0.15); color: var(--color-warning); }
+.status-tag.error { background: rgba(255, 59, 48, 0.15); color: var(--color-error); }
+.status-tag.unsupported,
+.status-tag.deleted,
+.status-tag.none {
+    background: rgba(142, 142, 147, 0.18);
+    color: var(--color-text-secondary);
+}
+
+/* Job-row states. ``error`` is already coloured by the rule above; the
+   other three were previously unstyled and rendered as bare text. */
+.status-tag.running { background: rgba(0, 113, 227, 0.15); color: var(--color-accent); }
+.status-tag.queued  { background: rgba(142, 142, 147, 0.18); color: var(--color-text-secondary); }
+.status-tag.done    { background: rgba(52, 199, 89, 0.15); color: var(--color-success); }
+
+/* Pulsing dot on a running pill. Adds a quiet "this is alive" signal
+   without rebuilding the row on every animation frame: it's a pure CSS
+   animation, not a JS tick. ``currentColor`` keeps the dot in sync with
+   the pill's text colour if it gets restyled. */
+@keyframes status-pulse {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.35; }
+}
+.status-tag.running::before {
+    content: '';
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background-color: currentColor;
+    margin-right: 6px;
+    animation: status-pulse 1.2s ease-in-out infinite;
+    flex: 0 0 auto;
+}
+
+/* Tabular nums everywhere a counter advances inside a status pill or id
+   chip, so "12s -> 13s" / "#9 -> #10" doesn't twitch the surrounding row. */
+.status-tag, .job-rows .job-id { font-variant-numeric: tabular-nums; }
+
+/* The top line of a job row: a primary verb plus a muted #id. */
+.job-rows .top { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.job-rows .top .label {
+    color: var(--color-text);
+    font-size: 12px;
+    font-weight: 500;
+    /* Allow the label to truncate when the phase suffix gets long
+       ("Reindex folder — wiping 1234/5678") rather than wrapping over
+       two lines and shoving the path further down. */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.job-rows .top .job-id {
+    color: var(--color-text-tertiary);
+    font-size: 11px;
+    flex: 0 0 auto;
+}
+
+/* Disclosure chevron on rows that have an expandable result detail. */
+.job-rows .top .job-expand {
+    color: var(--color-text-tertiary);
+    font-size: 10px;
+    flex: 0 0 auto;
+    line-height: 1;
+}
+.job-rows .top .job-expand:hover { color: var(--color-text); }
+
+/* Expandable job detail: a compact key/value grid of the handler's result
+   (sync stats, etc.) plus any per-item errors. */
+.job-detail {
+    margin-top: 4px;
+    padding: 6px 8px;
+    background: var(--color-bg);
+    border: 1px solid var(--color-border-light);
+    border-radius: var(--radius-md, 6px);
+    font-size: 11px;
+}
+.job-detail-grid {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 1px 12px;
+}
+.job-detail-row { display: contents; }
+.job-detail-row .k { color: var(--color-text-secondary); }
+.job-detail-row .v {
+    color: var(--color-text);
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+.job-detail-errors { margin-top: 6px; }
+.job-detail-errors-head {
+    color: var(--color-error);
+    font-weight: 600;
+    margin-bottom: 2px;
+}
+.job-detail-error {
+    color: var(--color-text-secondary);
+    word-break: break-word;
+    padding: 1px 0;
+}
+
+/* ---------- Sidebar ---------- */
+
+.sidebar {
+    display: flex;
+    flex-direction: column;
+    gap: var(--md);
+    /* Match the folder-list pattern: the sidebar is a grid cell with
+       height already fixed by the layout above, so it just needs to scroll
+       internally when its sections (extension table, kv-grid) overflow. */
+    min-height: 0;
+    overflow-y: auto;
+}
+.sidebar-section {
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border-light);
+    border-radius: var(--radius-lg);
+    padding: var(--lg);
+}
+.sidebar-section h3 {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin: 0 0 var(--md);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+.header-actions-inline { display: flex; gap: 4px; }
+
+/* Sidebar tab strip — Details vs Jobs. Two equal-width buttons; the
+   active one gets the accent fill (matching .seg-tab styling). */
+.sidebar-tabs {
+    display: flex;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    background: var(--color-bg);
+    padding: 2px;
+    gap: 2px;
+    flex-shrink: 0;
+}
+.sidebar-tab {
+    flex: 1;
+    padding: 8px 14px;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--color-text-secondary);
+    background: transparent;
+    border: none;
+    border-radius: calc(var(--radius-md) - 2px);
+    cursor: pointer;
+    transition: background var(--t), color var(--t);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+}
+.sidebar-tab:hover:not(.active) {
+    background: var(--color-bg-hover);
+    color: var(--color-text-primary);
+}
+.sidebar-tab.active {
+    background: var(--color-accent);
+    color: #fff;
+}
+/* Activity dot on the Jobs tab while jobs are queued/running/errored.
+   Small, accent-coloured pulse so the user notices motion in a tab they
+   aren't currently looking at. Goes white-on-accent when its tab is the
+   active one, so it stays visible against the new background. */
+.tab-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--color-accent);
+    display: inline-block;
+}
+.sidebar-tab.active .tab-dot { background: #fff; }
+.sidebar-tab[data-state="error"] .tab-dot { background: #dc3545; }
+.sidebar-tab.active[data-state="error"] .tab-dot { background: #fff; }
+
+/* Tab pane is a column-flex container so the inner sidebar-sections
+   stack the same way they did pre-tabs. ``hidden`` works natively. */
+.sidebar-tab-pane {
+    display: flex;
+    flex-direction: column;
+    gap: var(--md);
+    min-height: 0;
+}
+
+.sidebar-empty { text-align: center; }
+.hint, .hint-large { color: var(--color-text-secondary); }
+.hint { font-size: 11px; margin: 0; }
+.hint-large { font-size: 13px; }
+
+#folder-detail h3 {
+    font-size: 17px;
+    color: var(--color-text-primary);
+    text-transform: none;
+    letter-spacing: 0;
+    font-weight: 600;
+    margin: 0 0 4px;
+    display: block;
+}
+.path {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 11px;
+    color: var(--color-text-secondary);
+    word-break: break-all;
+    margin: 0 0 var(--md);
+}
+.badge-row { display: flex; gap: 6px; margin-bottom: var(--md); }
+.badge {
+    background: rgba(142, 142, 147, 0.18);
+    color: var(--color-text-secondary);
+    font-size: 11px;
+    font-weight: 500;
+    padding: 2px 8px;
+    border-radius: var(--radius-full);
+}
+.kv-grid {
+    display: grid;
+    grid-template-columns: 90px 1fr;
+    row-gap: 6px;
+    margin-bottom: var(--md);
+    font-size: 12px;
+}
+.kv-grid .k { color: var(--color-text-secondary); }
+.kv-grid .v { font-weight: 500; }
+
+.actions { display: flex; gap: 8px; }
+.actions-right { justify-content: flex-end; }
+
+.stats-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    margin-bottom: var(--md);
+}
+.stats-table th {
+    text-align: left;
+    font-weight: 500;
+    color: var(--color-text-secondary);
+    text-transform: uppercase;
+    font-size: 10px;
+    letter-spacing: 0.05em;
+    padding: 4px 0;
+    border-bottom: 1px solid var(--color-border-light);
+}
+.stats-table th.num,
+.stats-table td.num { text-align: right; }
+.stats-table td {
+    padding: 4px 0;
+    border-bottom: 1px solid var(--color-border-light);
+}
+.stats-table tr:last-child td { border-bottom: none; }
+.stats-table .ext { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+
+/* Per-extension row coloring in the by-extension table.
+   Tints are subtle so the table still scans as a list, not a heatmap. */
+.stats-table tr.ext-error td      { color: var(--color-error); }
+.stats-table tr.ext-error .ext    { color: var(--color-error); }
+.stats-table tr.ext-unsupported td { color: var(--color-text-secondary); font-style: italic; }
+.stats-table tr.ext-pending td    { color: var(--color-warning); }
+.stats-table tr.ext-indexed td    { color: var(--color-text); }
+
+.file-rows, .job-rows {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-height: 280px;
+    overflow-y: auto;
+}
+.file-rows li, .job-rows li {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--color-border-light);
+    font-size: 12px;
+}
+.file-rows li:last-child, .job-rows li:last-child { border-bottom: none; }
+.file-rows .name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+}
+.job-rows .col { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.job-rows .meta { color: var(--color-text-tertiary); font-size: 11px; }
+.job-rows .path {
+    /* Filename / rel-path under the kind label. Mono so long paths
+       wrap on slashes legibly; secondary colour so the bottleneck file
+       doesn't shout louder than the kind line. */
+    color: var(--color-text-secondary);
+    font-size: 11px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    word-break: break-all;
+    overflow-wrap: anywhere;
+}
+.job-rows .err { color: var(--color-error); font-size: 11px; word-break: break-word; }
+.job-rows .retry {
+    background: transparent;
+    border: 1px solid var(--color-accent);
+    color: var(--color-accent);
+    border-radius: var(--radius-sm);
+    font-size: 11px;
+    padding: 2px 8px;
+    cursor: pointer;
+}
+.job-rows .retry:hover { background: var(--color-accent); color: #fff; }
+
+/* Per-job cancel — danger-coloured to mirror the destructive intent.
+   Same shape as .retry so they align when both happen to be visible
+   (rare but possible: an error row plus a freshly-queued retry). */
+.job-rows .cancel {
+    background: transparent;
+    border: 1px solid #dc2626;
+    color: #dc2626;
+    border-radius: var(--radius-sm);
+    font-size: 11px;
+    padding: 2px 8px;
+    cursor: pointer;
+}
+.job-rows .cancel:hover:not(:disabled) { background: #dc2626; color: #fff; }
+.job-rows .cancel:disabled { opacity: 0.5; cursor: not-allowed; }
+
+#upload-card .btn,
+#upload-card input { margin-top: 8px; }
+

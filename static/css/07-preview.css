@@ -1,0 +1,388 @@
+/* ---------- File preview panel ---------- */
+
+.file-preview-panel {
+    /* Override the default sidebar-section padding — the header needs edge-to-edge
+       treatment; the body handles its own padding per plugin. */
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    /* Fill the available sidebar height so plugins (especially the
+       spreadsheet grid) can have an internal scroller. Without this,
+       the panel grows with its content and the sidebar — not the grid
+       — becomes the scrollable area. */
+    flex: 1;
+    min-height: 0;
+}
+
+.preview-header {
+    display: flex;
+    align-items: center;
+    gap: var(--sm);
+    padding: 10px var(--md);
+    border-bottom: 1px solid var(--color-border-light);
+    flex-shrink: 0;
+}
+
+.preview-filename {
+    flex: 1;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--color-text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+.preview-dl {
+    flex-shrink: 0;
+    font-size: 12px;
+    text-decoration: none;
+}
+
+.preview-body {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+    min-height: 0;
+}
+
+/* Loading / error / hint states (shared across plugins) */
+.preview-loading,
+.preview-error,
+.preview-hint {
+    font-size: 12px;
+    padding: var(--md);
+    margin: 0;
+    color: var(--color-text-secondary);
+}
+.preview-error { color: var(--color-error); }
+
+/* Image plugin */
+.preview-image { display: flex; align-items: flex-start; justify-content: center; padding: var(--sm); }
+.preview-image-el {
+    max-width: 100%;
+    height: auto;
+    border-radius: var(--radius-sm);
+    display: block;
+}
+
+/* Pages plugin — long vertical scroll of page renders */
+.preview-pages { display: flex; flex-direction: column; gap: 6px; padding: var(--sm); }
+.preview-page-wrapper { line-height: 0; }
+.preview-page-img {
+    width: 100%;
+    height: auto;
+    display: block;
+    border-radius: 2px;
+    background: #2a2a2a;
+}
+
+/* Text plugin */
+.preview-text-wrap { padding: var(--sm); }
+.preview-text {
+    font: 11px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+    color: var(--color-text-primary);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    margin: 0;
+    padding: var(--sm);
+    background: var(--color-bg);
+    border-radius: var(--radius-sm);
+}
+
+/* CAD plugin */
+.preview-cad {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: var(--sm);
+    background: #1a1a1a;
+}
+.preview-cad-canvas {
+    display: block;
+    max-width: 100%;
+    border-radius: var(--radius-sm);
+    cursor: grab;
+    touch-action: none;
+}
+.preview-cad-canvas:active { cursor: grabbing; }
+
+/* Unsupported plugin */
+.preview-unsupported { padding: var(--md); }
+
+/* Email plugin */
+.preview-email { padding: 0; }
+.email-view { display: flex; flex-direction: column; }
+
+.email-headers {
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--color-border-light);
+    background: var(--color-bg);
+}
+.email-subject {
+    margin: 0 0 8px;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--color-text-primary);
+    text-transform: none;
+    letter-spacing: 0;
+    display: block;
+}
+.email-fields {
+    margin: 0;
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 3px 10px;
+    font-size: 11px;
+}
+.email-fields dt {
+    color: var(--color-text-secondary);
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+.email-fields dd {
+    margin: 0;
+    color: var(--color-text-primary);
+    overflow-wrap: anywhere;
+}
+
+.email-attachments {
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--color-border-light);
+    background: var(--color-bg-elevated);
+}
+.email-att-label {
+    margin: 0 0 4px;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--color-text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+.email-att-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    font-size: 12px;
+}
+.email-att-list li { padding: 2px 0; }
+.email-att-name { color: var(--color-text-primary); }
+.email-att-meta { color: var(--color-text-secondary); font-size: 11px; }
+
+.email-body { padding: 0; }
+.email-html-frame {
+    width: 100%;
+    /* Sandboxed iframe can't message its size out; pick a tall fixed
+       max so the body scrolls inside the frame for long emails. */
+    height: 70vh;
+    border: 0;
+    background: #fff;
+    display: block;
+}
+.email-text {
+    font: 12px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+    color: var(--color-text-primary);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    margin: 0;
+    padding: 12px 14px;
+    background: var(--color-bg);
+}
+
+/* Spreadsheet plugin — Excel-style grid with column letters, row
+   numbers, and a sheet-tab strip. The whole pane is the scroller so
+   the column / row headers stay aligned with the cell grid. */
+.preview-spreadsheet {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: 0;
+}
+
+/* Sheet-tab strip. Mirrors the Excel bottom-tab idiom but lives at the
+   top so it stays in view while the cell grid scrolls below. */
+.preview-sheet-tabs {
+    display: flex;
+    gap: 2px;
+    padding: 6px 8px 0;
+    background: var(--color-bg);
+    border-bottom: 1px solid var(--color-border-light);
+    overflow-x: auto;
+    flex-shrink: 0;
+}
+.preview-sheet-tab {
+    background: var(--color-bg-elevated);
+    color: var(--color-text-secondary);
+    border: 1px solid var(--color-border-light);
+    border-bottom: none;
+    border-radius: 4px 4px 0 0;
+    padding: 4px 10px;
+    font-size: 11px;
+    cursor: pointer;
+    white-space: nowrap;
+    font-family: var(--font);
+}
+.preview-sheet-tab:hover { color: var(--color-text-primary); }
+.preview-sheet-tab.active {
+    background: var(--color-bg);
+    color: var(--color-text-primary);
+    border-color: var(--color-border);
+    border-bottom: 1px solid var(--color-bg);
+    margin-bottom: -1px;
+    font-weight: 600;
+}
+
+.preview-sheet-scroll {
+    flex: 1;
+    overflow: auto;
+    background: var(--color-bg);
+}
+.preview-sheet-wrap { display: inline-block; min-width: 100%; }
+
+.preview-sheet-grid {
+    border-collapse: separate;
+    border-spacing: 0;
+    font: 11px/1.4 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+    table-layout: auto;
+}
+
+/* Cell + header borders. ``border-collapse: separate`` + edge-only
+   borders gives the clean Excel grid look without the double-line
+   artifacts of ``collapse``. */
+.preview-sheet-grid th,
+.preview-sheet-grid td {
+    border-right: 1px solid var(--color-border-light);
+    border-bottom: 1px solid var(--color-border-light);
+    padding: 2px 6px;
+    min-width: 60px;
+    max-width: 240px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--color-text-primary);
+    background: var(--color-bg-elevated);
+}
+
+/* Column-letter header — sticky to the top of the scroller. */
+.preview-sheet-col-head {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: var(--color-bg-hover);
+    color: var(--color-text-secondary);
+    font-weight: 500;
+    text-align: center;
+    border-top: 1px solid var(--color-border-light);
+}
+
+/* Row-number header — sticky to the left of the scroller. */
+.preview-sheet-row-head {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    background: var(--color-bg-hover);
+    color: var(--color-text-secondary);
+    font-weight: 500;
+    text-align: right;
+    border-left: 1px solid var(--color-border-light);
+    min-width: 32px;
+}
+
+/* Top-left corner — sticky in both axes, sits above both headers. */
+.preview-sheet-corner {
+    position: sticky;
+    top: 0;
+    left: 0;
+    z-index: 3;
+    background: var(--color-bg-hover);
+    border-top: 1px solid var(--color-border-light);
+    border-left: 1px solid var(--color-border-light);
+    min-width: 32px;
+}
+
+/* Numbers right-aligned, monospace-ish digits for column alignment. */
+.preview-sheet-grid td.num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+.preview-sheet-grid td.date {
+    color: var(--color-text-primary);
+    font-variant-numeric: tabular-nums;
+}
+
+.preview-sheet-trunc {
+    padding: 8px 12px;
+    font-size: 11px;
+    color: var(--color-text-secondary);
+}
+
+/* Markdown plugin — rendered prose inside the preview panel */
+.preview-markdown {
+    padding: var(--md);
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--color-text-primary);
+    overflow-wrap: anywhere;
+}
+.preview-markdown h1,
+.preview-markdown h2,
+.preview-markdown h3,
+.preview-markdown h4 {
+    margin: 1em 0 0.4em;
+    font-weight: 600;
+    line-height: 1.25;
+}
+.preview-markdown h1 { font-size: 18px; border-bottom: 1px solid var(--color-border-light); padding-bottom: 4px; }
+.preview-markdown h2 { font-size: 15px; border-bottom: 1px solid var(--color-border-light); padding-bottom: 3px; }
+.preview-markdown h3 { font-size: 13px; }
+.preview-markdown h4 { font-size: 12px; color: var(--color-text-secondary); }
+.preview-markdown p { margin: 0.5em 0; }
+.preview-markdown ul,
+.preview-markdown ol { margin: 0.4em 0; padding-left: 20px; }
+.preview-markdown li { margin: 2px 0; }
+.preview-markdown code {
+    font: 11px/1.4 ui-monospace, "SF Mono", Menlo, monospace;
+    background: var(--color-bg-hover);
+    border-radius: 3px;
+    padding: 1px 4px;
+}
+.preview-markdown pre {
+    background: var(--color-bg);
+    border: 1px solid var(--color-border-light);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+    overflow-x: auto;
+    margin: 0.5em 0;
+}
+.preview-markdown pre code {
+    background: none;
+    padding: 0;
+    font-size: 11px;
+}
+.preview-markdown blockquote {
+    border-left: 3px solid var(--color-border);
+    margin: 0.5em 0;
+    padding: 2px 0 2px 12px;
+    color: var(--color-text-secondary);
+}
+.preview-markdown a { color: var(--color-accent); text-decoration: none; }
+.preview-markdown a:hover { text-decoration: underline; }
+.preview-markdown table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 12px;
+    margin: 0.5em 0;
+}
+.preview-markdown th,
+.preview-markdown td {
+    border: 1px solid var(--color-border-light);
+    padding: 4px 8px;
+    text-align: left;
+}
+.preview-markdown th { background: var(--color-bg-hover); font-weight: 600; }
+.preview-markdown img { max-width: 100%; height: auto; border-radius: var(--radius-sm); }
+.preview-markdown hr { border: none; border-top: 1px solid var(--color-border-light); margin: 1em 0; }
+

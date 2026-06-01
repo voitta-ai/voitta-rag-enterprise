@@ -1,0 +1,447 @@
+/* ---------- Folder list ---------- */
+
+/* Container fills its grid cell vertically and turns into a flex column
+   so the head row pins to the top while the <ul> below scrolls. */
+.folder-list-container {
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border-light);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+/* One source of truth for the column layout — every row (head + body)
+   uses this so header text aligns with cell content. Switch columns are
+   locked to a fixed width to keep alignment predictable. */
+:root {
+    /* name · files · indexed · status · search · share */
+    --tree-cols: 1fr 56px 64px 100px 56px 56px;
+    --tree-gap: 10px;
+    --tree-pad-x: 16px;
+}
+/* Depth indentation lives as padding-left on the .name-cell (see main.js).
+   That keeps chevron + glyph + label moving together as a unit while the
+   metadata columns to the right stay aligned with the column header. */
+.tree-row .name-cell {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    overflow: hidden;
+    min-width: 0;
+}
+
+.tree-head {
+    display: grid;
+    grid-template-columns: var(--tree-cols);
+    gap: var(--tree-gap);
+    padding: 8px var(--tree-pad-x);
+    background: var(--color-bg);
+    border-bottom: 1px solid var(--color-border);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+    color: var(--color-text-secondary);
+    flex-shrink: 0;
+    /* The ul is a separate scroll container, so this row doesn't need
+       position:sticky — but keep a subtle shadow when content scrolls
+       under it for visual continuity. */
+    position: relative;
+    z-index: 1;
+}
+.tree-head .num { text-align: right; }
+.tree-head .center { text-align: center; }
+
+.tree {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    /* Hide horizontal scroll-bars on tight viewports — the toggle column
+       widths are fixed, so there's no horizontal overflow to expose. */
+    overflow-x: hidden;
+}
+.tree-row {
+    position: relative;
+    display: grid;
+    grid-template-columns: var(--tree-cols);
+    align-items: center;
+    gap: var(--tree-gap);
+    padding: 5px var(--tree-pad-x);
+    border-bottom: 1px solid var(--color-border-light);
+    cursor: pointer;
+    transition: background var(--t);
+    user-select: none;
+}
+/* Read-only shared folders (someone else owns them) get a left-edge accent
+   so they stand out from your own. The accent persists even when selected. */
+.tree-row.folder-root.shared-readonly {
+    border-left: 3px solid var(--color-accent);
+    padding-left: 13px;
+    background: linear-gradient(
+        to right,
+        color-mix(in srgb, var(--color-accent) 6%, transparent),
+        transparent 40%
+    );
+}
+.tree-row.folder-root.shared-readonly.selected {
+    background: var(--color-accent);
+}
+
+/* "Sign in with Google" button — matches Google's Identity Branding
+   guidelines (https://developers.google.com/identity/branding-guidelines):
+   white surface, 1px #dadce0 border, four-colour G mark, Roboto-style
+   label. We render a real <a>, not an iframe widget, because we just need
+   to send the user to /api/auth/login/google — no client-side SDK. */
+.gsi-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    margin-top: 16px;
+    padding: 0 16px;
+    height: 40px;
+    min-width: 220px;
+    background: #ffffff;
+    border: 1px solid #dadce0;
+    border-radius: 4px;
+    color: #1f1f1f;
+    font-family: "Google Sans", "Roboto", -apple-system, BlinkMacSystemFont,
+        "Segoe UI", Helvetica, Arial, sans-serif;
+    font-size: 14px;
+    font-weight: 500;
+    letter-spacing: 0.25px;
+    text-decoration: none;
+    cursor: pointer;
+    transition: box-shadow 120ms ease, background 120ms ease;
+    /* Subtle Material-style elevation that lifts on hover. */
+    box-shadow: 0 1px 2px rgba(60, 64, 67, 0.06),
+                0 1px 3px 1px rgba(60, 64, 67, 0.04);
+}
+.gsi-button:hover {
+    background: #f8faff;
+    box-shadow: 0 1px 2px rgba(60, 64, 67, 0.10),
+                0 2px 6px 2px rgba(60, 64, 67, 0.08);
+}
+.gsi-button:active {
+    background: #f1f3f4;
+    box-shadow: 0 1px 1px rgba(60, 64, 67, 0.10);
+}
+.gsi-button:focus-visible {
+    outline: 2px solid #4285F4;
+    outline-offset: 2px;
+}
+.gsi-button-icon {
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+    width: 18px;
+    height: 18px;
+}
+.gsi-button-label {
+    line-height: 1;
+}
+/* Dark theme: invert to the Google "filled blue" variant — same brand
+   guidelines, white G on a #131314 surface with reduced opacity. */
+[data-theme="dark"] .gsi-button {
+    background: #131314;
+    border-color: #8e918f;
+    color: #e3e3e3;
+}
+[data-theme="dark"] .gsi-button:hover {
+    background: #1a1b1d;
+    border-color: #ffffff;
+}
+[data-theme="dark"] .gsi-button:active {
+    background: #232427;
+}
+
+/* Segmented tabs (e.g. Google Drive auth-mode picker). Two-button row
+   styled like an iOS segmented control: the active segment gets the
+   accent fill, hover dims the inactive side. Picked over a select-box
+   because the choices change which fields render below — visible options
+   make that consequence obvious without a dropdown click. */
+.seg-tabs {
+    display: inline-flex;
+    margin: 6px 0 12px;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    background: var(--color-bg);
+    padding: 2px;
+    gap: 2px;
+}
+.seg-tab {
+    padding: 6px 14px;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--color-text-secondary);
+    background: transparent;
+    border: none;
+    border-radius: calc(var(--radius-md) - 2px);
+    cursor: pointer;
+    transition: background var(--t), color var(--t);
+}
+.seg-tab:hover:not(.active) {
+    background: var(--color-bg-hover);
+    color: var(--color-text-primary);
+}
+.seg-tab.active {
+    background: var(--color-accent);
+    color: #fff;
+}
+
+/* Compact iOS-style toggle switch used for the per-folder Active and Share
+   flags. Built around an unstyled checkbox so screen readers and keyboard
+   navigation work for free. */
+.folder-switch {
+    position: relative;
+    display: inline-block;
+    width: 32px;
+    height: 18px;
+    flex-shrink: 0;
+}
+.folder-switch input {
+    position: absolute;
+    opacity: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    cursor: pointer;
+}
+.folder-switch .track {
+    position: absolute;
+    inset: 0;
+    background: var(--color-text-tertiary);
+    border-radius: 9px;
+    transition: background var(--t);
+    pointer-events: none;
+}
+.folder-switch .track::before {
+    content: "";
+    position: absolute;
+    left: 2px;
+    top: 2px;
+    width: 14px;
+    height: 14px;
+    background: #fff;
+    border-radius: 50%;
+    transition: transform 120ms ease;
+}
+.folder-switch input:checked + .track {
+    background: var(--color-accent);
+}
+.folder-switch input:checked + .track::before {
+    transform: translateX(14px);
+}
+.folder-switch input:disabled + .track {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+.folder-switch input:disabled {
+    cursor: not-allowed;
+}
+.tree-row:last-child { border-bottom: none; }
+.tree-row:hover { background: var(--color-bg-hover); }
+.tree-delete-btn {
+    position: absolute;
+    right: var(--tree-pad-x);
+    top: 50%;
+    transform: translateY(-50%);
+    padding: 0 5px;
+    border: none;
+    background: none;
+    color: var(--color-text-secondary);
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+    border-radius: 3px;
+    opacity: 0;
+    transition: opacity .1s;
+}
+.tree-row:hover .tree-delete-btn { opacity: .5; }
+.tree-delete-btn:hover { opacity: 1 !important; color: var(--color-danger, #c0392b); background: var(--color-bg-hover); }
+.tree-row.selected,
+.tree-row.selected:hover { background: var(--color-accent); color: #fff; }
+.tree-row.selected .num,
+.tree-row.selected .label,
+.tree-row.selected .chevron { color: #fff; }
+.tree-row.selected .glyph { color: #fff; }
+
+/* Legacy indent span — unused since depth moved to label padding-left.
+   Kept hidden in case any cached JS still emits it. */
+.tree-row .indent { display: none; }
+.tree-row .chevron {
+    width: 14px;
+    text-align: center;
+    color: var(--color-text-secondary);
+    font-size: 10px;
+    transition: transform 120ms ease;
+}
+.tree-row .chevron.open { transform: rotate(90deg); }
+.tree-row .chevron.leaf { visibility: hidden; }
+.tree-row .label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    font-size: 13px;
+}
+.tree-row .label .glyph {
+    flex-shrink: 0;
+    width: 16px;
+    height: 16px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 0;
+    position: relative;  /* anchor for the .source-lock overlay */
+}
+/* Private-source lock badge layered over the bottom-right corner
+   of the glyph. ~9 px so it's a clear cue without obscuring the
+   underlying brand mark; backdrop disc keeps it legible whether
+   the underlying icon is dark or light. */
+.tree-row .label .glyph .source-lock {
+    position: absolute;
+    right: -3px;
+    bottom: -3px;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--color-bg-elevated);
+    padding: 1px;
+    box-shadow: 0 0 0 1px var(--color-border);
+}
+.tree-row .label .glyph .source-lock[hidden] { display: none; }
+/* Vendored SVGs carry their own colour. ``<img>`` keeps the raster
+   pixel-perfect on retina without the per-render decode overhead a
+   plain inline-SVG would pay. */
+.tree-row .label .glyph .icon-img {
+    width: 16px;
+    height: 16px;
+    display: block;
+    /* Selection background is dark — keep the icon legible by adding
+       a tiny shadow under the SVG so light strokes don't disappear
+       on the accent fill. */
+    image-rendering: -webkit-optimize-contrast;
+}
+.tree-row.file .label { color: var(--color-text-secondary); }
+
+/* Artifact summary rows (one per type under expanded files) */
+.tree-row.artifact {
+    grid-template-columns: 1fr;
+}
+.tree-row.artifact .label.artifact-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--color-text-secondary);
+    font-size: 12px;
+    overflow: hidden;
+}
+.artifact-summary-icon { flex-shrink: 0; font-size: 13px; }
+.artifact-summary-text {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+.tree-row.artifact.selected .label.artifact-label { color: #fff; }
+
+/* --- Image gallery (preview pane) --- */
+.artifact-gallery {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    padding: 16px;
+}
+.artifact-gallery-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    cursor: default;
+}
+.artifact-gallery-img {
+    max-width: 200px;
+    max-height: 200px;
+    object-fit: contain;
+    border-radius: 4px;
+    border: 1px solid var(--color-border);
+    background: var(--color-bg-secondary);
+}
+.artifact-gallery-caption {
+    font-size: 11px;
+    color: var(--color-text-secondary);
+}
+
+/* --- Layout view (preview pane) --- */
+.layout-page-section {
+    margin-bottom: 20px;
+}
+.layout-page-header {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    padding: 6px 16px 4px;
+    position: sticky;
+    top: 0;
+    background: var(--color-bg);
+    border-bottom: 1px solid var(--color-border);
+    z-index: 1;
+}
+.layout-block {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    padding: 3px 16px;
+    font-size: 13px;
+    line-height: 1.4;
+    border-bottom: 1px solid var(--color-border-subtle, var(--color-border));
+}
+.layout-block:hover { background: var(--color-bg-hover, rgba(255,255,255,0.04)); }
+.layout-block-icon {
+    flex-shrink: 0;
+    width: 16px;
+    text-align: center;
+    color: var(--color-text-secondary);
+    font-size: 11px;
+}
+.layout-block-text {
+    color: var(--color-text);
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+.layout-block-title .layout-block-text { font-weight: 600; }
+.layout-block-table .layout-block-text { font-style: italic; color: var(--color-text-secondary); }
+.layout-block-page_number .layout-block-text,
+.layout-block-page_footnote .layout-block-text,
+.layout-block-header .layout-block-text { color: var(--color-text-secondary); font-size: 11px; }
+
+.tree-row .num {
+    text-align: right;
+    font-size: 12px;
+    color: var(--color-text-secondary);
+}
+
+/* Status pill: smaller and quieter inside tree rows. */
+.tree-row .status-tag {
+    min-width: auto;
+    font-size: 10px;
+    padding: 1px 8px;
+    text-transform: lowercase;
+}
+.tree-row.selected .status-tag {
+    background: rgba(255, 255, 255, 0.25);
+    color: #fff;
+}
+
