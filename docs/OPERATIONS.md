@@ -187,6 +187,48 @@ stored as the score (`chunk_image_links.distance`).
 `image_cas_id` was already embedded for another file, the existing point is
 reused and the new `file_id` is appended instead of re-embedding.
 
+### Parser output matrix
+
+A `ParseResult` can carry up to four artifact kinds; what each parser emits
+differs. This drives both what's searchable and what the file-tree expand view
+shows (it offers an *images* row and, for PDFs only, a *layout* row).
+
+```mermaid
+flowchart LR
+    F["file bytes"] --> P{parser by ext}
+    P -->|pdf| PDF["MinerU"]
+    P -->|docx| DOCX["python-docx"]
+    P -->|xlsx · xlsm| XLSX["openpyxl"]
+    P -->|xls| XLS["xlrd"]
+    P -->|pptx| PPTX["python-pptx"]
+    P -->|png·jpg·svg·cad…| OTHER["image / svg / cad / …"]
+    PDF --> A1["markdown · figures · page renders · page_layout"]
+    DOCX --> A2["markdown · figures (inline + swept)"]
+    XLSX --> A3["markdown tables · figures (xl/media)"]
+    XLS --> A4["markdown tables only"]
+    PPTX --> A5["markdown · figures · page renders"]
+```
+
+| Format | Text | Embedded images | Page renders | `page_layout.json` |
+|--------|:----:|:----:|:----:|:----:|
+| PDF | ✓ | ✓ (cropped figures) | ✓ (per-page WebP) | ✓ (**only PDF emits this**) |
+| docx | ✓ | ✓ inline **+ swept** (anchored, tables, headers/footers) | — | — |
+| xlsx / xlsm | ✓ (tables) | ✓ (harvested from `xl/media/`) | — | — |
+| **xls** (legacy BIFF) | ✓ (tables) | ✗ — **text only** (OLE/Escher; not worth the cost — use .xlsx) | — | — |
+| pptx | ✓ | ✓ | ✓ (slide renders) | — |
+| image / svg / cad | — | ✓ (the file itself / rasterised / rendered) | — | — |
+
+Embedded-image extraction for OOXML (docx/xlsx/pptx) harvests rasters straight
+from the package `*/media/` folder ([parsers/_ooxml.py](../src/voitta_rag_enterprise/services/parsers/_ooxml.py)),
+so anchored/table/header pictures aren't missed; vector parts (emf/wmf/svg) and
+sub-32px glyphs are skipped. docx additionally keeps a positioned inline walk so
+its figures anchor to the right chunk; swept (non-inline) and all xlsx images
+land at position 0.
+
+> Because `page_layout.json` is PDF-only, the tree's *layout* row is shown only
+> for PDFs; non-PDF expandables show their images, or a muted "No previews" when
+> a file has none.
+
 ---
 
 ## 3. Job queue mechanics
