@@ -49,8 +49,12 @@ async def export_notebooks(
     moves on. Per-page failures are caught and skipped individually.
     """
     base = "https://graph.microsoft.com/v1.0"
+    # ``self`` is the Graph endpoint for the notebook, used below to enumerate
+    # its sections. It must be in $select — OData omits unselected properties,
+    # and without it every notebook was dropped as "no self link". (``links``
+    # is a page-level field, selected at the page query, not needed here.)
     notebooks_url: str | None = (
-        f"{base}{owner_url}/onenote/notebooks?$select=id,displayName,links"
+        f"{base}{owner_url}/onenote/notebooks?$select=id,displayName,self"
     )
 
     entries: list[RemoteEntry] = []
