@@ -99,10 +99,17 @@ const rowCache = new Map();
 // rather than always showing "No previews".
 const _EXPANDABLE_EXTS = new Set([".pdf", ".pptx", ".ppt", ".docx", ".doc", ".odp", ".odt", ".xlsx", ".xlsm"]);
 
-function _isExpandable(relPath) {
-    const lower = relPath.toLowerCase();
+// A file is expandable only if its expand view would actually show something.
+// PDFs always do (per-page layout + renders). Other office types are
+// expandable only when they have at least one extracted image — so a docx /
+// xlsx with no pictures simply shows no chevron, instead of expanding to an
+// empty "No previews". ``image_count`` rides along on the file payload.
+function _isExpandable(file) {
+    const lower = (file.rel_path || "").toLowerCase();
     const dot = lower.lastIndexOf(".");
-    return dot >= 0 && _EXPANDABLE_EXTS.has(lower.slice(dot));
+    if (dot < 0 || !_EXPANDABLE_EXTS.has(lower.slice(dot))) return false;
+    if (_isPdf(lower)) return true;
+    return (file.image_count || 0) > 0;
 }
 
 function _isPdf(relPath) {
@@ -509,7 +516,7 @@ function updateFileRow(li, { file, depth }) {
     const isSelected = file.id === getSelectedFileId() && getSelectedArtifact() === null;
     setIfChanged(li, "className", `tree-row file${isSelected ? " selected" : ""}`);
 
-    const expandable = _isExpandable(file.rel_path);
+    const expandable = _isExpandable(file);
     const fileOpen = expandable && isFileExpanded(file.id);
     let chevCls = "chevron";
     if (!expandable) chevCls += " leaf";
@@ -722,7 +729,7 @@ function emitTreeRow({ targetRows, seenKeys, folder, node, relDir, displayName, 
         seenKeys.add(fkey);
 
         // Emit summary artifact rows for expandable files (one per type).
-        if (_isExpandable(f.rel_path) && isFileExpanded(f.id)) {
+        if (_isExpandable(f) && isFileExpanded(f.id)) {
             _loadArtifacts(f.id, f.rel_path);
             const imgs = _imageCache.get(f.id);
             const blocks = _layoutCache.get(f.id);

@@ -20,10 +20,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ..db.models import File, Folder, FolderSyncSource, Job
+from ..db.models import File, Folder, FolderSyncSource, Image, Job
 from ..services import folder_active
 from ..services.acl import folder_active_for_user, is_folder_owner
 from ..services.indexing import file_event_payload
@@ -67,7 +67,17 @@ def _files_snapshot(
         if not visible:
             return []
         stmt = stmt.where(File.folder_id.in_(visible))
-    return [file_event_payload(f) for f in db.execute(stmt).scalars().all()]
+    files = db.execute(stmt).scalars().all()
+    # One grouped count for the whole snapshot, not one query per file (the
+    # payload carries image_count so the tree can gate expandability up front).
+    counts = dict(
+        db.execute(
+            select(Image.file_id, func.count())
+            .where(Image.file_id.in_([f.id for f in files]))
+            .group_by(Image.file_id)
+        ).all()
+    ) if files else {}
+    return [file_event_payload(f, image_count=counts.get(f.id, 0)) for f in files]
 
 
 def _jobs_snapshot(

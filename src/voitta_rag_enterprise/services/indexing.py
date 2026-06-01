@@ -449,8 +449,27 @@ def publish_file_upserted(file_id: int) -> None:
         publish_folder_stats(s, file.folder_id)
 
 
-def file_event_payload(file: File) -> dict:
-    """Shape the SPA expects on every ``file.upserted`` event."""
+def file_event_payload(file: File, *, image_count: int | None = None) -> dict:
+    """Shape the SPA expects on every ``file.upserted`` event.
+
+    ``image_count`` lets the file tree decide expandability up front — a docx /
+    xlsx with no extracted images shows no expand chevron at all (rather than
+    expanding to an empty "No previews"). Pass it precomputed (the snapshot
+    builder counts in bulk to avoid N+1); otherwise it's counted inline from the
+    file's own session.
+    """
+    if image_count is None:
+        from sqlalchemy import func
+        from sqlalchemy.orm import object_session
+
+        sess = object_session(file)
+        image_count = (
+            sess.execute(
+                select(func.count()).select_from(Image).where(Image.file_id == file.id)
+            ).scalar_one()
+            if sess is not None
+            else 0
+        )
     return {
         "id": file.id,
         "folder_id": file.folder_id,
@@ -462,6 +481,7 @@ def file_event_payload(file: File) -> dict:
         "pending_embeds": file.pending_embeds,
         "source_url": file.source_url,
         "tab": file.tab,
+        "image_count": image_count,
     }
 
 

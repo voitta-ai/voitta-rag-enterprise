@@ -22,7 +22,24 @@ from voitta_rag_enterprise.db.models import (
     Image,
     Job,
 )
-from voitta_rag_enterprise.services.indexing import run_extract
+from voitta_rag_enterprise.services.indexing import file_event_payload, run_extract
+
+
+def test_file_event_payload_carries_image_count(env: None) -> None:
+    """The file payload exposes image_count so the tree can gate expandability
+    without a fetch. Counts inline from the file's own session."""
+    init_db()
+    with session_scope() as s:
+        folder = Folder(path="/tmp/x", display_name="x", source_type="filesystem")
+        s.add(folder)
+        s.flush()
+        f = File(folder_id=folder.id, rel_path="a.docx", state="indexed")
+        s.add(f)
+        s.flush()
+        s.add(Image(file_id=f.id, image_index=0, image_cas_id="deadbeef", anchor_chunk=0))
+        s.add(Image(file_id=f.id, image_index=1, image_cas_id="cafef00d", anchor_chunk=0))
+        s.flush()
+        assert file_event_payload(f)["image_count"] == 2
 
 
 def _png(color: tuple[int, int, int] = (10, 20, 30), size: tuple[int, int] = (8, 8)) -> bytes:

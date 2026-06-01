@@ -226,8 +226,10 @@ its figures anchor to the right chunk; swept (non-inline) and all xlsx images
 land at position 0.
 
 > Because `page_layout.json` is PDF-only, the tree's *layout* row is shown only
-> for PDFs; non-PDF expandables show their images, or a muted "No previews" when
-> a file has none.
+> for PDFs. Expandability is gated on content: PDFs are always expandable;
+> docx/xlsx/pptx are expandable only when they have ≥1 extracted image
+> (`image_count` rides on the file payload), so a picture-free office doc shows
+> no chevron at all rather than expanding to nothing.
 
 ---
 
