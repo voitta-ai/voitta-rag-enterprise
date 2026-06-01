@@ -243,9 +243,8 @@ function buildAuthProviderRow(p) {
 
     // Actions: Check + Delete.
     const tdActions = document.createElement("td");
-    tdActions.style.whiteSpace = "nowrap";
     const checkBtn = document.createElement("button");
-    checkBtn.className = "btn btn-secondary btn-sm";
+    checkBtn.className = "btn btn-secondary btn-xs";
     checkBtn.textContent = "Check";
     checkBtn.title = "Probe the provider's token endpoint to verify these credentials";
     const checkStatus = document.createElement("span");
@@ -269,12 +268,12 @@ function buildAuthProviderRow(p) {
         }
     });
     const delBtn = document.createElement("button");
-    delBtn.className = "btn-remove";
-    delBtn.textContent = "×";
+    delBtn.className = "admin-icon-btn admin-icon-danger";
+    delBtn.textContent = "🗑";
     delBtn.title = p.source === "env"
         ? "Delete (will be re-created on next restart while .env still has these values)"
         : "Delete";
-    delBtn.style.marginLeft = "8px";
+    delBtn.style.marginLeft = "6px";
     delBtn.addEventListener("click", async () => {
         if (!confirm(`Delete ${p.provider} provider "${p.label || p.client_id}"?`)) return;
         try {

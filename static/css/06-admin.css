@@ -10,7 +10,10 @@
  *   - The Users table is the dense piece — 32px rows, monospace email,
  *     small action buttons.
  */
-.admin-modal { max-width: 1040px; }
+/* Override .modal-wide's width (min(94vw,720px)) — the admin panel carries
+   wide tables (OAuth providers has 7 columns) that need real room. ``width``
+   not just ``max-width``, or the 720px cap from .modal-wide wins. */
+.admin-modal { width: min(95vw, 1200px); max-width: none; }
 /* A floor on the body height so short tabs (Storage, an empty Groups list)
    don't collapse the dialog to a sliver — the modal keeps a stable, roomy
    footprint across tabs. */
@@ -29,9 +32,7 @@
 }
 /* Uniform width only for the editor's primary actions — NOT for in-table row
    buttons (those must stay compact or they overflow the actions column). */
-.admin-editor-footer .btn { min-width: 110px; justify-content: center; }
-/* Extra-compact button for dense table rows. */
-.btn-xs { padding: 3px 8px; font-size: 11px; line-height: 1.4; }
+.admin-editor-footer .btn { min-width: 96px; justify-content: center; }
 
 .admin-grid {
     display: grid;
@@ -345,11 +346,28 @@
    the global ``td:last-child {width:80px}`` rule because we need room
    for the inline check status. */
 .admin-auth-providers { margin-top: 0; }
+/* Fixed layout with explicit widths so the 7 columns fit the modal instead of
+   overflowing into a horizontal scroll. The credential columns get the most
+   room; inputs fill their cell (width:100%) and shrink with it. */
+.admin-auth-providers .admin-table { table-layout: fixed; width: 100%; }
+.admin-auth-providers .admin-table th,
+.admin-auth-providers .admin-table td { padding: 8px 8px; }
+.admin-auth-providers .admin-table th:nth-child(1),
+.admin-auth-providers .admin-table td:nth-child(1) { width: 92px; }    /* Provider */
+.admin-auth-providers .admin-table th:nth-child(2),
+.admin-auth-providers .admin-table td:nth-child(2) { width: 12%; }     /* Label    */
+.admin-auth-providers .admin-table th:nth-child(5),
+.admin-auth-providers .admin-table td:nth-child(5) { width: 13%; }     /* Tenant   */
+.admin-auth-providers .admin-table th:nth-child(6),
+.admin-auth-providers .admin-table td:nth-child(6) { width: 56px; text-align: center; }  /* Enabled */
+.admin-auth-providers .admin-table th:last-child,
 .admin-auth-providers .admin-table td:last-child {
-    width: auto;
-    text-align: left;
+    width: 150px; text-align: left;
 }
+/* Client ID (3) + Client Secret (4) absorb the rest. */
 .admin-auth-providers .admin-table td input[type="text"] {
+    width: 100%;
+    box-sizing: border-box;
     padding: 4px 8px;
     border: 1px solid var(--color-border-light);
     border-radius: 4px;
@@ -358,6 +376,12 @@
     font-size: 12px;
     font-family: ui-monospace, "SF Mono", Menlo, monospace;
 }
+/* Actions: Check (xs) + delete icon on one line; the transient check-status
+   text wraps onto the next line rather than widening the column. */
+.admin-auth-providers .admin-table td:last-child {
+    white-space: normal;
+}
+.admin-auth-providers .admin-table td:last-child .hint { display: block; margin: 4px 0 0; }
 
 /* Add-provider card: a collapsible, labeled form. Rendered as a 2x2
    grid so each field has room to breathe and the credentials sit on

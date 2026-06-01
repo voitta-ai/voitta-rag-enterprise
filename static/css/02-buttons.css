@@ -1,11 +1,16 @@
 /* ---------- Buttons ---------- */
 
+/* One button scale used everywhere for consistency:
+ *   .btn     — default (toolbars, dialog primary actions)
+ *   .btn-sm  — modal/section actions
+ *   .btn-xs  — dense table rows
+ * All share the same look; only padding/size differs. */
 .btn {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: var(--sm);
-    padding: 8px 16px;
+    gap: 6px;
+    padding: 6px 12px;
     font: inherit;
     font-size: 13px;
     font-weight: 500;
@@ -17,6 +22,7 @@
 }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-sm { padding: 4px 10px; font-size: 12px; }
+.btn-xs { padding: 3px 8px; font-size: 11px; line-height: 1.4; }
 
 .btn-primary { background: var(--color-accent); color: #fff; }
 .btn-primary:hover:not(:disabled) { background: var(--color-accent-hover); }
