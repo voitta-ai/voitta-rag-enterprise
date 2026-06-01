@@ -27,7 +27,7 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -168,10 +168,33 @@ class AdminUserOut(BaseModel):
     display_name: str | None
     is_admin: bool
     is_super_admin: bool
+    groups: list[str] = []
+
+
+def _super_set() -> set[str]:
+    from ...config import get_settings
+
+    return {sa.lower() for sa in get_settings().super_admin_list()}
+
+
+def _user_out(user: User, *, groups: list[str], supers: set[str] | None = None) -> AdminUserOut:
+    supers = _super_set() if supers is None else supers
+    return AdminUserOut(
+        id=user.id,
+        email=user.email,
+        display_name=user.display_name,
+        is_admin=bool(user.is_admin),
+        is_super_admin=user.email.lower() in supers,
+        groups=groups,
+    )
 
 
 class _AdminFlagIn(BaseModel):
-    is_admin: bool
+    # All optional — a PATCH may flip admin, rename, set groups, or any combo.
+    # ``None`` means "leave alone"; for groups, pass [] to clear all memberships.
+    is_admin: bool | None = None
+    display_name: str | None = None
+    groups: list[str] | None = None
 
 
 class _CreateUserIn(BaseModel):
@@ -216,15 +239,9 @@ def create_user(
         me.email, email, body.is_admin, body.grant_signin,
     )
 
-    super_set = {sa.lower() for sa in get_settings().super_admin_list()}
+    out = _user_out(user, groups=[])
     publish_admin_state()
-    return AdminUserOut(
-        id=user.id,
-        email=user.email,
-        display_name=user.display_name,
-        is_admin=bool(user.is_admin),
-        is_super_admin=user.email.lower() in super_set,
-    )
+    return out
 
 
 @router.get("/users", response_model=list[AdminUserOut])
@@ -234,54 +251,78 @@ def list_users(
 ) -> list[AdminUserOut]:
     """Every User row that has ever signed in. Used by the admin UI for
     both the admin-flag toggle and the impersonation dropdown."""
-    from ...config import get_settings
+    from ...services import groups as groups_svc
 
-    super_set = {sa.lower() for sa in get_settings().super_admin_list()}
+    supers = _super_set()
+    by_user = groups_svc.group_names_by_user(db)
     rows = db.execute(select(User).order_by(User.email)).scalars().all()
     return [
-        AdminUserOut(
-            id=u.id,
-            email=u.email,
-            display_name=u.display_name,
-            is_admin=bool(u.is_admin),
-            is_super_admin=u.email.lower() in super_set,
-        )
-        for u in rows
+        _user_out(u, groups=by_user.get(u.id, []), supers=supers) for u in rows
     ]
 
 
 @router.patch("/users/{user_id}", response_model=AdminUserOut)
-def set_admin_flag(
+def update_user(
     user_id: int,
     body: _AdminFlagIn,
     db: Session = Depends(db_session),
     me: CurrentUser = Depends(admin_user),
 ) -> AdminUserOut:
-    """Toggle ``is_admin`` for any user. Super-admins can't be demoted —
-    their flag re-stamps on every sign-in, so attempting to flip it
-    silently sticks but won't survive their next login. We could 409
-    instead but it's friendlier to let the call succeed and let the
-    admin discover that side via the ``is_super_admin`` flag in the
-    response."""
-    from ...config import get_settings
+    """Update a user: admin flag, display name, and/or group membership.
+
+    Each field is optional ("leave alone" when omitted). Super-admins can't be
+    demoted — their flag re-stamps on every sign-in, so a flip here silently
+    sticks but won't survive their next login; we let the call succeed and let
+    the admin see ``is_super_admin`` in the response rather than 409.
+    """
+    from ...services import groups as groups_svc
 
     target = db.get(User, user_id)
     if target is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
-    target.is_admin = bool(body.is_admin)
+    if body.is_admin is not None:
+        target.is_admin = bool(body.is_admin)
+    if body.display_name is not None:
+        target.display_name = body.display_name.strip() or None
+    if body.groups is not None:
+        groups_svc.set_user_groups(db, user_id, body.groups)
     db.commit()
     logger.info(
-        "admin: %s set is_admin=%s for %s", me.email, body.is_admin, target.email
+        "admin: %s updated user %s (admin=%s, name=%s, groups=%s)",
+        me.email, target.email, body.is_admin, body.display_name, body.groups,
     )
-    super_set = {sa.lower() for sa in get_settings().super_admin_list()}
+    out = _user_out(target, groups=groups_svc.group_names_for_user(db, user_id))
     publish_admin_state()
-    return AdminUserOut(
-        id=target.id,
-        email=target.email,
-        display_name=target.display_name,
-        is_admin=bool(target.is_admin),
-        is_super_admin=target.email.lower() in super_set,
-    )
+    return out
+
+
+@router.delete("/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_user(
+    user_id: int,
+    db: Session = Depends(db_session),
+    me: CurrentUser = Depends(admin_user),
+) -> None:
+    """Delete a user. Memberships / api_keys / folder_acl cascade; owned
+    folders' ``owner_id`` is set null per schema. Guards: can't delete a
+    super-admin (they'd just be re-created on next sign-in, and it reads as a
+    footgun) nor yourself (lock-out protection)."""
+    target = db.get(User, user_id)
+    if target is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    if target.id == me.id:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "You can't delete your own account."
+        )
+    if target.email.lower() in _super_set():
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Super-admins (VOITTA_SUPER_ADMINS) can't be deleted here.",
+        )
+    email = target.email
+    db.delete(target)
+    db.commit()
+    logger.info("admin: %s deleted user %s", me.email, email)
+    publish_admin_state()
 
 
 # ---------------------------------------------------------------------------
@@ -685,6 +726,152 @@ def update_admin_settings(
 
 
 # ---------------------------------------------------------------------------
+# Groups (organizational; no folder-ACL effect)
+# ---------------------------------------------------------------------------
+
+
+class GroupOut(BaseModel):
+    id: int
+    name: str
+    description: str | None
+    member_count: int
+
+
+class _GroupCreateIn(BaseModel):
+    name: str = Field(..., min_length=1)
+    description: str | None = None
+
+
+class _GroupPatchIn(BaseModel):
+    name: str | None = None
+    description: str | None = None
+
+
+class _MemberIn(BaseModel):
+    user_id: int
+
+
+@router.get("/groups", response_model=list[GroupOut])
+def list_groups(
+    db: Session = Depends(db_session),
+    _: CurrentUser = Depends(admin_user),
+) -> list[GroupOut]:
+    from ...services import groups as groups_svc
+
+    return [GroupOut(**g) for g in groups_svc.list_groups_with_counts(db)]
+
+
+@router.post("/groups", response_model=GroupOut)
+def create_group(
+    body: _GroupCreateIn,
+    db: Session = Depends(db_session),
+    me: CurrentUser = Depends(admin_user),
+) -> GroupOut:
+    from ...db.models import Group
+
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Group name is required")
+    existing = db.execute(select(Group).where(Group.name == name)).scalar_one_or_none()
+    if existing is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, f"Group {name!r} already exists")
+    grp = Group(name=name, description=(body.description or "").strip() or None)
+    db.add(grp)
+    db.commit()
+    db.refresh(grp)
+    logger.info("admin: %s created group %s", me.email, name)
+    out = GroupOut(id=grp.id, name=grp.name, description=grp.description, member_count=0)
+    publish_admin_state()
+    return out
+
+
+@router.patch("/groups/{group_id}", response_model=GroupOut)
+def update_group(
+    group_id: int,
+    body: _GroupPatchIn,
+    db: Session = Depends(db_session),
+    me: CurrentUser = Depends(admin_user),
+) -> GroupOut:
+    from ...db.models import Group
+    from ...services import groups as groups_svc
+
+    grp = db.get(Group, group_id)
+    if grp is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Group not found")
+    if body.name is not None:
+        new_name = body.name.strip()
+        if not new_name:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Group name can't be empty")
+        clash = db.execute(
+            select(Group).where(Group.name == new_name, Group.id != group_id)
+        ).scalar_one_or_none()
+        if clash is not None:
+            raise HTTPException(status.HTTP_409_CONFLICT, f"Group {new_name!r} already exists")
+        grp.name = new_name
+    if body.description is not None:
+        grp.description = body.description.strip() or None
+    db.commit()
+    logger.info("admin: %s updated group id=%d", me.email, group_id)
+    count = len(groups_svc.group_member_ids(db, group_id))
+    out = GroupOut(id=grp.id, name=grp.name, description=grp.description, member_count=count)
+    publish_admin_state()
+    return out
+
+
+@router.delete("/groups/{group_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_group(
+    group_id: int,
+    db: Session = Depends(db_session),
+    me: CurrentUser = Depends(admin_user),
+) -> None:
+    from ...db.models import Group
+
+    grp = db.get(Group, group_id)
+    if grp is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Group not found")
+    name = grp.name
+    db.delete(grp)  # memberships cascade
+    db.commit()
+    logger.info("admin: %s deleted group %s", me.email, name)
+    publish_admin_state()
+
+
+@router.post("/groups/{group_id}/members", status_code=status.HTTP_204_NO_CONTENT)
+def add_group_member(
+    group_id: int,
+    body: _MemberIn,
+    db: Session = Depends(db_session),
+    me: CurrentUser = Depends(admin_user),
+) -> None:
+    from ...db.models import Group
+    from ...services import groups as groups_svc
+
+    if db.get(Group, group_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Group not found")
+    if db.get(User, body.user_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    groups_svc.add_member(db, group_id, body.user_id)
+    db.commit()
+    publish_admin_state()
+
+
+@router.delete(
+    "/groups/{group_id}/members/{user_id}", status_code=status.HTTP_204_NO_CONTENT
+)
+def remove_group_member(
+    group_id: int,
+    user_id: int,
+    db: Session = Depends(db_session),
+    me: CurrentUser = Depends(admin_user),
+) -> None:
+    from ...services import groups as groups_svc
+
+    groups_svc.remove_member(db, group_id, user_id)
+    db.commit()
+    publish_admin_state()
+
+
+# ---------------------------------------------------------------------------
 # WebSocket snapshot + push
 #
 # The admin modal is WS-backed: it renders from a single ``admin.snapshot``
@@ -696,15 +883,17 @@ def update_admin_settings(
 
 
 def build_admin_state(db: Session) -> dict:
-    """Full admin-console state, mirroring the five admin GET endpoints.
+    """Full admin-console state, mirroring the admin GET endpoints.
 
     The shape matches what the SPA's admin modal renders so one builder feeds
     both the connect snapshot and the on-mutation push.
     """
     from ...config import get_settings
+    from ...services import groups as groups_svc
 
     super_list = get_settings().super_admin_list()
-    super_set = {sa.lower() for sa in super_list}
+    supers = {sa.lower() for sa in super_list}
+    by_user = groups_svc.group_names_by_user(db)
     users = db.execute(select(User).order_by(User.email)).scalars().all()
     providers = db.execute(select(AuthProvider).order_by(AuthProvider.id)).scalars().all()
     return {
@@ -715,15 +904,10 @@ def build_admin_state(db: Session) -> dict:
             super_admins=super_list,
         ).model_dump(),
         "users": [
-            AdminUserOut(
-                id=u.id,
-                email=u.email,
-                display_name=u.display_name,
-                is_admin=bool(u.is_admin),
-                is_super_admin=u.email.lower() in super_set,
-            ).model_dump()
+            _user_out(u, groups=by_user.get(u.id, []), supers=supers).model_dump()
             for u in users
         ],
+        "groups": groups_svc.list_groups_with_counts(db),
         "auth_providers": [_to_out(r).model_dump() for r in providers],
         "indexing_caps": IndexingCapsOut(
             values=indexing_caps.as_dict(),
