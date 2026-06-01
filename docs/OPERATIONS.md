@@ -429,7 +429,7 @@ flowchart TB
 | `jobs` | `job.started`, `job.finished` (enriched with `folder_id`) | folder · `job_id` |
 | `folders` | `folder.upserted`, `folder.stats_changed`, `folder.sync_source_changed`, `folder.active_changed` | folder · `folder_id` |
 | `folders` | `folder.added`, `folder.removed`, `folder.sync_progress`, `folder.reindex_progress`, `folder.sync_config_changed`, `folder.gd_connected`, `folder.ms_connected` | folder · discrete |
-| `admin` | `admin.snapshot` (full admin-console state) | admin-only · discrete |
+| `admin` | `admin.snapshot` (full admin-console state: allowlist, users+groups, auth-providers, caps, settings) | admin-only · discrete |
 | `keys` | `keys.snapshot` (a user's API keys) | per-user · discrete |
 | `stats` | (reserved) | — |
 
@@ -520,10 +520,11 @@ flowchart TB
 
     subgraph routes["routes/admin.py — mutations gated by admin_user (403 else)"]
         R1["allowlist domains/users/blocklist"]
-        R2["PATCH users/{id} is_admin"]
+        R2["users CRUD: create · PATCH (admin/name/groups) · DELETE"]
         R3["auth-providers CRUD + /check"]
         R4["indexing-caps GET/PATCH"]
         R5["settings GET/PATCH (nfs_root)"]
+        R6["groups CRUD + members<br/>(services/groups.py)"]
         PUB["publish_admin_state()<br/>→ admin.snapshot (admin topic)"]
     end
 
@@ -531,8 +532,9 @@ flowchart TB
         F1["allowed_domains.txt<br/>allowed_users.txt<br/>blocked_users.txt"]
         F2["settings.json (nfs_root)"]
         F3["indexing_caps.json"]
-        F4[("SQLite: users.is_admin")]
+        F4[("SQLite: users.is_admin · display_name")]
         F5[("SQLite: auth_providers")]
+        F6[("SQLite: groups · user_groups")]
     end
 
     subgraph read["Backend read path (lazy, NO cache)"]
@@ -548,7 +550,8 @@ flowchart TB
     R4 --> F3 --> C3
     R2 --> F4 --> C4
     R3 --> F5 --> C5
-    R1 & R2 & R3 & R4 & R5 --> PUB
+    R6 --> F6
+    R1 & R2 & R3 & R4 & R5 & R6 --> PUB
     PUB -->|WS, admins only| SUB
 ```
 
@@ -557,7 +560,8 @@ flowchart TB
 | Setting | Persistence | Read path | Invalidation |
 |---------|-------------|-----------|--------------|
 | Allowed domains / users / blocklist | plain `.txt` files (`<data>/admin/`) | `is_email_allowed()` | takes effect at next sign-in |
-| `is_admin` flag | SQLite `users.is_admin` | `admin_user` dep, per request | next request; super-admins re-stamped each login |
+| `is_admin` flag · `display_name` | SQLite `users` | `admin_user` dep, per request | next request; super-admins re-stamped each login |
+| User groups (organizational only) | SQLite `groups` + `user_groups` | `services/groups.py`; in `admin.snapshot` | live WS push on every group/membership change |
 | Auth providers (OAuth catalog) | SQLite `auth_providers` | read at login / sync-config time | next login or restart (env rows re-seed) |
 | NFS root | `settings.json` | `get_nfs_root()` | re-probed on every browse/sync call |
 | Indexing caps | `indexing_caps.json` | `get_caps()` — **always re-reads disk** | every call (no cache) |
@@ -794,6 +798,8 @@ SQLite holds **metadata only**. Content lives in CAS; vectors live in Qdrant.
 erDiagram
     users ||--o{ folders : owns
     users ||--o{ api_keys : has
+    users ||--o{ user_groups : "member of"
+    groups ||--o{ user_groups : has
     folders ||--o{ files : contains
     folders ||--o| folder_sync_sources : "0..1 sync source"
     folders ||--o{ folder_acl : grants
@@ -808,7 +814,17 @@ erDiagram
     users {
         int id PK
         string email
+        string display_name
         bool is_admin
+    }
+    groups {
+        int id PK
+        string name UK
+        string description
+    }
+    user_groups {
+        int user_id FK
+        int group_id FK
     }
     folders {
         int id PK
@@ -863,6 +879,7 @@ erDiagram
         int attempts
         string dedup_key
         string error
+        json result
     }
     auth_providers {
         int id PK
