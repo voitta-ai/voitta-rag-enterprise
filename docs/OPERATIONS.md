@@ -266,7 +266,7 @@ flowchart LR
     Sc -->|extract| ENQ
     Rx -->|reindex_folder| ENQ
     Sy -->|sync| ENQ
-    Gc -->|gc_cas| ENQ
+    Gc -->|sync (auto-sync, hourly)| ENQ
 
     ENQ{{"enqueue()"}}
     ENQ -->|dedup_key in-flight?| DEDUP{existing<br/>queued/running?}
@@ -290,9 +290,14 @@ flowchart LR
 | `embed_text` | `{file_id, round}` | (now inline) | `run_embed_text` |
 | `embed_image` | `{image_id, round}` | (now inline) | `run_embed_image` |
 | `delete_file` | `{file_id}` | watcher (on delete) | `run_delete_file` |
-| `sync` | `{folder_id}` | REST `/folders/{id}/sync` | `run_sync` |
+| `sync` | `{folder_id}` | REST `/folders/{id}/sync`, auto-sync scheduler | `run_sync` |
 | `reindex_folder` | `{folder_id, file_ids}` | REST `/folders/{id}/reindex` | `run_reindex_folder` |
-| `gc_cas` | `{}` | scheduler | (CAS GC sweep) |
+
+> **`gc_cas` is reserved, not wired.** The worker registers a `gc_cas` kind but
+> it's a **no-op** and nothing enqueues it. CAS blobs *are* refcounted
+> (`cas_refs`; decref stamps `last_decref_at`), and `cas/gc.py:sweep()` exists
+> to reclaim long-zero blobs — but it has no callers and no scheduled job today,
+> so CAS is not actually garbage-collected at runtime.
 
 - **Dedup key** (e.g. `extract:42`) guarantees at most one in-flight job per
   resource. A duplicate enqueue returns the existing id and does **not** bump
@@ -376,7 +381,7 @@ sequenceDiagram
         W-->>C: {type:subscribed}
         W->>EV: attach Subscription(user_id, is_admin, visible)
         W->>SB: build_snapshot (ACL-scoped, off-thread)
-        SB-->>C: snapshot frames (folders/active/files/jobs[/admin/keys])
+        SB-->>C: snapshot frames (admin/keys first if subscribed, then folders/active/files/jobs)
         W-->>C: {type:synced}  → pill goes green
         loop until disconnect
             W->>EV: refresh visible set if acl_version moved
@@ -829,6 +834,7 @@ erDiagram
     folders {
         int id PK
         string path
+        string display_name
         int owner_id FK
         bool shared
         bool enabled
@@ -917,8 +923,11 @@ cas/
 └── images/<image_sha>.bin      raw image bytes
 ```
 
-`cas_refs(cas_id, kind, refcount, last_decref_at)` tracks delete-readiness; the
-`gc_cas` job sweeps blobs whose refcount has been zero for a quiet period.
+`cas_refs(cas_id, kind, refcount, last_decref_at)` tracks delete-readiness:
+decref stamps `last_decref_at` when refcount hits zero. `cas/gc.py:sweep()`
+would reclaim blobs that have been zero for a quiet period — but it's **not
+wired to a job or scheduler today** (see the `gc_cas` note in §3), so blobs
+accumulate rather than being swept at runtime.
 
 ---
 
