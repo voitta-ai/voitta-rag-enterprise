@@ -686,16 +686,45 @@ credential fields.
 
 ### Connector matrix
 
-| Provider | `source_type` | Auth methods | Token storage |
-|----------|---------------|--------------|---------------|
-| Google Drive | `google_drive` | OAuth · service-account JSON | `gd_refresh_token` (per folder) |
-| GitHub | `github` | SSH key · PAT · none | `gh_token` / `gh_pat` (per folder) |
-| SharePoint | `sharepoint` | OAuth · app-secret · app-cert | `ms_refresh_token` (OAuth) |
-| Teams | `teams` | OAuth · app-secret · app-cert | `ms_refresh_token` (OAuth) |
-| NFS | `nfs` | none (path under admin `nfs_root`) | — |
+| Provider | `source_type` | Auth methods | Token storage | `supports_progress` |
+|----------|---------------|--------------|---------------|:---:|
+| Google Drive | `google_drive` | OAuth · service-account JSON | `gd_refresh_token` (per folder) | ✓ |
+| GitHub | `github` | SSH key · PAT · none | `gh_token` / `gh_pat` (per folder) | ✗ |
+| SharePoint | `sharepoint` | OAuth · app-secret · app-cert | `ms_refresh_token` (OAuth) | ✓ |
+| Teams | `teams` | OAuth · app-secret · app-cert | `ms_refresh_token` (OAuth) | ✓ |
+| NFS | `nfs` | none (path under admin `nfs_root`) | — | ✓ |
 
-Connectors are registered in `services/sources/registry.py` /
-`services/sync/__init__.py` and resolved by `get_connector(source_type)`.
+### Connector contract & registry
+
+Each connector subclasses `SyncConnector`
+([services/sync/base.py](../src/voitta_rag_enterprise/services/sync/base.py)) and
+declares its own `source_type` + `supports_progress` as class attributes. They
+self-register in
+[services/sync/registry.py](../src/voitta_rag_enterprise/services/sync/registry.py)
+(same pattern as `parsers/registry`); the core resolves them via
+`get_connector(source_type)` — there is **no `source_type` if-else** in the
+dispatch path.
+
+```mermaid
+flowchart TB
+    RS["indexing.run_sync"] -->|"get_connector(type)"| REG["SyncRegistry.get()"]
+    REG --> C1["GitHubConnector"] & C2["GoogleDriveConnector"] & C3["NfsConnector"] & C4["SharePointConnector"] & C5["TeamsConnector"]
+    subgraph contract["SyncConnector ABC"]
+        M1["source_type · supports_progress"]
+        M2["resolve_config(row) → sync kwargs"]
+        M3["async sync(folder_root, **cfg) → stats"]
+    end
+    C1 & C2 & C3 & C4 & C5 -.implement.-> contract
+    RS -->|"if supports_progress: cfg['progress_cb']"| PROG["WS folder.sync_progress"]
+```
+
+`run_sync` builds the per-connector kwargs by calling `connector.resolve_config(row)`
+(each connector reads its own `gh_*`/`gd_*`/`ms_*`/`nfs_*` columns), then adds a
+`progress_cb` only when `connector.supports_progress`. Adding a sync backend is a
+new connector module + one registry line — no edit to `run_sync`.
+
+> The old speculative `services/sources/` registry stub has been removed; this
+> registry under `services/sync/` is the live one.
 
 ---
 
