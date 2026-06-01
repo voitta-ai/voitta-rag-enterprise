@@ -108,6 +108,55 @@ def test_ws_snapshot_reflects_existing_folder(client: TestClient, tmp_path: Path
         assert [f["id"] for f in snaps["folders"]] == [fid]
 
 
+def test_empty_folder_is_private_to_owner(client: TestClient, tmp_path: Path) -> None:
+    """An (empty) folder one user creates must not be visible to anyone else —
+    not in the ACL set, not in another user's WS snapshot, and not even to an
+    admin (admins are not folder-superusers; only the admin *console* is gated
+    by is_admin). Regression for folders leaking into other users' trees."""
+    from voitta_rag_enterprise.api.snapshot import build_snapshot
+    from voitta_rag_enterprise.db.database import session_scope
+    from voitta_rag_enterprise.db.models import Folder
+    from voitta_rag_enterprise.services.acl import (
+        get_or_create_user,
+        visible_folder_ids,
+    )
+
+    with session_scope() as s:
+        alice = get_or_create_user(s, "alice@x.com")
+        bob = get_or_create_user(s, "bob@x.com")
+        s.flush()
+        folder = Folder(
+            path=str(tmp_path / "alice-empty"),
+            display_name="alice-empty",
+            source_type="filesystem",
+            owner_id=alice.id,
+        )
+        s.add(folder)
+        s.flush()
+        folder_id, bob_id = folder.id, bob.id
+
+        # Data layer: Bob can't see Alice's folder.
+        bob_visible = set(visible_folder_ids(s, bob_id))
+        assert folder_id not in bob_visible
+        assert folder_id in set(visible_folder_ids(s, alice.id))
+
+        # Bob's WS snapshot excludes it...
+        bob_frames = build_snapshot(
+            s, user_id=bob_id, visible=bob_visible, is_admin=False,
+            topics=("folders",),
+        )
+        bob_folders = next(f for f in bob_frames if f.get("topic") == "folders")
+        assert folder_id not in [x["id"] for x in bob_folders["items"]]
+
+        # ...and so does an admin Bob (is_admin doesn't widen folder visibility).
+        admin_frames = build_snapshot(
+            s, user_id=bob_id, visible=bob_visible, is_admin=True,
+            topics=("folders",),
+        )
+        admin_folders = next(f for f in admin_frames if f.get("topic") == "folders")
+        assert folder_id not in [x["id"] for x in admin_folders["items"]]
+
+
 def test_ws_receives_folder_added_event(client: TestClient, tmp_path: Path) -> None:
     src = tmp_path / "src"
     src.mkdir()

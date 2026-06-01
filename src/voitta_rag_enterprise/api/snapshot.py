@@ -132,7 +132,9 @@ def build_snapshot(
 ) -> list[dict[str, Any]]:
     """Build the ordered list of snapshot frames for ``topics``.
 
-    ``visible is None`` means see-everything (admin / single-user). The active
+    ``visible is None`` means see-everything (single-user mode only). Admins get
+    a real ``visible`` set just like any other user — folder/file/job visibility
+    is never widened by ``is_admin``; only the ``admin`` topic is. The active
     folder-id set is shipped as its own ``active`` snapshot frame (only when the
     ``folders`` topic is subscribed) since the SPA tracks it as a separate set.
 

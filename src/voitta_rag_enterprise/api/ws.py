@@ -73,8 +73,17 @@ def _authenticate(ws: WebSocket) -> tuple[int | None, bool, set[int] | None] | N
     """Resolve ``(user_id, is_admin, visible)`` for the connection.
 
     Returns ``None`` when the caller is not signed in (multi-user) — the handler
-    closes the socket. ``visible is None`` means see-everything (admin or
-    single-user); otherwise it's the user's visible-folder set.
+    closes the socket. ``visible is None`` means see-everything; otherwise it's
+    the user's visible-folder set.
+
+    Folder visibility for an admin is the **same** as for any other user
+    (owned + granted + shared) — admins are not folder-superusers. This mirrors
+    ``routes/folders.list_folders``, which filters by ``visible_folder_ids`` for
+    everyone in multi-user mode; an empty folder one user creates must not show
+    up in another user's tree, admin or not. ``is_admin`` only governs the
+    separate ``admin`` topic (the admin console), never folder/file/job
+    visibility. ``visible is None`` is reserved for single-user mode, where the
+    sole identity owns everything.
     """
     session = ws.session if "session" in ws.scope else None
     factory = get_session_factory()
@@ -84,7 +93,7 @@ def _authenticate(ws: WebSocket) -> tuple[int | None, bool, set[int] | None] | N
         if resolved is None:
             return None
         user, is_admin = resolved
-        if get_settings().single_user or is_admin:
+        if get_settings().single_user:
             return user.id, is_admin, None
         return user.id, is_admin, set(visible_folder_ids(db, user.id))
     finally:
