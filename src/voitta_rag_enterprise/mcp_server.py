@@ -590,10 +590,10 @@ def get_file(file_id: int) -> dict:
 @mcp.tool()
 def get_chunk_range(
     file_id: int,
-    start_index: int = 0,
-    end_index: int = 10,
+    start: int = 0,
+    end: int = 10,
 ) -> list[ChunkInfo]:
-    """Return chunks ``[start_index, end_index)`` of a file, in order.
+    """Return chunks ``[start, end)`` of a file, in order.
 
     The bounded-slice complement to ``get_file``. Returns the
     extracted markdown for a contiguous chunk range plus per-chunk
@@ -614,8 +614,11 @@ def get_chunk_range(
     from .services.indexing import _load_char_to_page, _load_layout_summaries
     from .services.layout import pages_for_range, primary_page_for_range
 
-    start_index = max(0, start_index)
-    end_index = min(end_index, start_index + 500)
+    # Internal aliases — the public params are ``start`` / ``end`` (matching
+    # the documented API and what MCP clients send); the query below reads
+    # these clamped values.
+    start_index = max(0, start)
+    end_index = min(end, start_index + 500)
     if end_index <= start_index:
         return []
     with session_scope() as s:

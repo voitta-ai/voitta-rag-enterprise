@@ -167,6 +167,20 @@ def test_get_chunk_range_clamps_empty_range(env: None, tmp_path: Path) -> None:
     assert get_chunk_range(fid, 5, 5) == []
 
 
+def test_get_chunk_range_accepts_start_end_kwargs(env: None, tmp_path: Path) -> None:
+    """The public params are ``start`` / ``end`` — what the docstrings promise
+    and what MCP clients send. Regression for the validation error when the
+    signature used start_index/end_index."""
+    _seed_and_index(
+        tmp_path / "src",
+        {"big.md": "alpha\n\n" + ("beta\n\n" * 800) + "gamma"},
+    )
+    with session_scope() as s:
+        fid = s.execute(select(File)).scalar_one().id
+    chunks = get_chunk_range(file_id=fid, start=0, end=2)
+    assert [c.chunk_index for c in chunks] == [0, 1]
+
+
 def test_get_chunk_images_returns_links(env: None, tmp_path: Path) -> None:
     _seed_and_index(tmp_path / "src", {"d.md": "hello world"})
     # No images in markdown — manually insert a link to verify the join.
