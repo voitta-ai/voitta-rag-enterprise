@@ -1370,7 +1370,11 @@ input[type="text"], input[type="file"] {
     height: 36px;
     box-sizing: border-box;
 }
-.admin-body .btn-sm { min-width: 84px; justify-content: center; }
+/* Uniform width only for the editor's primary actions — NOT for in-table row
+   buttons (those must stay compact or they overflow the actions column). */
+.admin-editor-footer .btn { min-width: 110px; justify-content: center; }
+/* Extra-compact button for dense table rows. */
+.btn-xs { padding: 3px 8px; font-size: 11px; line-height: 1.4; }
 
 .admin-grid {
     display: grid;
@@ -1491,24 +1495,56 @@ input[type="text"], input[type="file"] {
     margin: 10px 2px 0; font-size: 12px; color: var(--color-text-tertiary);
 }
 
-/* Uniform table rows + aligned columns across Users / OAuth / Caps so all
-   tabs share one density. Fixed-width Admin + Actions columns keep the
-   variable Email/Name/Groups columns from jumping between rows. */
+/* Uniform headers across Users / OAuth / Caps so all tabs share one density. */
 .admin-table th {
     text-transform: uppercase; letter-spacing: 0.04em;
     font-size: 10px; color: var(--color-text-tertiary); font-weight: 600;
 }
 .admin-table td, .admin-table th { padding: 9px 10px; vertical-align: middle; }
 .admin-table tbody tr { height: 44px; }
-.admin-table .col-admin { width: 70px; text-align: center; }
-.admin-users .admin-table td:nth-child(3) { text-align: center; }
-/* Actions column sizes to content (Edit / View as / 🗑) instead of the 80px
-   cap the generic admin tables use. */
-.admin-users .admin-table .col-actions,
-.admin-users .admin-table td:last-child { width: 1%; white-space: nowrap; }
-.admin-users .row-actions { display: flex; gap: 6px; justify-content: flex-end; }
+
+/* The Users table uses a FIXED layout with explicit column widths so the
+   variable-length Email/Name/Groups can't shove the action buttons out of
+   their cell (the old auto layout let long emails + wide buttons overlap).
+   Widths sum to 100%; overflow in text columns ellipsizes. */
+.admin-users .admin-table { table-layout: fixed; width: 100%; }
+.admin-users .admin-table th:nth-child(1),
+.admin-users .admin-table td:nth-child(1) { width: 32%; }     /* Email   */
+.admin-users .admin-table th:nth-child(2),
+.admin-users .admin-table td:nth-child(2) { width: 16%; }     /* Name    */
+.admin-users .admin-table th:nth-child(3),
+.admin-users .admin-table td:nth-child(3) { width: 64px; text-align: center; }  /* Admin */
+.admin-users .admin-table th:nth-child(4),
+.admin-users .admin-table td:nth-child(4) { width: 18%; }     /* Groups  */
+.admin-users .admin-table th:nth-child(5),
+.admin-users .admin-table td:nth-child(5) { width: 200px; }   /* Actions */
+/* Ellipsize the text columns instead of wrapping into the buttons. */
+.admin-users .admin-table td:nth-child(1),
+.admin-users .admin-table td:nth-child(2),
+.admin-users .admin-table td.admin-cell-groups {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.admin-actions-cell { overflow: visible; }
+.admin-users .row-actions {
+    display: flex; gap: 6px; justify-content: flex-end; align-items: center;
+    flex-wrap: nowrap;
+}
 .admin-cell-groups { color: var(--color-text-secondary); font-size: 12px; }
-.btn-danger { color: var(--color-error); }
+
+/* Compact square icon button (delete in table rows). Ghost by default; the
+   danger variant goes red on hover only — never a full red bar. */
+.admin-icon-btn {
+    flex: 0 0 auto;
+    width: 28px; height: 28px; padding: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    border: 1px solid var(--color-border-light); border-radius: var(--radius-md, 6px);
+    background: transparent; cursor: pointer; font-size: 13px; line-height: 1;
+}
+.admin-icon-btn:hover { background: var(--color-bg-hover); }
+.admin-icon-danger:hover {
+    background: rgba(220, 53, 69, 0.12);
+    border-color: #dc3545;
+}
 
 /* ----- Full-pane user editor (swaps with the list) ----- */
 .admin-editor-pane {

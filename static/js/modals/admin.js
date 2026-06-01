@@ -611,15 +611,18 @@ function renderUsersTable(users) {
         tr.appendChild(tdGroups);
 
         const tdActions = document.createElement("td");
-        tdActions.className = "row-actions";
+        tdActions.className = "admin-actions-cell";
+        const actions = document.createElement("div");
+        actions.className = "row-actions";
+
         const editBtn = document.createElement("button");
-        editBtn.className = "btn btn-secondary btn-sm";
+        editBtn.className = "btn btn-secondary btn-xs";
         editBtn.textContent = "Edit";
         editBtn.addEventListener("click", () => openUserEditor(u));
-        tdActions.appendChild(editBtn);
+        actions.appendChild(editBtn);
 
         const viewBtn = document.createElement("button");
-        viewBtn.className = "btn btn-secondary btn-sm";
+        viewBtn.className = "btn btn-secondary btn-xs";
         viewBtn.textContent = "View as";
         viewBtn.addEventListener("click", async () => {
             try {
@@ -627,21 +630,24 @@ function renderUsersTable(users) {
                 window.location.reload();
             } catch (err) { alert(err.message); }
         });
-        tdActions.appendChild(viewBtn);
+        actions.appendChild(viewBtn);
 
-        // Delete — hidden for super-admins (backend refuses it anyway).
+        // Delete — compact icon button, hidden for super-admins (backend
+        // refuses it anyway).
         if (!u.is_super_admin) {
             const delBtn = document.createElement("button");
-            delBtn.className = "btn btn-secondary btn-sm btn-danger";
+            delBtn.className = "admin-icon-btn admin-icon-danger";
             delBtn.textContent = "🗑";
             delBtn.title = "Delete user";
+            delBtn.setAttribute("aria-label", `Delete ${u.email}`);
             delBtn.addEventListener("click", async () => {
                 if (!confirm(`Delete user ${u.email}?\n\nThis removes their account, API keys, and folder grants. Folders they own become unowned.`)) return;
                 try { await api.adminDeleteUser(u.id); }
                 catch (err) { alert(err.message); }
             });
-            tdActions.appendChild(delBtn);
+            actions.appendChild(delBtn);
         }
+        tdActions.appendChild(actions);
         tr.appendChild(tdActions);
 
         tbody.appendChild(tr);
