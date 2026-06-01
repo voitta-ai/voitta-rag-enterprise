@@ -93,7 +93,11 @@ export function renderFoldersFiltered() {
 const rowCache = new Map();
 
 // File types whose page renders are exposed as artifact children.
-const _EXPANDABLE_EXTS = new Set([".pdf", ".pptx", ".ppt", ".docx", ".doc", ".odp", ".odt"]);
+// Types whose expand view can surface artifacts. xlsx/xlsm carry embedded
+// pictures (harvested from xl/media at parse time), so they're expandable like
+// docx. .xls (legacy BIFF) is text-only — never any images — so it's left out
+// rather than always showing "No previews".
+const _EXPANDABLE_EXTS = new Set([".pdf", ".pptx", ".ppt", ".docx", ".doc", ".odp", ".odt", ".xlsx", ".xlsm"]);
 
 function _isExpandable(relPath) {
     const lower = relPath.toLowerCase();
