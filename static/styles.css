@@ -846,6 +846,49 @@ input[type="text"], input[type="file"] {
     flex: 0 0 auto;
 }
 
+/* Disclosure chevron on rows that have an expandable result detail. */
+.job-rows .top .job-expand {
+    color: var(--color-text-tertiary);
+    font-size: 10px;
+    flex: 0 0 auto;
+    line-height: 1;
+}
+.job-rows .top .job-expand:hover { color: var(--color-text); }
+
+/* Expandable job detail: a compact key/value grid of the handler's result
+   (sync stats, etc.) plus any per-item errors. */
+.job-detail {
+    margin-top: 4px;
+    padding: 6px 8px;
+    background: var(--color-bg);
+    border: 1px solid var(--color-border-light);
+    border-radius: var(--radius-md, 6px);
+    font-size: 11px;
+}
+.job-detail-grid {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 1px 12px;
+}
+.job-detail-row { display: contents; }
+.job-detail-row .k { color: var(--color-text-secondary); }
+.job-detail-row .v {
+    color: var(--color-text);
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+.job-detail-errors { margin-top: 6px; }
+.job-detail-errors-head {
+    color: var(--color-error);
+    font-weight: 600;
+    margin-bottom: 2px;
+}
+.job-detail-error {
+    color: var(--color-text-secondary);
+    word-break: break-word;
+    padding: 1px 0;
+}
+
 /* ---------- Sidebar ---------- */
 
 .sidebar {

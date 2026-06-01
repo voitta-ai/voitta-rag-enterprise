@@ -196,7 +196,11 @@ CREATE TABLE IF NOT EXISTS jobs (
     error         TEXT,
     enqueued_at   INTEGER NOT NULL,
     started_at    INTEGER,
-    finished_at   INTEGER
+    finished_at   INTEGER,
+    -- JSON summary the handler returns on success (e.g. a sync's
+    -- files_added/pages_written/errors). Surfaced in the Jobs panel's
+    -- expandable detail; NULL for handlers that report nothing.
+    result        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state, priority DESC, id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_dedup_inflight

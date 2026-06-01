@@ -311,3 +311,6 @@ class Job(Base):
     enqueued_at: Mapped[int] = mapped_column(default=_now_s)
     started_at: Mapped[int | None] = mapped_column(default=None)
     finished_at: Mapped[int | None] = mapped_column(default=None)
+    # JSON summary returned by the handler on success (sync stats, etc.);
+    # NULL for handlers that report nothing. Shown in the Jobs panel detail.
+    result: Mapped[str | None] = mapped_column(default=None)

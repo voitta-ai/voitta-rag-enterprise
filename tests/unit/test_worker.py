@@ -48,6 +48,32 @@ async def test_worker_processes_queued_job(env: None) -> None:
 
 
 @pytest.mark.asyncio
+async def test_worker_persists_handler_result(env: None) -> None:
+    """A handler's return dict is persisted on the job (jobs.result) so the
+    Jobs panel can show the detail (e.g. sync stats)."""
+    init_db()
+
+    async def handle(payload: dict) -> dict:
+        return {"files_added": 3, "errors": []}
+
+    pool = WorkerPool(size=1, handlers={"sync": handle}, idle_sleep=0.05)
+    with session_scope() as s:
+        jid = job_queue.enqueue(s, "sync", {"folder_id": 1})
+
+    await pool.start()
+    try:
+        await _wait_until(lambda: _job_state(jid) == "done")
+    finally:
+        await pool.stop()
+
+    import json
+
+    with session_scope() as s:
+        j = s.get(Job, jid)
+        assert json.loads(j.result) == {"files_added": 3, "errors": []}
+
+
+@pytest.mark.asyncio
 async def test_worker_marks_error_on_handler_exception(env: None) -> None:
     init_db()
 

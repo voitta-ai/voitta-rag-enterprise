@@ -147,6 +147,9 @@ def init_db() -> None:
         # NFS multi-subpath. JSON array of POSIX paths. Default NULL is
         # safe — code reads nfs_subpath as a fallback when this is empty.
         _ensure_column(raw_conn, "folder_sync_sources", "nfs_subpaths", "TEXT")
+        # Job result summary (JSON) surfaced in the Jobs panel's expandable
+        # detail; NULL for jobs that report nothing / predate this column.
+        _ensure_column(raw_conn, "jobs", "result", "TEXT")
         raw_conn.commit()
     finally:
         raw_conn.close()

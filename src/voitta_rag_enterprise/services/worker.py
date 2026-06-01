@@ -75,8 +75,13 @@ class WorkerPool:
                 with bind_context(job_id=claimed.id, kind=claimed.kind):
                     logger.info("%s claim job", name)
                     try:
-                        await handler(claimed.payload)
-                        await asyncio.to_thread(job_queue.mark_done, claimed.id)
+                        # Handlers may return a JSON-able summary dict (e.g.
+                        # sync stats); it's persisted on the job and shown in
+                        # the Jobs panel detail. Most return None.
+                        result = await handler(claimed.payload)
+                        await asyncio.to_thread(
+                            job_queue.mark_done, claimed.id, result
+                        )
                         logger.info("%s job done", name)
                     except Exception as e:
                         logger.exception("%s job failed", name)

@@ -35,6 +35,9 @@ class JobOut(BaseModel):
     # the SPA can render ``extract #2912 — Lucid Drive/big.json``
     # without a per-job round-trip back to the file API.
     display_path: str | None = None
+    # Handler summary (sync stats, etc.) for the Jobs panel's expandable
+    # detail; None for jobs that reported nothing.
+    result: dict | None = None
 
 
 def _to_out(j: Job, file_paths: dict[int, str] | None = None) -> JobOut:
@@ -44,6 +47,10 @@ def _to_out(j: Job, file_paths: dict[int, str] | None = None) -> JobOut:
         fid = payload.get("file_id")
         if isinstance(fid, int):
             display = file_paths.get(fid)
+    try:
+        result = json.loads(j.result) if j.result else None
+    except (json.JSONDecodeError, TypeError):
+        result = None
     return JobOut(
         id=j.id,
         kind=j.kind,
@@ -56,6 +63,7 @@ def _to_out(j: Job, file_paths: dict[int, str] | None = None) -> JobOut:
         error=j.error,
         dedup_key=j.dedup_key,
         display_path=display,
+        result=result,
     )
 
 

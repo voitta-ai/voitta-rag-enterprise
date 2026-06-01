@@ -197,9 +197,18 @@ def _resolve_display_path(session, payload: dict) -> str | None:
     ).scalar()
 
 
-def mark_done(job_id: int) -> None:
+def mark_done(job_id: int, result: dict | None = None) -> None:
     kind: str | None = None
     folder_id: int | None = None
+    # Persist the handler's summary so it survives a reconnect (the snapshot
+    # reads it back); guard against a non-serialisable return rather than
+    # failing the whole job over a logging nicety.
+    result_json: str | None = None
+    if result is not None:
+        try:
+            result_json = json.dumps(result)
+        except (TypeError, ValueError):
+            logger.warning("job %d result not JSON-serialisable; dropping", job_id)
     with session_scope() as session:
         job = session.get(Job, job_id)
         if job is None:
@@ -215,6 +224,7 @@ def mark_done(job_id: int) -> None:
         folder_id = folder_active.folder_id_for_payload(session, payload)
         job.state = "done"
         job.finished_at = int(time.time())
+        job.result = result_json
         kind = job.kind
     folder_active.on_finished(folder_id)
     events.publish(
@@ -225,6 +235,7 @@ def mark_done(job_id: int) -> None:
             "kind": kind,
             "state": "done",
             "folder_id": folder_id,
+            "result": result,
         },
     )
 

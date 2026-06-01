@@ -263,7 +263,7 @@ function handleEvent(event) {
         case "job.finished": {
             jobs.update((list) => list.map(j =>
                 j.id === event.job_id
-                    ? { ...j, state: event.state, error: event.error || null }
+                    ? { ...j, state: event.state, error: event.error || null, result: event.result || null }
                     : j,
             ));
             return;

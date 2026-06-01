@@ -39,6 +39,15 @@ function buildJobRow(jobId) {
     // "Extract  #17945branches/main/...queued".
     const top = document.createElement("div");
     top.className = "top";
+    // Disclosure chevron — shown only for rows that have detail to expand
+    // (a result summary, or an error). Toggles the detail panel below.
+    const expand = document.createElement("span");
+    expand.className = "job-expand";
+    expand.textContent = "▸";
+    expand.hidden = true;
+    expand.style.cursor = "pointer";
+    expand.style.userSelect = "none";
+    expand.title = "Show details";
     // The top line is split into a primary label and a muted #id chip
     // so the action ("Extract") dominates and the id stays available
     // for cross-referencing logs without shouting on every row.
@@ -46,7 +55,7 @@ function buildJobRow(jobId) {
     topLabel.className = "label";
     const topId = document.createElement("span");
     topId.className = "job-id";
-    top.append(topLabel, topId);
+    top.append(expand, topLabel, topId);
     // Per-row file-path line: rendered for jobs whose payload references
     // a file (extract / embed_text / embed_image / delete_file). Hidden
     // for sync / reindex_folder rows where folder context is shown
@@ -57,7 +66,22 @@ function buildJobRow(jobId) {
     const err = document.createElement("div");
     err.className = "err";
     err.hidden = true;
-    col.append(top, path, err);
+    // Expandable detail panel: key/value summary of the job's result
+    // (sync stats, etc.) plus any per-item errors. Collapsed by default.
+    const detail = document.createElement("div");
+    detail.className = "job-detail";
+    detail.hidden = true;
+    col.append(top, path, err, detail);
+
+    // Toggle expand/collapse; state lives on the <li> so it survives the
+    // render loop's row reuse (rows are cached by job id).
+    const toggle = () => {
+        const open = li.dataset.expanded === "1";
+        li.dataset.expanded = open ? "0" : "1";
+        expand.textContent = open ? "▸" : "▾";
+        detail.hidden = open;
+    };
+    expand.addEventListener("click", (e) => { e.stopPropagation(); toggle(); });
 
     const tag = document.createElement("span");
     tag.className = "status-tag";
@@ -104,8 +128,77 @@ function buildJobRow(jobId) {
     });
 
     li.append(col, tag, cancel, retry);
-    li._refs = { topLabel, topId, path, err, tag, cancel, retry };
+    li._refs = { expand, topLabel, topId, path, err, detail, tag, cancel, retry };
     return li;
+}
+
+// Pretty labels for known result keys; unknown keys fall back to a
+// humanised form of the raw key so a new connector stat still renders.
+const RESULT_LABEL = {
+    files_added: "Files added",
+    files_updated: "Files updated",
+    files_removed: "Files removed",
+    files_skipped: "Files skipped",
+    files_404: "Files missing (404)",
+    pages_written: "Pages written",
+    notes_written: "Notes written",
+    tabs_written: "Tabs written",
+    sites_synced: "Sites synced",
+    branches_synced: "Branches synced",
+    commits_written: "Commits written",
+    branches_removed: "Branches removed",
+    elapsed_s: "Elapsed (s)",
+};
+
+function _humanKey(k) {
+    return RESULT_LABEL[k] || k.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
+}
+
+// Render a job's result dict into the detail panel: scalar stats as a compact
+// key/value grid, and any ``errors`` array as a highlighted list. Returns true
+// if it produced any content.
+function renderJobDetail(detailEl, result) {
+    detailEl.textContent = "";
+    if (!result || typeof result !== "object") return false;
+
+    const grid = document.createElement("div");
+    grid.className = "job-detail-grid";
+    let scalarCount = 0;
+    for (const [k, v] of Object.entries(result)) {
+        if (k === "errors" || v === null || typeof v === "object") continue;
+        const row = document.createElement("div");
+        row.className = "job-detail-row";
+        const key = document.createElement("span");
+        key.className = "k";
+        key.textContent = _humanKey(k);
+        const val = document.createElement("span");
+        val.className = "v";
+        val.textContent = String(v);
+        // De-emphasise zero counts so the eye lands on what actually happened.
+        if (v === 0) row.style.opacity = "0.5";
+        row.append(key, val);
+        grid.append(row);
+        scalarCount++;
+    }
+    if (scalarCount) detailEl.append(grid);
+
+    const errors = Array.isArray(result.errors) ? result.errors : [];
+    if (errors.length) {
+        const box = document.createElement("div");
+        box.className = "job-detail-errors";
+        const head = document.createElement("div");
+        head.className = "job-detail-errors-head";
+        head.textContent = `${errors.length} error${errors.length > 1 ? "s" : ""}`;
+        box.append(head);
+        for (const e of errors) {
+            const line = document.createElement("div");
+            line.className = "job-detail-error";
+            line.textContent = typeof e === "string" ? e : JSON.stringify(e);
+            box.append(line);
+        }
+        detailEl.append(box);
+    }
+    return scalarCount > 0 || errors.length > 0;
 }
 
 // Compact wall-clock duration: 12s / 3m 04s / 1h 12m. Sized so it fits
@@ -194,6 +287,21 @@ function updateJobRow(li, j) {
 
     const showRetry = j.state === "error";
     if (r.retry.hidden === showRetry) r.retry.hidden = !showRetry;
+
+    // Expandable detail: present when the handler returned a result summary
+    // (sync stats, etc.). Render into the (hidden) panel and reveal the
+    // chevron; the panel itself follows the row's persisted expanded state.
+    const hasDetail = renderJobDetail(r.detail, j.result);
+    if (r.expand.hidden === hasDetail) r.expand.hidden = !hasDetail;
+    if (!hasDetail) {
+        li.dataset.expanded = "0";
+        r.expand.textContent = "▸";
+        if (!r.detail.hidden) r.detail.hidden = true;
+    } else {
+        const open = li.dataset.expanded === "1";
+        r.expand.textContent = open ? "▾" : "▸";
+        if (r.detail.hidden === open) r.detail.hidden = !open;
+    }
 }
 
 export function renderJobs() {

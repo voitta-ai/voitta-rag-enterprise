@@ -689,17 +689,20 @@ async def run_embed_image(payload: dict) -> None:
         raise
 
 
-async def run_sync(payload: dict) -> None:
+async def run_sync(payload: dict) -> dict | None:
     """Worker handler for ``sync`` jobs: pulls a folder's remote, mirrors files
     onto disk, and records status on the ``folder_sync_sources`` row.
 
     Side effects on disk drive the existing extract / delete pipeline through
     the watcher — this handler does not enqueue extracts itself.
+
+    Returns the connector's stats dict (files_added, pages_written, errors, …)
+    so the worker persists it on the job and the Jobs panel can show the detail.
     """
     folder_id = int(payload["folder_id"])
     with bind_context(folder_id=folder_id):
         try:
-            await _run_sync_inner(folder_id)
+            return await _run_sync_inner(folder_id)
         except Exception:
             logger.exception("sync failed")
             _mark_sync_error(folder_id, _format_exception("sync failed"))
@@ -837,6 +840,10 @@ async def _run_sync_inner(folder_id: int) -> None:
     # on success, but other connectors may not — this guarantees the SPA
     # drops the sync pill no matter which connector ran.
     _on_progress("done", 0, 0, None)
+
+    # Returned to the worker → persisted on the job → shown in the Jobs panel
+    # detail. ``elapsed_s`` is added so the row can show how long it took.
+    return {**stats.as_dict(), "elapsed_s": round(elapsed, 1)}
 
 
 def _mark_sync_error(folder_id: int, message: str) -> None:
