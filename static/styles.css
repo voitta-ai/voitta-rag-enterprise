@@ -1466,6 +1466,75 @@ input[type="text"], input[type="file"] {
 }
 .admin-add-user { margin-top: 8px; }
 
+/* ---------- User management + Groups ---------- */
+
+/* Master-detail layout: list on the left, editor/detail slide-over on right. */
+.admin-split { display: flex; gap: 16px; align-items: flex-start; }
+.admin-split > .admin-section { flex: 1; min-width: 0; }
+.admin-split > .admin-editor { flex: 0 0 320px; }
+
+.admin-toolbar { display: flex; gap: 8px; margin-bottom: 10px; }
+.admin-toolbar input { flex: 1; }
+
+/* The actions column holds Edit / View as / 🗑 — let it size to content
+   instead of the 80px cap used elsewhere. */
+.admin-users .admin-table td:last-child { width: auto; white-space: nowrap; }
+.admin-users .row-actions { display: flex; gap: 4px; justify-content: flex-end; }
+.admin-cell-groups { color: var(--color-text-secondary); font-size: 12px; }
+.btn-danger { color: var(--color-error); }
+
+/* Slide-over editor / group detail panel. */
+.admin-editor {
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border-light);
+    border-radius: var(--radius-lg);
+    padding: var(--lg);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+.admin-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.admin-field > span { color: var(--color-text-secondary); }
+.admin-field input { width: 100%; }
+.admin-editor-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+.admin-editor-error { color: var(--color-error); font-size: 12px; }
+
+/* Groups list (master). */
+.admin-groups-list { display: flex; flex-direction: column; gap: 2px; }
+.admin-group-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 6px 8px; border-radius: var(--radius-md, 6px); cursor: pointer;
+}
+.admin-group-row:hover { background: var(--color-bg); }
+.admin-group-row.selected { background: rgba(0, 122, 255, 0.12); }
+.admin-group-count { color: var(--color-text-tertiary); font-size: 11px; }
+.admin-list-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 2px 0; }
+
+/* Chip multi-select (groups on the user editor, members on the group panel). */
+.chip-select { position: relative; }
+.chip-select-chips {
+    display: flex; flex-wrap: wrap; gap: 4px; align-items: center;
+    border: 1px solid var(--color-border-light); border-radius: var(--radius-md, 6px);
+    padding: 4px 6px; background: var(--color-bg);
+}
+.chip-select-input { flex: 1; min-width: 100px; border: none; outline: none; background: transparent; font-size: 12px; }
+.chip {
+    display: inline-flex; align-items: center; gap: 4px;
+    background: rgba(0, 122, 255, 0.12); color: var(--color-text);
+    border-radius: 10px; padding: 1px 6px; font-size: 11px;
+}
+.chip-x { border: none; background: none; cursor: pointer; color: var(--color-text-tertiary); font-size: 10px; padding: 0; }
+.chip-x:hover { color: var(--color-error); }
+.chip-select-menu {
+    position: absolute; z-index: 10; left: 0; right: 0; top: 100%; margin-top: 2px;
+    background: var(--color-bg-elevated); border: 1px solid var(--color-border-light);
+    border-radius: var(--radius-md, 6px); max-height: 200px; overflow-y: auto;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+}
+.chip-select-item { padding: 6px 10px; font-size: 12px; cursor: pointer; }
+.chip-select-item:hover { background: var(--color-bg); }
+.chip-select-create { color: var(--color-accent, #007aff); font-style: italic; }
+
 /* Admin tab strip: reuses .seg-tab from the GD modal but laid out
    full-width so all three buckets get equal real estate. The
    ``.admin-tabs`` selector adds the ``display:flex`` override (the

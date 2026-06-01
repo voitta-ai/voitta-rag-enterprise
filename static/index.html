@@ -49,6 +49,9 @@
                     <button type="button" id="admin-tab-btn-users"
                         class="seg-tab" role="tab" aria-selected="false"
                         aria-controls="admin-tab-pane-users">Users</button>
+                    <button type="button" id="admin-tab-btn-groups"
+                        class="seg-tab" role="tab" aria-selected="false"
+                        aria-controls="admin-tab-pane-groups">Groups</button>
                     <button type="button" id="admin-tab-btn-oauth"
                         class="seg-tab" role="tab" aria-selected="false"
                         aria-controls="admin-tab-pane-oauth">OAuth providers</button>
@@ -85,21 +88,83 @@
 
                 <!-- Tab: Users -->
                 <div id="admin-tab-pane-users" class="admin-tab-pane" role="tabpanel" hidden>
-                    <section class="admin-section admin-users">
-                        <header><h4>Users</h4><span class="hint">Add an individual address to allow them in (whether or not their domain is allowed). Toggle admin to grant access to this panel. "View as" to impersonate.</span></header>
-                        <table id="admin-users-table" class="admin-table">
-                            <thead><tr><th>Email</th><th>Name</th><th>Admin</th><th></th></tr></thead>
-                            <tbody></tbody>
-                        </table>
-                        <div class="admin-add-row admin-add-user">
-                            <input id="admin-newuser-input" type="email" placeholder="new-user@customer.com" />
-                            <label class="admin-inline-check">
-                                <input id="admin-newuser-admin" type="checkbox" />
-                                Admin
+                    <div class="admin-split">
+                        <section class="admin-section admin-users">
+                            <header>
+                                <h4>Users</h4>
+                                <span class="hint">Add a user to allow them in, set their name, admin rights, and group membership. "View as" to impersonate.</span>
+                            </header>
+                            <div class="admin-toolbar">
+                                <input id="admin-user-filter" type="search" placeholder="Filter users…" />
+                                <button id="admin-user-add-btn" class="btn btn-primary btn-sm">+ Add user</button>
+                            </div>
+                            <table id="admin-users-table" class="admin-table">
+                                <thead><tr><th>Email</th><th>Name</th><th>Admin</th><th>Groups</th><th></th></tr></thead>
+                                <tbody></tbody>
+                            </table>
+                        </section>
+
+                        <!-- Slide-over editor: add or edit a single user. -->
+                        <section id="admin-user-editor" class="admin-section admin-editor" hidden>
+                            <header><h4 id="admin-user-editor-title">Edit user</h4></header>
+                            <label class="admin-field">Email
+                                <input id="admin-ue-email" type="email" placeholder="user@customer.com" />
                             </label>
-                            <button id="admin-newuser-add" class="btn btn-primary btn-sm">Add</button>
-                        </div>
-                    </section>
+                            <label class="admin-field">Display name
+                                <input id="admin-ue-name" type="text" placeholder="Jane Doe" />
+                            </label>
+                            <label class="admin-inline-check">
+                                <input id="admin-ue-admin" type="checkbox" /> Administrator
+                            </label>
+                            <label class="admin-inline-check" id="admin-ue-signin-row">
+                                <input id="admin-ue-signin" type="checkbox" checked /> Allow sign-in (allowlist)
+                            </label>
+                            <div class="admin-field">
+                                <span>Groups</span>
+                                <div id="admin-ue-groups"></div>
+                            </div>
+                            <div id="admin-ue-error" class="admin-editor-error" hidden></div>
+                            <div class="admin-editor-actions">
+                                <button id="admin-ue-cancel" class="btn btn-secondary btn-sm">Cancel</button>
+                                <button id="admin-ue-save" class="btn btn-primary btn-sm">Save</button>
+                            </div>
+                        </section>
+                    </div>
+                </div>
+
+                <!-- Tab: Groups -->
+                <div id="admin-tab-pane-groups" class="admin-tab-pane" role="tabpanel" hidden>
+                    <div class="admin-split">
+                        <section class="admin-section">
+                            <header><h4>Groups</h4><span class="hint">Organizational groups. Membership only — no effect on folder access (yet).</span></header>
+                            <div class="admin-toolbar">
+                                <input id="admin-group-new-name" type="text" placeholder="New group name…" />
+                                <button id="admin-group-add-btn" class="btn btn-primary btn-sm">+ New group</button>
+                            </div>
+                            <ul id="admin-groups-list" class="admin-list admin-groups-list"></ul>
+                        </section>
+
+                        <!-- Selected group's member panel. -->
+                        <section id="admin-group-detail" class="admin-section admin-editor" hidden>
+                            <header><h4 id="admin-group-detail-title">Group</h4>
+                                <button id="admin-group-delete" class="btn btn-secondary btn-sm">Delete group</button>
+                            </header>
+                            <label class="admin-field">Name
+                                <input id="admin-gd-name" type="text" />
+                            </label>
+                            <label class="admin-field">Description
+                                <input id="admin-gd-desc" type="text" placeholder="(optional)" />
+                            </label>
+                            <div class="admin-field">
+                                <span>Add member</span>
+                                <div id="admin-gd-addmember"></div>
+                            </div>
+                            <div class="admin-field">
+                                <span id="admin-gd-members-label">Members</span>
+                                <ul id="admin-gd-members" class="admin-list"></ul>
+                            </div>
+                        </section>
+                    </div>
                 </div>
 
                 <!-- Tab: OAuth providers -->

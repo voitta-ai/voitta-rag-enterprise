@@ -215,8 +215,21 @@ export const api = {
         req("POST", "/api/admin/users", { email, is_admin, grant_signin: true }),
     adminSetIsAdmin: (id, is_admin) =>
         req("PATCH", `/api/admin/users/${id}`, { is_admin }),
+    // Partial update: any of { is_admin, display_name, groups }.
+    adminUpdateUser: (id, body) => req("PATCH", `/api/admin/users/${id}`, body),
+    adminDeleteUser: (id) => req("DELETE", `/api/admin/users/${id}`),
     adminImpersonate: (id) => req("POST", `/api/admin/impersonate/${id}`),
     adminStopImpersonate: () => req("DELETE", "/api/admin/impersonate"),
+    // Groups (organizational)
+    adminListGroups: () => req("GET", "/api/admin/groups"),
+    adminCreateGroup: (name, description) =>
+        req("POST", "/api/admin/groups", { name, description }),
+    adminUpdateGroup: (id, body) => req("PATCH", `/api/admin/groups/${id}`, body),
+    adminDeleteGroup: (id) => req("DELETE", `/api/admin/groups/${id}`),
+    adminAddGroupMember: (id, user_id) =>
+        req("POST", `/api/admin/groups/${id}/members`, { user_id }),
+    adminRemoveGroupMember: (id, user_id) =>
+        req("DELETE", `/api/admin/groups/${id}/members/${user_id}`),
 
     // Admin — auth providers (OAuth credentials catalog). Just a list;
     // not wired into the login flow (yet).

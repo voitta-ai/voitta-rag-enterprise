@@ -12,6 +12,7 @@
 
 import { api } from "../api.js";
 import { adminState } from "../store.js";
+import { createChipSelect } from "../components/chip_select.js";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -51,7 +52,7 @@ function wireAdminStore() {
 // caps / Storage. Pure DOM toggle; refreshAdmin always pulls every
 // section regardless of which tab is visible, so flipping tabs is
 // instant.
-const ADMIN_TABS = ["access", "users", "oauth", "caps", "storage"];
+const ADMIN_TABS = ["access", "users", "groups", "oauth", "caps", "storage"];
 
 function setAdminTab(name) {
     if (!ADMIN_TABS.includes(name)) name = "access";
@@ -74,6 +75,7 @@ function renderAdminFromState(state) {
     renderList("#admin-domains", state.allowlist.domains, "domain", api.adminRemoveDomain);
     renderList("#admin-blocked", state.allowlist.blocked, "email", api.adminUnblock);
     renderUsersTable(state.users);
+    renderGroups(state.groups || [], state.users);
     renderAuthProvidersTable(state.auth_providers);
     renderCapsTable(state.indexing_caps);
     renderStorageSettings(state.settings);
@@ -559,10 +561,19 @@ function renderList(sel, items, _kind, removeFn) {
     }
 }
 
+let _userFilter = "";
+
 function renderUsersTable(users) {
     const tbody = $("#admin-users-table tbody");
     tbody.innerHTML = "";
-    for (const u of users) {
+    const q = _userFilter.trim().toLowerCase();
+    const rows = q
+        ? users.filter((u) =>
+            u.email.toLowerCase().includes(q) ||
+            (u.display_name || "").toLowerCase().includes(q) ||
+            (u.groups || []).some((g) => g.toLowerCase().includes(q)))
+        : users;
+    for (const u of rows) {
         const tr = document.createElement("tr");
 
         const tdEmail = document.createElement("td");
@@ -592,8 +603,19 @@ function renderUsersTable(users) {
         tdAdmin.appendChild(cb);
         tr.appendChild(tdAdmin);
 
+        const tdGroups = document.createElement("td");
+        tdGroups.className = "admin-cell-groups";
+        tdGroups.textContent = (u.groups && u.groups.length) ? u.groups.join(", ") : "—";
+        tr.appendChild(tdGroups);
+
         const tdActions = document.createElement("td");
         tdActions.className = "row-actions";
+        const editBtn = document.createElement("button");
+        editBtn.className = "btn btn-secondary btn-sm";
+        editBtn.textContent = "Edit";
+        editBtn.addEventListener("click", () => openUserEditor(u));
+        tdActions.appendChild(editBtn);
+
         const viewBtn = document.createElement("button");
         viewBtn.className = "btn btn-secondary btn-sm";
         viewBtn.textContent = "View as";
@@ -604,10 +626,184 @@ function renderUsersTable(users) {
             } catch (err) { alert(err.message); }
         });
         tdActions.appendChild(viewBtn);
+
+        // Delete — hidden for super-admins (backend refuses it anyway).
+        if (!u.is_super_admin) {
+            const delBtn = document.createElement("button");
+            delBtn.className = "btn btn-secondary btn-sm btn-danger";
+            delBtn.textContent = "🗑";
+            delBtn.title = "Delete user";
+            delBtn.addEventListener("click", async () => {
+                if (!confirm(`Delete user ${u.email}?\n\nThis removes their account, API keys, and folder grants. Folders they own become unowned.`)) return;
+                try { await api.adminDeleteUser(u.id); }
+                catch (err) { alert(err.message); }
+            });
+            tdActions.appendChild(delBtn);
+        }
         tr.appendChild(tdActions);
 
         tbody.appendChild(tr);
     }
+}
+
+// ---------------------------------------------------------------------------
+// User editor (slide-over) — add or edit one user
+// ---------------------------------------------------------------------------
+
+let _editingUserId = null;   // null = adding
+let _ueGroupSelect = null;   // the chip-select instance
+
+function _allGroupNames() {
+    const s = adminState.get();
+    return (s && s.groups ? s.groups.map((g) => g.name) : []);
+}
+
+function openUserEditor(user) {
+    _editingUserId = user ? user.id : null;
+    $("#admin-user-editor-title").textContent = user ? "Edit user" : "Add user";
+    const emailEl = $("#admin-ue-email");
+    emailEl.value = user ? user.email : "";
+    emailEl.disabled = !!user;  // email is the key — immutable once created
+    $("#admin-ue-name").value = user ? (user.display_name || "") : "";
+    $("#admin-ue-admin").checked = user ? user.is_admin : false;
+    $("#admin-ue-admin").disabled = user ? user.is_super_admin : false;
+    // "Allow sign-in" only applies when creating (it adds to the allowlist).
+    $("#admin-ue-signin-row").hidden = !!user;
+    $("#admin-ue-signin").checked = true;
+    $("#admin-ue-error").hidden = true;
+
+    const host = $("#admin-ue-groups");
+    host.innerHTML = "";
+    _ueGroupSelect = createChipSelect({
+        selected: user ? (user.groups || []) : [],
+        options: _allGroupNames,
+        allowCreate: true,
+        placeholder: "add or create a group…",
+    });
+    host.appendChild(_ueGroupSelect.el);
+
+    $("#admin-user-editor").hidden = false;
+}
+
+function closeUserEditor() {
+    $("#admin-user-editor").hidden = true;
+    _editingUserId = null;
+    _ueGroupSelect = null;
+}
+
+async function saveUserEditor() {
+    const errEl = $("#admin-ue-error");
+    errEl.hidden = true;
+    const groups = _ueGroupSelect ? _ueGroupSelect.getValues() : [];
+    const name = $("#admin-ue-name").value.trim();
+    const isAdmin = $("#admin-ue-admin").checked;
+    try {
+        let userId = _editingUserId;
+        if (userId === null) {
+            const email = $("#admin-ue-email").value.trim().toLowerCase();
+            if (!email) { errEl.textContent = "Email is required."; errEl.hidden = false; return; }
+            const created = await api.adminCreateUser(email, isAdmin);
+            userId = created.id;
+        }
+        // PATCH carries name + groups (+ admin for existing users; for new the
+        // create call already set admin, but re-sending is harmless).
+        await api.adminUpdateUser(userId, {
+            is_admin: isAdmin,
+            display_name: name,
+            groups,
+        });
+        closeUserEditor();
+    } catch (err) {
+        errEl.textContent = err.message;
+        errEl.hidden = false;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Groups tab
+// ---------------------------------------------------------------------------
+
+let _selectedGroupId = null;
+let _gdMemberSelect = null;
+
+function renderGroups(groups, users) {
+    const list = $("#admin-groups-list");
+    if (!list) return;
+    list.innerHTML = "";
+    for (const g of groups) {
+        const li = document.createElement("li");
+        li.className = "admin-group-row" + (g.id === _selectedGroupId ? " selected" : "");
+        const name = document.createElement("span");
+        name.className = "admin-group-name";
+        name.textContent = g.name;
+        const count = document.createElement("span");
+        count.className = "admin-group-count";
+        count.textContent = `${g.member_count} member${g.member_count === 1 ? "" : "s"}`;
+        li.append(name, count);
+        li.addEventListener("click", () => { _selectedGroupId = g.id; renderAdminFromState(adminState.get()); });
+        list.appendChild(li);
+    }
+    // If a group is selected, (re)render its detail panel from fresh state.
+    const sel = groups.find((g) => g.id === _selectedGroupId);
+    if (sel) renderGroupDetail(sel, users);
+    else $("#admin-group-detail").hidden = true;
+}
+
+function renderGroupDetail(group, users) {
+    $("#admin-group-detail").hidden = false;
+    $("#admin-group-detail-title").textContent = `Group: ${group.name}`;
+    const nameEl = $("#admin-gd-name");
+    const descEl = $("#admin-gd-desc");
+    if (document.activeElement !== nameEl) nameEl.value = group.name;
+    if (document.activeElement !== descEl) descEl.value = group.description || "";
+
+    // Members = users whose groups include this group's name.
+    const members = users.filter((u) => (u.groups || []).includes(group.name));
+    $("#admin-gd-members-label").textContent = `Members (${members.length})`;
+    const ul = $("#admin-gd-members");
+    ul.innerHTML = "";
+    for (const u of members) {
+        const li = document.createElement("li");
+        li.className = "admin-list-row";
+        const label = document.createElement("span");
+        label.textContent = u.display_name ? `${u.display_name} <${u.email}>` : u.email;
+        const x = document.createElement("button");
+        x.className = "btn btn-secondary btn-sm";
+        x.textContent = "✕";
+        x.title = "Remove from group";
+        x.addEventListener("click", async () => {
+            try { await api.adminRemoveGroupMember(group.id, u.id); }
+            catch (err) { alert(err.message); }
+        });
+        li.append(label, x);
+        ul.appendChild(li);
+    }
+
+    // Add-member picker: users not already in the group.
+    const host = $("#admin-gd-addmember");
+    host.innerHTML = "";
+    const nonMembers = users.filter((u) => !(u.groups || []).includes(group.name));
+    const byLabel = new Map(nonMembers.map((u) => [u.email, u.id]));
+    _gdMemberSelect = createChipSelect({
+        selected: [],
+        options: () => [...byLabel.keys()],
+        allowCreate: false,
+        placeholder: "add a user by email…",
+        onChange: async (vals) => {
+            // Single-add semantics: when a value is picked, add and clear.
+            const email = vals[vals.length - 1];
+            const uid = byLabel.get(email);
+            if (uid == null) return;
+            // Drop focus first so the incoming admin.snapshot push isn't
+            // skipped by the editing focus-guard in wireAdminStore — that's
+            // what refreshes the member list after the add.
+            if (document.activeElement) document.activeElement.blur();
+            _gdMemberSelect.setValues([]);
+            try { await api.adminAddGroupMember(group.id, uid); }
+            catch (err) { alert(err.message); }
+        },
+    });
+    host.appendChild(_gdMemberSelect.el);
 }
 
 // Wire each input + button pair so click and Enter both submit. Without
@@ -635,33 +831,13 @@ function wireAdminAdd(inputSel, buttonSel, apiFn) {
     });
 }
 
-// Pre-create user (with optional admin grant). Different shape from the
-// allowlist add rows because it has an extra "Admin" checkbox alongside
-// the email input — wireAdminAdd only handles single-input.
-async function submitAddUser() {
-    const input = $("#admin-newuser-input");
-    const adminCb = $("#admin-newuser-admin");
-    const email = input.value.trim();
-    if (!email) return;
-    try {
-        await api.adminCreateUser(email, adminCb.checked);
-        input.value = "";
-        adminCb.checked = false;
-        await refreshAdmin();
-    } catch (err) {
-        alert(err.message);
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Module-load wiring
 // ---------------------------------------------------------------------------
 
-$("#admin-tab-btn-access").addEventListener("click", () => setAdminTab("access"));
-$("#admin-tab-btn-users").addEventListener("click", () => setAdminTab("users"));
-$("#admin-tab-btn-oauth").addEventListener("click", () => setAdminTab("oauth"));
-$("#admin-tab-btn-caps").addEventListener("click", () => setAdminTab("caps"));
-$("#admin-tab-btn-storage").addEventListener("click", () => setAdminTab("storage"));
+for (const t of ADMIN_TABS) {
+    $(`#admin-tab-btn-${t}`).addEventListener("click", () => setAdminTab(t));
+}
 
 $("#admin-auth-provider-add").addEventListener("click", submitAddAuthProvider);
 $("#admin-auth-provider-client-secret").addEventListener("keydown", (e) => {
@@ -700,9 +876,53 @@ $("#admin-backdrop").addEventListener("click", (e) => {
 wireAdminAdd("#admin-domain-input", "#admin-domain-add", api.adminAddDomain);
 wireAdminAdd("#admin-block-input", "#admin-block-add", api.adminBlock);
 
-$("#admin-newuser-add").addEventListener("click", submitAddUser);
-$("#admin-newuser-input").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") { e.preventDefault(); submitAddUser(); }
+// Users tab: filter + add + slide-over editor.
+$("#admin-user-filter").addEventListener("input", (e) => {
+    _userFilter = e.target.value;
+    renderUsersTable(adminState.get()?.users || []);
+});
+$("#admin-user-add-btn").addEventListener("click", () => openUserEditor(null));
+$("#admin-ue-cancel").addEventListener("click", closeUserEditor);
+$("#admin-ue-save").addEventListener("click", saveUserEditor);
+
+// Groups tab: create + detail name/desc save + delete.
+async function submitNewGroup() {
+    const input = $("#admin-group-new-name");
+    const name = input.value.trim();
+    if (!name) return;
+    try {
+        const g = await api.adminCreateGroup(name, "");
+        input.value = "";
+        _selectedGroupId = g.id;  // select the just-created group
+    } catch (err) { alert(err.message); }
+}
+$("#admin-group-add-btn").addEventListener("click", submitNewGroup);
+$("#admin-group-new-name").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); submitNewGroup(); }
+});
+
+async function saveGroupMeta() {
+    if (_selectedGroupId == null) return;
+    const name = $("#admin-gd-name").value.trim();
+    const description = $("#admin-gd-desc").value.trim();
+    if (!name) return;
+    try { await api.adminUpdateGroup(_selectedGroupId, { name, description }); }
+    catch (err) { alert(err.message); }
+}
+// Commit name/description on blur (focus-guard in wireAdminStore keeps live
+// pushes from clobbering the field while it's focused).
+$("#admin-gd-name").addEventListener("blur", saveGroupMeta);
+$("#admin-gd-desc").addEventListener("blur", saveGroupMeta);
+
+$("#admin-group-delete").addEventListener("click", async () => {
+    if (_selectedGroupId == null) return;
+    const g = (adminState.get()?.groups || []).find((x) => x.id === _selectedGroupId);
+    if (!g) return;
+    if (!confirm(`Delete group "${g.name}"?\n\nMembers are not deleted — they just lose this group.`)) return;
+    try {
+        await api.adminDeleteGroup(_selectedGroupId);
+        _selectedGroupId = null;
+    } catch (err) { alert(err.message); }
 });
 
 $("#btn-stop-impersonate").addEventListener("click", async () => {
