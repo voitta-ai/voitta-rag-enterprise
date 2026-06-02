@@ -287,8 +287,8 @@ flowchart LR
 | Kind | Payload | Producer | Handler |
 |------|---------|----------|---------|
 | `extract` | `{file_id}` | watcher, scanner, reconcile | `run_extract` |
-| `embed_text` | `{file_id, round}` | (now inline) | `run_embed_text` |
-| `embed_image` | `{image_id, round}` | (now inline) | `run_embed_image` |
+| `embed_text` | `{file_id, round}` | inline (within extract) | `run_embed_text` |
+| `embed_image` | `{image_id, round}` | inline (within extract) | `run_embed_image` |
 | `delete_file` | `{file_id}` | watcher (on delete) | `run_delete_file` |
 | `sync` | `{folder_id}` | REST `/folders/{id}/sync`, auto-sync scheduler | `run_sync` |
 | `reindex_folder` | `{folder_id, file_ids}` | REST `/folders/{id}/reindex` | `run_reindex_folder` |
@@ -507,15 +507,15 @@ single-user mode the filter is skipped entirely (`None`).
 
 Two things to keep separate here:
 
-- **Backend storage & read path** — still file/DB, lazy, no cache (unchanged).
-  The consumers (`is_email_allowed`, `get_caps`, `get_nfs_root`, the
-  `admin_user` dep) re-read their backing store on each use.
-- **Client propagation** — now **WS-pushed**, not pull-based. After a mutation,
+- **Backend storage & read path** — file/DB, lazy, no cache. The consumers
+  (`is_email_allowed`, `get_caps`, `get_nfs_root`, the `admin_user` dep) re-read
+  their backing store on each use.
+- **Client propagation** — **WS-pushed**, not pull-based. After a mutation,
   `routes/admin.py` calls `publish_admin_state()`, which rebuilds the full
   admin state and emits an `admin.snapshot` on the **admin-only** `admin` topic.
   The admin modal renders from the `adminState` store — no GET on open, no
   refetch after mutation — so a change in one admin's tab shows up live in
-  another's. (Previously this was `refreshAdmin()` pull-on-open + re-GET.)
+  another's.
 
 ```mermaid
 flowchart TB
@@ -625,19 +625,17 @@ There are **two separate provider mechanisms** — don't conflate them:
 | Scopes | `openid email profile` | per-connector (e.g. `drive.readonly …`) |
 | Tokens | session cookie | per-folder refresh token |
 
-The intended design: the admin defines an OAuth app **once** in the
-`auth_providers` catalog, and **every user** picks it as a shortcut in the
-per-folder sync modal — the picker pre-fills `client_id` / `client_secret` so
-the user doesn't have to register their own Google/Azure app.
+The design: the admin defines an OAuth app **once** in the `auth_providers`
+catalog, and **every user** picks it as a shortcut in the per-folder sync modal
+— the picker pre-fills `client_id` / `client_secret` so the user doesn't have to
+register their own Google/Azure app.
 
-> **Fixed bug (was admin-only).** `GET /api/admin/auth-providers` used to be
-> gated by `admin_user`, so a non-admin opening the sync modal got a 403 and
-> saw an **empty** provider picker — defeating the whole "shared shortcut"
-> intent. The gate is now `current_user`: the list is readable by any
-> authenticated user; only the mutating routes (POST/PATCH/DELETE/check) remain
-> admin-only. The response includes `client_secret` by design — it's the shared
-> app credential users are meant to use, and it lands in their folder's sync
-> row regardless.
+> **Gate.** `GET /api/admin/auth-providers` is gated by `current_user` — the
+> list is readable by any authenticated user, so the shared-shortcut picker
+> works for non-admins. Only the mutating routes (POST/PATCH/DELETE/check) are
+> `admin_user`-gated. The response includes `client_secret` by design — it's the
+> shared app credential users are meant to use, and it lands in their folder's
+> sync row regardless.
 
 ```mermaid
 flowchart TB
@@ -674,8 +672,7 @@ flowchart TB
   any signed-in user) and filters for `enabled` rows of the relevant provider.
   The matching rows populate the picker for **every** user; selecting one
   pre-fills the credentials into the per-folder form. Manual entry remains
-  available if no catalog provider fits. (Previously this endpoint was
-  admin-only, so non-admins saw an empty picker — see the fixed-bug note above.)
+  available if no catalog provider fits.
 
 ### Admin-defined OAuth provider lifecycle
 
@@ -789,9 +786,6 @@ flowchart TB
 (each connector reads its own `gh_*`/`gd_*`/`ms_*`/`nfs_*` columns), then adds a
 `progress_cb` only when `connector.supports_progress`. Adding a sync backend is a
 new connector module + one registry line — no edit to `run_sync`.
-
-> The old speculative `services/sources/` registry stub has been removed; this
-> registry under `services/sync/` is the live one.
 
 ---
 
