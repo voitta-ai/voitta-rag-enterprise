@@ -749,11 +749,29 @@ async def run_sync(payload: dict) -> dict | None:
     folder_id = int(payload["folder_id"])
     with bind_context(folder_id=folder_id):
         try:
-            return await _run_sync_inner(folder_id)
+            stats = await _run_sync_inner(folder_id)
         except Exception:
             logger.exception("sync failed")
             _mark_sync_error(folder_id, _format_exception("sync failed"))
             raise
+        # Reconcile the folder against the freshly-written ``.voitta_sources.json``
+        # so the connector's per-file provenance (source_url / source_meta) lands
+        # on the File rows — and gets enqueued for (re)extract where changed.
+        # The watcher only sees byte changes and never reads the sidecar, so
+        # without this an *unchanged* file's owner/date metadata would never
+        # reach the DB (it'd wait for the next process restart's startup scan).
+        await asyncio.to_thread(_rescan_after_sync, folder_id)
+        return stats
+
+
+def _rescan_after_sync(folder_id: int) -> None:
+    """Run scan_folder so the post-sync sidecar updates File.source_url/_meta."""
+    from .scanner import scan_folder
+
+    with session_scope() as s:
+        folder = s.get(Folder, folder_id)
+        if folder is not None:
+            scan_folder(s, folder)
 
 
 def _publish_sync_source_changed(folder_id: int) -> None:
