@@ -151,6 +151,18 @@
 }
 .header-actions-inline { display: flex; gap: 4px; }
 
+/* Subheading inside a sidebar section (e.g. the "Source" provenance block). */
+.sidebar-subhead {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--color-text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin: var(--md) 0 var(--sm);
+}
+#provenance-block .v { overflow: hidden; text-overflow: ellipsis; }
+#owners-table .ext { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* Sidebar tab strip — Details vs Jobs. Two equal-width buttons; the
    active one gets the accent fill (matching .seg-tab styling). */
 .sidebar-tabs {

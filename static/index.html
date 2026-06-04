@@ -441,6 +441,26 @@
                                 </thead>
                                 <tbody id="ext-tbody"></tbody>
                             </table>
+
+                            <!-- Source provenance captured at sync time
+                                 (owner / shared-by / date range). Hidden until
+                                 a synced + (re)indexed folder is selected. -->
+                            <div id="provenance-block" hidden>
+                                <h4 class="sidebar-subhead">Source</h4>
+                                <div class="kv-grid">
+                                    <span class="k">Shared by</span><span class="v" id="kv-shared-by">–</span>
+                                    <span class="k">Created</span><span class="v" id="kv-created">–</span>
+                                    <span class="k">Modified</span><span class="v" id="kv-modified">–</span>
+                                    <span class="k">Owners</span><span class="v" id="kv-owner-count">–</span>
+                                </div>
+                                <table class="stats-table" id="owners-table" hidden>
+                                    <thead>
+                                        <tr><th>Owner</th><th class="num">Files</th></tr>
+                                    </thead>
+                                    <tbody id="owners-tbody"></tbody>
+                                </table>
+                            </div>
+
                             <p id="upload-target-hint" class="hint" hidden>
                                 Uploads go to <code id="upload-target">/</code>
                             </p>

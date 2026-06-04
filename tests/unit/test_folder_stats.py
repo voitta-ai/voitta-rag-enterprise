@@ -41,6 +41,7 @@ def _add_file(
     chunks: int = 0,
     images: int = 0,
     source_url: str | None = None,
+    source_meta: str | None = None,
 ) -> int:
     with session_scope() as s:
         f = File(
@@ -51,6 +52,7 @@ def _add_file(
             last_seen_at=0,
             state=state,
             source_url=source_url,
+            source_meta=source_meta,
         )
         s.add(f)
         s.flush()
@@ -293,3 +295,41 @@ async def test_publish_swallows_compute_errors(
             assert await sub.wait(timeout=0.1) is False
     finally:
         events.uninstall_loop()
+
+
+def test_provenance_aggregates_owners_shared_by_and_date_range(env: None) -> None:
+    import json
+
+    fid = _seed()
+    _add_file(fid, "a.pdf", source_meta=json.dumps({
+        "owner_email": "alice@x.com", "owner_name": "Alice",
+        "shared_by_email": "grp@x.com",
+        "created_ts": 1700000000, "modified_ts": 1700500000,
+    }))
+    _add_file(fid, "b.pdf", source_meta=json.dumps({
+        "owner_email": "alice@x.com", "owner_name": "Alice",
+        "shared_by_email": "grp@x.com",
+        "created_ts": 1699000000, "modified_ts": 1700900000,  # earlier created, later modified
+    }))
+    _add_file(fid, "c.pdf", source_meta=json.dumps({
+        "owner_email": "bob@x.com", "owner_name": "Bob",
+        "shared_by_email": "grp@x.com", "created_ts": 1701000000,
+    }))
+    with session_scope() as s:
+        folder = s.get(Folder, fid)
+        prov = compute_folder_stats(s, folder)["provenance"]
+
+    assert prov["shared_by"] == {"email": "grp@x.com", "name": ""}
+    assert prov["owner_count"] == 2
+    # Alice (2 files) ranks before Bob (1).
+    assert prov["owners"][0] == {"email": "alice@x.com", "name": "Alice", "count": 2}
+    assert prov["created_min"] == 1699000000   # earliest across files
+    assert prov["modified_max"] == 1700900000  # latest across files
+
+
+def test_provenance_none_when_no_source_meta(env: None) -> None:
+    fid = _seed()
+    _add_file(fid, "plain.txt")  # no source_meta (non-synced)
+    with session_scope() as s:
+        prov = compute_folder_stats(s, s.get(Folder, fid))["provenance"]
+    assert prov is None

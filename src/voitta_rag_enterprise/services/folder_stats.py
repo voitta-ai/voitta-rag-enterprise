@@ -15,6 +15,7 @@ folder id).
 
 from __future__ import annotations
 
+import json
 import logging
 
 from sqlalchemy import func, select
@@ -28,6 +29,54 @@ from .reconcile import folder_health
 logger = logging.getLogger(__name__)
 
 _IN_PROGRESS_STATES = ("extracted", "embedding")
+
+
+def _aggregate_provenance(files: list[File]) -> dict | None:
+    """Roll up source-object provenance (File.source_meta) across a folder.
+
+    For the Details pane: who shared the synced root (uniform when downfilled),
+    the distinct owners with file counts (top few), and the created/modified
+    date range. Returns None when no file carries provenance (non-synced
+    folders / not-yet-reindexed). All timestamps are epoch seconds.
+    """
+    owners: dict[str, dict] = {}
+    shared_by: dict[str, str] = {}
+    created_min = modified_max = None
+    any_meta = False
+    for f in files:
+        if not f.source_meta:
+            continue
+        try:
+            sm = json.loads(f.source_meta)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(sm, dict):
+            continue
+        any_meta = True
+        email = sm.get("owner_email") or sm.get("owner_name")
+        if email:
+            o = owners.setdefault(email, {"email": sm.get("owner_email") or "",
+                                          "name": sm.get("owner_name") or "", "count": 0})
+            o["count"] += 1
+        if sm.get("shared_by_email") or sm.get("shared_by_name"):
+            shared_by = {"email": sm.get("shared_by_email") or "",
+                         "name": sm.get("shared_by_name") or ""}
+        c = sm.get("created_ts")
+        if isinstance(c, int):
+            created_min = c if created_min is None else min(created_min, c)
+        m = sm.get("modified_ts")
+        if isinstance(m, int):
+            modified_max = m if modified_max is None else max(modified_max, m)
+    if not any_meta:
+        return None
+    top_owners = sorted(owners.values(), key=lambda o: o["count"], reverse=True)[:6]
+    return {
+        "shared_by": shared_by or None,
+        "owners": top_owners,
+        "owner_count": len(owners),
+        "created_min": created_min,
+        "modified_max": modified_max,
+    }
 
 
 def compute_folder_stats(session: Session, folder: Folder) -> dict:
@@ -121,6 +170,7 @@ def compute_folder_stats(session: Session, folder: Folder) -> dict:
         "images_unique": int(images_unique),
         "bytes_total": int(bytes_total),
         "by_extension": by_extension,
+        "provenance": _aggregate_provenance(files),
         "index_health": {
             "status": health.status,
             "qdrant_chunk_points": int(health.qdrant_chunk_points),

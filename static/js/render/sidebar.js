@@ -204,9 +204,62 @@ export function renderSidebar() {
     }
 
     renderExtTable(s);
+    renderProvenance(s);
 
     $("#upload-target-hint").hidden = false;
     $("#upload-target").textContent = getSelectedRelDir() ? `/${getSelectedRelDir()}/` : "/";
+}
+
+// ----- Source provenance (owner / shared-by / date range) -----
+
+function _fmtDate(epoch_s) {
+    if (!epoch_s) return "–";
+    try {
+        return new Date(epoch_s * 1000).toLocaleDateString(undefined,
+            { year: "numeric", month: "short", day: "numeric" });
+    } catch { return "–"; }
+}
+
+function _ownerLabel(o) {
+    if (o.name && o.email) return `${o.name} <${o.email}>`;
+    return o.name || o.email || "(unknown)";
+}
+
+function renderProvenance(s) {
+    const block = $("#provenance-block");
+    const p = s && s.provenance;
+    if (!p) { block.hidden = true; return; }
+    block.hidden = false;
+
+    const sb = p.shared_by;
+    $("#kv-shared-by").textContent = sb ? _ownerLabel(sb) : "–";
+    $("#kv-created").textContent = _fmtDate(p.created_min);
+    $("#kv-modified").textContent = _fmtDate(p.modified_max);
+    $("#kv-owner-count").textContent = p.owner_count != null ? String(p.owner_count) : "–";
+
+    // Owners breakdown — only when there's more than one (a single owner is
+    // already implied by the count) or names add signal.
+    const tbl = $("#owners-table");
+    const tbody = $("#owners-tbody");
+    const owners = p.owners || [];
+    if (owners.length > 1) {
+        tbody.innerHTML = "";
+        for (const o of owners) {
+            const tr = document.createElement("tr");
+            const td1 = document.createElement("td");
+            td1.className = "ext";
+            td1.textContent = _ownerLabel(o);
+            td1.title = _ownerLabel(o);
+            const td2 = document.createElement("td");
+            td2.className = "num";
+            td2.textContent = String(o.count);
+            tr.append(td1, td2);
+            tbody.appendChild(tr);
+        }
+        tbl.hidden = false;
+    } else {
+        tbl.hidden = true;
+    }
 }
 
 // ----- Per-extension table -----

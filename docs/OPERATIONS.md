@@ -530,6 +530,11 @@ a **reindex** to backfill.
 > Google-Docs exports (Docs/Sheets/Slides → markdown) don't yet carry `meta_*`
 > (their `RemoteEntry` is built in the workspace exporters) — a follow-up.
 
+The folder **Details pane** rolls this provenance up per folder: `folder_stats`
+aggregates `File.source_meta` into a `provenance` block (shared-by, distinct
+owners with file counts, and the created/modified date range) shown under a
+"Source" subheading.
+
 ---
 
 ## 7. Admin settings: storage & propagation
