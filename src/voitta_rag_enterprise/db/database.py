@@ -150,6 +150,9 @@ def init_db() -> None:
         # Job result summary (JSON) surfaced in the Jobs panel's expandable
         # detail; NULL for jobs that report nothing / predate this column.
         _ensure_column(raw_conn, "jobs", "result", "TEXT")
+        # Source-object provenance (JSON) captured at sync time → meta_* Qdrant
+        # payload. NULL for non-synced files / rows predating this column.
+        _ensure_column(raw_conn, "files", "source_meta", "TEXT")
         raw_conn.commit()
     finally:
         raw_conn.close()

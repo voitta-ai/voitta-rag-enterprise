@@ -86,6 +86,53 @@ def _format_exception(prefix: str) -> str:
     return msg
 
 
+def _build_meta_payload(
+    *,
+    source_meta: str | None,
+    added_at: int | None,
+    mtime_ns: int | None,
+    folder_path: str | None,
+    rel_path: str,
+) -> dict | None:
+    """Assemble the flat ``meta_*`` payload for a file's chunk/image points.
+
+    Combines three sources, all optional:
+    - ``File.source_meta`` (JSON from a sync connector) → owner/editor/shared_by
+      + created/modified epochs, via ``source_meta.payload_fields``.
+    - ``added_at`` → ``meta_uploaded_ts`` (always present for indexed files).
+    - filesystem ``mtime`` → ``meta_modified_ts`` fallback when the source
+      didn't supply one (covers uploads / NFS / github).
+    - a legacy per-file ``.voitta.meta`` sidecar (``meta_sidecar``) is still
+      merged for any deployment that uses it; source_meta wins on key overlap.
+    """
+    import json as _json
+
+    from . import source_meta as sm
+
+    parsed: dict | None = None
+    if source_meta:
+        try:
+            parsed = _json.loads(source_meta)
+        except (ValueError, TypeError):
+            parsed = None
+
+    fs_modified = int(mtime_ns // 1_000_000_000) if isinstance(mtime_ns, int) else None
+    out = sm.payload_fields(
+        parsed, uploaded_ts=added_at, modified_fallback_ts=fs_modified
+    )
+
+    # Legacy .voitta.meta sidecar (owner/tags/etc.) — merge underneath so the
+    # connector-captured source_meta takes precedence on overlapping keys.
+    if folder_path:
+        from .meta_sidecar import load as load_meta_sidecar
+
+        legacy = load_meta_sidecar(Path(folder_path) / rel_path)
+        if legacy and legacy.payload_fields:
+            out = {**legacy.payload_fields, **out}
+
+    return out or None
+
+
 async def run_extract(payload: dict) -> None:
     file_id = int(payload["file_id"])
     await asyncio.to_thread(_run_extract_sync, file_id)
@@ -1141,6 +1188,9 @@ def _embed_text_sync(file_id: int, round_token: int | None = None) -> None:
             source_url = file.source_url
             tab = file.tab
             file_cas_id = file.file_cas_id
+            file_source_meta = file.source_meta
+            file_added_at = file.added_at
+            file_mtime_ns = file.mtime_ns
             allowed_users = allowed_user_ids_for_file(s, file_id)
             folder = s.get(Folder, folder_id)
             folder_path = folder.path if folder else None
@@ -1148,14 +1198,13 @@ def _embed_text_sync(file_id: int, round_token: int | None = None) -> None:
         char_to_page = _load_char_to_page(file_cas_id)
         layout_summaries = _load_layout_summaries(file_cas_id)
 
-        from .meta_sidecar import load as load_meta_sidecar
-
-        meta_payload: dict | None = None
-        if folder_path:
-            abs_file = Path(folder_path) / rel_path
-            meta = load_meta_sidecar(abs_file)
-            if meta:
-                meta_payload = meta.payload_fields or None
+        meta_payload = _build_meta_payload(
+            source_meta=file_source_meta,
+            added_at=file_added_at,
+            mtime_ns=file_mtime_ns,
+            folder_path=folder_path,
+            rel_path=rel_path,
+        )
 
         text_emb = get_text_embedder()
         sparse_emb = get_sparse_embedder()
@@ -1250,10 +1299,22 @@ def _embed_image_sync(image_id: int, round_token: int | None = None) -> None:
             folder_id = file.folder_id
             rel_path = file.rel_path
             file_cas_id = file.file_cas_id
+            file_source_meta = file.source_meta
+            file_added_at = file.added_at
+            file_mtime_ns = file.mtime_ns
+            folder = s.get(Folder, folder_id)
+            folder_path = folder.path if folder else None
             allowed_users = allowed_user_ids_for_file(s, file_id)
 
         layout_summaries = _load_layout_summaries(file_cas_id)
         layout_summary = layout_summaries.get(page) if page is not None else None
+        meta_payload = _build_meta_payload(
+            source_meta=file_source_meta,
+            added_at=file_added_at,
+            mtime_ns=file_mtime_ns,
+            folder_path=folder_path,
+            rel_path=rel_path,
+        )
 
     with bind_context(image_id=image_id, file_id=file_id):
         image_emb = get_image_embedder()
@@ -1285,6 +1346,7 @@ def _embed_image_sync(image_id: int, round_token: int | None = None) -> None:
                         image_model_version=settings.image_version,
                         allowed_users=allowed_users,
                         layout_summary=layout_summary,
+                        meta_payload=meta_payload,
                     ),
                     file_ids=[file_id],
                 )

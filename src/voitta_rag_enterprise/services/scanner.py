@@ -37,18 +37,30 @@ class ScanResult:
     vanished_ids: list[int] = field(default_factory=list)
 
 
+# Source-provenance keys a connector may write into a sidecar record alongside
+# url/tab (see services/source_meta.build). Stored verbatim on File.source_meta.
+_META_KEYS = (
+    "owner_name", "owner_email", "editor_name", "editor_email",
+    "shared_by_name", "shared_by_email", "created_ts", "modified_ts",
+)
+
+
 @dataclass
 class SidecarEntry:
     """Per-file metadata read from ``.voitta_sources.json``."""
 
     url: str | None = None
     tab: str | None = None
+    # Source-object provenance (owner/editor/shared_by + created/modified
+    # epochs); the subset of keys the connector recorded. None when absent.
+    meta: dict | None = None
 
 
 def load_sidecar(folder_root: Path) -> dict[str, SidecarEntry]:
     """Return the ``rel_path → SidecarEntry`` mapping from ``.voitta_sources.json``.
 
-    Expected on-disk shape: ``{rel_path: {"url": "https://…", "tab": "Overview"}}``.
+    On-disk shape: ``{rel_path: {"url": …, "tab": …, "owner_email": …,
+    "created_ts": …, …}}``. Unknown keys are ignored (forward-compat).
     """
     sidecar = folder_root / SIDECAR_FILENAME
     if not sidecar.exists():
@@ -66,9 +78,11 @@ def load_sidecar(folder_root: Path) -> dict[str, SidecarEntry]:
             continue
         url = v.get("url")
         tab = v.get("tab")
+        meta = {mk: v[mk] for mk in _META_KEYS if mk in v and v[mk] is not None}
         out[k] = SidecarEntry(
             url=str(url) if isinstance(url, str) else None,
             tab=str(tab) if isinstance(tab, str) else None,
+            meta=meta or None,
         )
     return out
 
@@ -123,6 +137,9 @@ def scan_folder(
         entry = sidecar.get(rel)
         url = entry.url if entry else None
         tab = entry.tab if entry else None
+        meta_json = (
+            json.dumps(entry.meta) if (entry and entry.meta) else None
+        )
 
         existing = session.execute(
             select(File).where(File.folder_id == folder.id, File.rel_path == rel)
@@ -138,6 +155,7 @@ def scan_folder(
                 state="pending",
                 source_url=url,
                 tab=tab,
+                source_meta=meta_json,
             )
             session.add(new_file)
             session.flush()
@@ -159,6 +177,8 @@ def scan_folder(
                 existing.source_url = url
             if existing.tab != tab:
                 existing.tab = tab
+            if existing.source_meta != meta_json:
+                existing.source_meta = meta_json
             if existing.state == "deleted":
                 existing.state = "pending"
             if changed:

@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS files (
     embed_round     INTEGER NOT NULL DEFAULT 0,
     source_url      TEXT,
     tab             TEXT,                                 -- e.g. Google Docs tab name when the file is one tab of a multi-tab doc
+    source_meta     TEXT,                                 -- JSON: source provenance (owner/creator/editor/shared_by + created/modified epochs) → meta_* Qdrant payload
     error           TEXT,
     UNIQUE (folder_id, rel_path)
 );

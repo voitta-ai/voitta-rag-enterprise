@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import io
 import time
@@ -114,6 +115,71 @@ def test_extract_text_creates_chunks_and_cas(env: None, tmp_path: Path) -> None:
 
     assert (cas_store.file_dir(f.file_cas_id) / "text.md").exists()
     assert (cas_store.file_dir(f.file_cas_id) / "manifest.json").exists()
+
+
+def _seed_file_with_meta(folder_root: Path, rel_path: str, content, source_meta: str) -> int:
+    """Seed a file and set its File.source_meta (simulating a synced object)."""
+    fid = _seed_file(folder_root, rel_path, content)
+    with session_scope() as s:
+        s.get(File, fid).source_meta = source_meta
+    return fid
+
+
+def test_source_meta_reaches_chunk_and_image_payloads(env: None, tmp_path: Path) -> None:
+    """Owner/date provenance on File.source_meta is spread into BOTH the chunk
+    and image Qdrant payloads as meta_*, and a numeric range filter on
+    meta_modified_ts actually matches (proves the payload index works)."""
+    import json
+
+    from voitta_rag_enterprise.services import vector_store as vs
+    from qdrant_client.http import models as qm
+
+    init_db()
+    meta = json.dumps({
+        "owner_name": "Roman", "owner_email": "roman@x.com",
+        "editor_email": "editor@x.com",
+        "shared_by_email": "grp@x.com",
+        "created_ts": 1_700_000_000, "modified_ts": 1_700_500_000,
+    })
+    # A text file → chunks; a standalone png → an image point. Both synced
+    # (source_meta set), so meta_* must land on both collections.
+    txt_id = _seed_file_with_meta(tmp_path / "src", "doc.md",
+                                  "# Title\n\n" + ("body paragraph " * 40), meta)
+    png_id = _seed_file_with_meta(tmp_path / "src", "logo.png", _png(), meta)
+    asyncio.run(_extract(txt_id))
+    asyncio.run(_extract(png_id))
+
+    def scroll(coll):
+        return vs.run_on_qdrant(
+            lambda: vs.get_client().scroll(coll, limit=50, with_payload=True)
+        )[0]
+
+    chunks = scroll(vs.CHUNKS)
+    assert chunks, "expected chunk points"
+    cp = chunks[0].payload
+    assert cp["meta_owner_email"] == "roman@x.com"
+    assert cp["meta_editor_email"] == "editor@x.com"
+    assert cp["meta_shared_by_email"] == "grp@x.com"
+    assert cp["meta_created_ts"] == 1_700_000_000
+    assert cp["meta_modified_ts"] == 1_700_500_000
+    assert cp["meta_uploaded_ts"] > 0           # File.added_at
+    assert "meta_editor_name" not in cp          # null-omitted
+
+    imgs = scroll(vs.IMAGES)
+    assert imgs, "expected image points"
+    assert imgs[0].payload["meta_owner_email"] == "roman@x.com"
+    assert imgs[0].payload["meta_created_ts"] == 1_700_000_000
+
+    # The integer index supports range prefilters: gte just-below matches,
+    # gte just-above does not.
+    def count_ge(threshold):
+        flt = qm.Filter(must=[qm.FieldCondition(
+            key="meta_modified_ts", range=qm.Range(gte=threshold))])
+        return len(vs.run_on_qdrant(
+            lambda: vs.get_client().scroll(vs.CHUNKS, scroll_filter=flt, limit=50)
+        )[0])
+    assert count_ge(1_700_000_000) == len(chunks)
+    assert count_ge(1_700_500_001) == 0
 
 
 def test_extract_standalone_image_zero_chunks_one_image(env: None, tmp_path: Path) -> None:

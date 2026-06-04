@@ -24,6 +24,15 @@ from qdrant_client.http import models as qm
 
 from ..config import get_settings
 from .embedding import SparseVector
+from .source_meta import DATE_PAYLOAD_FIELDS, PEOPLE_PAYLOAD_FIELDS
+
+# Source-provenance payload indexes shared by both collections: people fields
+# are keyword (exact match), date fields are integer (range filters). Derived
+# from source_meta so the index list can't drift from the producer.
+_META_PAYLOAD_INDEXES: tuple[tuple[str, str], ...] = tuple(
+    [(f, "keyword") for f in PEOPLE_PAYLOAD_FIELDS]
+    + [(f, "integer") for f in DATE_PAYLOAD_FIELDS]
+)
 
 logger = logging.getLogger(__name__)
 
@@ -151,12 +160,14 @@ _CHUNK_PAYLOAD_INDEXES: tuple[tuple[str, str], ...] = (
     ("layout_has_equation", "bool"),
     ("layout_column_count", "integer"),
     ("layout_max_text_level", "integer"),
+    *_META_PAYLOAD_INDEXES,
 )
 _IMAGE_PAYLOAD_INDEXES: tuple[tuple[str, str], ...] = (
     ("page", "integer"),
     ("layout_kind", "keyword"),
     ("layout_has_image", "bool"),
     ("layout_has_table", "bool"),
+    *_META_PAYLOAD_INDEXES,
 )
 
 
@@ -297,6 +308,9 @@ class ImagePoint:
     allowed_users: list[int]
     # See ChunkPoint.layout_summary — same shape, looked up by image.page.
     layout_summary: dict | None = None
+    # Same ``meta_*`` source-provenance fields as ChunkPoint, so image search
+    # can prefilter by owner/date identically to chunk search.
+    meta_payload: dict | None = None
 
 
 # Max points per Qdrant upsert request. Qdrant rejects request bodies over
@@ -460,6 +474,8 @@ def _image_payload(p: ImagePoint, file_ids: list[int]) -> dict:
     }
     if p.layout_summary:
         payload.update(p.layout_summary)
+    if p.meta_payload:
+        payload.update(p.meta_payload)
     return payload
 
 

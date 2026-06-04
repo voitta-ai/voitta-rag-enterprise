@@ -501,6 +501,35 @@ single-user mode the filter is skipped entirely (`None`).
 > rests on the folder-id intersection above. (`search_chunks` / `search_images`
 > accept an optional `allowed_user_id`, but the REST endpoint doesn't pass it.)
 
+### Provenance prefilters (`meta_*`)
+
+Synced objects' provenance is captured at sync time and stored as flat,
+**indexed** `meta_*` payload fields on **both** collections, so search can
+prefilter/sort by owner or date. Captured from the source API (Drive `owners`/
+`lastModifyingUser`/`createdTime`/`modifiedTime`; SharePoint `createdBy`/
+`lastModifiedBy`/`createdDateTime`/`lastModifiedDateTime` + the library
+`drive.owner`), carried through `File.source_meta` (JSON), spread into the
+payload at index time (`indexing._build_meta_payload` → `source_meta.payload_fields`).
+
+| Field | Type · index | Source |
+|-------|------|--------|
+| `meta_owner_name` / `meta_owner_email` | keyword | responsible principal — Drive owner / SharePoint creator |
+| `meta_editor_name` / `meta_editor_email` | keyword | last modifier |
+| `meta_shared_by_name` / `meta_shared_by_email` | keyword | who shared the synced root — **downfilled to all descendants** (may be a group) |
+| `meta_created_ts` · `meta_modified_ts` · `meta_uploaded_ts` | integer (epoch s) | source created / modified / our ingest time (`File.added_at`) |
+
+Absent values are **omitted, not null** (compact; exact filters don't match
+empties). `meta_modified_ts` falls back to filesystem mtime for non-synced
+files; `meta_uploaded_ts` is always set. Dates are epoch **seconds** so Qdrant
+`Range(gte=…/lte=…)` filters work; the people fields are `keyword` for exact
+match. Payload indexes are declared in `vector_store._META_PAYLOAD_INDEXES` and
+created on collection init. Populated at **index time** — existing folders need
+a **reindex** to backfill.
+
+> Coverage today: binary Google Drive files + all SharePoint files. Native
+> Google-Docs exports (Docs/Sheets/Slides → markdown) don't yet carry `meta_*`
+> (their `RemoteEntry` is built in the workspace exporters) — a follow-up.
+
 ---
 
 ## 7. Admin settings: storage & propagation
@@ -841,6 +870,8 @@ erDiagram
         string state
         int pending_embeds
         int embed_round
+        string source_url
+        json source_meta
         string error
     }
     chunks {

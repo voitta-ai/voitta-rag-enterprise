@@ -346,11 +346,20 @@ class SharePointConnector(SyncConnector):
         site_id = site["id"]
         # Find the site's default document library.
         drive_resp = await msa.graph_get(
-            client, f"{GRAPH_BASE}/sites/{site_id}/drive", token
+            client, f"{GRAPH_BASE}/sites/{site_id}/drive?$select=id,owner", token
         )
         if drive_resp.status_code != 200:
             msa.raise_graph_error(drive_resp, f"drive lookup for site {site_id}")
-        drive_id = drive_resp.json()["id"]
+        drive_json = drive_resp.json()
+        drive_id = drive_json["id"]
+        # Library (drive) owner → downfilled as "shared by" onto every item in
+        # this site. Graph's owner can be a group OR a user; take whichever.
+        _own = drive_json.get("owner") or {}
+        _principal = _own.get("user") or _own.get("group") or {}
+        self._sp_shared_by = {
+            "name": _principal.get("displayName") or "",
+            "email": _principal.get("email") or "",
+        }
 
         # Phase 1 — drive items.
         drive_entries: list[_DriveItem] = []
@@ -407,14 +416,32 @@ class SharePointConnector(SyncConnector):
         self._mirror_delete(site_root, expected, stats)
 
         # Phase 4 — record this site's sources into the global sidecar.
+        from .. import source_meta as sm
+
+        shared = getattr(self, "_sp_shared_by", {}) or {}
         for di in drive_entries:
             key = f"sites/{site_dir_name}/{di.rel_path}"
-            sidecar_sources[key] = {
+            record = {
                 "source": "sharepoint",
                 "site_id": site_id,
                 "site": site.get("displayName") or "",
                 "url": di.web_url,
             }
+            # Source provenance → meta_* Qdrant payload. SharePoint has no
+            # per-item owner, so createdBy maps to the normalized "owner".
+            record.update(
+                sm.build(
+                    owner_name=di.created_by_name,
+                    owner_email=di.created_by_email,
+                    editor_name=di.modified_by_name,
+                    editor_email=di.modified_by_email,
+                    shared_by_name=shared.get("name"),
+                    shared_by_email=shared.get("email"),
+                    created=di.created_at,
+                    modified=di.modified_at,
+                )
+            )
+            sidecar_sources[key] = record
             if di.modified_at or di.created_at:
                 sidecar_times[key] = {
                     k: v
@@ -446,10 +473,14 @@ class SharePointConnector(SyncConnector):
         path: str,
         items: list[_DriveItem],
     ) -> None:
+        sel = (
+            "?$select=id,name,size,folder,file,webUrl,"
+            "createdDateTime,lastModifiedDateTime,createdBy,lastModifiedBy"
+        )
         if not path:
-            url: str | None = f"{GRAPH_BASE}/drives/{drive_id}/root/children"
+            url: str | None = f"{GRAPH_BASE}/drives/{drive_id}/root/children{sel}"
         else:
-            url = f"{GRAPH_BASE}/drives/{drive_id}/root:/{path}:/children"
+            url = f"{GRAPH_BASE}/drives/{drive_id}/root:/{path}:/children{sel}"
         while url:
             resp = await msa.graph_get(client, url, token)
             if resp.status_code != 200:
@@ -467,6 +498,8 @@ class SharePointConnector(SyncConnector):
                         items=items,
                     )
                 elif "file" in item:
+                    cb = (item.get("createdBy") or {}).get("user") or {}
+                    mb = (item.get("lastModifiedBy") or {}).get("user") or {}
                     items.append(
                         _DriveItem(
                             rel_path=item_path,
@@ -481,6 +514,10 @@ class SharePointConnector(SyncConnector):
                                 or ""
                             ),
                             item_id=item["id"],
+                            created_by_name=cb.get("displayName") or "",
+                            created_by_email=cb.get("email") or "",
+                            modified_by_name=mb.get("displayName") or "",
+                            modified_by_email=mb.get("email") or "",
                         )
                     )
             url = data.get("@odata.nextLink")
@@ -615,3 +652,9 @@ class _DriveItem:
     web_url: str
     sha256: str
     item_id: str
+    # Source provenance (Graph createdBy/lastModifiedBy .user). Empty when the
+    # actor wasn't a user (app/device) or Graph omitted it.
+    created_by_name: str = ""
+    created_by_email: str = ""
+    modified_by_name: str = ""
+    modified_by_email: str = ""

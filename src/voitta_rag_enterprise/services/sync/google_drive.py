@@ -917,6 +917,11 @@ class GoogleDriveConnector(SyncConnector):
                 unique = f"{base}-{n}"
                 n += 1
             used_dirs.add(unique)
+            # "Shared by" for this synced root → downfilled onto every item
+            # below. For a folder shared into this account (e.g. via a service
+            # account) ``sharingUser`` names who shared it; otherwise fall back
+            # to the folder's owner. Best-effort — never block the sync on it.
+            self._shared_by = self._fetch_shared_by(drive, folder_id)
             tick = _make_listing_tick(idx, display)
             tick()  # entering this folder — flips current_folder in the badge
             try:
@@ -1225,7 +1230,10 @@ class GoogleDriveConnector(SyncConnector):
                     q=f"'{folder_id}' in parents and trashed=false",
                     fields=(
                         "nextPageToken,"
-                        "files(id,name,mimeType,size,modifiedTime,md5Checksum,webViewLink)"
+                        "files(id,name,mimeType,size,modifiedTime,createdTime,"
+                        "md5Checksum,webViewLink,"
+                        "owners(displayName,emailAddress),"
+                        "lastModifyingUser(displayName,emailAddress))"
                     ),
                     pageSize=1000,
                     pageToken=page_token,
@@ -1357,6 +1365,7 @@ class GoogleDriveConnector(SyncConnector):
                 producer=_bin_producer,
                 fingerprint=item.get("md5Checksum") or item.get("modifiedTime", ""),
                 size_hint=size,
+                extra={"meta": self._drive_item_meta(item)},
             )
         )
 
@@ -1394,12 +1403,59 @@ class GoogleDriveConnector(SyncConnector):
                 return False
         return False
 
+    def _fetch_shared_by(self, drive: Any, folder_id: str) -> dict[str, str]:
+        """Resolve who shared the synced root folder → ``{name, email}`` or {}.
+
+        ``sharingUser`` when the folder was shared into this account; else the
+        folder's owner. Best-effort: any API hiccup yields {} (no shared_by).
+        """
+        try:
+            meta = drive.files().get(
+                fileId=folder_id,
+                fields="sharingUser(displayName,emailAddress),"
+                       "owners(displayName,emailAddress),ownedByMe",
+                supportsAllDrives=True,
+            ).execute()
+        except Exception:
+            return {}
+        u = meta.get("sharingUser")
+        if not u and not meta.get("ownedByMe"):
+            owners = meta.get("owners") or []
+            u = owners[0] if owners else None
+        if not u:
+            return {}
+        return {"name": u.get("displayName") or "", "email": u.get("emailAddress") or ""}
+
+    def _drive_item_meta(self, item: dict) -> dict:
+        """Build the source_meta dict for one Drive item (owner/editor/dates +
+        downfilled shared_by)."""
+        from .. import source_meta as sm
+
+        owners = item.get("owners") or []
+        owner = owners[0] if owners else {}
+        editor = item.get("lastModifyingUser") or {}
+        shared = getattr(self, "_shared_by", {}) or {}
+        return sm.build(
+            owner_name=owner.get("displayName"),
+            owner_email=owner.get("emailAddress"),
+            editor_name=editor.get("displayName"),
+            editor_email=editor.get("emailAddress"),
+            shared_by_name=shared.get("name"),
+            shared_by_email=shared.get("email"),
+            created=item.get("createdTime"),
+            modified=item.get("modifiedTime"),
+        )
+
     def _record_sidecar(
         self, sidecar: dict[str, dict[str, str]], entry: RemoteEntry
     ) -> None:
-        record: dict[str, str] = {"url": entry.url}
+        record: dict[str, Any] = {"url": entry.url}
         if entry.tab:
             record["tab"] = entry.tab
+        # Source provenance captured at listing time (see _drive_item_meta).
+        meta = entry.extra.get("meta") if entry.extra else None
+        if meta:
+            record.update(meta)
         sidecar[entry.rel_path] = record
 
 

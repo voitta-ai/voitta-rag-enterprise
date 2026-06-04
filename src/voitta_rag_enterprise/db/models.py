@@ -69,6 +69,11 @@ class File(Base):
     embed_round: Mapped[int] = mapped_column(default=0)
     source_url: Mapped[str | None] = mapped_column(default=None)
     tab: Mapped[str | None] = mapped_column(default=None)
+    # JSON blob of source-object provenance captured at sync time (owner /
+    # creator / last editor / who-shared-the-root + created/modified epochs).
+    # Spread into the Qdrant payload as flat ``meta_*`` fields at index time.
+    # NULL for non-synced files and rows synced before this was added.
+    source_meta: Mapped[str | None] = mapped_column(default=None)
     error: Mapped[str | None] = mapped_column(default=None)
 
 
