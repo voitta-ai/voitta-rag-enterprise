@@ -59,6 +59,9 @@ _COALESCE_KEYS: dict[str, str] = {
     "file.upserted": "file_id_from_payload",  # special-cased below
     "job.started": "job_id",
     "job.finished": "job_id",
+    # Transient per-job sub-progress ("parsing" / "embedding 800/1521").
+    # Coalesce by job_id so a 256-batch burst collapses to the latest tick.
+    "job.progress": "job_id",
     "folder.upserted": "folder_id_from_payload",
     # Per-folder stats snapshots: only the latest matters. A burst of
     # commits on one folder during heavy indexing collapses to one

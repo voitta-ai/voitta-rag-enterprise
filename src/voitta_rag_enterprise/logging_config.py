@@ -58,6 +58,17 @@ def bind_context(**fields: Any):
         _ctx.reset(token)
 
 
+def current_context_value(key: str) -> Any:
+    """Read one field from the active bound context (e.g. ``job_id``).
+
+    Lets code deep in the extract pipeline emit job-scoped progress without
+    threading the job id through every call — the worker binds ``job_id`` once
+    around the handler. Returns None when unset.
+    """
+    ctx = _ctx.get()
+    return ctx.get(key) if ctx else None
+
+
 _NOISY_THIRD_PARTY = (
     "mineru",
     "transformers",

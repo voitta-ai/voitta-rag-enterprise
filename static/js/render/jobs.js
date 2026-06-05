@@ -224,6 +224,29 @@ const KIND_LABEL = {
     reindex_folder: "Reindex folder",
 };
 
+// Friendly labels for the extract pipeline's internal _stage names that arrive
+// as job.progress.phase. Unmapped phases fall back to a prettified form, so a
+// new stage still shows something sensible without a code change here.
+const PHASE_LABEL = {
+    read_bytes:        "reading",
+    parse:             "parsing",
+    "cas_write_text":  "writing text",
+    "cas_write_images": "writing images",
+    page_render:       "rendering pages",
+    chunk:             "chunking",
+    commit_indexing:   "saving chunks",
+    embed_text:        "embedding text",
+    embed_image:       "embedding images",
+    "embed_text.dense": "embedding text",
+    "embed_text.upsert": "uploading vectors",
+    "embed_image.upsert": "uploading vectors",
+};
+
+function _prettyPhase(p) {
+    // Strip a "group." prefix and turn snake_case into spaced words.
+    return p.replace(/^[a-z]+\./, "").replace(/_/g, " ");
+}
+
 function updateJobRow(li, j) {
     const r = li._refs;
     let labelText = KIND_LABEL[j.kind] || j.kind;
@@ -244,6 +267,14 @@ function updateJobRow(li, j) {
                     : ` — ${prog.phase}`;
             }
         }
+    } else if (j.state === "running" && j.phase) {
+        // Live extract sub-progress (job.progress events): e.g.
+        // "Extract foo.pdf — embedding 800/1521". Keeps a big file from
+        // looking frozen while it parses / embeds / uploads.
+        const label = PHASE_LABEL[j.phase] || _prettyPhase(j.phase);
+        labelText += (j.phase_total)
+            ? ` — ${label} ${j.phase_done}/${j.phase_total}`
+            : ` — ${label}`;
     }
     setIfChanged(r.topLabel, "textContent", labelText);
     setIfChanged(r.topId, "textContent", `#${j.id}`);

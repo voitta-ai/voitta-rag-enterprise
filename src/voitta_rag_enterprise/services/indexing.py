@@ -35,6 +35,11 @@ logger = logging.getLogger(__name__)
 
 _ERROR_FIELD_MAX = 4000  # cap stored traceback so an error row stays scannable
 
+# Chunks per embed batch for per-batch progress emission. Sentence-transformers
+# batches internally anyway, so splitting the call site adds negligible
+# overhead but gives the Jobs panel a moving counter on large files.
+_EMBED_PROGRESS_BATCH = 256
+
 # Process-wide lock around the extract pipeline.
 #
 # Originally added because PyMuPDF / cairo / some Pillow decoders are not
@@ -58,9 +63,29 @@ _ERROR_FIELD_MAX = 4000  # cap stored traceback so an error row stays scannable
 _EXTRACT_LOCK = threading.Lock()
 
 
+def _publish_job_progress(phase: str, done: int | None = None, total: int | None = None) -> None:
+    """Emit a transient ``job.progress`` for the job bound on the current
+    context (the worker binds ``job_id`` around each handler), so the Jobs
+    panel can show what a long extract is doing right now. No-op outside a job
+    (e.g. REST-triggered reindex scans). Coalesced per job_id by the broker.
+    """
+    from ..logging_config import current_context_value
+
+    job_id = current_context_value("job_id")
+    if job_id is None:
+        return
+    event: dict = {"type": "job.progress", "job_id": job_id, "phase": phase}
+    if total is not None:
+        event["done"] = done
+        event["total"] = total
+    events.publish("jobs", event)
+
+
 @contextmanager
 def _stage(name: str, **extra):
-    """Log entry/exit + elapsed ms for a single indexing stage."""
+    """Log entry/exit + elapsed ms for a single indexing stage, and surface the
+    stage name as live job sub-progress (Jobs panel)."""
+    _publish_job_progress(name)
     start = time.perf_counter()
     if extra:
         logger.debug("stage %s start %s", name, extra)
@@ -1235,10 +1260,20 @@ def _embed_text_sync(file_id: int, round_token: int | None = None) -> None:
 
         if chunk_data:
             texts = [t for _, t, _, _, _, _ in chunk_data]
+            # Embed in batches and emit per-batch progress — a big spreadsheet
+            # (1000s of chunks) is otherwise a single multi-minute call that
+            # shows zero movement. Each batch acquires gpu_lock independently,
+            # which also lets search interleave between batches.
             with _stage("embed_text.dense", count=len(texts)):
-                denses = text_emb.embed_documents(texts)
-            with _stage("embed_text.sparse", count=len(texts)):
-                sparses = sparse_emb.embed_documents(texts)
+                denses, sparses = [], []
+                total = len(texts)
+                for i in range(0, total, _EMBED_PROGRESS_BATCH):
+                    batch = texts[i : i + _EMBED_PROGRESS_BATCH]
+                    denses.extend(text_emb.embed_documents(batch))
+                    sparses.extend(sparse_emb.embed_documents(batch))
+                    _publish_job_progress(
+                        "embed_text", min(i + _EMBED_PROGRESS_BATCH, total), total
+                    )
             points: list = []
             for (cid, text, idx, nearby, c_start, c_end), dense, sparse in zip(
                 chunk_data, denses, sparses, strict=True

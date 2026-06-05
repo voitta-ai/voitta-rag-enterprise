@@ -260,10 +260,20 @@ function handleEvent(event) {
             jobs.update((list) => [j, ...list.filter(x => x.id !== j.id)].slice(0, 50));
             return;
         }
+        case "job.progress": {
+            // Transient sub-progress for a running job (phase + optional
+            // done/total). Coalesced per job_id upstream. Cleared on finish.
+            jobs.update((list) => list.map(j =>
+                j.id === event.job_id
+                    ? { ...j, phase: event.phase, phase_done: event.done ?? null, phase_total: event.total ?? null }
+                    : j,
+            ));
+            return;
+        }
         case "job.finished": {
             jobs.update((list) => list.map(j =>
                 j.id === event.job_id
-                    ? { ...j, state: event.state, error: event.error || null, result: event.result || null }
+                    ? { ...j, state: event.state, error: event.error || null, result: event.result || null, phase: null, phase_done: null, phase_total: null }
                     : j,
             ));
             return;
