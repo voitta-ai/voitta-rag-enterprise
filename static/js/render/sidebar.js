@@ -231,18 +231,30 @@ function renderProvenance(s) {
     if (!p) { block.hidden = true; return; }
     block.hidden = false;
 
+    // Shared-by: hide the whole row when empty (a self-owned folder has no
+    // sharer — showing a bare "–" reads as broken).
     const sb = p.shared_by;
-    $("#kv-shared-by").textContent = sb ? _ownerLabel(sb) : "–";
+    const sbVal = sb ? _ownerLabel(sb) : "";
+    $("#kv-shared-by").textContent = sbVal;
+    $("#kv-shared-by").hidden = !sbVal;
+    $("#kv-shared-by-k").hidden = !sbVal;
+
     $("#kv-created").textContent = _fmtDate(p.created_min);
     $("#kv-modified").textContent = _fmtDate(p.modified_max);
-    $("#kv-owner-count").textContent = p.owner_count != null ? String(p.owner_count) : "–";
 
-    // Owners breakdown — only when there's more than one (a single owner is
-    // already implied by the count) or names add signal.
+    const owners = p.owners || [];
+    const ownerVal = $("#kv-owner-count");
     const tbl = $("#owners-table");
     const tbody = $("#owners-tbody");
-    const owners = p.owners || [];
-    if (owners.length > 1) {
+    if (owners.length === 1) {
+        // Single owner → show WHO inline (not a bare "1"), no table.
+        ownerVal.textContent = _ownerLabel(owners[0]);
+        ownerVal.title = _ownerLabel(owners[0]);
+        tbl.hidden = true;
+    } else if (owners.length > 1) {
+        // Multiple → show the count inline + a per-owner breakdown table.
+        ownerVal.textContent = `${owners.length} owners`;
+        ownerVal.title = "";
         tbody.innerHTML = "";
         for (const o of owners) {
             const tr = document.createElement("tr");
@@ -258,6 +270,7 @@ function renderProvenance(s) {
         }
         tbl.hidden = false;
     } else {
+        ownerVal.textContent = "–";
         tbl.hidden = true;
     }
 }
