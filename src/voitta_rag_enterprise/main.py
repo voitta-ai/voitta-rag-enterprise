@@ -148,150 +148,175 @@ def create_app() -> FastAPI:
         settings.data_dir.mkdir(parents=True, exist_ok=True)
         setup_logging(settings.data_dir / "logs")
         logger.info("Voitta RAG Enterprise starting (data_dir=%s)", settings.data_dir)
+        app.state.startup_status = {"phase": "init", "ready": False}
         init_db()
         events.install_loop(asyncio.get_running_loop())
         _seed_users()
         _seed_auth_providers()
         _startup_scan()
 
-        if not settings.disable_background:
-            from .services import job_queue
-            from .services.indexing import (
-                HANDLERS as INDEXING_HANDLERS,
-            )
-            from .services.indexing import reconcile_abandoned_extracts
-            from .services.watcher import (
-                from_settings_for_all_folders,
-                install_default,
-            )
-            from .services.worker import DEFAULT_HANDLERS, WorkerPool
+        app.state.startup_status = {"phase": "loading models", "ready": False}
 
-            requeued, killed = job_queue.reclaim_abandoned_jobs()
-            if requeued or killed:
-                logger.warning(
-                    "abandoned-jobs reconcile: requeued=%d killed=%d",
-                    requeued,
-                    killed,
-                )
-            # Bootstrap the folder-active tracker *after* the abandoned-job
-            # sweep so we don't count rows that are about to be flipped to
-            # 'error'. Subsequent enqueue/finish hooks maintain it incrementally.
-            from .services import folder_active
-
-            folder_active.init_from_db()
-            extracts_repaired = reconcile_abandoned_extracts()
-            if extracts_repaired:
-                logger.warning(
-                    "reset %d file(s) from extracted/embedding -> pending"
-                    " (extract job was abandoned)",
-                    extracts_repaired,
-                )
-
-            # Qdrant orphan-point sweep. Cleans points whose payload id
-            # no longer matches any SQLite row:
-            #   - Images: caused by the pre-fix _commit_indexing path
-            #     deleting Image DB rows but not their Qdrant points.
-            #   - Chunks: shouldn't accumulate (replace_chunks_for_file
-            #     is atomic), but we sweep anyway as defense-in-depth.
-            # Idempotent on subsequent runs.
+        async def _finish_startup() -> None:
+            # The heavy tail (Qdrant sweeps, model warmup, worker +
+            # scheduler start) runs AFTER the server starts serving, so the
+            # UI is reachable immediately and can show "starting up" instead
+            # of a dead page for minutes. The warmup->worker order inside is
+            # preserved (two CUDA contexts at once corrupts the heap).
             try:
-                from sqlalchemy import select as _select
-
-                from .db.database import session_scope as _ss
-                from .db.models import Chunk as _Chunk
-                from .db.models import Image as _Image
-                from .services.vector_store import (
-                    delete_orphan_chunk_points,
-                    delete_orphan_image_points,
+                from .services import job_queue
+                from .services.indexing import (
+                    HANDLERS as INDEXING_HANDLERS,
                 )
+                from .services.indexing import reconcile_abandoned_extracts
+                from .services.watcher import (
+                    from_settings_for_all_folders,
+                    install_default,
+                )
+                from .services.worker import DEFAULT_HANDLERS, WorkerPool
 
-                with _ss() as _s:
-                    known_image_ids = {
-                        iid for (iid,) in _s.execute(_select(_Image.id)).all()
-                    }
-                    known_chunk_ids = {
-                        cid for (cid,) in _s.execute(_select(_Chunk.id)).all()
-                    }
-                deleted_imgs = delete_orphan_image_points(known_image_ids)
-                if deleted_imgs:
+                requeued, killed = job_queue.reclaim_abandoned_jobs()
+                if requeued or killed:
                     logger.warning(
-                        "deleted %d orphan image point(s) from Qdrant "
-                        "(stale image_id payloads from a pre-fix re-extract)",
-                        deleted_imgs,
+                        "abandoned-jobs reconcile: requeued=%d killed=%d",
+                        requeued,
+                        killed,
                     )
-                deleted_chunks = delete_orphan_chunk_points(known_chunk_ids)
-                if deleted_chunks:
+                # Bootstrap the folder-active tracker *after* the abandoned-job
+                # sweep so we don't count rows that are about to be flipped to
+                # 'error'. Subsequent enqueue/finish hooks maintain it incrementally.
+                from .services import folder_active
+
+                folder_active.init_from_db()
+                extracts_repaired = reconcile_abandoned_extracts()
+                if extracts_repaired:
                     logger.warning(
-                        "deleted %d orphan chunk point(s) from Qdrant "
-                        "(stale chunk_id payloads)",
-                        deleted_chunks,
+                        "reset %d file(s) from extracted/embedding -> pending"
+                        " (extract job was abandoned)",
+                        extracts_repaired,
                     )
-            except Exception:  # pragma: no cover — never fail boot for this
-                logger.exception("orphan-point sweep failed at startup")
 
-            # Index health: warn if any folder has files marked indexed in
-            # SQLite but no chunk points in Qdrant (the Qdrant store was
-            # wiped or moved). The user has to Reindex to repopulate; we
-            # surface it on startup so they don't discover it via empty
-            # search results an hour later.
-            try:
-                from .db.database import session_scope as _ss
-                from .services.reconcile import log_startup_warnings
+                # Qdrant orphan-point sweep. Cleans points whose payload id
+                # no longer matches any SQLite row:
+                #   - Images: caused by the pre-fix _commit_indexing path
+                #     deleting Image DB rows but not their Qdrant points.
+                #   - Chunks: shouldn't accumulate (replace_chunks_for_file
+                #     is atomic), but we sweep anyway as defense-in-depth.
+                # Idempotent on subsequent runs.
+                try:
+                    from sqlalchemy import select as _select
 
-                with _ss() as _s:
-                    log_startup_warnings(_s)
-            except Exception:  # pragma: no cover — never fail boot for this
-                logger.exception("index-health check failed at startup")
+                    from .db.database import session_scope as _ss
+                    from .db.models import Chunk as _Chunk
+                    from .db.models import Image as _Image
+                    from .services.vector_store import (
+                        delete_orphan_chunk_points,
+                        delete_orphan_image_points,
+                    )
 
-            watcher = from_settings_for_all_folders()
-            watcher.start()
-            install_default(watcher)
-            handlers = {**DEFAULT_HANDLERS, **INDEXING_HANDLERS}
-            # Pre-warm the embedders before any worker can claim a job.
-            # Lazy-loading them on first use means the load (CUDA weight
-            # transfer) can run on a request thread while the worker is
-            # mid-MinerU on another thread — two CUDA contexts in flight,
-            # glibc detects heap corruption ("malloc_consolidate: unaligned
-            # fastbin chunk"). Pre-warming under gpu_lock at startup means
-            # all later calls take the fast path.
-            await _warmup_embedders(settings)
+                    with _ss() as _s:
+                        known_image_ids = {
+                            iid for (iid,) in _s.execute(_select(_Image.id)).all()
+                        }
+                        known_chunk_ids = {
+                            cid for (cid,) in _s.execute(_select(_Chunk.id)).all()
+                        }
+                    deleted_imgs = delete_orphan_image_points(known_image_ids)
+                    if deleted_imgs:
+                        logger.warning(
+                            "deleted %d orphan image point(s) from Qdrant "
+                            "(stale image_id payloads from a pre-fix re-extract)",
+                            deleted_imgs,
+                        )
+                    deleted_chunks = delete_orphan_chunk_points(known_chunk_ids)
+                    if deleted_chunks:
+                        logger.warning(
+                            "deleted %d orphan chunk point(s) from Qdrant "
+                            "(stale chunk_id payloads)",
+                            deleted_chunks,
+                        )
+                except Exception:  # pragma: no cover — never fail boot for this
+                    logger.exception("orphan-point sweep failed at startup")
 
-            n_workers = settings.resolved_workers()
-            logger.info(
-                "starting indexer pool with %d worker%s "
-                "(serial extract is the design — set VOITTA_WORKERS to override)",
-                n_workers,
-                "" if n_workers == 1 else "s",
-            )
-            workers = WorkerPool(size=n_workers, handlers=handlers)
-            await workers.start()
-            app.state.watcher = watcher
-            app.state.workers = workers
+                # Index health: warn if any folder has files marked indexed in
+                # SQLite but no chunk points in Qdrant (the Qdrant store was
+                # wiped or moved). The user has to Reindex to repopulate; we
+                # surface it on startup so they don't discover it via empty
+                # search results an hour later.
+                try:
+                    from .db.database import session_scope as _ss
+                    from .services.reconcile import log_startup_warnings
 
-            # Auto-sync scheduler: ticks once a minute, enqueues a sync
-            # job for any folder_sync_sources row whose auto_sync_hours
-            # interval has lapsed since last_synced_at. Same dedup key as
-            # the manual /sync/trigger endpoint, so a still-running sync
-            # is coalesced.
-            from .services import scheduler as auto_sync_scheduler
+                    with _ss() as _s:
+                        log_startup_warnings(_s)
+                except Exception:  # pragma: no cover — never fail boot for this
+                    logger.exception("index-health check failed at startup")
 
-            app.state.scheduler_task = asyncio.create_task(
-                auto_sync_scheduler.run_forever()
-            )
+                watcher = from_settings_for_all_folders()
+                watcher.start()
+                install_default(watcher)
+                handlers = {**DEFAULT_HANDLERS, **INDEXING_HANDLERS}
+                # Pre-warm the embedders before any worker can claim a job.
+                # Lazy-loading them on first use means the load (CUDA weight
+                # transfer) can run on a request thread while the worker is
+                # mid-MinerU on another thread — two CUDA contexts in flight,
+                # glibc detects heap corruption ("malloc_consolidate: unaligned
+                # fastbin chunk"). Pre-warming under gpu_lock at startup means
+                # all later calls take the fast path.
+                await _warmup_embedders(settings)
+
+                n_workers = settings.resolved_workers()
+                logger.info(
+                    "starting indexer pool with %d worker%s "
+                    "(serial extract is the design — set VOITTA_WORKERS to override)",
+                    n_workers,
+                    "" if n_workers == 1 else "s",
+                )
+                workers = WorkerPool(size=n_workers, handlers=handlers)
+                await workers.start()
+                app.state.watcher = watcher
+                app.state.workers = workers
+
+                # Auto-sync scheduler: ticks once a minute, enqueues a sync
+                # job for any folder_sync_sources row whose auto_sync_hours
+                # interval has lapsed since last_synced_at. Same dedup key as
+                # the manual /sync/trigger endpoint, so a still-running sync
+                # is coalesced.
+                from .services import scheduler as auto_sync_scheduler
+
+                app.state.scheduler_task = asyncio.create_task(
+                    auto_sync_scheduler.run_forever()
+                )
+                app.state.startup_status = {"phase": "ready", "ready": True}
+                logger.info("background startup complete — indexer ready")
+            except Exception:
+                logger.exception("background startup failed")
+                app.state.startup_status = {"phase": "error", "ready": False}
+
+        if settings.disable_background:
+            app.state.startup_status = {"phase": "ready", "ready": True}
+        else:
+            app.state.bg_startup_task = asyncio.create_task(_finish_startup())
 
         # Run the mounted MCP app's lifespan as well.
         async with mcp_app.router.lifespan_context(mcp_app):
             try:
                 yield
             finally:
+                import contextlib
+
+                # Background startup may still be warming up — stop it first so
+                # it doesn't start workers/watcher mid-teardown.
+                if getattr(app.state, "bg_startup_task", None) is not None:
+                    app.state.bg_startup_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await app.state.bg_startup_task
                 if hasattr(app.state, "scheduler_task"):
                     app.state.scheduler_task.cancel()
                     # Awaiting the cancelled task lets it run its own
                     # CancelledError handler; we swallow whatever bubbles
                     # out (CancelledError on success, anything else means
                     # the loop body raised right before cancel).
-                    import contextlib
-
                     with contextlib.suppress(asyncio.CancelledError, Exception):
                         await app.state.scheduler_task
                 if hasattr(app.state, "workers"):
@@ -325,6 +350,17 @@ def create_app() -> FastAPI:
     @app.get("/healthz", tags=["health"])
     async def healthz() -> dict[str, bool]:
         return {"ok": True}
+
+    @app.get("/api/health", tags=["health"])
+    async def api_health() -> dict:
+        """Startup readiness for the SPA. ``ready`` flips true once background
+        startup (model warmup + workers) finishes; ``phase`` is a human label
+        of the current step while starting. The SPA shows a 'starting up'
+        banner until ready."""
+        status = getattr(app.state, "startup_status", None) or {
+            "phase": "ready", "ready": True
+        }
+        return status
 
     app.include_router(api_router, prefix="/api")
     app.include_router(ws_router)

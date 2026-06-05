@@ -160,6 +160,25 @@ async function bootstrap() {
     seedGhostDirsFromFolders();
     hideBootOverlay();
     connect();
+    pollStartupReadiness();
+}
+
+// Poll /api/health until the backend's background startup (model warmup +
+// workers) is ready, showing a banner meanwhile so a multi-minute boot doesn't
+// look like a dead app. Stops once ready (or on error — don't nag forever).
+async function pollStartupReadiness() {
+    const banner = $("#startup-banner");
+    const text = $("#startup-banner-text");
+    if (!banner) return;
+    for (let i = 0; i < 600; i++) {  // ~20 min ceiling at 2s
+        let h;
+        try { h = await api.health(); } catch { h = null; }
+        if (!h || h.ready) { banner.hidden = true; return; }
+        text.textContent = `Starting up — ${h.phase || "loading"}…`;
+        banner.hidden = false;
+        await new Promise((r) => setTimeout(r, 2000));
+    }
+    banner.hidden = true;
 }
 
 // Lazily seed ghost dirs for every folder we haven't seen yet, re-running

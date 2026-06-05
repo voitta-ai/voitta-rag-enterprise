@@ -15,6 +15,13 @@
     <link rel="stylesheet" href="/static/css/07-preview.css">
 </head>
 <body>
+    <!-- Startup banner: shown while the backend is still warming up (loading
+         models / workers) so the app doesn't look dead. boot.js polls
+         /api/health and hides this once ready. -->
+    <div id="startup-banner" class="startup-banner" hidden>
+        <span class="spinner"></span>
+        <span id="startup-banner-text">Starting up — loading models…</span>
+    </div>
     <header class="app-header">
         <div class="header-content">
             <a href="/" class="logo">Voitta RAG Enterprise</a>
