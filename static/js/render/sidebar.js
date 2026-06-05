@@ -204,7 +204,10 @@ export function renderSidebar() {
     }
 
     renderExtTable(s);
-    renderProvenance(s);
+    // Provenance is rolled up client-side over the SELECTED subtree (not the
+    // whole folder) so clicking a subfolder shows that subtree's owners/dates.
+    // Each file carries its own `provenance`, same source the count cards use.
+    renderProvenance(_subtreeProvenance(subtreeFiles));
 
     $("#upload-target-hint").hidden = false;
     $("#upload-target").textContent = getSelectedRelDir() ? `/${getSelectedRelDir()}/` : "/";
@@ -225,9 +228,37 @@ function _ownerLabel(o) {
     return o.name || o.email || "(unknown)";
 }
 
-function renderProvenance(s) {
+// Aggregate per-file provenance across a set of files into the rollup the
+// Source panel renders: distinct owners (with file counts), shared-by, and the
+// created/modified range. Mirrors services/folder_stats._aggregate_provenance,
+// but scoped to the client-selected subtree. Returns null when no file has
+// provenance (non-synced / not-yet-synced).
+function _subtreeProvenance(files) {
+    const owners = new Map();
+    let sharedBy = null, createdMin = null, modifiedMax = null, any = false;
+    for (const f of files) {
+        const p = f.provenance;
+        if (!p) continue;
+        any = true;
+        const key = p.owner_email || p.owner_name;
+        if (key) {
+            const o = owners.get(key) || { name: p.owner_name || "", email: p.owner_email || "", count: 0 };
+            o.count++;
+            owners.set(key, o);
+        }
+        if (!sharedBy && (p.shared_by_email || p.shared_by_name)) {
+            sharedBy = { name: p.shared_by_name || "", email: p.shared_by_email || "" };
+        }
+        if (typeof p.created_ts === "number") createdMin = createdMin === null ? p.created_ts : Math.min(createdMin, p.created_ts);
+        if (typeof p.modified_ts === "number") modifiedMax = modifiedMax === null ? p.modified_ts : Math.max(modifiedMax, p.modified_ts);
+    }
+    if (!any) return null;
+    const top = [...owners.values()].sort((a, b) => b.count - a.count).slice(0, 6);
+    return { shared_by: sharedBy, owners: top, created_min: createdMin, modified_max: modifiedMax };
+}
+
+function renderProvenance(p) {
     const block = $("#provenance-block");
-    const p = s && s.provenance;
     if (!p) { block.hidden = true; return; }
     block.hidden = false;
 

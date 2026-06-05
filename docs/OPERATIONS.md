@@ -552,9 +552,10 @@ the Qdrant fields.
 after a sync — no reindex needed for these):
 - **File preview panel** — Owner · Modified by (only when ≠ owner) · Shared by ·
   Created · Modified · Indexed, via `file_event_payload`'s `provenance` field.
-- **Folder Details "Source"** — `folder_stats` aggregates `File.source_meta`
-  into a `provenance` block: shared-by, distinct owners with file counts, and
-  the created/modified date range.
+- **Folder Details "Source"** — the sidebar rolls up the per-file `provenance`
+  of the **selected subtree** (client-side, from the `files` store): shared-by,
+  distinct owners with file counts, and the created/modified date range. Scoped
+  to the clicked subfolder, like the count cards beside it.
 
 ---
 

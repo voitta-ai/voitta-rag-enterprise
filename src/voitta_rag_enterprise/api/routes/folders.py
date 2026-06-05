@@ -692,12 +692,6 @@ class FolderStats(BaseModel):
     bytes_total: int
     by_extension: dict[str, ExtensionStats]
     index_health: IndexHealth
-    # Source-object provenance rolled up across the folder (owner breakdown,
-    # shared-by, created/modified range). None for non-synced folders or those
-    # not yet reindexed with source_meta. Kept as a loose dict — it mirrors the
-    # WS folder.stats_changed payload, which ships the raw compute_folder_stats
-    # dict without a Pydantic round-trip.
-    provenance: dict | None = None
 
 
 @router.get("/{folder_id}/stats", response_model=FolderStats)

@@ -175,5 +175,4 @@ def test_stats_empty_folder(client: TestClient, tmp_path: Path) -> None:
         "images_unique": 0,
         "bytes_total": 0,
         "by_extension": {},
-        "provenance": None,
     }
