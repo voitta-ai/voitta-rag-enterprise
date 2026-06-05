@@ -296,8 +296,8 @@ flowchart LR
 > **`gc_cas` is reserved, not wired.** The worker registers a `gc_cas` kind but
 > it's a **no-op** and nothing enqueues it. CAS blobs *are* refcounted
 > (`cas_refs`; decref stamps `last_decref_at`), and `cas/gc.py:sweep()` exists
-> to reclaim long-zero blobs — but it has no callers and no scheduled job today,
-> so CAS is not actually garbage-collected at runtime.
+> to reclaim long-zero blobs — but it has no callers and no scheduled job,
+> so CAS is not garbage-collected at runtime.
 
 - **Dedup key** (e.g. `extract:42`) guarantees at most one in-flight job per
   resource. A duplicate enqueue returns the existing id and does **not** bump
@@ -501,39 +501,60 @@ single-user mode the filter is skipped entirely (`None`).
 > rests on the folder-id intersection above. (`search_chunks` / `search_images`
 > accept an optional `allowed_user_id`, but the REST endpoint doesn't pass it.)
 
-### Provenance prefilters (`meta_*`)
+### Source provenance (owner / dates) — `meta_*`
 
-Synced objects' provenance is captured at sync time and stored as flat,
-**indexed** `meta_*` payload fields on **both** collections, so search can
-prefilter/sort by owner or date. Captured from the source API (Drive `owners`/
-`lastModifyingUser`/`createdTime`/`modifiedTime`; SharePoint `createdBy`/
-`lastModifiedBy`/`createdDateTime`/`lastModifiedDateTime` + the library
-`drive.owner`), carried through `File.source_meta` (JSON), spread into the
-payload at index time (`indexing._build_meta_payload` → `source_meta.payload_fields`).
+Synced objects carry provenance the local file doesn't: who owns/created it,
+who last edited it, who shared the synced root, and the source created/modified
+timestamps. It's captured at sync time, stored on `File.source_meta` (JSON),
+and surfaced in three places: the file-preview panel, the folder Details
+rollup, and as **indexed, prefilterable** `meta_*` Qdrant payload fields on
+**both** collections.
 
-| Field | Type · index | Source |
+**Capture (per connector, normalized by `services/source_meta.build`):**
+
+| | Google Drive | SharePoint / OneNote |
+|---|---|---|
+| owner | `owners[0]` (true owner) | `createdBy.user` (creator) |
+| editor | `lastModifyingUser` | `lastModifiedBy.user` |
+| shared_by | root's `sharingUser` (else owner if not owned-by-me) | library `drive.owner` (**user or group**) |
+| created / modified | `createdTime` / `modifiedTime` | `createdDateTime` / `lastModifiedDateTime` |
+
+`shared_by` is **downfilled** to every descendant of the synced root (it's a
+property of the root, not the item). All synced file types are covered — Drive
+binaries **and** native exports (Docs/Sheets/Slides/Forms), SharePoint drive
+items, Pages, and OneNote (OneNote: dates only, no clean per-page author). The
+connector stamps each file's normalized meta into `.voitta_sources.json`;
+`scanner.scan_folder` loads it onto `File.source_meta` (and `run_sync` triggers
+that rescan so it lands without waiting for a restart).
+
+**Flat payload fields** (`indexing._build_meta_payload` →
+`source_meta.payload_fields`), all optional — **absent values are omitted, not
+null**:
+
+| Field | Type · index | Meaning |
 |-------|------|--------|
-| `meta_owner_name` / `meta_owner_email` | keyword | responsible principal — Drive owner / SharePoint creator |
+| `meta_owner_name` / `meta_owner_email` | keyword | responsible principal |
 | `meta_editor_name` / `meta_editor_email` | keyword | last modifier |
-| `meta_shared_by_name` / `meta_shared_by_email` | keyword | who shared the synced root — **downfilled to all descendants** (may be a group) |
+| `meta_shared_by_name` / `meta_shared_by_email` | keyword | sharer of the synced root (downfilled; may be a group) |
 | `meta_created_ts` · `meta_modified_ts` · `meta_uploaded_ts` | integer (epoch s) | source created / modified / our ingest time (`File.added_at`) |
 
-Absent values are **omitted, not null** (compact; exact filters don't match
-empties). `meta_modified_ts` falls back to filesystem mtime for non-synced
-files; `meta_uploaded_ts` is always set. Dates are epoch **seconds** so Qdrant
-`Range(gte=…/lte=…)` filters work; the people fields are `keyword` for exact
-match. Payload indexes are declared in `vector_store._META_PAYLOAD_INDEXES` and
-created on collection init. Populated at **index time** — existing folders need
-a **reindex** to backfill.
+Dates are epoch **seconds** so Qdrant `Range(gte=…/lte=…)` filters work; people
+fields are `keyword` for exact match. Indexes are declared in
+`vector_store._META_PAYLOAD_INDEXES` (derived from the `source_meta` field
+tuples) and created on collection init. `meta_modified_ts` falls back to
+filesystem mtime **only for non-synced files** (`source_url is None` — local
+uploads / NFS / GitHub), where it's the real modified time; synced files always
+use the source date (never the download time). The `meta_*` payload is
+populated at **index time**, so existing folders need a **reindex** to backfill
+the Qdrant fields.
 
-> Coverage today: binary Google Drive files + all SharePoint files. Native
-> Google-Docs exports (Docs/Sheets/Slides → markdown) don't yet carry `meta_*`
-> (their `RemoteEntry` is built in the workspace exporters) — a follow-up.
-
-The folder **Details pane** rolls this provenance up per folder: `folder_stats`
-aggregates `File.source_meta` into a `provenance` block (shared-by, distinct
-owners with file counts, and the created/modified date range) shown under a
-"Source" subheading.
+**Where it shows in the UI** (both read `File.source_meta`, so they populate
+after a sync — no reindex needed for these):
+- **File preview panel** — Owner · Modified by (only when ≠ owner) · Shared by ·
+  Created · Modified · Indexed, via `file_event_payload`'s `provenance` field.
+- **Folder Details "Source"** — `folder_stats` aggregates `File.source_meta`
+  into a `provenance` block: shared-by, distinct owners with file counts, and
+  the created/modified date range.
 
 ---
 
@@ -701,7 +722,8 @@ flowchart TB
 - **Login button:** `login.js` calls `GET /api/auth/config`, which returns
   `{google_enabled}` derived from whether the `.env` Google client id/secret
   are set. (Login currently reads `.env` directly, not the `auth_providers`
-  table — Microsoft/GitHub rows are stored but not yet wired to login.)
+  table — only `google_enabled` is exposed, so Microsoft/GitHub rows are
+  stored but not wired to login.)
 - **Sync picker:** `sync.js` calls `GET /api/admin/auth-providers` (readable by
   any signed-in user) and filters for `enabled` rows of the relevant provider.
   The matching rows populate the picker for **every** user; selecting one
@@ -956,7 +978,7 @@ cas/
 `cas_refs(cas_id, kind, refcount, last_decref_at)` tracks delete-readiness:
 decref stamps `last_decref_at` when refcount hits zero. `cas/gc.py:sweep()`
 would reclaim blobs that have been zero for a quiet period — but it's **not
-wired to a job or scheduler today** (see the `gc_cas` note in §3), so blobs
+wired to a job or scheduler** (see the `gc_cas` note in §3), so blobs
 accumulate rather than being swept at runtime.
 
 ---
