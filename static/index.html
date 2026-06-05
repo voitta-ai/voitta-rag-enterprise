@@ -407,6 +407,17 @@
                                 <span id="preview-filename" class="preview-filename"></span>
                                 <a id="preview-download" class="btn btn-secondary btn-sm preview-dl" download title="Download file">↓</a>
                             </div>
+                            <!-- Per-file source provenance (owner / dates /
+                                 shared-by). Rows hide individually when absent;
+                                 the whole block hides for files with none. -->
+                            <div id="preview-meta" class="preview-meta kv-grid" hidden>
+                                <span class="k" id="pm-owner-k">Owner</span><span class="v" id="pm-owner">–</span>
+                                <span class="k" id="pm-editor-k">Last editor</span><span class="v" id="pm-editor">–</span>
+                                <span class="k" id="pm-shared-k">Shared by</span><span class="v" id="pm-shared">–</span>
+                                <span class="k" id="pm-created-k">Created</span><span class="v" id="pm-created">–</span>
+                                <span class="k" id="pm-modified-k">Modified</span><span class="v" id="pm-modified">–</span>
+                                <span class="k" id="pm-uploaded-k">Indexed</span><span class="v" id="pm-uploaded">–</span>
+                            </div>
                             <div id="preview-body" class="preview-body"></div>
                         </div>
 

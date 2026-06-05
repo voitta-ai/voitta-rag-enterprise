@@ -41,6 +41,15 @@
     text-decoration: none;
 }
 
+/* Per-file provenance grid between the header and the preview body. */
+.preview-meta {
+    padding: 10px var(--md);
+    border-bottom: 1px solid var(--color-border-light);
+    flex-shrink: 0;
+    font-size: 12px;
+}
+.preview-meta .v { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 .preview-body {
     flex: 1;
     overflow-y: auto;

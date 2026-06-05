@@ -37,10 +37,15 @@ def test_file_event_payload_carries_image_count(env: None) -> None:
         f = File(folder_id=folder.id, rel_path="a.docx", state="indexed")
         s.add(f)
         s.flush()
+        f.source_meta = '{"owner_email": "roman@x.com", "created_ts": 1700000000}'
         s.add(Image(file_id=f.id, image_index=0, image_cas_id="deadbeef", anchor_chunk=0))
         s.add(Image(file_id=f.id, image_index=1, image_cas_id="cafef00d", anchor_chunk=0))
         s.flush()
-        assert file_event_payload(f)["image_count"] == 2
+        payload = file_event_payload(f)
+        assert payload["image_count"] == 2
+        # Per-file provenance + added_at flow to the SPA for the preview panel.
+        assert payload["provenance"] == {"owner_email": "roman@x.com", "created_ts": 1700000000}
+        assert payload["added_at"] > 0
 
 
 def _png(color: tuple[int, int, int] = (10, 20, 30), size: tuple[int, int] = (8, 8)) -> bytes:

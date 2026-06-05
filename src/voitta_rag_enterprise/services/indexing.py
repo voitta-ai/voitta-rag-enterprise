@@ -517,6 +517,18 @@ def file_event_payload(file: File, *, image_count: int | None = None) -> dict:
             if sess is not None
             else 0
         )
+    # Per-file source provenance (owner / editor / shared_by + created/modified
+    # epochs) so the file-preview panel can show it. Parsed from the
+    # File.source_meta JSON; None for non-synced files.
+    provenance: dict | None = None
+    if file.source_meta:
+        import json as _json
+
+        try:
+            provenance = _json.loads(file.source_meta)
+        except (ValueError, TypeError):
+            provenance = None
+
     return {
         "id": file.id,
         "folder_id": file.folder_id,
@@ -524,11 +536,13 @@ def file_event_payload(file: File, *, image_count: int | None = None) -> dict:
         "state": file.state,
         "size_bytes": file.size_bytes,
         "mtime_ns": file.mtime_ns,
+        "added_at": file.added_at,
         "last_indexed_at": file.last_indexed_at,
         "pending_embeds": file.pending_embeds,
         "source_url": file.source_url,
         "tab": file.tab,
         "image_count": image_count,
+        "provenance": provenance,
     }
 
 
