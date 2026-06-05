@@ -89,21 +89,21 @@ def _format_exception(prefix: str) -> str:
 def _build_meta_payload(
     *,
     source_meta: str | None,
+    source_url: str | None,
     added_at: int | None,
     mtime_ns: int | None,
-    folder_path: str | None,
-    rel_path: str,
 ) -> dict | None:
     """Assemble the flat ``meta_*`` payload for a file's chunk/image points.
 
-    Combines three sources, all optional:
-    - ``File.source_meta`` (JSON from a sync connector) → owner/editor/shared_by
-      + created/modified epochs, via ``source_meta.payload_fields``.
-    - ``added_at`` → ``meta_uploaded_ts`` (always present for indexed files).
-    - filesystem ``mtime`` → ``meta_modified_ts`` fallback when the source
-      didn't supply one (covers uploads / NFS / github).
-    - a legacy per-file ``.voitta.meta`` sidecar (``meta_sidecar``) is still
-      merged for any deployment that uses it; source_meta wins on key overlap.
+    Single source of truth: ``File.source_meta`` (JSON a connector captured) →
+    owner/editor/shared_by + created/modified epochs, via
+    ``source_meta.payload_fields``. ``added_at`` becomes ``meta_uploaded_ts``.
+
+    Filesystem ``mtime`` is used for ``meta_modified_ts`` **only for non-synced
+    files** (``source_url is None`` — local uploads / NFS / github), where it's
+    the real modified time. For synced files the source date is authoritative;
+    we never fall back to fs-mtime there because that's just the *download*
+    time, which would be wrong.
     """
     import json as _json
 
@@ -116,21 +116,14 @@ def _build_meta_payload(
         except (ValueError, TypeError):
             parsed = None
 
-    fs_modified = int(mtime_ns // 1_000_000_000) if isinstance(mtime_ns, int) else None
-    out = sm.payload_fields(
-        parsed, uploaded_ts=added_at, modified_fallback_ts=fs_modified
+    fs_modified = (
+        int(mtime_ns // 1_000_000_000)
+        if (source_url is None and isinstance(mtime_ns, int))
+        else None
     )
-
-    # Legacy .voitta.meta sidecar (owner/tags/etc.) — merge underneath so the
-    # connector-captured source_meta takes precedence on overlapping keys.
-    if folder_path:
-        from .meta_sidecar import load as load_meta_sidecar
-
-        legacy = load_meta_sidecar(Path(folder_path) / rel_path)
-        if legacy and legacy.payload_fields:
-            out = {**legacy.payload_fields, **out}
-
-    return out or None
+    return sm.payload_fields(
+        parsed, uploaded_ts=added_at, modified_fallback_ts=fs_modified
+    ) or None
 
 
 async def run_extract(payload: dict) -> None:
@@ -1224,18 +1217,15 @@ def _embed_text_sync(file_id: int, round_token: int | None = None) -> None:
             file_added_at = file.added_at
             file_mtime_ns = file.mtime_ns
             allowed_users = allowed_user_ids_for_file(s, file_id)
-            folder = s.get(Folder, folder_id)
-            folder_path = folder.path if folder else None
 
         char_to_page = _load_char_to_page(file_cas_id)
         layout_summaries = _load_layout_summaries(file_cas_id)
 
         meta_payload = _build_meta_payload(
             source_meta=file_source_meta,
+            source_url=source_url,
             added_at=file_added_at,
             mtime_ns=file_mtime_ns,
-            folder_path=folder_path,
-            rel_path=rel_path,
         )
 
         text_emb = get_text_embedder()
@@ -1332,20 +1322,18 @@ def _embed_image_sync(image_id: int, round_token: int | None = None) -> None:
             rel_path = file.rel_path
             file_cas_id = file.file_cas_id
             file_source_meta = file.source_meta
+            file_source_url = file.source_url
             file_added_at = file.added_at
             file_mtime_ns = file.mtime_ns
-            folder = s.get(Folder, folder_id)
-            folder_path = folder.path if folder else None
             allowed_users = allowed_user_ids_for_file(s, file_id)
 
         layout_summaries = _load_layout_summaries(file_cas_id)
         layout_summary = layout_summaries.get(page) if page is not None else None
         meta_payload = _build_meta_payload(
             source_meta=file_source_meta,
+            source_url=file_source_url,
             added_at=file_added_at,
             mtime_ns=file_mtime_ns,
-            folder_path=folder_path,
-            rel_path=rel_path,
         )
 
     with bind_context(image_id=image_id, file_id=file_id):

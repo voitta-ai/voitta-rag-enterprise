@@ -51,7 +51,8 @@ async def export_site_pages(
     base = "https://graph.microsoft.com/v1.0"
     pages_url: str | None = (
         f"{base}/sites/{site_id}/pages/microsoft.graph.sitePage"
-        "?$select=id,name,title,webUrl,lastModifiedDateTime"
+        "?$select=id,name,title,webUrl,createdDateTime,lastModifiedDateTime,"
+        "createdBy,lastModifiedBy"
     )
 
     entries: list[RemoteEntry] = []
@@ -129,11 +130,23 @@ async def _export_page(
         + "\n"
     )
     safe = safe_filename(name.removesuffix(".aspx"), "page")
+    cb = (page.get("createdBy") or {}).get("user") or {}
+    mb = (page.get("lastModifiedBy") or {}).get("user") or {}
     return RemoteEntry(
         rel_path=f"{base_rel}/{safe}.md",
         url=deep_link,
         fingerprint=fingerprint,
         payload=payload,
+        # Raw provenance; the connector normalizes it (+ adds shared_by) into
+        # source_meta. Same shape onenote/drive-items surface.
+        extra={"prov": {
+            "created": page.get("createdDateTime"),
+            "modified": page.get("lastModifiedDateTime"),
+            "created_by_name": cb.get("displayName"),
+            "created_by_email": cb.get("email"),
+            "modified_by_name": mb.get("displayName"),
+            "modified_by_email": mb.get("email"),
+        }},
     )
 
 

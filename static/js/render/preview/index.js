@@ -43,9 +43,13 @@ function _renderPreviewMeta(file) {
     // File.added_at as the "Indexed" (entered-our-system) date.
     const modifiedTs = p.modified_ts
         || (file.mtime_ns ? Math.floor(file.mtime_ns / 1e9) : 0);
+    const owner = _person(p.owner_name, p.owner_email);
+    const editor = _person(p.editor_name, p.editor_email);
     const rows = [
-        ["pm-owner", _person(p.owner_name, p.owner_email)],
-        ["pm-editor", _person(p.editor_name, p.editor_email)],
+        ["pm-owner", owner],
+        // "Modified by" only when the last editor differs from the owner —
+        // dropping the noisy duplicate (most files: owner edited it last).
+        ["pm-editor", editor && editor !== owner ? editor : ""],
         ["pm-shared", _person(p.shared_by_name, p.shared_by_email)],
         ["pm-created", _fmtDate(p.created_ts)],
         ["pm-modified", _fmtDate(modifiedTs)],

@@ -1012,7 +1012,13 @@ class GoogleDriveConnector(SyncConnector):
                     ),
                     access_token=access_token,
                 )
-                return rel_here, exporter.export(item, rel_here, ctx)
+                native_entries = exporter.export(item, rel_here, ctx)
+                # Same per-item provenance as binary files — stamped onto every
+                # entry the exporter produced (a multi-tab doc yields several).
+                meta = self._drive_item_meta(item)
+                for e in native_entries:
+                    e.extra["meta"] = meta
+                return rel_here, native_entries
 
             with ThreadPoolExecutor(
                 max_workers=4, thread_name_prefix="gd-native"
@@ -1274,6 +1280,11 @@ class GoogleDriveConnector(SyncConnector):
         mime = item["mimeType"]
         rel_here = f"{rel_prefix}/{name}" if rel_prefix else name
 
+        # Stamp the current synced-root's "shared by" onto the item now, while
+        # self._shared_by is correct for this folder. Native exports are
+        # materialized later in a cross-folder batch, so they read it from here.
+        item["_voitta_shared_by"] = getattr(self, "_shared_by", {}) or {}
+
         registry = get_default_registry()
         is_native_known = registry.find(mime) is not None
 
@@ -1428,13 +1439,20 @@ class GoogleDriveConnector(SyncConnector):
 
     def _drive_item_meta(self, item: dict) -> dict:
         """Build the source_meta dict for one Drive item (owner/editor/dates +
-        downfilled shared_by)."""
+        downfilled shared_by).
+
+        ``shared_by`` is read from the item itself (stamped at enumerate time in
+        ``_process_item``) rather than ``self._shared_by`` — native exports are
+        materialized in a deferred batch *after* all folders are enumerated, so
+        the live ``self._shared_by`` would be the last folder's value. Reading
+        the per-item stamp keeps multi-folder syncs correct.
+        """
         from .. import source_meta as sm
 
         owners = item.get("owners") or []
         owner = owners[0] if owners else {}
         editor = item.get("lastModifyingUser") or {}
-        shared = getattr(self, "_shared_by", {}) or {}
+        shared = item.get("_voitta_shared_by") or getattr(self, "_shared_by", {}) or {}
         return sm.build(
             owner_name=owner.get("displayName"),
             owner_email=owner.get("emailAddress"),

@@ -140,7 +140,8 @@ async def _export_section(
     base = "https://graph.microsoft.com/v1.0"
     self_link = section.get("self") or f"{base}/me/onenote/sections/{section['id']}"
     pages_url: str | None = (
-        f"{self_link}/pages?$select=id,title,lastModifiedDateTime,links,contentUrl"
+        f"{self_link}/pages?$select=id,title,createdDateTime,"
+        "lastModifiedDateTime,links,contentUrl"
         "&pagelevel=true&$top=100"
     )
 
@@ -217,6 +218,11 @@ async def _export_page(
         url=deep_link,
         fingerprint=fingerprint,
         payload=payload,
+        # OneNote exposes dates but no clean per-page author → dates only.
+        extra={"prov": {
+            "created": page.get("createdDateTime"),
+            "modified": page.get("lastModifiedDateTime"),
+        }},
     )
 
 

@@ -453,12 +453,29 @@ class SharePointConnector(SyncConnector):
                 }
         for entry in page_entries + note_entries:
             key = f"sites/{site_dir_name}/{entry.rel_path}"
-            sidecar_sources[key] = {
+            record = {
                 "source": "sharepoint",
                 "site_id": site_id,
                 "site": site.get("displayName") or "",
                 "url": entry.url,
             }
+            # Pages/OneNote surface raw provenance on entry.extra["prov"];
+            # normalize it the same way as drive items (+ downfilled shared_by).
+            prov = (entry.extra or {}).get("prov") or {}
+            if prov:
+                record.update(
+                    sm.build(
+                        owner_name=prov.get("created_by_name"),
+                        owner_email=prov.get("created_by_email"),
+                        editor_name=prov.get("modified_by_name"),
+                        editor_email=prov.get("modified_by_email"),
+                        shared_by_name=shared.get("name"),
+                        shared_by_email=shared.get("email"),
+                        created=prov.get("created"),
+                        modified=prov.get("modified"),
+                    )
+                )
+            sidecar_sources[key] = record
 
     # ------------------------------------------------------------------
     # Drive listing + download

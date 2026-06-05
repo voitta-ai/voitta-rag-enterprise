@@ -459,7 +459,10 @@ async def test_multi_tab_doc_writes_one_md_per_tab(
                 "name": "Specs",
                 "mimeType": NATIVE_DOC,
                 "modifiedTime": "2026-01-02T00:00:00Z",
+                "createdTime": "2026-01-01T00:00:00Z",
                 "webViewLink": "https://docs.google.com/document/d/doc1/edit",
+                "owners": [{"displayName": "Roman", "emailAddress": "roman@x.com"}],
+                "lastModifyingUser": {"displayName": "Roman", "emailAddress": "roman@x.com"},
             }
         ]
     }
@@ -531,6 +534,12 @@ async def test_multi_tab_doc_writes_one_md_per_tab(
     # URL deep-links into the right tab.
     assert "tab=t.intro" in sidecar["Root/Specs/01-Intro.md"]["url"]
     assert "tab=t.api" in sidecar["Root/Specs/02-API.md"]["url"]
+    # Native exports now carry source provenance too (was a gap — only binary
+    # files used to). Both tab files inherit the parent doc's owner + dates.
+    for rel in ("Root/Specs/01-Intro.md", "Root/Specs/02-API.md"):
+        assert sidecar[rel]["owner_email"] == "roman@x.com"
+        assert sidecar[rel]["created_ts"] == 1767225600   # 2026-01-01Z
+        assert sidecar[rel]["modified_ts"] == 1767312000   # 2026-01-02Z
 
 
 @pytest.mark.asyncio
