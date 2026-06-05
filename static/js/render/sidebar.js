@@ -20,6 +20,10 @@ import { files, folders, folderStats, reindexProgress, syncProgress } from "../s
 const $ = (sel) => document.querySelector(sel);
 
 export function renderSidebar() {
+    // Meta tab is selection-aware and self-contained — render it up front so it
+    // stays correct through every early return below (file vs folder vs none).
+    renderMeta();
+
     const fileId = getSelectedFileId();
     if (fileId !== null) {
         renderFilePreview(fileId, getSelectedArtifact() ?? {});
@@ -204,10 +208,6 @@ export function renderSidebar() {
     }
 
     renderExtTable(s);
-    // Provenance is rolled up client-side over the SELECTED subtree (not the
-    // whole folder) so clicking a subfolder shows that subtree's owners/dates.
-    // Each file carries its own `provenance`, same source the count cards use.
-    renderProvenance(_subtreeProvenance(subtreeFiles));
 
     $("#upload-target-hint").hidden = false;
     $("#upload-target").textContent = getSelectedRelDir() ? `/${getSelectedRelDir()}/` : "/";
@@ -216,16 +216,93 @@ export function renderSidebar() {
 // ----- Source provenance (owner / shared-by / date range) -----
 
 function _fmtDate(epoch_s) {
-    if (!epoch_s) return "–";
+    if (!epoch_s) return "";
     try {
         return new Date(epoch_s * 1000).toLocaleDateString(undefined,
             { year: "numeric", month: "short", day: "numeric" });
-    } catch { return "–"; }
+    } catch { return ""; }
 }
 
 function _ownerLabel(o) {
     if (o.name && o.email) return `${o.name} <${o.email}>`;
     return o.name || o.email || "(unknown)";
+}
+
+function _person(name, email) {
+    if (name && email) return `${name} <${email}>`;
+    return name || email || "";
+}
+
+// The Meta tab — ownership & temporal metadata, selection-aware. A file shows
+// its own provenance; a folder/subtree shows the rollup; nothing selected (or
+// no metadata) shows a hint. Single entry point for all "who/when" rendering.
+export function renderMeta() {
+    const fileEl = $("#meta-file");
+    const folderEl = $("#provenance-block");
+    const folderNone = $("#meta-folder-none");
+    const empty = $("#meta-empty");
+
+    const fileId = getSelectedFileId();
+    if (fileId !== null) {
+        const file = files.get().find((f) => f.id === fileId);
+        folderEl.hidden = true;
+        folderNone.hidden = true;
+        empty.hidden = true;
+        fileEl.hidden = false;
+        _renderFileMeta(file || {});
+        return;
+    }
+
+    fileEl.hidden = true;
+    const folder = folders.get().find((f) => f.id === getSelectedFolderId());
+    if (!folder) {
+        folderEl.hidden = true;
+        folderNone.hidden = true;
+        empty.hidden = false;
+        return;
+    }
+    empty.hidden = true;
+
+    // Roll up the selected subtree's per-file provenance (same source + scoping
+    // as the Details count cards).
+    const relDir = getSelectedRelDir();
+    const subtree = files.get().filter(
+        (f) => f.folder_id === folder.id && f.state !== "deleted"
+            && (!relDir || f.rel_path.startsWith(`${relDir}/`)),
+    );
+    const prov = _subtreeProvenance(subtree);
+    renderProvenance(prov);
+    folderNone.hidden = !!prov;
+}
+
+function _renderFileMeta(file) {
+    $("#meta-file-name").textContent = (file.rel_path || "").split("/").pop() || "";
+    const p = file.provenance || {};
+    // Source modified, else filesystem mtime; added_at is our ingest date.
+    const modifiedTs = p.modified_ts
+        || (file.mtime_ns ? Math.floor(file.mtime_ns / 1e9) : 0);
+    const owner = _person(p.owner_name, p.owner_email);
+    const editor = _person(p.editor_name, p.editor_email);
+    const rows = [
+        ["pm-owner", owner],
+        // "Modified by" only when it differs from the owner (drop the dupe).
+        ["pm-editor", editor && editor !== owner ? editor : ""],
+        ["pm-shared", _person(p.shared_by_name, p.shared_by_email)],
+        ["pm-created", _fmtDate(p.created_ts)],
+        ["pm-modified", _fmtDate(modifiedTs)],
+        ["pm-uploaded", _fmtDate(file.added_at)],
+    ];
+    let any = false;
+    for (const [id, val] of rows) {
+        const v = $(`#${id}`), k = $(`#${id}-k`);
+        const show = !!val;
+        v.textContent = val || "–";
+        v.title = val || "";
+        v.hidden = !show;
+        if (k) k.hidden = !show;
+        if (show) any = true;
+    }
+    $("#meta-file-none").hidden = any;
 }
 
 // Aggregate per-file provenance across a set of files into the rollup the
@@ -270,8 +347,8 @@ function renderProvenance(p) {
     $("#kv-shared-by").hidden = !sbVal;
     $("#kv-shared-by-k").hidden = !sbVal;
 
-    $("#kv-created").textContent = _fmtDate(p.created_min);
-    $("#kv-modified").textContent = _fmtDate(p.modified_max);
+    $("#kv-created").textContent = _fmtDate(p.created_min) || "–";
+    $("#kv-modified").textContent = _fmtDate(p.modified_max) || "–";
 
     const owners = p.owners || [];
     const ownerVal = $("#kv-owner-count");

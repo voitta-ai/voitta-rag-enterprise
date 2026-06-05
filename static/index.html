@@ -386,6 +386,10 @@
                             class="sidebar-tab active"
                             role="tab" aria-selected="true"
                             aria-controls="tab-pane-details">Details</button>
+                        <button type="button" id="tab-btn-meta"
+                            class="sidebar-tab"
+                            role="tab" aria-selected="false"
+                            aria-controls="tab-pane-meta">Meta</button>
                         <button type="button" id="tab-btn-jobs"
                             class="sidebar-tab"
                             role="tab" aria-selected="false"
@@ -406,17 +410,6 @@
                             <div class="preview-header">
                                 <span id="preview-filename" class="preview-filename"></span>
                                 <a id="preview-download" class="btn btn-secondary btn-sm preview-dl" download title="Download file">↓</a>
-                            </div>
-                            <!-- Per-file source provenance (owner / dates /
-                                 shared-by). Rows hide individually when absent;
-                                 the whole block hides for files with none. -->
-                            <div id="preview-meta" class="preview-meta kv-grid" hidden>
-                                <span class="k" id="pm-owner-k">Owner</span><span class="v" id="pm-owner">–</span>
-                                <span class="k" id="pm-editor-k">Modified by</span><span class="v" id="pm-editor">–</span>
-                                <span class="k" id="pm-shared-k">Shared by</span><span class="v" id="pm-shared">–</span>
-                                <span class="k" id="pm-created-k">Created</span><span class="v" id="pm-created">–</span>
-                                <span class="k" id="pm-modified-k">Modified</span><span class="v" id="pm-modified">–</span>
-                                <span class="k" id="pm-uploaded-k">Indexed</span><span class="v" id="pm-uploaded">–</span>
                             </div>
                             <div id="preview-body" class="preview-body"></div>
                         </div>
@@ -453,28 +446,55 @@
                                 <tbody id="ext-tbody"></tbody>
                             </table>
 
-                            <!-- Source provenance captured at sync time
-                                 (owner / shared-by / date range). Hidden until
-                                 a synced + (re)indexed folder is selected. -->
-                            <div id="provenance-block" hidden>
-                                <h4 class="sidebar-subhead">Source</h4>
-                                <div class="kv-grid">
-                                    <span class="k" id="kv-shared-by-k">Shared by</span><span class="v" id="kv-shared-by">–</span>
-                                    <span class="k">Owner</span><span class="v" id="kv-owner-count">–</span>
-                                    <span class="k">Created</span><span class="v" id="kv-created">–</span>
-                                    <span class="k">Modified</span><span class="v" id="kv-modified">–</span>
-                                </div>
-                                <table class="stats-table" id="owners-table" hidden>
-                                    <thead>
-                                        <tr><th>Owner</th><th class="num">Files</th></tr>
-                                    </thead>
-                                    <tbody id="owners-tbody"></tbody>
-                                </table>
-                            </div>
-
                             <p id="upload-target-hint" class="hint" hidden>
                                 Uploads go to <code id="upload-target">/</code>
                             </p>
+                        </div>
+                    </div>
+
+                    <!-- Tab: Meta — ownership & temporal metadata, selection-aware:
+                         a file shows its own provenance; a folder/subtree shows
+                         the rollup. Both render from the per-file `provenance`
+                         carried on the files store. -->
+                    <div id="tab-pane-meta" class="sidebar-tab-pane" role="tabpanel"
+                         aria-labelledby="tab-btn-meta" hidden>
+                        <div class="sidebar-section" id="meta-empty">
+                            <p class="hint-large">Select a folder or file to see ownership &amp; dates.</p>
+                        </div>
+
+                        <!-- Per-file provenance (file selected). Rows hide
+                             individually when absent. -->
+                        <div class="sidebar-section" id="meta-file" hidden>
+                            <h3 id="meta-file-name" class="meta-file-name"></h3>
+                            <div class="kv-grid">
+                                <span class="k" id="pm-owner-k">Owner</span><span class="v" id="pm-owner">–</span>
+                                <span class="k" id="pm-editor-k">Modified by</span><span class="v" id="pm-editor">–</span>
+                                <span class="k" id="pm-shared-k">Shared by</span><span class="v" id="pm-shared">–</span>
+                                <span class="k" id="pm-created-k">Created</span><span class="v" id="pm-created">–</span>
+                                <span class="k" id="pm-modified-k">Modified</span><span class="v" id="pm-modified">–</span>
+                                <span class="k" id="pm-uploaded-k">Indexed</span><span class="v" id="pm-uploaded">–</span>
+                            </div>
+                            <p id="meta-file-none" class="hint" hidden>No source metadata for this file.</p>
+                        </div>
+
+                        <!-- Subtree rollup (folder selected). -->
+                        <div class="sidebar-section" id="provenance-block" hidden>
+                            <h4 class="sidebar-subhead">Source</h4>
+                            <div class="kv-grid">
+                                <span class="k" id="kv-shared-by-k">Shared by</span><span class="v" id="kv-shared-by">–</span>
+                                <span class="k">Owner</span><span class="v" id="kv-owner-count">–</span>
+                                <span class="k">Created</span><span class="v" id="kv-created">–</span>
+                                <span class="k">Modified</span><span class="v" id="kv-modified">–</span>
+                            </div>
+                            <table class="stats-table" id="owners-table" hidden>
+                                <thead>
+                                    <tr><th>Owner</th><th class="num">Files</th></tr>
+                                </thead>
+                                <tbody id="owners-tbody"></tbody>
+                            </table>
+                        </div>
+                        <div class="sidebar-section" id="meta-folder-none" hidden>
+                            <p class="hint">No source metadata. Sync a Google Drive / SharePoint folder to capture owner &amp; dates.</p>
                         </div>
                     </div>
 

@@ -548,14 +548,18 @@ use the source date (never the download time). The `meta_*` payload is
 populated at **index time**, so existing folders need a **reindex** to backfill
 the Qdrant fields.
 
-**Where it shows in the UI** (both read `File.source_meta`, so they populate
-after a sync — no reindex needed for these):
-- **File preview panel** — Owner · Modified by (only when ≠ owner) · Shared by ·
-  Created · Modified · Indexed, via `file_event_payload`'s `provenance` field.
-- **Folder Details "Source"** — the sidebar rolls up the per-file `provenance`
-  of the **selected subtree** (client-side, from the `files` store): shared-by,
-  distinct owners with file counts, and the created/modified date range. Scoped
-  to the clicked subfolder, like the count cards beside it.
+**Where it shows in the UI** — the sidebar's **Meta** tab (one of Details /
+Meta / Jobs) is the single home for all "who/when", rendered selection-aware by
+`sidebar.renderMeta` from the per-file `provenance` on the `files` store (so it
+populates after a sync — no reindex needed):
+- **file selected** → that file's Owner · Modified by (only when ≠ owner) ·
+  Shared by · Created · Modified · Indexed.
+- **folder/subtree selected** → a rollup of the **selected subtree's** files
+  (client-side, scoped like the Details count cards): shared-by, distinct
+  owners with file counts, and the created/modified range.
+
+(The Details tab is purely counts/stats; the file preview is purely
+name + download + body. Provenance lives only on the Meta tab.)
 
 ---
 

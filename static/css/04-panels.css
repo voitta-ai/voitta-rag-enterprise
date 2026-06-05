@@ -161,6 +161,11 @@
     margin: var(--md) 0 var(--sm);
 }
 #provenance-block .v { overflow: hidden; text-overflow: ellipsis; }
+.meta-file-name {
+    font-size: 13px; font-weight: 600; margin: 0 0 var(--md);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#meta-file .v { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #owners-table .ext { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Sidebar tab strip — Details vs Jobs. Two equal-width buttons; the

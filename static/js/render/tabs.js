@@ -11,24 +11,23 @@ import { jobs } from "../store.js";
 
 const $ = (sel) => document.querySelector(sel);
 
-let activeSidebarTab = "details"; // "details" | "jobs"
+const SIDEBAR_TABS = ["details", "meta", "jobs"];
+let activeSidebarTab = "details";
 
 export function setSidebarTab(name) {
-    if (name !== "details" && name !== "jobs") name = "details";
+    if (!SIDEBAR_TABS.includes(name)) name = "details";
     if (activeSidebarTab === name) return;
     activeSidebarTab = name;
-
-    const detailsBtn = $("#tab-btn-details");
-    const jobsBtn = $("#tab-btn-jobs");
-    const detailsPane = $("#tab-pane-details");
-    const jobsPane = $("#tab-pane-jobs");
-
-    detailsBtn.classList.toggle("active", name === "details");
-    jobsBtn.classList.toggle("active", name === "jobs");
-    detailsBtn.setAttribute("aria-selected", String(name === "details"));
-    jobsBtn.setAttribute("aria-selected", String(name === "jobs"));
-    detailsPane.hidden = name !== "details";
-    jobsPane.hidden = name !== "jobs";
+    for (const t of SIDEBAR_TABS) {
+        const active = t === name;
+        const btn = $(`#tab-btn-${t}`);
+        const pane = $(`#tab-pane-${t}`);
+        if (btn) {
+            btn.classList.toggle("active", active);
+            btn.setAttribute("aria-selected", String(active));
+        }
+        if (pane) pane.hidden = !active;
+    }
 }
 
 // Tiny activity indicator on the Jobs tab so the user notices when work
@@ -56,5 +55,6 @@ export function updateJobsTabIndicator() {
 // level because the modal HTML is in the document by the time any
 // module runs (we're imported from main, which is loaded as the page's
 // entry point after parsing).
-$("#tab-btn-details").addEventListener("click", () => setSidebarTab("details"));
-$("#tab-btn-jobs").addEventListener("click", () => setSidebarTab("jobs"));
+for (const t of SIDEBAR_TABS) {
+    $(`#tab-btn-${t}`).addEventListener("click", () => setSidebarTab(t));
+}
