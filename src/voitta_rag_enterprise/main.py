@@ -155,7 +155,10 @@ def create_app() -> FastAPI:
         _seed_auth_providers()
         _startup_scan()
 
-        app.state.startup_status = {"phase": "loading models", "ready": False}
+        app.state.startup_status = {"phase": "starting", "ready": False}
+
+        def _set_phase(phase: str) -> None:
+            app.state.startup_status = {"phase": phase, "ready": False}
 
         async def _finish_startup() -> None:
             # The heavy tail (Qdrant sweeps, model warmup, worker +
@@ -175,6 +178,7 @@ def create_app() -> FastAPI:
                 )
                 from .services.worker import DEFAULT_HANDLERS, WorkerPool
 
+                _set_phase("reconciling jobs")
                 requeued, killed = job_queue.reclaim_abandoned_jobs()
                 if requeued or killed:
                     logger.warning(
@@ -203,6 +207,7 @@ def create_app() -> FastAPI:
                 #   - Chunks: shouldn't accumulate (replace_chunks_for_file
                 #     is atomic), but we sweep anyway as defense-in-depth.
                 # Idempotent on subsequent runs.
+                _set_phase("sweeping orphan vectors")
                 try:
                     from sqlalchemy import select as _select
 
@@ -243,6 +248,7 @@ def create_app() -> FastAPI:
                 # wiped or moved). The user has to Reindex to repopulate; we
                 # surface it on startup so they don't discover it via empty
                 # search results an hour later.
+                _set_phase("checking index health")
                 try:
                     from .db.database import session_scope as _ss
                     from .services.reconcile import log_startup_warnings
@@ -263,6 +269,7 @@ def create_app() -> FastAPI:
                 # glibc detects heap corruption ("malloc_consolidate: unaligned
                 # fastbin chunk"). Pre-warming under gpu_lock at startup means
                 # all later calls take the fast path.
+                _set_phase("loading models")
                 await _warmup_embedders(settings)
 
                 n_workers = settings.resolved_workers()

@@ -432,6 +432,7 @@ flowchart TB
 | `files` | `file.upserted` (carries `folder_id`) | folder · `file.id` |
 | `files` | `file.deleted` (enriched with `folder_id`) | folder · discrete |
 | `jobs` | `job.started`, `job.finished` (enriched with `folder_id`) | folder · `job_id` |
+| `jobs` | `job.progress` (transient sub-progress: `phase` + optional `done`/`total`) | folder · `job_id` |
 | `folders` | `folder.upserted`, `folder.stats_changed`, `folder.sync_source_changed`, `folder.active_changed` | folder · `folder_id` |
 | `folders` | `folder.added`, `folder.removed`, `folder.sync_progress`, `folder.reindex_progress`, `folder.sync_config_changed`, `folder.gd_connected`, `folder.ms_connected` | folder · discrete |
 | `admin` | `admin.snapshot` (full admin-console state: allowlist, users+groups, auth-providers, caps, settings) | admin-only · discrete |
@@ -1035,6 +1036,24 @@ REST-thread/worker-thread reindex race.
 > **TL;DR — where the logs are:** `~/.voitta-rag-enterprise/logs/`. The
 > per-job detail stream is `indexing.log`. Watch a sync/extract live with
 > `tail -f ~/.voitta-rag-enterprise/logs/indexing.log`.
+
+### Live progress surfaces (so long steps don't look frozen)
+
+- **Startup readiness** — model warmup, Qdrant orphan sweeps, and index-health
+  run in a **background task after the server starts serving** (so the UI is
+  reachable immediately). `GET /api/health` returns `{phase, ready}`; the SPA
+  shows a top "Starting up — <phase>…" banner until `ready`, where phase walks
+  `reconciling jobs → sweeping orphan vectors → checking index health →
+  loading models → ready`. The warmup→worker-start order is preserved inside
+  the task (concurrent CUDA contexts corrupt the heap).
+- **Per-job sub-progress** — `_stage()` emits a transient `job.progress`
+  (`phase` + optional `done`/`total`) for the job bound on the worker context;
+  the embed long-pole ticks per 256-chunk batch. The Jobs panel shows it inline
+  ("Extract foo.pdf — embedding text 800/1521"). Ephemeral (not persisted); a
+  reconnect shows "running" until the next tick.
+- **Not surfaced:** `gc_cas` is unwired (no scheduler enqueues it; the handler
+  is a no-op), so there's nothing to show — CAS isn't garbage-collected at
+  runtime (see §3).
 
 Application logging is **file-only by design** — `logging_config.setup_logging`
 ([logging_config.py](../src/voitta_rag_enterprise/logging_config.py)) installs
