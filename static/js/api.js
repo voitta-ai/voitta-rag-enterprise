@@ -169,6 +169,14 @@ export const api = {
     nfsStatus: () => req("GET", "/api/sync/nfs/status"),
     nfsBrowse: (rel = "") =>
         req("GET", `/api/sync/nfs/browse?rel=${encodeURIComponent(rel || "")}`),
+    // rclone — capability probe, paste-parse, Google UI-Connect, folder picker.
+    rcloneStatus: () => req("GET", "/api/sync/rclone/status"),
+    rcloneParse: (folderId, body) =>
+        req("POST", `/api/folders/${folderId}/sync/rclone/parse`, body),
+    rcloneAuthInit: (folderId, body = {}) =>
+        req("POST", `/api/folders/${folderId}/sync/rclone/auth`, body),
+    rcloneFolders: (folderId, parent = "") =>
+        req("GET", `/api/folders/${folderId}/sync/rclone/folders?parent=${encodeURIComponent(parent || "")}`),
     msAuthInit: (folderId) =>
         req("POST", `/api/folders/${folderId}/sync/microsoft/auth`),
     msListSites: (folderId) =>

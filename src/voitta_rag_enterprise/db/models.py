@@ -231,6 +231,31 @@ class FolderSyncSource(Base):
     tm_user_mode: Mapped[str | None] = mapped_column(default=None)
     tm_user_id: Mapped[str | None] = mapped_column(default=None)
     tm_include_attended: Mapped[bool] = mapped_column(default=True)
+    # rclone — a thin connector that shells out to the ``rclone`` binary to
+    # mirror a cloud remote (Google Drive, OneDrive/SharePoint, …) into the
+    # folder root. The appeal over the native Drive/SharePoint connectors:
+    # rclone ships its own built-in public OAuth client, so a user can connect
+    # without an admin registering an app in GCP / Azure. Auth is one of two
+    # shapes, both reduced to the same stored ``rc_token`` blob:
+    #   * UI Connect — server-side browser OAuth using rclone's built-in
+    #     client; the callback formats the result into rclone's token JSON.
+    #   * Paste — the user runs ``rclone authorize "<backend>"`` on their own
+    #     laptop and pastes the resulting token JSON (or a full remote config
+    #     block, whose ``token`` we extract into ``rc_token`` and whose extra
+    #     params land in ``rc_config_extra``).
+    # ``rc_backend`` is the rclone backend type ("drive" or "onedrive").
+    # ``rc_config_extra`` is a JSON object of extra rclone remote params the
+    # backend needs beyond the token — e.g. OneDrive/SharePoint's
+    # ``drive_id`` + ``drive_type``, or Drive's ``team_drive`` — written
+    # verbatim into the temp rclone config at sync time. ``rc_root`` is the
+    # path *within* the remote to mirror (empty = the remote's root).
+    # ``rc_export_native`` toggles ``--drive-export-formats`` so native Google
+    # Docs come down as Office files the extractor pipeline understands.
+    rc_backend: Mapped[str | None] = mapped_column(default=None)
+    rc_token: Mapped[str | None] = mapped_column(default=None)
+    rc_config_extra: Mapped[str | None] = mapped_column(default=None)
+    rc_root: Mapped[str | None] = mapped_column(default=None)
+    rc_export_native: Mapped[bool] = mapped_column(default=True)
     # NFS — admin sets the root via settings, user picks one or more
     # subpaths under it via the sync UI's tree picker.
     # ``nfs_subpaths`` is a JSON array of POSIX paths *relative* to the

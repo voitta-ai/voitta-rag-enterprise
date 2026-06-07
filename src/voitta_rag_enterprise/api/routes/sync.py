@@ -49,6 +49,15 @@ from ...services.sync.google_drive import (
     GoogleWorkspaceAccessError,
 )
 from ...services.sync import microsoft_auth as msa
+from ...services.sync.rclone import (
+    RcloneAuth,
+    SUPPORTED_BACKENDS as RC_BACKENDS,
+    coerce_extra as rc_coerce_extra,
+    encode_extra as rc_encode_extra,
+    list_remote_dirs as rc_list_remote_dirs,
+    parse_pasted_config as rc_parse_pasted_config,
+    rclone_available as rc_available,
+)
 from ...services.sync.sharepoint import (
     coerce_sites_field as sp_coerce_sites,
     encode_sites_field as sp_encode_sites,
@@ -155,11 +164,33 @@ class NfsSyncIn(BaseModel):
     subpaths: list[str] = Field(default_factory=list)
 
 
+class RcloneSyncIn(BaseModel):
+    """Payload when ``source_type == 'rclone'``.
+
+    ``backend`` is the rclone backend type (``drive`` / ``onedrive``).
+    ``token`` is rclone's token JSON (either pasted from ``rclone authorize``
+    or set by the UI-Connect callback); blank on re-save means "leave the
+    stored token alone" (it's masked client-side, same convention as the
+    other connectors' secrets). ``config_extra`` carries extra rclone remote
+    params (e.g. SharePoint's ``drive_id`` + ``drive_type``). ``root`` is the
+    path within the remote to mirror.
+    """
+
+    backend: Literal["", "drive", "onedrive"] = ""
+    token: str = ""
+    config_extra: dict[str, str] = Field(default_factory=dict)
+    root: str = ""
+    export_native: bool = True
+
+
 class SyncSourceIn(BaseModel):
-    source_type: Literal["github", "google_drive", "nfs", "sharepoint", "teams"]
+    source_type: Literal[
+        "github", "google_drive", "nfs", "rclone", "sharepoint", "teams"
+    ]
     github: GithubSyncIn | None = None
     google_drive: GoogleDriveSyncIn | None = None
     nfs: NfsSyncIn | None = None
+    rclone: RcloneSyncIn | None = None
     sharepoint: SharePointSyncIn | None = None
     teams: TeamsSyncIn | None = None
     # Periodic auto-sync. ``auto_sync_hours`` is bounded to 1-24 by the
@@ -250,6 +281,15 @@ class NfsSyncOut(BaseModel):
     nfs_status: str
 
 
+class RcloneSyncOut(BaseModel):
+    backend: str
+    root: str
+    export_native: bool
+    config_extra: dict[str, str]
+    connected: bool  # true once a token has been stored (paste or UI-Connect)
+    rclone_available: bool  # false → server is missing the rclone binary
+
+
 class SyncSourceOut(BaseModel):
     folder_id: int
     source_type: str
@@ -261,6 +301,7 @@ class SyncSourceOut(BaseModel):
     github: GithubSyncOut | None = None
     google_drive: GoogleDriveSyncOut | None = None
     nfs: NfsSyncOut | None = None
+    rclone: RcloneSyncOut | None = None
     sharepoint: SharePointSyncOut | None = None
     teams: TeamsSyncOut | None = None
 
@@ -354,6 +395,20 @@ def _to_out(src: FolderSyncSource) -> SyncSourceOut:
             nfs_available=available,
             nfs_status=status_str,
         )
+    rc = None
+    if src.source_type == "rclone":
+        extra = rc_coerce_extra(src.rc_config_extra)
+        # Never leak the client_secret (UI-Connect stores it so rclone can
+        # refresh) back to the browser — reduce it to nothing in the echo.
+        safe_extra = {k: v for k, v in extra.items() if k != "client_secret"}
+        rc = RcloneSyncOut(
+            backend=src.rc_backend or "",
+            root=src.rc_root or "",
+            export_native=bool(src.rc_export_native),
+            config_extra=safe_extra,
+            connected=bool(src.rc_token),
+            rclone_available=rc_available(),
+        )
     sp = None
     tm = None
     if src.source_type == "sharepoint":
@@ -392,6 +447,7 @@ def _to_out(src: FolderSyncSource) -> SyncSourceOut:
         github=gh,
         google_drive=gd,
         nfs=nfs,
+        rclone=rc,
         sharepoint=sp,
         teams=tm,
     )
@@ -505,6 +561,7 @@ def upsert_sync_source(
         if existing is not None and existing.source_type != "github":
             _clear_google_drive_fields(src)
             _clear_microsoft_fields(src)
+            _clear_rclone_fields(src)
         src.source_type = "github"
         if existing is not None and existing.source_type != "github":
             src.nfs_subpath = None
@@ -570,6 +627,7 @@ def upsert_sync_source(
             _clear_github_fields(src)
             _clear_google_drive_fields(src)
             _clear_microsoft_fields(src)
+            _clear_rclone_fields(src)
         src.source_type = "nfs"
         import json as _json
         src.nfs_subpaths = _json.dumps(subpaths)
@@ -611,6 +669,7 @@ def upsert_sync_source(
         if existing is not None and existing.source_type != "google_drive":
             _clear_github_fields(src)
             _clear_microsoft_fields(src)
+            _clear_rclone_fields(src)
             src.nfs_subpath = None
             src.nfs_subpaths = None
             # New source type → drop any stored refresh_token, it belongs to
@@ -637,6 +696,68 @@ def upsert_sync_source(
             src.gd_refresh_token = None
         src.gd_use_loopback = bool(gd_cfg.use_loopback)
         src.gd_files_only = bool(gd_cfg.files_only)
+
+    elif body.source_type == "rclone":
+        if body.rclone is None:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "Missing 'rclone' config for source_type='rclone'",
+            )
+        rc_cfg = body.rclone
+        backend = rc_cfg.backend
+        incoming_token = rc_cfg.token or ""
+        incoming_extra = dict(rc_cfg.config_extra or {})
+        # The user may paste a whole ``rclone config`` remote block instead of
+        # a bare token. Split it: a block (anything not starting with ``{``)
+        # carries its own ``type`` (backend) + extra params. A bare token JSON
+        # is taken as-is, with the backend coming from the form's picker.
+        if incoming_token and not incoming_token.lstrip().startswith("{"):
+            parsed_backend, parsed_token, parsed_extra = rc_parse_pasted_config(
+                incoming_token
+            )
+            if not parsed_token:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    "Pasted rclone config has no 'token =' line.",
+                )
+            incoming_token = parsed_token
+            incoming_extra = {**parsed_extra, **incoming_extra}
+            backend = parsed_backend or backend
+        if backend not in RC_BACKENDS:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"Pick an rclone backend ({', '.join(RC_BACKENDS)}).",
+            )
+        # A tokenless rclone row is allowed on save: the UI-Connect flow must
+        # persist the row first so the OAuth callback can resolve it by
+        # folder_id and stash the client creds. Same as Google Drive, where you
+        # Save client_id/secret, then Connect. The trigger endpoint guards on
+        # rc_token so an un-connected row can't actually sync.
+
+        src = existing or FolderSyncSource(
+            folder_id=folder_id, source_type="rclone"
+        )
+        if existing is not None and existing.source_type != "rclone":
+            _clear_github_fields(src)
+            _clear_google_drive_fields(src)
+            _clear_microsoft_fields(src)
+            src.nfs_subpath = None
+            src.nfs_subpaths = None
+            # Token belongs to whatever remote we were configured for before.
+            src.rc_token = None
+        src.source_type = "rclone"
+        src.rc_backend = backend
+        # Masked-secret convention: a blank token on re-save means "leave the
+        # stored one alone", not "clear it" (the textarea is masked client-side).
+        if incoming_token:
+            src.rc_token = incoming_token
+        # Merge config_extra so a re-save that doesn't re-send the (masked)
+        # client_secret / drive_id doesn't drop it. Incoming wins per-key.
+        merged_extra = rc_coerce_extra(src.rc_config_extra)
+        merged_extra.update({k: v for k, v in incoming_extra.items() if v})
+        src.rc_config_extra = rc_encode_extra(merged_extra)
+        src.rc_root = rc_cfg.root.strip("/") or None
+        src.rc_export_native = bool(rc_cfg.export_native)
 
     elif body.source_type in ("sharepoint", "teams"):
         src = _apply_microsoft_config(
@@ -763,6 +884,7 @@ def _apply_microsoft_config(
     if existing is not None and existing.source_type != body.source_type:
         _clear_github_fields(src)
         _clear_google_drive_fields(src)
+        _clear_rclone_fields(src)
         if existing.source_type not in ("sharepoint", "teams"):
             _clear_microsoft_fields(src)
         src.nfs_subpath = None
@@ -816,6 +938,14 @@ def _clear_google_drive_fields(src: FolderSyncSource) -> None:
     src.gd_folder_id = None
     src.gd_use_loopback = False
     src.gd_files_only = False
+
+
+def _clear_rclone_fields(src: FolderSyncSource) -> None:
+    src.rc_backend = None
+    src.rc_token = None
+    src.rc_config_extra = None
+    src.rc_root = None
+    src.rc_export_native = True
 
 
 def _publish_folder_changed(folder: Folder, *, has_sync_source: bool) -> None:
@@ -946,6 +1076,17 @@ def trigger_sync(
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST,
                 "Pick a user for Teams 'specific user' mode before syncing.",
+            )
+    if src.source_type == "rclone":
+        if not rc_available():
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "rclone is not installed on the server.",
+            )
+        if not src.rc_token:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "Connect or paste an rclone token before syncing.",
             )
     job_id = job_queue.enqueue(
         db,
@@ -1215,6 +1356,195 @@ async def gd_api_status(
     )
 
 
+# ---------------------------------------------------------------------------
+# rclone connector — paste-parse, folder picker, and Google UI-Connect.
+# ---------------------------------------------------------------------------
+
+
+class RcloneStatusOut(BaseModel):
+    available: bool
+
+
+@oauth_router.get("/rclone/status", response_model=RcloneStatusOut)
+def rclone_status(_: CurrentUser = Depends(current_user)) -> RcloneStatusOut:
+    """Tell the SPA whether the rclone connector is usable (binary present).
+
+    Folder-agnostic — the sync modal probes this on open to decide whether to
+    offer the rclone option, mirroring the NFS capability probe.
+    """
+    return RcloneStatusOut(available=rc_available())
+
+
+class RcloneParseIn(BaseModel):
+    text: str = ""
+    backend_hint: Literal["", "drive", "onedrive"] = ""
+
+
+class RcloneParseOut(BaseModel):
+    backend: str
+    has_token: bool
+    extra_keys: list[str]
+    error: str = ""
+
+
+@router.post("/rclone/parse", response_model=RcloneParseOut)
+def rclone_parse(
+    folder_id: int,
+    body: RcloneParseIn,
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(current_user),
+) -> RcloneParseOut:
+    """Parse a pasted rclone token / config block so the UI can confirm it.
+
+    Pure parsing — no DB write. Lets the modal show "✓ drive token detected
+    (carrying team_drive)" before the user commits to Save. The backend falls
+    back to ``backend_hint`` (the UI's picker) when the paste is a bare token.
+    """
+    _check_owner(folder_id, db, user)
+    backend, token, extra = rc_parse_pasted_config(body.text)
+    if not backend:
+        backend = body.backend_hint
+    if not token:
+        return RcloneParseOut(
+            backend=backend, has_token=False, extra_keys=[],
+            error="No token found. Paste the {token} JSON from "
+            "`rclone authorize`, or a full remote-config block.",
+        )
+    # Never echo secret values back; just the key names that were carried.
+    extra_keys = sorted(k for k in extra if k != "client_secret")
+    return RcloneParseOut(backend=backend, has_token=True, extra_keys=extra_keys)
+
+
+class RcloneFolderEntry(BaseModel):
+    name: str
+    path: str
+
+
+class RcloneFoldersOut(BaseModel):
+    entries: list[RcloneFolderEntry]
+
+
+@router.get("/rclone/folders", response_model=RcloneFoldersOut)
+async def rclone_folders(
+    folder_id: int,
+    parent: str = Query("", description="Path within the remote whose subdirs to list"),
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(current_user),
+) -> RcloneFoldersOut:
+    """List immediate subdirectories of ``parent`` in the configured remote."""
+    _check_owner(folder_id, db, user)
+    src = db.get(FolderSyncSource, folder_id)
+    if src is None or src.source_type != "rclone":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No rclone source")
+    if not src.rc_token:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Connect or paste an rclone token before listing folders.",
+        )
+    auth = RcloneAuth(
+        backend=src.rc_backend or "",
+        token=src.rc_token or "",
+        extra=rc_coerce_extra(src.rc_config_extra),
+    )
+    try:
+        entries = await asyncio.to_thread(rc_list_remote_dirs, auth, parent)
+    except Exception as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
+    return RcloneFoldersOut(entries=[RcloneFolderEntry(**e) for e in entries])
+
+
+class RcloneAuthInitIn(BaseModel):
+    # Which operator-registered Google client to use. Omit to auto-pick the
+    # single enabled Google AuthProvider.
+    provider_id: int | None = None
+
+
+@router.post("/rclone/auth", response_model=GdAuthInitOut)
+def rclone_auth_init(
+    folder_id: int,
+    body: RcloneAuthInitIn,
+    request: Request,
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(current_user),
+) -> GdAuthInitOut:
+    """Start UI-Connect for an rclone *Google Drive* remote.
+
+    Reuses an operator-registered Google OAuth client (the same AuthProvider
+    rows the native Drive connector uses) and the already-registered
+    ``/oauth/google/callback`` redirect. We stash the chosen client_id/secret
+    in ``rc_config_extra`` so (a) the callback can exchange the code and
+    (b) rclone can refresh the access token at sync time. OneDrive/SharePoint
+    UI-Connect isn't offered here — paste a config (it carries the drive_id),
+    or use the native SharePoint connector.
+    """
+    from sqlalchemy import select
+
+    from ...db.models import AuthProvider
+
+    _check_owner(folder_id, db, user)
+    src = db.get(FolderSyncSource, folder_id)
+    if src is None or src.source_type != "rclone":
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Save the rclone source before connecting.",
+        )
+    if (src.rc_backend or "") != "drive":
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "UI-Connect supports the Google Drive backend only. For "
+            "OneDrive/SharePoint, paste an rclone config block instead.",
+        )
+    # Resolve the Google client.
+    if body.provider_id is not None:
+        prov = db.get(AuthProvider, body.provider_id)
+        if prov is None or prov.provider != "google" or not prov.enabled:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, "Invalid Google provider selection."
+            )
+    else:
+        rows = (
+            db.execute(
+                select(AuthProvider).where(
+                    AuthProvider.provider == "google",
+                    AuthProvider.enabled == True,  # noqa: E712
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if not rows:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "No enabled Google OAuth provider configured. Add one under "
+                "Admin → Auth providers, or use the paste flow instead.",
+            )
+        if len(rows) > 1:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "Multiple Google providers configured — pass provider_id.",
+            )
+        prov = rows[0]
+    if not (prov.client_id and prov.client_secret):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "The selected Google provider is missing a client_id/secret.",
+        )
+    # Stash client creds where the callback + rclone refresh will read them.
+    extra = rc_coerce_extra(src.rc_config_extra)
+    extra["client_id"] = prov.client_id
+    extra["client_secret"] = prov.client_secret
+    src.rc_config_extra = rc_encode_extra(extra)
+    db.commit()
+
+    state = base64.urlsafe_b64encode(str(folder_id).encode()).decode()
+    auth_url = gd_get_auth_url(
+        client_id=prov.client_id,
+        redirect_uri=_oauth_redirect_uri(request, use_loopback=False),
+        state=state,
+    )
+    return GdAuthInitOut(auth_url=auth_url)
+
+
 @oauth_router.get("/oauth/google/callback")
 async def gd_oauth_callback(
     request: Request,
@@ -1231,16 +1561,27 @@ async def gd_oauth_callback(
 
     from ...db.database import session_scope
 
+    # The same Google client / redirect URI serves two source types: the
+    # native ``google_drive`` connector (stores a bare refresh_token) and the
+    # ``rclone`` connector's UI-Connect path (stores rclone's token JSON, using
+    # the client creds it stashed in ``rc_config_extra`` so rclone can refresh).
     with session_scope() as s:
         src = s.get(FolderSyncSource, folder_id)
-        if src is None or src.source_type != "google_drive":
+        if src is None or src.source_type not in ("google_drive", "rclone"):
             raise HTTPException(
                 status.HTTP_404_NOT_FOUND,
-                "Google Drive source not found for this state",
+                "Google source not found for this state",
             )
-        client_id = src.gd_client_id or ""
-        client_secret = src.gd_client_secret or ""
-        use_loopback = bool(src.gd_use_loopback)
+        source_type = src.source_type
+        if source_type == "rclone":
+            extra = rc_coerce_extra(src.rc_config_extra)
+            client_id = extra.get("client_id", "")
+            client_secret = extra.get("client_secret", "")
+            use_loopback = False
+        else:
+            client_id = src.gd_client_id or ""
+            client_secret = src.gd_client_secret or ""
+            use_loopback = bool(src.gd_use_loopback)
 
     try:
         tokens = await gd_exchange_code(
@@ -1266,13 +1607,17 @@ async def gd_oauth_callback(
     with session_scope() as s:
         src = s.get(FolderSyncSource, folder_id)
         if src is not None:
-            src.gd_refresh_token = refresh_token
+            if source_type == "rclone":
+                src.rc_token = _google_tokens_to_rclone(tokens)
+            else:
+                src.gd_refresh_token = refresh_token
 
     events.publish(
         "folders",
         {
             "type": "folder.gd_connected",
             "folder_id": folder_id,
+            "source_type": source_type,
         },
     )
 
@@ -1280,6 +1625,28 @@ async def gd_oauth_callback(
     return HTMLResponse(
         "<html><body><script>window.close()</script>"
         "<p>Google Drive connected. You can close this tab.</p></body></html>"
+    )
+
+
+def _google_tokens_to_rclone(tokens: dict) -> str:
+    """Format a Google token response into the token JSON rclone stores.
+
+    rclone's ``drive`` backend wants ``{access_token, token_type, refresh_token,
+    expiry}`` with an RFC3339 ``expiry``; it refreshes the access token itself
+    (using the client_id/secret in the remote config) once expiry passes.
+    """
+    import datetime as _dt
+    import json as _json
+
+    expires_in = int(tokens.get("expires_in", 3600))
+    expiry = _dt.datetime.now(_dt.UTC) + _dt.timedelta(seconds=expires_in)
+    return _json.dumps(
+        {
+            "access_token": tokens.get("access_token", ""),
+            "token_type": "Bearer",
+            "refresh_token": tokens.get("refresh_token", ""),
+            "expiry": expiry.isoformat(),
+        }
     )
 
 

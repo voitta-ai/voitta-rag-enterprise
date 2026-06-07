@@ -583,6 +583,11 @@
                     <option value="google_drive">Google Drive</option>
                     <option value="sharepoint">SharePoint</option>
                     <option value="teams">Teams meetings</option>
+                    <!-- rclone is NOT a top-level source. It's a no-app
+                         connect *method* surfaced as a third auth tab inside
+                         the Google Drive card (backend=drive) and the
+                         SharePoint card (backend=onedrive). See the
+                         #sync-rc-block movable pane below. -->
                     <!-- Shown only when the admin has configured an NFS
                          root and the path is reachable. sync.js drops
                          this <option> on open via setNfsAvailability. -->
@@ -663,6 +668,14 @@
                         <button type="button" id="sync-gd-tab-sa"
                             class="seg-tab" role="tab" aria-selected="false">
                             Service account
+                        </button>
+                        <!-- Third connect method: rclone, which needs no
+                             OAuth app registered in GCP. Selecting it swaps
+                             the native folder/API block below for the movable
+                             rclone pane (backend pinned to Drive). -->
+                        <button type="button" id="sync-gd-tab-rclone"
+                            class="seg-tab" role="tab" aria-selected="false">
+                            No app needed (rclone)
                         </button>
                     </div>
 
@@ -745,6 +758,16 @@
                         <textarea id="sync-gd-sa-json" rows="6" placeholder='{"type":"service_account","client_email":"…","private_key":"…"}'></textarea>
                     </div>
 
+                    <!-- Mount point for the movable rclone pane (#sync-rc-block).
+                         sync.js relocates the single rclone block here when the
+                         "No app needed (rclone)" tab is active, with backend
+                         pinned to Drive. -->
+                    <div id="sync-gd-rc-mount" class="sync-gd-pane" hidden></div>
+
+                    <!-- Native (Drive-API) options — folder multi-select, API
+                         probe, files-only. Hidden when the rclone tab is active
+                         (rclone uses its own single-path picker instead). -->
+                    <div id="sync-gd-native-block">
                     <!-- Shared folder selector — applies to whichever auth
                          mode is active. The Pick button only works in OAuth
                          mode (the API needs a refresh_token to list a real
@@ -785,6 +808,7 @@
                         are off — sync already skips only the disabled types
                         automatically. Use it when you deliberately want binaries only.
                     </p>
+                    </div><!-- /#sync-gd-native-block -->
                 </div>
 
                 <!-- SharePoint sync pane. Tenant-wide app credentials are
@@ -1003,6 +1027,82 @@
                     </div>
                     <ul id="sync-nfs-tree" class="nfs-tree" style="margin:0;padding:6px 0 6px 4px;max-height:40vh;overflow:auto;border:1px solid var(--border, #ccc);border-radius:4px;list-style:none;font-size:13px;"></ul>
                     <p class="hint" id="sync-nfs-hint" style="margin-top:6px;">Click ▶ to expand, click a checkbox to (de)select that subtree.</p>
+                </div>
+
+                <!-- Movable rclone pane. NOT a top-level source: sync.js
+                     relocates this block into the Google Drive card's
+                     #sync-gd-rc-mount (backend=drive) — and, later, the
+                     SharePoint card's mount (backend=onedrive) — when the
+                     "No app needed (rclone)" tab is active. Backend is pinned
+                     by the host card via the hidden select below, never chosen
+                     by the user here. Kept detached + hidden at the modal level
+                     when no rclone tab is active. -->
+                <div id="sync-rc-block" hidden>
+                    <input type="hidden" id="sync-rc-backend" value="drive">
+                    <p class="hint" style="margin:0 0 6px;">
+                        Connect without registering an OAuth app — <code>rclone</code>
+                        mirrors the remote. Google Docs export to Office files
+                        (.docx/.xlsx/.pptx) the indexer reads. This is a
+                        <strong>mirror</strong>: files removed on the remote are
+                        removed locally too.
+                    </p>
+
+                    <!-- Two ways to authenticate. Connect (Drive only) reuses an
+                         operator OAuth client; Paste works for any backend with
+                         zero app setup. -->
+                    <div class="seg-tabs" role="tablist">
+                        <button type="button" id="sync-rc-tab-connect"
+                            class="seg-tab active" role="tab" aria-selected="true">One-click connect</button>
+                        <button type="button" id="sync-rc-tab-paste"
+                            class="seg-tab" role="tab" aria-selected="false">Paste token</button>
+                    </div>
+
+                    <div id="sync-rc-pane-connect" class="sync-gd-pane" style="margin-top:8px;">
+                        <p class="hint" style="margin:0 0 6px;">
+                            Uses an operator-configured Google OAuth client
+                            (Admin → Auth providers) — no per-user or
+                            Workspace-admin setup. Save, then Connect.
+                        </p>
+                        <div class="branches-row">
+                            <button type="button" id="sync-rc-connect" class="btn btn-secondary btn-sm" disabled title="Save the source first">Connect</button>
+                            <span id="sync-rc-conn-status" class="hint" style="margin-left:auto;"></span>
+                        </div>
+                    </div>
+
+                    <div id="sync-rc-pane-paste" class="sync-gd-pane" hidden style="margin-top:8px;">
+                        <p class="hint" style="margin:0 0 6px;">
+                            On your own machine run
+                            <code id="sync-rc-authorize-cmd">rclone authorize "drive"</code>,
+                            approve in the browser, and paste the token JSON it
+                            prints below. Or paste a whole <code>rclone config</code>
+                            remote block (carries SharePoint's drive_id).
+                        </p>
+                        <!-- type=text on the token: it's an API token, not a
+                             login password — keeping it out of browser password
+                             stores avoids cross-site leakage (same rationale as
+                             the GitHub PAT field). -->
+                        <textarea id="sync-rc-token" rows="5" placeholder='{"access_token":"…","refresh_token":"…","expiry":"…"}'
+                            autocomplete="off" spellcheck="false"
+                            data-1p-ignore data-lpignore="true" data-form-type="other"></textarea>
+                        <div class="branches-row" style="margin-top:6px;">
+                            <button type="button" id="sync-rc-check-token" class="btn btn-secondary btn-sm">Check token</button>
+                            <span id="sync-rc-token-status" class="hint" style="margin-left:auto;"></span>
+                        </div>
+                    </div>
+
+                    <label style="margin-top:12px;">Folder to mirror</label>
+                    <div class="branches-row">
+                        <button type="button" id="sync-rc-pick-folder" class="btn btn-secondary btn-sm" disabled title="Connect or paste a token first">Pick folder…</button>
+                        <input type="text" id="sync-rc-root" placeholder="Path within the remote (blank = whole remote)" style="flex:1;">
+                    </div>
+                    <ul id="sync-rc-folders-list" style="margin:6px 0 0;padding-left:0;list-style:none;font-size:13px;color:var(--muted, #666);"></ul>
+                    <p class="hint" id="sync-rc-folders-hint">The chosen path is mirrored into this folder.</p>
+
+                    <label class="check-row" style="margin-top:10px;"><input type="checkbox" id="sync-rc-export-native" checked> Export Google Docs/Sheets/Slides to Office files (uncheck to skip native types)</label>
+
+                    <p class="hint" id="sync-rc-unavailable" hidden style="color:var(--danger,#b00);margin-top:8px;">
+                        rclone isn't installed on the server — this connect method is unavailable.
+                    </p>
                 </div>
 
                 <!-- Auto-sync schedule. Common to all source types. The

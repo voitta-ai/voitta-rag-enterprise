@@ -47,6 +47,7 @@ def get_registry() -> SyncRegistry:
     from .github import GitHubConnector
     from .google_drive import GoogleDriveConnector
     from .nfs import NfsConnector
+    from .rclone import RcloneConnector
     from .sharepoint import SharePointConnector
     from .teams import TeamsConnector
 
@@ -55,6 +56,7 @@ def get_registry() -> SyncRegistry:
         GitHubConnector,
         GoogleDriveConnector,
         NfsConnector,
+        RcloneConnector,
         SharePointConnector,
         TeamsConnector,
     ):
