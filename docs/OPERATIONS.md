@@ -60,7 +60,7 @@ flowchart TB
             PARSE["parsers/registry"]
             CHUNK["chunking/registry"]
             EMB["embedding/factory<br/>text · image · sparse"]
-            SYNC["sync/*<br/>gdrive · sharepoint · teams<br/>github · nfs · rclone"]
+            SYNC["sync/*<br/>gdrive · sharepoint · teams<br/>github · nfs"]
         end
     end
 
@@ -819,57 +819,6 @@ credential fields.
 | SharePoint | `sharepoint` | OAuth · app-secret · app-cert | `ms_refresh_token` (OAuth) | ✓ |
 | Teams | `teams` | OAuth · app-secret · app-cert | `ms_refresh_token` (OAuth) | ✓ |
 | NFS | `nfs` | none (path under admin `nfs_root`) | — | ✓ |
-| rclone | `rclone` | paste token/config · UI-Connect (Drive) | `rc_token` (rclone JSON, per folder) | ✓ |
-
-### rclone connector
-
-A thin connector that shells out to the `rclone` binary
-([services/sync/rclone.py](../src/voitta_rag_enterprise/services/sync/rclone.py)) to
-**mirror** a cloud remote into the folder root (`rclone sync` — deletes locals no
-longer on the remote, like the native connectors). Backends: `drive` and
-`onedrive` (the latter covers OneDrive **and** SharePoint document libraries).
-Native Google Docs come down as Office files via `--drive-export-formats
-docx,xlsx,pptx,svg`, which the extractor pipeline already reads.
-
-**UI placement.** rclone is *not* a top-level entry in the sync modal's Source
-dropdown. It's surfaced as a third connect tab — **"No app needed (rclone)"** —
-inside the **Google Drive card** (backend pinned to `drive`), next to "Sign in
-with Google" / "Service account". The modal moves a single shared pane
-(`#sync-rc-block`) into the active card's mount point; selecting the tab swaps
-the native Drive-API folder block for the rclone connect/paste/picker UI. The
-folder list still badges these as Drive folders (`rc_backend == "drive"` →
-`google_drive` icon). Hosting the same tab in the SharePoint card for the
-`onedrive` backend is a follow-up; until then OneDrive is reachable only by
-pasting an rclone config block (the connector + API support it regardless).
-
-Its draw over the native Drive/SharePoint connectors: **no provider-side app
-registration**. Two auth shapes, both reduced to one stored `rc_token` blob:
-
-- **Paste** (`drive` + `onedrive`, zero setup anywhere): the user runs
-  `rclone authorize "<backend>"` on their own machine (rclone's built-in public
-  client, local-loopback redirect), then pastes the token JSON — or a whole
-  `rclone config` remote block, whose `type`/`token`/extra params
-  (`drive_id`, `drive_type`, `team_drive`, …) are split server-side by
-  `parse_pasted_config` into `rc_token` + `rc_config_extra`.
-- **UI-Connect** (`drive` only): reuses an operator **AuthProvider** Google
-  client + the already-registered `/oauth/google/callback`. The callback
-  formats Google's token into rclone's JSON; the client creds are stashed in
-  `rc_config_extra` so rclone can refresh. *Not offered for `onedrive`* —
-  rclone's built-in client can't bind our server callback's redirect URI, and
-  SharePoint needs a `drive_id` the paste flow carries; use paste (or the
-  native SharePoint connector) there.
-
-**Runtime mechanics:** each sync writes a private temp `rclone.conf` (mode 600
-in a 700 dir, token never world-readable), runs `rclone sync … --use-json-log
--v --stats` and parses the JSON log stream for add/update/remove counts +
-progress, then **reads the token back** — rclone rewrites it on refresh and
-OneDrive rotates the refresh token per refresh, so the connector parks the new
-value on `auth.rotated_token` and `run_sync` persists it to `rc_token` (same
-pattern as Microsoft's `rotated_refresh_token`). `VOITTA_IGNORE_PATTERNS` is
-translated to `--exclude-from` filters so ignore policy matches the watcher.
-Requires the `rclone` binary on the server (`VOITTA_RCLONE_BIN` overrides the
-PATH lookup); the modal hides the option and the API rejects sync when it's
-absent.
 
 ### Connector contract & registry
 
@@ -885,18 +834,18 @@ dispatch path.
 ```mermaid
 flowchart TB
     RS["indexing.run_sync"] -->|"get_connector(type)"| REG["SyncRegistry.get()"]
-    REG --> C1["GitHubConnector"] & C2["GoogleDriveConnector"] & C3["NfsConnector"] & C4["SharePointConnector"] & C5["TeamsConnector"] & C6["RcloneConnector"]
+    REG --> C1["GitHubConnector"] & C2["GoogleDriveConnector"] & C3["NfsConnector"] & C4["SharePointConnector"] & C5["TeamsConnector"]
     subgraph contract["SyncConnector ABC"]
         M1["source_type · supports_progress"]
         M2["resolve_config(row) → sync kwargs"]
         M3["async sync(folder_root, **cfg) → stats"]
     end
-    C1 & C2 & C3 & C4 & C5 & C6 -.implement.-> contract
+    C1 & C2 & C3 & C4 & C5 -.implement.-> contract
     RS -->|"if supports_progress: cfg['progress_cb']"| PROG["WS folder.sync_progress"]
 ```
 
 `run_sync` builds the per-connector kwargs by calling `connector.resolve_config(row)`
-(each connector reads its own `gh_*`/`gd_*`/`ms_*`/`nfs_*`/`rc_*` columns), then adds a
+(each connector reads its own `gh_*`/`gd_*`/`ms_*`/`nfs_*` columns), then adds a
 `progress_cb` only when `connector.supports_progress`. Adding a sync backend is a
 new connector module + one registry line — no edit to `run_sync`.
 

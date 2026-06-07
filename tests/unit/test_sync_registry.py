@@ -10,7 +10,7 @@ from voitta_rag_enterprise.services.sync import (
     get_registry,
 )
 
-EXPECTED_TYPES = {"github", "google_drive", "nfs", "rclone", "sharepoint", "teams"}
+EXPECTED_TYPES = {"github", "google_drive", "nfs", "sharepoint", "teams"}
 
 
 def test_registry_lists_all_connectors() -> None:
@@ -55,8 +55,7 @@ def _blank_row():
         "nfs_subpaths nfs_subpath "
         "ms_tenant_id ms_client_id ms_client_secret ms_cert_pem ms_refresh_token "
         "ms_auth_method sp_selected_sites sp_all_sites "
-        "tm_user_mode tm_user_id tm_include_attended "
-        "rc_backend rc_token rc_config_extra rc_root rc_export_native"
+        "tm_user_mode tm_user_id tm_include_attended"
     ).split()
     return SimpleNamespace(**{c: None for c in cols})
 
@@ -67,7 +66,6 @@ def _blank_row():
         ("github", {"repo_url", "branches", "auth"}),
         ("google_drive", {"drive_folders", "files_only", "auth"}),
         ("nfs", {"nfs_subpaths"}),
-        ("rclone", {"auth", "root", "export_native"}),
         ("sharepoint", {"auth", "sites", "all_sites"}),
         ("teams", {"auth", "user_mode", "user_id", "include_attended"}),
     ],

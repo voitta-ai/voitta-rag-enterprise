@@ -931,14 +931,6 @@ async def _run_sync_inner(folder_id: int) -> None:
                 rotated = getattr(ms_auth, "rotated_refresh_token", None)
                 if rotated:
                     src.ms_refresh_token = rotated
-            # rclone rewrites its token on refresh; OneDrive rotates the
-            # refresh token per refresh, so persist whatever the connector
-            # parked or the next auto-sync would fail with an invalid token.
-            if source_type == "rclone":
-                rc_auth = cfg.get("auth")
-                rotated_tok = getattr(rc_auth, "rotated_token", None)
-                if rotated_tok:
-                    src.rc_token = rotated_tok
 
     _publish_sync_source_changed(folder_id)
     # Final clear-the-badge event. The GD connector already emits "done"

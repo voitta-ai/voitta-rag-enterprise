@@ -147,17 +147,6 @@ def init_db() -> None:
         # NFS multi-subpath. JSON array of POSIX paths. Default NULL is
         # safe — code reads nfs_subpath as a fallback when this is empty.
         _ensure_column(raw_conn, "folder_sync_sources", "nfs_subpaths", "TEXT")
-        # rclone connector — backend type, token blob, extra remote params,
-        # path within the remote, and the native-export toggle. All NULL/1-safe
-        # defaults so existing rows of every other source_type are untouched.
-        for col, decl in (
-            ("rc_backend", "TEXT"),
-            ("rc_token", "TEXT"),
-            ("rc_config_extra", "TEXT"),
-            ("rc_root", "TEXT"),
-            ("rc_export_native", "INTEGER NOT NULL DEFAULT 1"),
-        ):
-            _ensure_column(raw_conn, "folder_sync_sources", col, decl)
         # Job result summary (JSON) surfaced in the Jobs panel's expandable
         # detail; NULL for jobs that report nothing / predate this column.
         _ensure_column(raw_conn, "jobs", "result", "TEXT")

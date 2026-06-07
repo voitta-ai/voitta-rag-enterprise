@@ -153,20 +153,6 @@ function openSyncModal() {
     $("#sync-gd-test-hint").textContent = "";
     setGdAuthMode("oauth");
     setGdConnState({ connected: false, hasClientSecret: false });
-    // rclone pane defaults (the pane is mounted on demand by setGdAuthMode/
-    // the SharePoint card; here we just clear its inputs and stow it).
-    $("#sync-rc-backend").value = "drive";
-    $("#sync-rc-token").value = "";
-    $("#sync-rc-token").placeholder = '{"access_token":"…","refresh_token":"…","expiry":"…"}';
-    $("#sync-rc-root").value = "";
-    $("#sync-rc-folders-list").innerHTML = "";
-    $("#sync-rc-export-native").checked = true;
-    $("#sync-rc-token-status").textContent = "";
-    $("#sync-rc-conn-status").textContent = "";
-    setRcAuthTab("connect");
-    setRcConnState({ connected: false });
-    stowRcBlock();
-    rcRefreshAvailability();
     // Auto-sync defaults: off, 6h. loadSyncSource overrides from the row.
     $("#sync-auto-enabled").checked = false;
     $("#sync-auto-hours").value = "6";
@@ -230,9 +216,6 @@ function setSyncType(t) {
     $("#sync-form-nfs").hidden = t !== "nfs";
     $("#sync-form-sharepoint").hidden = t !== "sharepoint";
     $("#sync-form-teams").hidden = t !== "teams";
-    // Switching away from a card that hosts the movable rclone pane: stow it
-    // so it doesn't linger visible under another source's form.
-    if (t !== "google_drive" && t !== "sharepoint") stowRcBlock();
     if (t === "google_drive") {
         updateGdRedirectHint();
     }
@@ -613,31 +596,18 @@ function _snapshotSavedGdFolders(folders) {
 // different gotchas (OAuth needs Connect + redirect URI; SA needs
 // folder-shared-with-client_email), so we render exactly one set of
 // fields and persist the mode the user actually used.
-let gdAuthMode = "oauth"; // "oauth" | "sa" | "rclone"
+let gdAuthMode = "oauth"; // "oauth" | "sa"
 
 function setGdAuthMode(mode) {
-    gdAuthMode = ["sa", "rclone"].includes(mode) ? mode : "oauth";
+    gdAuthMode = mode === "sa" ? "sa" : "oauth";
     const oauthTab = $("#sync-gd-tab-oauth");
     const saTab = $("#sync-gd-tab-sa");
-    const rcTab = $("#sync-gd-tab-rclone");
-    for (const [tab, m] of [[oauthTab, "oauth"], [saTab, "sa"], [rcTab, "rclone"]]) {
-        tab.classList.toggle("active", gdAuthMode === m);
-        tab.setAttribute("aria-selected", gdAuthMode === m ? "true" : "false");
-    }
+    oauthTab.classList.toggle("active", gdAuthMode === "oauth");
+    oauthTab.setAttribute("aria-selected", gdAuthMode === "oauth" ? "true" : "false");
+    saTab.classList.toggle("active", gdAuthMode === "sa");
+    saTab.setAttribute("aria-selected", gdAuthMode === "sa" ? "true" : "false");
     $("#sync-gd-pane-oauth").hidden = gdAuthMode !== "oauth";
     $("#sync-gd-pane-sa").hidden = gdAuthMode !== "sa";
-
-    // rclone is the odd one out: it's a wholly different connector under the
-    // hood (source_type=rclone). Swap the native Drive-API block for the
-    // movable rclone pane mounted into this card, pinned to the Drive backend.
-    const isRclone = gdAuthMode === "rclone";
-    $("#sync-gd-native-block").hidden = isRclone;
-    if (isRclone) {
-        mountRcBlock($("#sync-gd-rc-mount"), "drive");
-        return;  // native folder/Pick/API logic below doesn't apply to rclone
-    }
-    $("#sync-gd-rc-mount").hidden = true;
-    stowRcBlock();
 
     // Pick browser only works in OAuth mode (it needs gd_refresh_token).
     // In SA mode, surface the typed-folder-id input as the only path and
@@ -720,7 +690,6 @@ function setGdConnState({ connected, hasClientSecret }) {
 
 $("#sync-gd-tab-oauth").addEventListener("click", () => setGdAuthMode("oauth"));
 $("#sync-gd-tab-sa").addEventListener("click", () => setGdAuthMode("sa"));
-$("#sync-gd-tab-rclone").addEventListener("click", () => setGdAuthMode("rclone"));
 
 // Manual folder-ID add — Enter accepts, ignores duplicates and empties.
 // Folder names aren't known here (no Drive lookup in SA mode); the
@@ -771,15 +740,8 @@ async function loadSyncSource() {
             });
         }
         if (!src) return;
-        // rclone isn't a top-level source in the UI — today it's surfaced as a
-        // third connect tab inside the Google Drive card. Map it onto that card
-        // so the dropdown stays valid. (SharePoint/OneDrive hosting is a
-        // follow-up; until then any rclone row renders under the Drive card.)
-        const displaySource = src.source_type === "rclone"
-            ? "google_drive"
-            : src.source_type;
-        $("#sync-type").value = displaySource;
-        setSyncType(displaySource);
+        $("#sync-type").value = src.source_type;
+        setSyncType(src.source_type);
         if (src.source_type === "github" && src.github) {
             const gh = src.github;
             $("#sync-gh-repo").value = gh.repo || "";
@@ -833,29 +795,6 @@ async function loadSyncSource() {
             const saOnly = gd.has_service_account && !gd.has_client_secret;
             setGdAuthMode(saOnly ? "sa" : "oauth");
             setGdConnState({ connected: gd.connected, hasClientSecret: gd.has_client_secret });
-        } else if (src.source_type === "rclone" && src.rclone) {
-            const rc = src.rclone;
-            const backend = rc.backend || "drive";
-            // Activate the rclone tab on the Google Drive card — this mounts the
-            // movable block. setGdAuthMode pins backend=drive; restore the row's
-            // true backend right after (matters only for legacy onedrive rows,
-            // which have no creation path in the UI yet).
-            setGdAuthMode("rclone");
-            $("#sync-rc-backend").value = backend;
-            updateRcBackendUi();
-            $("#sync-rc-root").value = rc.root || "";
-            $("#sync-rc-export-native").checked = rc.export_native !== false;
-            // Token is masked server-side; reflect "saved" so a blank submit
-            // preserves it (same convention as the GD secret field).
-            $("#sync-rc-token").value = "";
-            $("#sync-rc-token").placeholder = rc.connected
-                ? "(token saved — paste a new one to replace)"
-                : '{"access_token":"…","refresh_token":"…","expiry":"…"}';
-            $("#sync-rc-folders-list").innerHTML = "";
-            setRcAuthTab(backend === "drive" ? "connect" : "paste");
-            updateRcBackendUi();
-            setRcConnState({ connected: rc.connected });
-            if (!rc.rclone_available) $("#sync-rc-unavailable").hidden = false;
         } else if (src.source_type === "sharepoint" && src.sharepoint) {
             loadMsForm("sp", src.sharepoint);
             setSpSites(src.sharepoint.sites || []);
@@ -1022,15 +961,7 @@ function syncBody() {
     const autoHours = Math.max(1, Math.min(24, Number($("#sync-auto-hours").value) || 6));
     const base = { auto_sync_enabled: autoEnabled, auto_sync_hours: autoHours };
     if (t === "github") return { ...base, source_type: "github", github: ghFormConfig() };
-    if (t === "google_drive") {
-        // The Google Drive card's third auth tab is actually the rclone
-        // connector (backend pinned to Drive) — emit it as such so the
-        // user never sees a separate "rclone" source.
-        if (gdAuthMode === "rclone") {
-            return { ...base, source_type: "rclone", rclone: rcFormConfig() };
-        }
-        return { ...base, source_type: "google_drive", google_drive: gdFormConfig() };
-    }
+    if (t === "google_drive") return { ...base, source_type: "google_drive", google_drive: gdFormConfig() };
     if (t === "nfs") {
         const subpaths = [...nfsSelected];
         return {
@@ -1396,255 +1327,6 @@ $("#sync-gd-pick-folder").addEventListener("click", async () => {
         alert(err.message);
     }
 });
-
-// ---------------------------------------------------------------------------
-// rclone connector — backend/tab UI, paste-check, Connect, folder picker
-// ---------------------------------------------------------------------------
-
-// Current rclone auth tab: "connect" (Drive UI-OAuth) or "paste".
-let rcAuthTab = "connect";
-// Whether the server has the rclone binary (probed on mount).
-let rcAvailable = true;
-
-// The rclone pane (#sync-rc-block) is a SINGLE element moved into whichever
-// card's mount point is active — so its controls + handlers exist once. The
-// host card pins the backend (Drive for the GD card, OneDrive for SharePoint).
-function mountRcBlock(mountEl, backend) {
-    const block = $("#sync-rc-block");
-    $("#sync-rc-backend").value = backend;
-    mountEl.appendChild(block);  // re-parents (moves) the node
-    mountEl.hidden = false;
-    block.hidden = false;
-    updateRcBackendUi();
-    // Land on the sensible default tab for the backend (Connect is Drive-only;
-    // updateRcBackendUi already forces Paste for OneDrive).
-    setRcAuthTab(backend === "drive" ? "connect" : "paste");
-    rcRefreshAvailability();
-}
-
-function stowRcBlock() {
-    $("#sync-rc-block").hidden = true;
-}
-
-function setRcAuthTab(tab) {
-    rcAuthTab = tab;
-    $("#sync-rc-pane-connect").hidden = tab !== "connect";
-    $("#sync-rc-pane-paste").hidden = tab !== "paste";
-    const connectTab = $("#sync-rc-tab-connect");
-    const pasteTab = $("#sync-rc-tab-paste");
-    connectTab.classList.toggle("active", tab === "connect");
-    connectTab.setAttribute("aria-selected", String(tab === "connect"));
-    pasteTab.classList.toggle("active", tab === "paste");
-    pasteTab.setAttribute("aria-selected", String(tab === "paste"));
-}
-
-function setRcConnState({ connected }) {
-    // Folder picking needs a usable token (from Connect or a saved/pasted one).
-    const ready = !!connected;
-    const pick = $("#sync-rc-pick-folder");
-    pick.disabled = !ready;
-    pick.title = ready ? "Browse remote folders" : "Connect or paste a token first";
-    const status = $("#sync-rc-conn-status");
-    if (status) {
-        status.textContent = connected ? "Connected ✓" : "";
-        status.style.color = connected ? "var(--ok, #2a7)" : "";
-    }
-}
-
-// Reflect the backend choice: Connect (UI-OAuth) is Drive-only; the authorize
-// command and tab availability follow the backend the host card pinned.
-function updateRcBackendUi() {
-    const backend = $("#sync-rc-backend").value;
-    const isDrive = backend === "drive";
-    $("#sync-rc-authorize-cmd").textContent = `rclone authorize "${backend}"`;
-    const connectTab = $("#sync-rc-tab-connect");
-    connectTab.disabled = !isDrive;
-    connectTab.title = isDrive
-        ? "One-click OAuth for Google Drive"
-        : "Connect is Drive-only — use Paste for OneDrive/SharePoint";
-    // The Connect button itself: usable for Drive (it saves then opens OAuth).
-    const connectBtn = $("#sync-rc-connect");
-    connectBtn.disabled = !isDrive;
-    connectBtn.title = isDrive
-        ? "Save and open Google sign-in"
-        : "Connect is Drive-only — use Paste";
-    // OneDrive can't use the Connect tab; force Paste.
-    if (!isDrive && rcAuthTab === "connect") setRcAuthTab("paste");
-}
-
-// Probe whether the server has the rclone binary; when absent, disable the
-// "No app needed (rclone)" tab(s) and show an inline banner in the pane.
-async function rcRefreshAvailability() {
-    try {
-        const { available } = await api.rcloneStatus();
-        rcAvailable = !!available;
-    } catch {
-        // Probe failed — assume available; save/trigger errors clearly if not.
-        rcAvailable = true;
-    }
-    $("#sync-rc-unavailable").hidden = rcAvailable;
-    for (const id of ["#sync-gd-tab-rclone", "#sync-sp-tab-rclone"]) {
-        const tab = $(id);
-        if (!tab) continue;
-        tab.disabled = !rcAvailable;
-        tab.title = rcAvailable ? "" : "rclone is not installed on the server";
-    }
-}
-
-function rcFormConfig() {
-    // The token textarea is forwarded verbatim: the backend splits a pasted
-    // config block, accepts a bare token JSON, or — when blank — preserves the
-    // stored token (Connect path / unchanged re-save). config_extra is left to
-    // the backend (Connect stashes client creds; paste carries drive_id).
-    return {
-        backend: $("#sync-rc-backend").value,
-        token: $("#sync-rc-token").value.trim(),
-        config_extra: {},
-        root: $("#sync-rc-root").value.trim().replace(/^\/+|\/+$/g, ""),
-        export_native: !!$("#sync-rc-export-native").checked,
-    };
-}
-
-// Backend is pinned by the host card (hidden input) — updateRcBackendUi is
-// invoked directly by mountRcBlock, so no change listener is needed here.
-$("#sync-rc-tab-connect").addEventListener("click", () => {
-    if (!$("#sync-rc-tab-connect").disabled) setRcAuthTab("connect");
-});
-$("#sync-rc-tab-paste").addEventListener("click", () => setRcAuthTab("paste"));
-
-// Validate a pasted token/config without saving — surfaces what was parsed.
-$("#sync-rc-check-token").addEventListener("click", async () => {
-    const status = $("#sync-rc-token-status");
-    const text = $("#sync-rc-token").value.trim();
-    if (!text) {
-        status.textContent = "Paste a token first.";
-        status.style.color = "var(--danger, #b00)";
-        return;
-    }
-    try {
-        const r = await api.rcloneParse(syncFolderId, {
-            text,
-            backend_hint: $("#sync-rc-backend").value,
-        });
-        if (!r.has_token) {
-            status.textContent = r.error || "No token found.";
-            status.style.color = "var(--danger, #b00)";
-            return;
-        }
-        if (r.backend) $("#sync-rc-backend").value = r.backend;
-        updateRcBackendUi();
-        const carried = r.extra_keys.length ? ` (carrying ${r.extra_keys.join(", ")})` : "";
-        status.textContent = `✓ ${r.backend || "token"} detected${carried}`;
-        status.style.color = "var(--ok, #2a7)";
-    } catch (err) {
-        status.textContent = err.message;
-        status.style.color = "var(--danger, #b00)";
-    }
-});
-
-// Drive UI-Connect: save first (so the row exists + backend is set), then pop
-// the OAuth window. Same popup-poll pattern as the native GD connector.
-$("#sync-rc-connect").addEventListener("click", async () => {
-    try {
-        await api.putSync(syncFolderId, syncBody());
-        const { auth_url } = await api.rcloneAuthInit(syncFolderId);
-        const popup = window.open(auth_url, "voitta-rc-auth", "width=520,height=640");
-        if (!popup) {
-            alert("Popup blocked. Allow popups for this site and click Connect again.");
-            return;
-        }
-        const t = setInterval(async () => {
-            if (popup.closed) {
-                clearInterval(t);
-                await loadSyncSource();
-            }
-        }, 500);
-    } catch (err) {
-        alert(err.message);
-    }
-});
-
-// Inline remote folder browser. Drills one level at a time into
-// #sync-rc-folders-list; each row sets #sync-rc-root to that path. A header
-// row selects the current level (so the remote root is pickable too).
-let rcBrowseParent = "";
-
-$("#sync-rc-pick-folder").addEventListener("click", async () => {
-    rcBrowseParent = $("#sync-rc-root").value.trim().replace(/^\/+|\/+$/g, "");
-    await rcRenderBrowse();
-});
-
-async function rcRenderBrowse() {
-    const list = $("#sync-rc-folders-list");
-    list.innerHTML = "";
-    let entries;
-    try {
-        const r = await api.rcloneFolders(syncFolderId, rcBrowseParent);
-        entries = r.entries || [];
-    } catch (err) {
-        const li = document.createElement("li");
-        li.textContent = err.message;
-        li.style.color = "var(--danger, #b00)";
-        list.append(li);
-        return;
-    }
-    // Header: breadcrumb + "use this folder" + up.
-    const head = document.createElement("li");
-    head.style.cssText = "display:flex;gap:8px;align-items:center;margin-bottom:4px;font-weight:600;";
-    const crumb = document.createElement("span");
-    crumb.textContent = rcBrowseParent ? `/${rcBrowseParent}` : "(remote root)";
-    crumb.style.flex = "1";
-    head.append(crumb);
-    if (rcBrowseParent) {
-        const up = document.createElement("button");
-        up.type = "button";
-        up.className = "btn btn-secondary btn-sm";
-        up.textContent = "⤴ up";
-        up.addEventListener("click", async () => {
-            const parts = rcBrowseParent.split("/");
-            parts.pop();
-            rcBrowseParent = parts.join("/");
-            await rcRenderBrowse();
-        });
-        head.append(up);
-    }
-    const useBtn = document.createElement("button");
-    useBtn.type = "button";
-    useBtn.className = "btn btn-primary btn-sm";
-    useBtn.textContent = "Use this folder";
-    useBtn.addEventListener("click", () => {
-        $("#sync-rc-root").value = rcBrowseParent;
-        list.innerHTML = "";
-        $("#sync-rc-folders-hint").textContent = rcBrowseParent
-            ? `Mirroring /${rcBrowseParent}`
-            : "Mirroring the whole remote.";
-    });
-    head.append(useBtn);
-    list.append(head);
-
-    if (!entries.length) {
-        const li = document.createElement("li");
-        li.textContent = "(no subfolders here)";
-        li.style.color = "var(--muted, #888)";
-        list.append(li);
-        return;
-    }
-    for (const e of entries) {
-        const li = document.createElement("li");
-        li.style.cssText = "display:flex;gap:6px;align-items:center;padding:2px 0;";
-        const into = document.createElement("button");
-        into.type = "button";
-        into.className = "btn-text";
-        into.textContent = `📁 ${e.name}`;
-        into.title = "Open";
-        into.addEventListener("click", async () => {
-            rcBrowseParent = e.path;
-            await rcRenderBrowse();
-        });
-        li.append(into);
-        list.append(li);
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Google Drive folder-picker — lazy tree with 3-state checkboxes

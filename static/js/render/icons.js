@@ -90,11 +90,6 @@ function _sourceIcon(kind) {
             return `${M_FOLDER}/folder-network.svg`;
         case "sharepoint":
             return `${SIMPLE}/sharepoint.svg`;
-        case "rclone":
-            // rclone-mirrored OneDrive/other (Drive-backed rclone resolves to
-            // "google_drive" server-side). Reuse the teal network folder —
-            // it reads as "remote mirror", same family as NFS.
-            return `${M_FOLDER}/folder-network.svg`;
         case "s3":
         case "azure_data_lake":
         case "regular":

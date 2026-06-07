@@ -128,11 +128,6 @@ def _sync_source_kind(source: FolderSyncSource | None) -> str:
         return "sharepoint"
     if source.source_type == "teams":
         return "teams"
-    if source.source_type == "rclone":
-        # Badge by the underlying remote so an rclone-mirrored Drive looks
-        # like a Drive. ``onedrive`` has no Simple Icons mark (Microsoft was
-        # dropped in 2024) so it falls through to the generic folder icon.
-        return "google_drive" if (source.rc_backend or "") == "drive" else "rclone"
     return "regular"
 
 

@@ -44,11 +44,6 @@ ENV PYTHONUNBUFFERED=1 \
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         git \
-        # rclone — the optional rclone sync connector shells out to this
-        # binary to mirror Drive / OneDrive without a provider-side app.
-        # Debian's build is recent enough for every flag we pass
-        # (lsjson, --use-json-log, --drive-export-formats, --track-renames).
-        rclone \
         curl \
         libgl1 \
         libglib2.0-0 \
@@ -116,8 +111,7 @@ COPY --from=warm /root/mineru.json /tmp/mineru.json
 
 # Strip the toolchain we only needed for pip-installing native wheels.
 # ``git`` stays — the GitHub sync feature shells out to ``git ls-remote``
-# and ``git clone`` at runtime; ``rclone`` likewise stays for the rclone
-# sync connector (both are runtime deps, not build tooling).
+# and ``git clone`` at runtime.
 RUN apt-get purge -y build-essential \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
