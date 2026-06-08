@@ -36,9 +36,31 @@ class Settings(BaseSettings):
     data_dir: Path = _default_data_dir()
     db_path: Path | None = None
     cas_dir: Path | None = None
-    qdrant_mode: Literal["embedded", "standalone"] = "embedded"
+    # Three deployment shapes:
+    #   * "embedded"   — in-process QdrantClient(path=…). Pure-Python local
+    #                    backend: no Docker, no subprocess, but stripped down
+    #                    (slower, single-process, no server-side Query API /
+    #                    quantization / snapshots).
+    #   * "standalone" — connect to an externally-run Qdrant server over
+    #                    VOITTA_QDRANT_URL (the Docker / k8s deployment).
+    #   * "managed"    — the app spawns the native Qdrant *binary* as a
+    #                    localhost subprocess and connects to it over HTTP.
+    #                    Full-engine feature parity, no Docker. Hard-fail: if
+    #                    the binary is missing or won't become healthy, boot
+    #                    crashes — there is NO fallback to embedded.
+    qdrant_mode: Literal["embedded", "standalone", "managed"] = "embedded"
     qdrant_url: str | None = None
     qdrant_path: Path | None = None
+    # managed-mode knobs (ignored unless qdrant_mode="managed").
+    # ``qdrant_binary`` is a path or a name resolved on PATH (default
+    # "qdrant"). The subprocess binds localhost only; storage defaults to
+    # ``data_dir/qdrant_managed`` (kept separate from the embedded backend's
+    # ``data_dir/qdrant`` — the on-disk formats are NOT compatible).
+    qdrant_binary: str | None = None
+    qdrant_managed_host: str = "127.0.0.1"
+    qdrant_managed_http_port: int = 6333
+    qdrant_managed_grpc_port: int = 6334
+    qdrant_managed_startup_timeout_s: float = 30.0
 
     # Required parent for all user-registered folders. Every folder is created
     # under this path; arbitrary host paths cannot be registered.
@@ -242,6 +264,17 @@ class Settings(BaseSettings):
 
     def resolved_qdrant_path(self) -> Path:
         return self.qdrant_path or (self.data_dir / "qdrant")
+
+    def resolved_qdrant_managed_dir(self) -> Path:
+        """Storage dir for the managed Qdrant subprocess.
+
+        Honors the ``qdrant_path`` override when set; otherwise a dedicated
+        dir distinct from the embedded backend's (incompatible on-disk format).
+        """
+        return self.qdrant_path or (self.data_dir / "qdrant_managed")
+
+    def managed_qdrant_url(self) -> str:
+        return f"http://{self.qdrant_managed_host}:{self.qdrant_managed_http_port}"
 
     def asset_url(self, token: str) -> str:
         """Build the public URL for a signed asset token.

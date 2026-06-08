@@ -1,0 +1,60 @@
+# Briefcase-only manifest for the Voitta RAG macOS menu-bar .app.
+#
+# Deliberately has NO [project] table: BeeWare Briefcase (0.4.x) installs
+# [project].dependencies in addition to `requires`, which would drag the whole
+# heavy ML stack (mineru/torch/vtk) into the bundle at build time and blow up
+# pip's resolver. Keeping this manifest [project]-free means Briefcase installs
+# ONLY the minimal `requires` below; the full stack is pip-installed on first
+# launch from the build-time-pinned requirements-lock.txt (see installer.py).
+#
+# The two source packages are symlinked into ./src/ by build_app.sh so
+# Briefcase's same-tree `sources` paths resolve without escaping the dir.
+# Build/dist land under desktop/. Driven by ./build_app.sh.
+
+[tool.briefcase]
+project_name = "Voitta RAG Enterprise"
+bundle = "ai.voitta"
+version = "0.1.19"
+url = "https://voitta.ai"
+license = "AGPL-3.0-or-later"
+author = "Voitta"
+author_email = "info@voitta.ai"
+
+[tool.briefcase.app.voitta-rag-desktop]
+formal_name = "Voitta RAG"
+description = "Local single-user document RAG with hybrid search (no Docker)."
+long_description = """
+Voitta RAG Enterprise, packaged as a local macOS menu-bar app. Runs the
+FastAPI server in single-user mode with a managed (no-Docker) Qdrant engine.
+Heavy ML dependencies and models download on first launch to keep the
+installer small.
+"""
+icon = "src/voitta_rag_desktop/resources/voitta"
+
+# Symlinked into ./src/ at build time (→ ../../src/...).
+sources = [
+    "src/voitta_rag_desktop",
+    "src/voitta_rag_enterprise",
+]
+
+# Minimal boot deps shipped in the bundle. Everything heavy is installed on
+# first launch from requirements-lock.txt. pip/setuptools/wheel are bundled so
+# the first-run installer can run.
+requires = [
+    "./wheels/rumps-0.4.0-py3-none-any.whl",
+    "pyobjc-framework-Cocoa>=10.0",
+    "pip",
+    "setuptools",
+    "wheel",
+]
+
+[tool.briefcase.app.voitta-rag-desktop.macOS]
+universal_build = false
+min_os_version = "14.0"
+info."LSUIElement" = true
+info."NSHumanReadableCopyright" = "© Voitta"
+
+entitlement."com.apple.security.cs.allow-jit" = true
+entitlement."com.apple.security.cs.allow-unsigned-executable-memory" = true
+entitlement."com.apple.security.cs.disable-library-validation" = true
+entitlement."com.apple.security.cs.allow-dyld-environment-variables" = true

@@ -23,7 +23,13 @@ from .services.scanner import scan_folder
 logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-STATIC_DIR = REPO_ROOT / "static"
+# ``VOITTA_STATIC_DIR`` overrides the SPA location. Needed by the frozen macOS
+# .app bundle, where the package no longer sits two levels under the repo root
+# (the desktop shim stages ``static/`` into the bundle and points us at it).
+# Falls back to the in-repo ``static/`` for normal source / server runs.
+import os as _os  # noqa: E402
+
+STATIC_DIR = Path(_os.environ.get("VOITTA_STATIC_DIR") or (REPO_ROOT / "static"))
 
 
 def _startup_scan() -> None:
@@ -150,6 +156,14 @@ def create_app() -> FastAPI:
         logger.info("Voitta RAG Enterprise starting (data_dir=%s)", settings.data_dir)
         app.state.startup_status = {"phase": "init", "ready": False}
         init_db()
+        # Managed Qdrant: spawn the native binary subprocess up front, in the
+        # synchronous part of boot (outside the background task's try/except),
+        # so a missing/unhealthy binary aborts startup hard — no fallback to a
+        # different backend. Embedded / standalone modes spawn nothing here.
+        if settings.qdrant_mode == "managed":
+            from .services.qdrant_process import start_managed_qdrant
+
+            start_managed_qdrant()
         events.install_loop(asyncio.get_running_loop())
         _seed_users()
         _seed_auth_providers()

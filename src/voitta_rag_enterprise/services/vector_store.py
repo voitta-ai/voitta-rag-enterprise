@@ -79,6 +79,13 @@ def get_client() -> QdrantClient:
                 settings = get_settings()
                 if settings.qdrant_mode == "standalone":
                     _client = QdrantClient(url=settings.qdrant_url)
+                elif settings.qdrant_mode == "managed":
+                    # Spawn (or reuse) the native Qdrant subprocess and connect
+                    # over HTTP. start_managed_qdrant() raises on any failure —
+                    # no fallback to embedded.
+                    from .qdrant_process import start_managed_qdrant
+
+                    _client = QdrantClient(url=start_managed_qdrant())
                 else:
                     path = settings.resolved_qdrant_path()
                     path.mkdir(parents=True, exist_ok=True)
@@ -105,6 +112,11 @@ def reset_client_cache() -> None:
         with contextlib.suppress(Exception):
             _client.close()
     _client = None
+    # Tear down the managed subprocess too, if one was started. No-op for the
+    # embedded / standalone backends (nothing was spawned).
+    from .qdrant_process import stop_managed_qdrant
+
+    stop_managed_qdrant()
 
 
 def ensure_chunks_collection(text_dim: int) -> None:
