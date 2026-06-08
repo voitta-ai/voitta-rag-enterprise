@@ -198,6 +198,14 @@ if [ -f "$APP_PLIST" ]; then
     || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $VERSION" "$APP_PLIST"
   /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$APP_PLIST" 2>/dev/null \
     || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $VERSION" "$APP_PLIST"
+  # `briefcase update` (the build/ exists path) does NOT re-copy the app icon,
+  # so refresh it from source — otherwise an icon change never reaches the .app.
+  SRC_ICNS="$RES/voitta.icns"
+  APP_ICNS="$APP_BUNDLE/Contents/Resources/voitta-rag-desktop.icns"
+  if [ -f "$SRC_ICNS" ] && [ -f "$APP_ICNS" ]; then
+    cp "$SRC_ICNS" "$APP_ICNS"
+    echo "[build_app] refreshed app icon"
+  fi
   # Editing Info.plist invalidates the ad-hoc signature briefcase applied during
   # build; an invalid signature gets the app SIGKILL'd by Gatekeeper. Re-sign
   # ad-hoc so the local build runs. (A later `--package --identity` re-signs
