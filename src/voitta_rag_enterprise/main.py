@@ -417,13 +417,30 @@ def create_app() -> FastAPI:
     app.add_middleware(_McpAuthBridge)
 
     if STATIC_DIR.exists():
-        app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+        # Force the browser to REVALIDATE the SPA on every load instead of
+        # serving a stale cached copy. StaticFiles emits etag/last-modified but
+        # no Cache-Control, so browsers fall back to heuristic freshness and
+        # skip revalidation — which is why a plain reload kept showing old JS
+        # and a manual "empty cache" was needed. ``no-cache`` means "you may
+        # cache, but always revalidate via the etag first" → a cheap 304 when
+        # unchanged, fresh bytes the moment we redeploy. No version-stamping
+        # needed, and the desktop app ships new JS on every build.
+        class _NoCacheStatic(StaticFiles):
+            async def get_response(self, path, scope):
+                resp = await super().get_response(path, scope)
+                resp.headers["Cache-Control"] = "no-cache"
+                return resp
+
+        app.mount("/static", _NoCacheStatic(directory=STATIC_DIR), name="static")
 
         @app.get("/", include_in_schema=False)
         async def root() -> object:
             from fastapi.responses import FileResponse
 
-            return FileResponse(STATIC_DIR / "index.html")
+            return FileResponse(
+                STATIC_DIR / "index.html",
+                headers={"Cache-Control": "no-cache"},
+            )
 
         @app.get("/favicon.ico", include_in_schema=False)
         async def favicon() -> object:
