@@ -1506,9 +1506,9 @@ def gdl_browse(
 
 
 class GdlConnectIn(BaseModel):
-    folder_id: int                     # the folder being configured (the opened one)
     account: str                       # signed-in email (provenance only)
-    path: str                          # chosen Drive folder under CloudStorage
+    path: str                          # chosen subtree under CloudStorage
+    display_name: str = ""
     auto_sync_enabled: bool = False
     auto_sync_hours: int = Field(default=6, ge=1, le=24)
 
@@ -1519,27 +1519,21 @@ def gdl_connect(
     db: Session = Depends(db_session),
     user: CurrentUser = Depends(current_user),
 ) -> SyncTriggerOut:
-    """Point an EXISTING folder at a Google Drive folder (index in place).
+    """Register a Google Drive subtree as an indexed-in-place folder.
 
-    Like every other connector, this configures the folder whose sync dialog
-    was opened — it does NOT create new folders. The folder's ``path`` is
-    repointed at the chosen Drive subtree (we index in place; content
-    materializes lazily as the extract worker reads each file), its
-    ``source_type`` becomes ``google_drive_local``, and a matching sync source
-    is upserted. The initial sync is then enqueued.
+    Creates the ``Folder`` (its ``path`` IS the Drive subtree), attaches a
+    ``google_drive_local`` sync source, and enqueues the initial sync. No
+    download happens here — content materializes lazily as the extract worker
+    reads each file.
     """
     from sqlalchemy import select as _select
 
+    from ...services.acl import grant_folder
     from ...services.sync.cloudstorage_local import (
         is_macos,
         is_source_live,
         is_within_cloud_storage,
     )
-
-    _check_owner(body.folder_id, db, user)
-    folder = db.get(Folder, body.folder_id)
-    if folder is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Folder not found")
 
     if not is_macos():
         raise HTTPException(
@@ -1562,34 +1556,35 @@ def gdl_connect(
     from pathlib import Path as _P
 
     abs_path = str(_P(path).resolve(strict=False))
-    # Refuse if ANOTHER folder already points at this Drive path.
-    clash = db.execute(
-        _select(Folder).where(Folder.path == abs_path, Folder.id != folder.id)
+    existing = db.execute(
+        _select(Folder).where(Folder.path == abs_path)
     ).scalar_one_or_none()
-    if clash is not None:
+    if existing is not None:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            f"Another folder ('{clash.display_name}', id={clash.id}) already "
-            f"indexes that Drive folder.",
+            f"This folder is already indexed (id={existing.id}).",
         )
 
-    # Repoint the opened folder AT the Drive subtree (index in place).
-    folder.path = abs_path
-    folder.source_type = "google_drive_local"
-
-    existing = db.get(FolderSyncSource, folder.id)
-    src = existing or FolderSyncSource(
-        folder_id=folder.id, source_type="google_drive_local"
+    display = (body.display_name or "").strip() or _P(abs_path).name or "Google Drive"
+    folder = Folder(
+        path=abs_path,
+        display_name=display,
+        source_type="google_drive_local",
+        owner_id=user.id,
     )
-    src.source_type = "google_drive_local"
-    src.gdl_account = (body.account or "").strip()
-    src.gdl_path = abs_path
-    src.auto_sync_enabled = bool(body.auto_sync_enabled)
-    src.auto_sync_hours = int(body.auto_sync_hours)
-    src.sync_status = "idle"
-    src.sync_error = None
-    if existing is None:
-        db.add(src)
+    db.add(folder)
+    db.flush()
+    grant_folder(db, folder.id, user.id)
+
+    src = FolderSyncSource(
+        folder_id=folder.id,
+        source_type="google_drive_local",
+        gdl_account=(body.account or "").strip(),
+        gdl_path=abs_path,
+        auto_sync_enabled=bool(body.auto_sync_enabled),
+        auto_sync_hours=int(body.auto_sync_hours),
+    )
+    db.add(src)
     db.flush()
 
     # Initial sync (builds the provenance sidecar under data_dir, then the
@@ -1600,9 +1595,7 @@ def gdl_connect(
         db, "sync", {"folder_id": folder.id}, dedup_key=f"sync:{folder.id}"
     )
     db.commit()
-    events.publish(
-        "folders", {"type": "folder.sync_source_changed", "folder_id": folder.id}
-    )
+    events.publish("folders", {"type": "folder.added", "folder_id": folder.id})
     return SyncTriggerOut(folder_id=folder.id, job_id=job_id)
 
 

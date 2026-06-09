@@ -120,7 +120,9 @@ def _sync_source_kind(source: FolderSyncSource | None) -> str:
             and bool(source.gh_pat)
         )
         return "github_private" if (is_ssh_url or has_https_pat) else "github_public"
-    if source.source_type == "google_drive":
+    if source.source_type in ("google_drive", "google_drive_local"):
+        # Both wear the Google Drive brand mark — same content origin, just
+        # API-synced vs. indexed-in-place from the local Drive app.
         return "google_drive"
     if source.source_type == "nfs":
         return "nfs"
