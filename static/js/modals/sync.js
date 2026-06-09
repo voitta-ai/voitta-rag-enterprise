@@ -214,19 +214,9 @@ function updateGdRedirectHint() {
 function setSyncType(t) {
     $("#sync-form-github").hidden = t !== "github";
     $("#sync-form-google_drive").hidden = t !== "google_drive";
-    $("#sync-form-google_drive_local").hidden = t !== "google_drive_local";
     $("#sync-form-nfs").hidden = t !== "nfs";
     $("#sync-form-sharepoint").hidden = t !== "sharepoint";
     $("#sync-form-teams").hidden = t !== "teams";
-    // google_drive_local CREATES a new indexed folder (it doesn't configure the
-    // selected one), so it uses its own "Connect & index" button — hide the
-    // shared Save / Sync-now / Remove footer and the auto-sync row for it.
-    const isGdl = t === "google_drive_local";
-    $("#sync-save").hidden = isGdl;
-    $("#sync-trigger").hidden = isGdl;
-    if (isGdl) $("#sync-delete").hidden = true;
-    const autoRow = document.querySelector(".sync-auto-row");
-    if (autoRow) autoRow.hidden = isGdl;
     if (t === "google_drive") {
         updateGdRedirectHint();
     }
@@ -238,9 +228,30 @@ function setSyncType(t) {
             nfsRebuildTree(initial);
         });
     }
-    if (isGdl) gdlInit();
     if (t === "sharepoint") updateMsLoopbackHint("sp");
     if (t === "teams") updateMsLoopbackHint("tm");
+    // Reconcile the Save/Sync-now footer + shared GD selector with the active
+    // Google Drive sub-tab (the local "This Mac" tab hides both).
+    applyGdlChrome();
+}
+
+// The local "This Mac" Google Drive tab CREATES a new indexed folder via its
+// own "Connect & index" button, so the shared Drive-folder selector and the
+// standard Save / Sync-now / Remove footer + auto-sync row don't apply to it.
+// Active iff source == google_drive AND its sub-tab == local.
+function gdlActive() {
+    return $("#sync-type").value === "google_drive" && gdAuthMode === "local";
+}
+
+function applyGdlChrome() {
+    const local = gdlActive();
+    const shared = $("#sync-gd-shared");
+    if (shared) shared.hidden = local;
+    $("#sync-save").hidden = local;
+    $("#sync-trigger").hidden = local;
+    if (local) $("#sync-delete").hidden = true;
+    const autoRow = document.querySelector(".sync-auto-row");
+    if (autoRow) autoRow.hidden = local;
 }
 
 // ---------------------------------------------------------------------------
@@ -256,16 +267,16 @@ let gdlCurrentPath = "";   // absolute path currently shown
 let gdlAccountRoot = "";   // mount root for the selected account (browse floor)
 
 async function gdlRefreshAvailability() {
-    // Show the "Google Drive (this Mac)" option only when the desktop Drive
-    // app is running with at least one signed-in account. Mirrors how the NFS
-    // option is gated on a reachable root.
-    const opt = $("#sync-type-option-gdl");
-    if (!opt) return;
+    // Show the "This Mac (no setup)" Google Drive tab only when the desktop
+    // Drive app is running with at least one signed-in account (i.e. on the
+    // macOS desktop app). On the server it stays hidden.
+    const tab = $("#sync-gd-tab-local");
+    if (!tab) return;
     try {
         const res = await api.gdlAccounts();
-        opt.hidden = !(res.available && (res.accounts || []).length);
+        tab.hidden = !(res.available && (res.accounts || []).length);
     } catch {
-        opt.hidden = true;
+        tab.hidden = true;
     }
 }
 
@@ -718,18 +729,29 @@ function _snapshotSavedGdFolders(folders) {
 // different gotchas (OAuth needs Connect + redirect URI; SA needs
 // folder-shared-with-client_email), so we render exactly one set of
 // fields and persist the mode the user actually used.
-let gdAuthMode = "oauth"; // "oauth" | "sa"
+let gdAuthMode = "oauth"; // "oauth" | "sa" | "local"
 
 function setGdAuthMode(mode) {
-    gdAuthMode = mode === "sa" ? "sa" : "oauth";
+    gdAuthMode = ["sa", "local"].includes(mode) ? mode : "oauth";
     const oauthTab = $("#sync-gd-tab-oauth");
     const saTab = $("#sync-gd-tab-sa");
-    oauthTab.classList.toggle("active", gdAuthMode === "oauth");
-    oauthTab.setAttribute("aria-selected", gdAuthMode === "oauth" ? "true" : "false");
-    saTab.classList.toggle("active", gdAuthMode === "sa");
-    saTab.setAttribute("aria-selected", gdAuthMode === "sa" ? "true" : "false");
+    const localTab = $("#sync-gd-tab-local");
+    for (const [tab, m] of [[oauthTab, "oauth"], [saTab, "sa"], [localTab, "local"]]) {
+        if (!tab) continue;
+        tab.classList.toggle("active", gdAuthMode === m);
+        tab.setAttribute("aria-selected", gdAuthMode === m ? "true" : "false");
+    }
     $("#sync-gd-pane-oauth").hidden = gdAuthMode !== "oauth";
     $("#sync-gd-pane-sa").hidden = gdAuthMode !== "sa";
+    $("#sync-gd-pane-local").hidden = gdAuthMode !== "local";
+
+    // The local "This Mac" tab is a CREATE flow with its own button — hide the
+    // shared selector + standard footer, and (re)load the folder picker.
+    applyGdlChrome();
+    if (gdAuthMode === "local") {
+        gdlInit();
+        return;  // none of the OAuth/SA folder-selector wiring applies
+    }
 
     // Pick browser only works in OAuth mode (it needs gd_refresh_token).
     // In SA mode, surface the typed-folder-id input as the only path and
@@ -812,6 +834,7 @@ function setGdConnState({ connected, hasClientSecret }) {
 
 $("#sync-gd-tab-oauth").addEventListener("click", () => setGdAuthMode("oauth"));
 $("#sync-gd-tab-sa").addEventListener("click", () => setGdAuthMode("sa"));
+$("#sync-gd-tab-local").addEventListener("click", () => setGdAuthMode("local"));
 
 // Manual folder-ID add — Enter accepts, ignores duplicates and empties.
 // Folder names aren't known here (no Drive lookup in SA mode); the
@@ -862,6 +885,23 @@ async function loadSyncSource() {
             });
         }
         if (!src) return;
+        // google_drive_local isn't a Source dropdown entry — it's the "This Mac"
+        // tab under Google Drive. Map it so reopening such a folder's dialog
+        // lands on that tab instead of an empty form.
+        if (src.source_type === "google_drive_local") {
+            $("#sync-type").value = "google_drive";
+            setSyncType("google_drive");
+            $("#sync-gd-tab-local").hidden = false;
+            setGdAuthMode("local");
+            const status = $("#sync-gdl-status");
+            if (status && src.google_drive_local) {
+                status.hidden = false;
+                status.textContent =
+                    `Indexing ${src.google_drive_local.path} ` +
+                    `(${src.google_drive_local.status}). Use "Sync now" from the folder menu to refresh.`;
+            }
+            return;
+        }
         $("#sync-type").value = src.source_type;
         setSyncType(src.source_type);
         if (src.source_type === "github" && src.github) {

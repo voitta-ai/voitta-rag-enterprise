@@ -581,10 +581,6 @@
                 <select id="sync-type">
                     <option value="github">GitHub / Git</option>
                     <option value="google_drive">Google Drive</option>
-                    <!-- Shown only on the macOS desktop app when the Google
-                         Drive for Desktop app is running. sync.js toggles this
-                         <option> on open via the /sync/local/accounts probe. -->
-                    <option value="google_drive_local" id="sync-type-option-gdl" hidden>Google Drive (this Mac — no setup)</option>
                     <option value="sharepoint">SharePoint</option>
                     <option value="teams">Teams meetings</option>
                     <!-- Shown only when the admin has configured an NFS
@@ -668,6 +664,15 @@
                             class="seg-tab" role="tab" aria-selected="false">
                             Service account
                         </button>
+                        <!-- Local desktop tab — shown only on the macOS desktop
+                             app when Google Drive for Desktop is running with a
+                             signed-in account. sync.js toggles it on modal open
+                             via the /sync/local/accounts probe. No credentials:
+                             rides on the installed Drive app. -->
+                        <button type="button" id="sync-gd-tab-local" hidden
+                            class="seg-tab" role="tab" aria-selected="false">
+                            This Mac (no setup)
+                        </button>
                     </div>
 
                     <!-- OAuth pane -->
@@ -749,6 +754,43 @@
                         <textarea id="sync-gd-sa-json" rows="6" placeholder='{"type":"service_account","client_email":"…","private_key":"…"}'></textarea>
                     </div>
 
+                    <!-- Local desktop pane — index a folder straight from the
+                         Google Drive app on this Mac. No credentials; the folder
+                         is indexed IN PLACE and content downloads lazily as it's
+                         indexed. This CREATES a new indexed folder via its own
+                         "Connect & index" button (so the shared folder-selector
+                         and the Save / Sync-now footer below are hidden for it). -->
+                    <div id="sync-gd-pane-local" class="sync-gd-pane" hidden>
+                        <p class="hint">
+                            Index a folder straight from the Google Drive app on
+                            this Mac — no client ID, no OAuth. Files download on
+                            demand as they're indexed; nothing is ever written
+                            back to Drive. Native Google Docs are added as links
+                            (shared ones are also exported and indexed).
+                        </p>
+                        <label>Account</label>
+                        <select id="sync-gdl-account"></select>
+
+                        <label style="margin-top:10px;">Folder to index</label>
+                        <div class="branches-row" style="margin-bottom:6px;gap:6px;flex-wrap:wrap;">
+                            <span id="sync-gdl-breadcrumb" class="hint" style="margin:0;word-break:break-all;">/</span>
+                            <span id="sync-gdl-count" class="hint" style="margin-left:auto;"></span>
+                        </div>
+                        <ul id="sync-gdl-list" style="margin:0;padding:4px 0;max-height:36vh;overflow:auto;border:1px solid var(--border,#ccc);border-radius:4px;list-style:none;font-size:13px;"></ul>
+                        <p class="hint" style="margin-top:6px;">
+                            Click a folder to open it. <strong>Connect &amp; index</strong>
+                            indexes the folder shown above (including its subfolders).
+                        </p>
+                        <div class="actions actions-right" style="margin-top:8px;">
+                            <button type="button" id="sync-gdl-connect" class="btn btn-primary btn-sm">Connect &amp; index this folder</button>
+                        </div>
+                        <p id="sync-gdl-status" class="hint" hidden style="margin-top:6px;"></p>
+                    </div>
+
+                    <!-- Shared folder selector + Workspace API controls. Apply
+                         to the OAuth / Service-account modes only; hidden for the
+                         local "This Mac" tab. -->
+                    <div id="sync-gd-shared">
                     <!-- Shared folder selector — applies to whichever auth
                          mode is active. The Pick button only works in OAuth
                          mode (the API needs a refresh_token to list a real
@@ -789,6 +831,7 @@
                         are off — sync already skips only the disabled types
                         automatically. Use it when you deliberately want binaries only.
                     </p>
+                    </div><!-- /#sync-gd-shared -->
                 </div>
 
                 <!-- SharePoint sync pane. Tenant-wide app credentials are
@@ -1007,40 +1050,6 @@
                     </div>
                     <ul id="sync-nfs-tree" class="nfs-tree" style="margin:0;padding:6px 0 6px 4px;max-height:40vh;overflow:auto;border:1px solid var(--border, #ccc);border-radius:4px;list-style:none;font-size:13px;"></ul>
                     <p class="hint" id="sync-nfs-hint" style="margin-top:6px;">Click ▶ to expand, click a checkbox to (de)select that subtree.</p>
-                </div>
-
-                <!-- Google Drive LOCAL (desktop, no credentials). Rides on the
-                     installed Google Drive for Desktop app: browse the (free,
-                     not-yet-downloaded) tree and index a chosen folder IN
-                     PLACE. Content downloads lazily as files are indexed; we
-                     never write back into the Drive. This form CREATES a new
-                     indexed folder (it doesn't configure the selected one), so
-                     it has its own "Connect & index" button. -->
-                <div id="sync-form-google_drive_local" hidden>
-                    <p class="hint" style="margin:0 0 6px;">
-                        Index a folder straight from the Google Drive app on this
-                        Mac — no client ID, no OAuth. Files download on demand as
-                        they're indexed; nothing is ever written back to Drive.
-                        Native Google Docs are added as links (shared ones are
-                        also exported and indexed).
-                    </p>
-                    <label>Account</label>
-                    <select id="sync-gdl-account"></select>
-
-                    <label style="margin-top:10px;">Folder to index</label>
-                    <div class="branches-row" style="margin-bottom:6px;gap:6px;flex-wrap:wrap;">
-                        <span id="sync-gdl-breadcrumb" class="hint" style="margin:0;word-break:break-all;">/</span>
-                        <span id="sync-gdl-count" class="hint" style="margin-left:auto;"></span>
-                    </div>
-                    <ul id="sync-gdl-list" style="margin:0;padding:4px 0;max-height:40vh;overflow:auto;border:1px solid var(--border,#ccc);border-radius:4px;list-style:none;font-size:13px;"></ul>
-                    <p class="hint" style="margin-top:6px;">
-                        Click a folder to open it. <strong>Connect &amp; index</strong>
-                        indexes the folder shown above (including its subfolders).
-                    </p>
-                    <div class="actions actions-right" style="margin-top:8px;">
-                        <button type="button" id="sync-gdl-connect" class="btn btn-primary btn-sm">Connect &amp; index this folder</button>
-                    </div>
-                    <p id="sync-gdl-status" class="hint" hidden style="margin-top:6px;"></p>
                 </div>
 
                 <!-- Auto-sync schedule. Common to all source types. The
