@@ -20,6 +20,7 @@ keeping the process alive amortises that cost across the whole queue.
 from __future__ import annotations
 
 import json
+import multiprocessing
 import sys
 import traceback
 
@@ -77,4 +78,15 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # CRITICAL: MinerU renders PDF pages with a ProcessPoolExecutor using the
+    # "spawn" start method (it hard-forces spawn on non-Windows). A spawned
+    # worker re-imports THIS module as ``__main__`` to recover globals — which,
+    # without this guard, re-runs ``main()`` and blocks the worker forever on
+    # ``sys.stdin.readline()``. The render pool then never returns and the
+    # parent's 600s watchdog kills the whole daemon — so every PDF "times out",
+    # even tiny ones. ``freeze_support`` + the MainProcess check ensure only the
+    # genuine daemon process runs the stdio loop; spawned workers fall through
+    # to multiprocessing's own bootstrap and do their render work.
+    multiprocessing.freeze_support()
+    if multiprocessing.current_process().name == "MainProcess":
+        main()

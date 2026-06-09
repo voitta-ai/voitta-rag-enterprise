@@ -127,6 +127,21 @@ def test_connector_registered():
     assert conn.supports_progress is True
 
 
+def test_sync_stats_object_matches_run_sync_contract():
+    """run_sync treats the connector's return value as a stats OBJECT —
+    ``stats.as_dict()`` and ``stats.errors`` — not a dict. Guards against the
+    regression where sync() returned ``stats.as_dict()`` and run_sync then hit
+    ``'dict' object has no attribute 'as_dict'``."""
+    from voitta_rag_enterprise.services.sync.cloud_local import CloudLocalSyncStats
+
+    stats = CloudLocalSyncStats(files_seen=3, stubs=3)
+    # The two attributes run_sync depends on must exist on the OBJECT.
+    assert hasattr(stats, "errors")
+    assert isinstance(stats.errors, list)
+    d = stats.as_dict()
+    assert isinstance(d, dict) and d["files_seen"] == 3
+
+
 # ---------------------------------------------------------------------------
 # Live-Drive tests (skipped without a mounted Google Drive)
 # ---------------------------------------------------------------------------

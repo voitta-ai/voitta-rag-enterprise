@@ -94,7 +94,9 @@ class CloudLocalConnector(SyncConnector):
         gdl_account: str = "",
         folder_id: int | None = None,
         progress_cb: Callable[[str, int, int, dict | None], None] | None = None,
-    ) -> dict[str, Any]:
+    ) -> "CloudLocalSyncStats":
+        # run_sync expects a stats OBJECT (it calls .as_dict() / .errors on the
+        # result), so return the dataclass — not its dict form.
         return await asyncio.to_thread(
             self._sync_sync,
             folder_root=folder_root,
@@ -196,7 +198,7 @@ class CloudLocalConnector(SyncConnector):
             "cloud-local sync: %d files (%d stubs, %d native docs) under %s",
             stats.files_seen, stats.stubs, stats.native_docs, root,
         )
-        return stats.as_dict()
+        return stats  # run_sync calls .as_dict()/.errors on the OBJECT
 
 
 __all__ = [
