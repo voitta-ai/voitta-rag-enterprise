@@ -1660,37 +1660,34 @@ $("#sync-gdl-account").addEventListener("change", () => {
     gdlBuildTree();
 });
 
-// Google Drive LOCAL: register every CHECKED folder as its own indexed-in-place
-// folder (path = the Drive subtree) and enqueue each sync. Content downloads
-// lazily as files are indexed. Failures (e.g. a folder already indexed → 409)
-// are collected per-path so one bad pick doesn't sink the rest.
+// Configure the OPENED folder to mirror the checked Drive folders. ONE call:
+// the folder's path becomes the account mount, the checked subtrees are
+// recorded, and the Drive structure (incl. parent dirs) renders as a tree
+// under this folder after sync.
 $("#sync-gdl-connect").addEventListener("click", async () => {
     const paths = [...gdlSelected];
-    if (!paths.length) return;
-    const account = $("#sync-gdl-account").value;
+    if (!paths.length || !syncFolderId) return;
+    const sel = $("#sync-gdl-account");
+    const account = sel.options[sel.selectedIndex]?.textContent || "";  // email
     const btn = $("#sync-gdl-connect");
     btn.disabled = true;
-    let ok = 0;
-    const errors = [];
-    for (const path of paths) {
-        const rel = path.slice(gdlAccountRoot.length).replace(/^\/+/, "");
-        const name = rel ? rel.split("/").pop() : (account || "Google Drive");
-        setGdlStatus(`Connecting ${name}… (${ok + errors.length + 1}/${paths.length})`);
-        try {
-            await api.gdlConnect({ account, path, display_name: name });
-            ok++;
-        } catch (err) {
-            errors.push(`${name}: ${err.message || err}`);
-        }
-    }
-    if (errors.length) {
-        setGdlStatus(`Indexed ${ok}/${paths.length}. Issues: ${errors.join("; ")}`, true);
+    setGdlStatus(`Connecting ${paths.length} folder${paths.length === 1 ? "" : "s"}…`);
+    try {
+        await api.gdlConnect({
+            folder_id: syncFolderId,
+            account,
+            account_root: gdlAccountRoot,
+            paths,
+            auto_sync_enabled: $("#sync-auto-enabled").checked,
+            auto_sync_hours: parseInt($("#sync-auto-hours").value, 10) || 6,
+        });
+        setGdlStatus("");
+        closeSyncModal();
+        alert(`Connected ${paths.length} Google Drive folder${paths.length === 1 ? "" : "s"}. They'll appear as a tree under this folder as files index in the background — watch the Recent jobs panel.`);
+    } catch (err) {
+        setGdlStatus(err.message || String(err), true);
         btn.disabled = false;
-        return;
     }
-    setGdlStatus("");
-    closeSyncModal();
-    alert(`Indexing started for ${ok} folder${ok === 1 ? "" : "s"}. Files download and index in the background — watch the Recent jobs panel.`);
 });
 
 // Google Drive: launch the OAuth flow in a popup. The callback closes its

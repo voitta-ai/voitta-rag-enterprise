@@ -80,8 +80,21 @@ class CloudLocalConnector(SyncConnector):
     supports_progress = True
 
     def resolve_config(self, row) -> dict[str, Any]:  # FolderSyncSource
+        import json as _json
+
+        paths: list[str] = []
+        raw = (row.gdl_paths or "").strip()
+        if raw:
+            try:
+                decoded = _json.loads(raw)
+                if isinstance(decoded, list):
+                    paths = [str(x) for x in decoded if x]
+            except (ValueError, TypeError):
+                paths = []
+        if not paths and row.gdl_path:
+            paths = [row.gdl_path]
         return {
-            "gdl_path": (row.gdl_path or "").strip(),
+            "gdl_paths": paths,
             "gdl_account": (row.gdl_account or "").strip(),
             "folder_id": row.folder_id,
         }
@@ -90,7 +103,7 @@ class CloudLocalConnector(SyncConnector):
         self,
         *,
         folder_root: Path,
-        gdl_path: str = "",
+        gdl_paths: list[str] | None = None,
         gdl_account: str = "",
         folder_id: int | None = None,
         progress_cb: Callable[[str, int, int, dict | None], None] | None = None,
@@ -100,7 +113,7 @@ class CloudLocalConnector(SyncConnector):
         return await asyncio.to_thread(
             self._sync_sync,
             folder_root=folder_root,
-            gdl_path=gdl_path,
+            gdl_paths=gdl_paths or [],
             gdl_account=gdl_account,
             folder_id=folder_id,
             progress_cb=progress_cb,
@@ -110,51 +123,60 @@ class CloudLocalConnector(SyncConnector):
         self,
         *,
         folder_root: Path,
-        gdl_path: str,
+        gdl_paths: list[str],
         gdl_account: str,
         folder_id: int | None,
         progress_cb: Callable[[str, int, int, dict | None], None] | None,
-    ) -> dict[str, Any]:
+    ) -> "CloudLocalSyncStats":
         def _emit(phase: str, done: int, total: int, detail: dict | None = None) -> None:
             if progress_cb is not None:
                 progress_cb(phase, done, total, detail)
 
-        # The source path is the chosen Drive subtree. Index in place.
-        root = Path(gdl_path or folder_root).expanduser()
+        # ``folder_root`` is the account MOUNT root; rel_paths are numbered
+        # relative to it so the Drive structure is mirrored under the folder.
+        mount = Path(folder_root).expanduser()
 
         # --- safety + liveness gates ---------------------------------------
-        if not is_within_cloud_storage(root):
+        if not is_within_cloud_storage(mount):
             raise RuntimeError(
-                f"cloud-local source is not under ~/Library/CloudStorage: {root}"
+                f"cloud-local source is not under ~/Library/CloudStorage: {mount}"
             )
-        if not root.is_dir():
-            raise RuntimeError(f"cloud-local source path does not exist: {root}")
-        if not is_source_live(root):
+        if not is_source_live(mount):
             raise RuntimeError(
-                "Google Drive is not available (app not running or the folder is "
-                "empty). Start Google Drive for Desktop and try again."
+                "Google Drive is not available (app not running). "
+                "Start Google Drive for Desktop and try again."
             )
+        # Only the selected subtrees that currently exist under the mount.
+        subtrees = [
+            Path(p) for p in (gdl_paths or [])
+            if (Path(p) == mount or str(Path(p)).startswith(str(mount) + "/"))
+            and Path(p).is_dir()
+        ]
+        if not subtrees:
+            raise RuntimeError("no selected Google Drive folder is currently present")
 
         stats = CloudLocalSyncStats()
         _emit("listing", 0, 0)
 
-        # Walk the tree (stat-only — NO content read, NO download) to build the
-        # provenance sidecar. Real files need no sidecar entry (scanner handles
-        # them); native docs get their web URL recorded so they're searchable
-        # as links and the export job can fetch shared ones.
+        # Walk the SELECTED subtrees (stat-only — NO content read, NO download)
+        # to build the provenance sidecar. Real files need no sidecar entry
+        # (scanner handles them); native docs get their web URL recorded so
+        # they're searchable as links and the export job can fetch shared ones.
+        # Sidecar keys are rel-to-MOUNT, matching what the scanner records.
         sidecar: dict[str, dict] = {}
         files: list[Path] = []
-        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-            dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
-            for fname in sorted(filenames):
-                if fname.startswith("."):
-                    continue
-                files.append(Path(dirpath) / fname)
+        for sroot in subtrees:
+            for dirpath, dirnames, filenames in os.walk(sroot, followlinks=False):
+                dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
+                for fname in sorted(filenames):
+                    if fname.startswith("."):
+                        continue
+                    files.append(Path(dirpath) / fname)
 
         total = len(files)
         for i, fpath in enumerate(files):
             try:
-                rel = fpath.relative_to(root).as_posix()
+                rel = fpath.relative_to(mount).as_posix()
             except ValueError:
                 continue
             stats.files_seen += 1
@@ -195,8 +217,8 @@ class CloudLocalConnector(SyncConnector):
 
         _emit("done", total, total)
         logger.info(
-            "cloud-local sync: %d files (%d stubs, %d native docs) under %s",
-            stats.files_seen, stats.stubs, stats.native_docs, root,
+            "cloud-local sync: %d files (%d stubs, %d native docs) across %d subtree(s) under %s",
+            stats.files_seen, stats.stubs, stats.native_docs, len(subtrees), mount,
         )
         return stats  # run_sync calls .as_dict()/.errors on the OBJECT
 

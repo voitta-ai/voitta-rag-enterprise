@@ -121,8 +121,17 @@ def scan_folder(
     #      whole index. Skip the scan entirely instead (never delete on outage).
     #   2. Sidecar lives under data_dir, never inside the Drive mount, so we
     #      never write into the user's Drive.
+    # ``scan_roots`` are the subtrees to walk; ``rel`` is always computed
+    # relative to ``root`` (folder.path). For a regular folder that's just the
+    # folder itself. For a cloud-local (Google Drive) folder, ``root`` is the
+    # account mount and we walk ONLY the user-selected subtrees — but still
+    # number rel_paths relative to the mount, so the Drive's folder structure
+    # (incl. parent dirs the user didn't select) is mirrored under the folder.
     sidecar_file: Path | None = None
+    scan_roots: list[Path] = [root]
     if folder.source_type == "google_drive_local":
+        import json as _json
+
         from .sync.cloud_local import cloud_sidecar_path
         from .sync.cloudstorage_local import is_source_live
 
@@ -134,6 +143,36 @@ def scan_folder(
             return ScanResult(0, 0, 0)
         sidecar_file = cloud_sidecar_path(folder.id)
 
+        # Resolve the selected subtrees from the sync source.
+        from ..db.models import FolderSyncSource
+
+        src = session.get(FolderSyncSource, folder.id)
+        selected: list[str] = []
+        if src is not None:
+            raw = (src.gdl_paths or "").strip()
+            if raw:
+                try:
+                    decoded = _json.loads(raw)
+                    if isinstance(decoded, list):
+                        selected = [str(x) for x in decoded if x]
+                except (ValueError, TypeError):
+                    selected = []
+            if not selected and src.gdl_path:
+                selected = [src.gdl_path]
+        # Keep only selections that exist and live under the mount; if none are
+        # currently present, skip (outage guard — never purge).
+        scan_roots = [
+            Path(p) for p in selected
+            if (Path(p) == root or str(Path(p)).startswith(str(root) + "/"))
+            and Path(p).is_dir()
+        ]
+        if not scan_roots:
+            logger.info(
+                "cloud folder %s: no selected subtree currently present — "
+                "skipping scan to avoid purging the index", folder.path
+            )
+            return ScanResult(0, 0, 0)
+
     sidecar = load_sidecar(root, sidecar_file)
     now = int(time.time())
     seen: set[str] = set()
@@ -141,7 +180,10 @@ def scan_folder(
     touched_ids: list[int] = []
     vanished_ids: list[int] = []
 
-    for path in root.rglob("*"):
+    _walk_iter = (
+        p for sroot in scan_roots for p in sroot.rglob("*")
+    )
+    for path in _walk_iter:
         if not path.is_file():
             continue
         rel = path.relative_to(root).as_posix()

@@ -158,6 +158,9 @@ def init_db() -> None:
         # ~/Library/CloudStorage. NULL-safe for all existing rows.
         _ensure_column(raw_conn, "folder_sync_sources", "gdl_account", "TEXT")
         _ensure_column(raw_conn, "folder_sync_sources", "gdl_path", "TEXT")
+        # JSON array of selected subtree paths (multi-select). NULL-safe; code
+        # falls back to the single gdl_path when this is empty.
+        _ensure_column(raw_conn, "folder_sync_sources", "gdl_paths", "TEXT")
         raw_conn.commit()
     finally:
         raw_conn.close()

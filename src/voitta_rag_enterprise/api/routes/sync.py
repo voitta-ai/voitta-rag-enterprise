@@ -1506,9 +1506,10 @@ def gdl_browse(
 
 
 class GdlConnectIn(BaseModel):
+    folder_id: int                     # the folder being configured (the opened one)
     account: str                       # signed-in email (provenance only)
-    path: str                          # chosen subtree under CloudStorage
-    display_name: str = ""
+    account_root: str                  # the account MOUNT root → becomes folder.path
+    paths: list[str]                   # selected subtree absolute paths under the mount
     auto_sync_enabled: bool = False
     auto_sync_hours: int = Field(default=6, ge=1, le=24)
 
@@ -1519,72 +1520,95 @@ def gdl_connect(
     db: Session = Depends(db_session),
     user: CurrentUser = Depends(current_user),
 ) -> SyncTriggerOut:
-    """Register a Google Drive subtree as an indexed-in-place folder.
+    """Configure the OPENED folder to mirror selected Google Drive folders.
 
-    Creates the ``Folder`` (its ``path`` IS the Drive subtree), attaches a
-    ``google_drive_local`` sync source, and enqueues the initial sync. No
-    download happens here — content materializes lazily as the extract worker
-    reads each file.
+    Sets the folder's ``path`` to the account mount root and records the
+    selected subtree paths. The scanner enumerates only those subtrees but
+    numbers each file's rel_path relative to the mount, so the Drive's folder
+    structure (incl. synthesised parent dirs) is mirrored under this folder.
+    Read-only / index-in-place: content materializes lazily as files are read.
+    Configures the opened folder — it does NOT create new folders.
     """
-    from sqlalchemy import select as _select
+    import json as _json
+    from pathlib import Path as _P
 
-    from ...services.acl import grant_folder
     from ...services.sync.cloudstorage_local import (
         is_macos,
         is_source_live,
         is_within_cloud_storage,
     )
 
+    _check_owner(body.folder_id, db, user)
+    folder = db.get(Folder, body.folder_id)
+    if folder is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Folder not found")
+
     if not is_macos():
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             "Local Google Drive sync is only available on the macOS desktop app.",
         )
-    path = (body.path or "").strip()
-    if not path or not is_within_cloud_storage(path):
+
+    mount = str(_P((body.account_root or "").strip()).resolve(strict=False))
+    if not mount or not is_within_cloud_storage(mount):
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            "Pick a folder inside your Google Drive (~/Library/CloudStorage).",
+            "Invalid Google Drive account (mount not under ~/Library/CloudStorage).",
         )
-    if not is_source_live(path):
+    if not is_source_live(mount):
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            "Google Drive isn't available right now (app not running or folder "
-            "empty). Start Google Drive for Desktop and try again.",
+            "Google Drive isn't available right now (app not running). "
+            "Start Google Drive for Desktop and try again.",
         )
 
-    from pathlib import Path as _P
-
-    abs_path = str(_P(path).resolve(strict=False))
-    existing = db.execute(
-        _select(Folder).where(Folder.path == abs_path)
-    ).scalar_one_or_none()
-    if existing is not None:
+    # Validate each selected subtree: under the mount + a real directory.
+    sel: list[str] = []
+    for raw in body.paths or []:
+        p = str(_P((raw or "").strip()).resolve(strict=False))
+        if not p:
+            continue
+        if not (p == mount or p.startswith(mount + "/")):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"Selected folder is outside the account mount: {raw}",
+            )
+        if not _P(p).is_dir():
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, f"Not a folder: {raw}"
+            )
+        sel.append(p)
+    if not sel:
         raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            f"This folder is already indexed (id={existing.id}).",
+            status.HTTP_400_BAD_REQUEST,
+            "Pick at least one Google Drive folder to index.",
         )
+    # Drop any selection that's already covered by an ancestor selection
+    # (indexing is recursive), so we never double-walk a subtree.
+    sel = sorted(set(sel))
+    canonical = [
+        p for p in sel
+        if not any(p != q and p.startswith(q + "/") for q in sel)
+    ]
 
-    display = (body.display_name or "").strip() or _P(abs_path).name or "Google Drive"
-    folder = Folder(
-        path=abs_path,
-        display_name=display,
-        source_type="google_drive_local",
-        owner_id=user.id,
-    )
-    db.add(folder)
-    db.flush()
-    grant_folder(db, folder.id, user.id)
+    # Configure the opened folder: path = the mount root (rel-path base).
+    folder.path = mount
+    folder.source_type = "google_drive_local"
 
-    src = FolderSyncSource(
-        folder_id=folder.id,
-        source_type="google_drive_local",
-        gdl_account=(body.account or "").strip(),
-        gdl_path=abs_path,
-        auto_sync_enabled=bool(body.auto_sync_enabled),
-        auto_sync_hours=int(body.auto_sync_hours),
+    existing = db.get(FolderSyncSource, folder.id)
+    src = existing or FolderSyncSource(
+        folder_id=folder.id, source_type="google_drive_local"
     )
-    db.add(src)
+    src.source_type = "google_drive_local"
+    src.gdl_account = (body.account or "").strip()
+    src.gdl_path = canonical[0]                 # legacy single-path fallback
+    src.gdl_paths = _json.dumps(canonical)      # the real selection
+    src.auto_sync_enabled = bool(body.auto_sync_enabled)
+    src.auto_sync_hours = int(body.auto_sync_hours)
+    src.sync_status = "idle"
+    src.sync_error = None
+    if existing is None:
+        db.add(src)
     db.flush()
 
     # Initial sync (builds the provenance sidecar under data_dir, then the
@@ -1595,7 +1619,9 @@ def gdl_connect(
         db, "sync", {"folder_id": folder.id}, dedup_key=f"sync:{folder.id}"
     )
     db.commit()
-    events.publish("folders", {"type": "folder.added", "folder_id": folder.id})
+    events.publish(
+        "folders", {"type": "folder.sync_source_changed", "folder_id": folder.id}
+    )
     return SyncTriggerOut(folder_id=folder.id, job_id=job_id)
 
 
