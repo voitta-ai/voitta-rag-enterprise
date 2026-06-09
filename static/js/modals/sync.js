@@ -262,9 +262,13 @@ function applyGdlChrome() {
 // POST /sync/local/connect. Read-only: nothing is written back to the Drive.
 // ---------------------------------------------------------------------------
 
-let gdlAccounts = [];      // [{email, path, provider}]
-let gdlCurrentPath = "";   // absolute path currently shown
-let gdlAccountRoot = "";   // mount root for the selected account (browse floor)
+let gdlAccounts = [];          // [{email, path, provider}]
+let gdlAccountRoot = "";       // mount root for the selected account
+// Canonical set of chosen absolute paths — never two where one is an ancestor
+// of the other (the ancestor wins; descendants are pruned). Indexing is
+// recursive, so a checked parent already covers its whole subtree.
+const gdlSelected = new Set();
+const gdlChildrenCache = new Map();  // path -> [entries] (dirs+files)
 
 async function gdlRefreshAvailability() {
     // Show the "This Mac (no setup)" Google Drive tab only when the desktop
@@ -303,7 +307,7 @@ async function gdlInit() {
         sel.appendChild(opt);
     }
     gdlAccountRoot = gdlAccounts[0].path;
-    await gdlBrowseTo(gdlAccountRoot);
+    await gdlBuildTree();
 }
 
 function setGdlStatus(msg, isError) {
@@ -314,54 +318,249 @@ function setGdlStatus(msg, isError) {
     el.style.color = isError ? "var(--danger, #c00)" : "";
 }
 
-async function gdlBrowseTo(path) {
-    gdlCurrentPath = path;
+// ---- 3-state selection model (ancestor-wins, like the NFS picker) ----------
+
+function gdlIsAncestorOrSelf(ancestor, candidate) {
+    return candidate === ancestor || candidate.startsWith(ancestor + "/");
+}
+function gdlIsCovered(path) {
+    for (const sel of gdlSelected) if (gdlIsAncestorOrSelf(sel, path)) return true;
+    return false;
+}
+function gdlHasSelectedDescendant(path) {
+    for (const sel of gdlSelected) {
+        if (sel !== path && gdlIsAncestorOrSelf(path, sel)) return true;
+    }
+    return false;
+}
+function gdlNodeState(path) {
+    if (gdlIsCovered(path)) return "checked";
+    if (gdlHasSelectedDescendant(path)) return "indeterminate";
+    return "unchecked";
+}
+function gdlApplyCheckboxState(cb, state) {
+    cb.checked = state === "checked";
+    cb.indeterminate = state === "indeterminate";
+}
+
+async function gdlFetchChildren(path) {
+    if (gdlChildrenCache.has(path)) return gdlChildrenCache.get(path);
+    const out = await api.gdlBrowse(path);
+    const entries = out.entries || [];
+    gdlChildrenCache.set(path, entries);
+    return entries;
+}
+
+function gdlSelect(path) {
+    if (gdlIsCovered(path)) return;  // already covered by self/ancestor
+    // This subtree subsumes any selected descendants — prune them.
+    for (const sel of [...gdlSelected]) {
+        if (gdlIsAncestorOrSelf(path, sel)) gdlSelected.delete(sel);
+    }
+    gdlSelected.add(path);
+}
+
+function gdlDeselect(path) {
+    if (gdlSelected.has(path)) { gdlSelected.delete(path); return; }
+    // Otherwise an ancestor covers it — split that ancestor into the siblings
+    // along the chain down to ``path`` (re-selecting everything except the
+    // branch we're removing), mirroring the NFS picker's behaviour.
+    let covering = "";
+    for (const sel of gdlSelected) {
+        if (gdlIsAncestorOrSelf(sel, path)) { covering = sel; break; }
+    }
+    if (!covering) return;
+    gdlSelected.delete(covering);
+    gdlExpandCoverage(covering, path).catch(() => {});
+}
+
+async function gdlExpandCoverage(coveringPath, removePath) {
+    let current = coveringPath;
+    const tail = removePath.slice(coveringPath.length).replace(/^\/+/, "");
+    for (const seg of tail.split("/")) {
+        const next = `${current}/${seg}`;
+        const children = await gdlFetchChildren(current);
+        for (const child of children) {
+            if (child.is_dir && child.path !== next && !gdlIsCovered(child.path)) {
+                gdlSelected.add(child.path);
+            }
+        }
+        current = next;
+    }
+    gdlRefreshTreeUi();
+}
+
+// Re-apply every visible checkbox's tri-state + refresh the chosen-count line
+// and the connect button. Cheap: only the currently-rendered nodes.
+function gdlRefreshTreeUi() {
+    for (const cb of $("#sync-gdl-list").querySelectorAll(".gdl-cb")) {
+        const li = cb.closest("li[data-gdl-path]");
+        if (li) gdlApplyCheckboxState(cb, gdlNodeState(li.dataset.gdlPath));
+    }
+    const n = gdlSelected.size;
+    $("#sync-gdl-breadcrumb").textContent =
+        n === 0 ? "No folders chosen" : `${n} folder${n === 1 ? "" : "s"} chosen`;
+    $("#sync-gdl-connect").disabled = n === 0;
+}
+
+function gdlClearSelection() {
+    gdlSelected.clear();
+    gdlChildrenCache.clear();
+    $("#sync-gdl-breadcrumb").textContent = "No folders chosen";
+    $("#sync-gdl-connect").disabled = true;
+}
+
+// Build the expandable tree: top-level folders of the account mount become
+// root nodes; each node lazy-loads its subfolders on expand (so a huge Drive
+// never pre-fetches). Browsing is free — listing never downloads file content.
+async function gdlBuildTree() {
+    gdlClearSelection();
     const list = $("#sync-gdl-list");
-    const crumb = $("#sync-gdl-breadcrumb");
-    // Show a path relative to the account mount for readability.
-    crumb.textContent = path === gdlAccountRoot
-        ? "/"
-        : "/" + path.slice(gdlAccountRoot.length).replace(/^\/+/, "");
-    list.innerHTML = "<li class='hint' style='padding:6px;'>Loading…</li>";
+    $("#sync-gdl-count").textContent =
+        "Click ▶ to expand · tick a folder to index it (incl. its subfolders)";
+    list.innerHTML = "<div class='hint' style='padding:6px;'>Loading…</div>";
     let res;
     try {
-        res = await api.gdlBrowse(path);
+        res = await api.gdlBrowse(gdlAccountRoot);
+        gdlChildrenCache.set(gdlAccountRoot, res.entries || []);
     } catch (e) {
         list.innerHTML = "";
-        setGdlStatus(`Couldn't open folder: ${e.message || e}`, true);
+        setGdlStatus(`Couldn't open Drive: ${e.message || e}`, true);
         return;
     }
     setGdlStatus("");
     list.innerHTML = "";
-
-    // "Up" row (never above the account mount).
-    if (res.parent && path !== gdlAccountRoot) {
-        const up = document.createElement("li");
-        up.style.cssText = "padding:5px 8px;cursor:pointer;";
-        up.textContent = "⬆︎  ..";
-        up.addEventListener("click", () => gdlBrowseTo(res.parent));
-        list.appendChild(up);
-    }
-
+    const ul = document.createElement("ul");
+    ul.style.cssText = "list-style:none;margin:0;padding:0;";
     const dirs = res.entries.filter((e) => e.is_dir);
-    const files = res.entries.filter((e) => !e.is_dir);
-    for (const d of dirs) {
-        const li = document.createElement("li");
-        li.style.cssText = "padding:5px 8px;cursor:pointer;";
-        li.textContent = `📁  ${d.name}`;
-        li.addEventListener("click", () => gdlBrowseTo(d.path));
-        list.appendChild(li);
+    if (!dirs.length) {
+        list.innerHTML = "<div class='hint' style='padding:6px;'>No folders here.</div>";
+        return;
     }
-    // Files are shown (greyed) for context only — you pick a FOLDER to index.
+    for (const d of dirs) ul.append(gdlBuildNode(d.path, d.name, 0));
+    list.append(ul);
+}
+
+// Summarise a folder's files by type, e.g. "12 files — 5 pdf · 4 xlsx · 3 docx".
+// Native Google docs (.gdoc/.gsheet/.gslides) are labelled as such since they
+// index as links (shared ones also export). Shows the top types, then "+N more".
+function gdlFileSummary(files) {
+    const GDOC = { gdoc: "google doc", gsheet: "google sheet", gslides: "google slides", gdraw: "google drawing", gform: "google form" };
+    const counts = {};
     for (const f of files) {
-        const li = document.createElement("li");
-        li.style.cssText = "padding:5px 8px;color:var(--text-muted,#888);";
-        const tag = f.is_native_doc ? "📄 (Google doc — link)" : "📄";
-        li.textContent = `${tag}  ${f.name}`;
-        list.appendChild(li);
+        const dot = f.name.lastIndexOf(".");
+        let ext = dot > 0 ? f.name.slice(dot + 1).toLowerCase() : "(no ext)";
+        if (f.is_native_doc && GDOC[ext]) ext = GDOC[ext];
+        counts[ext] = (counts[ext] || 0) + 1;
     }
-    $("#sync-gdl-count").textContent =
-        `${dirs.length} folder(s), ${files.length} file(s)`;
+    const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    const TOP = 6;
+    const shown = sorted.slice(0, TOP).map(([ext, n]) => `${n} ${ext}`);
+    const more = sorted.length - TOP;
+    if (more > 0) shown.push(`+${more} more`);
+    const total = files.length;
+    return `${total} file${total === 1 ? "" : "s"} — ${shown.join(" · ")}`;
+}
+
+// One folder row: [▶ toggle][☑ checkbox][📁 label] + a hidden child <ul>. The
+// chevron expands/collapses (lazy-loading subfolders the first time); the
+// checkbox (de)selects that subtree with ancestor-wins tri-state.
+function gdlBuildNode(path, name, level) {
+    const li = document.createElement("li");
+    li.dataset.gdlPath = path;
+    li.style.cssText = "list-style:none;padding:0;";
+
+    const row = document.createElement("div");
+    row.style.cssText =
+        "display:flex;align-items:center;padding:3px 4px 3px " +
+        (4 + level * 16) + "px;";
+
+    const toggle = document.createElement("span");
+    toggle.textContent = "▶";
+    toggle.style.cssText =
+        "cursor:pointer;width:14px;display:inline-block;user-select:none;color:var(--text-muted,#888);";
+
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.className = "gdl-cb";
+    cb.style.margin = "0 6px";
+    gdlApplyCheckboxState(cb, gdlNodeState(path));
+
+    const label = document.createElement("span");
+    label.textContent = `📁  ${name}`;
+    label.title = name;
+    label.style.cssText = "cursor:pointer;flex:1;";
+
+    row.append(toggle, cb, label);
+    li.append(row);
+
+    const childUl = document.createElement("ul");
+    childUl.style.cssText = "list-style:none;margin:0;padding:0;";
+    childUl.hidden = true;
+    li.append(childUl);
+
+    let loaded = null;
+    async function ensureLoaded() {
+        if (loaded) return loaded;
+        loaded = (async () => {
+            let entries;
+            try {
+                entries = await gdlFetchChildren(path);
+            } catch (e) {
+                const err = document.createElement("li");
+                err.style.cssText = "padding:3px 0 3px " + (4 + (level + 1) * 16) + "px;color:#dc3545;";
+                err.textContent = `error: ${e.message || e}`;
+                childUl.append(err);
+                return;
+            }
+            const dirs = entries.filter((e) => e.is_dir);
+            const files = entries.filter((e) => !e.is_dir);
+            const indent = 4 + (level + 1) * 16;
+            // File-type breakdown (shown whenever the folder has files, even
+            // alongside subfolders) — what gets indexed if you tick this folder.
+            if (files.length) {
+                const stats = document.createElement("li");
+                stats.className = "hint";
+                stats.style.cssText = `padding:3px 0 3px ${indent}px;`;
+                stats.textContent = `📄 ${gdlFileSummary(files)}`;
+                childUl.append(stats);
+            }
+            if (!dirs.length && !files.length) {
+                const empty = document.createElement("li");
+                empty.className = "hint";
+                empty.style.cssText = `padding:3px 0 3px ${indent}px;`;
+                empty.textContent = "(empty)";
+                childUl.append(empty);
+            }
+            for (const d of dirs) childUl.append(gdlBuildNode(d.path, d.name, level + 1));
+        })();
+        return loaded;
+    }
+    async function expand() {
+        toggle.textContent = "…";
+        await ensureLoaded();
+        childUl.hidden = false;
+        toggle.textContent = "▼";
+        gdlRefreshTreeUi();  // newly-rendered children pick up covered state
+    }
+    function collapse() {
+        childUl.hidden = true;
+        toggle.textContent = "▶";
+    }
+    toggle.addEventListener("click", () => {
+        if (childUl.hidden) expand(); else collapse();
+    });
+    label.addEventListener("click", () => {
+        if (childUl.hidden) expand(); else collapse();
+    });
+    cb.addEventListener("change", () => {
+        // Decide by the model's current state, not the checkbox's post-click
+        // value: a click on an indeterminate box should SELECT the subtree.
+        if (gdlNodeState(path) === "checked") gdlDeselect(path);
+        else gdlSelect(path);
+        gdlRefreshTreeUi();
+    });
+    return li;
 }
 
 // ---------------------------------------------------------------------------
@@ -1455,38 +1654,43 @@ $("#sync-trigger").addEventListener("click", async () => {
     }
 });
 
-// Google Drive LOCAL: re-root the browser when the account changes.
+// Google Drive LOCAL: re-root the tree when the account changes.
 $("#sync-gdl-account").addEventListener("change", () => {
-    const path = $("#sync-gdl-account").value;
-    gdlAccountRoot = path;
-    gdlBrowseTo(path);
+    gdlAccountRoot = $("#sync-gdl-account").value;
+    gdlBuildTree();
 });
 
-// Google Drive LOCAL: register the currently-shown folder as a new
-// indexed-in-place folder. Creates a folder (path = the Drive subtree) and
-// enqueues the initial sync; content downloads lazily as files are indexed.
+// Google Drive LOCAL: register every CHECKED folder as its own indexed-in-place
+// folder (path = the Drive subtree) and enqueue each sync. Content downloads
+// lazily as files are indexed. Failures (e.g. a folder already indexed → 409)
+// are collected per-path so one bad pick doesn't sink the rest.
 $("#sync-gdl-connect").addEventListener("click", async () => {
-    if (!gdlCurrentPath) return;
+    const paths = [...gdlSelected];
+    if (!paths.length) return;
     const account = $("#sync-gdl-account").value;
-    const rel = gdlCurrentPath.slice(gdlAccountRoot.length).replace(/^\/+/, "");
-    const name = rel ? rel.split("/").pop() : (account || "Google Drive");
     const btn = $("#sync-gdl-connect");
     btn.disabled = true;
-    setGdlStatus("Connecting…");
-    try {
-        await api.gdlConnect({
-            account,
-            path: gdlCurrentPath,
-            display_name: name,
-        });
-        setGdlStatus("");
-        closeSyncModal();
-        alert("Indexing started. Files download and index in the background — watch the Recent jobs panel.");
-    } catch (err) {
-        setGdlStatus(err.message || String(err), true);
-    } finally {
-        btn.disabled = false;
+    let ok = 0;
+    const errors = [];
+    for (const path of paths) {
+        const rel = path.slice(gdlAccountRoot.length).replace(/^\/+/, "");
+        const name = rel ? rel.split("/").pop() : (account || "Google Drive");
+        setGdlStatus(`Connecting ${name}… (${ok + errors.length + 1}/${paths.length})`);
+        try {
+            await api.gdlConnect({ account, path, display_name: name });
+            ok++;
+        } catch (err) {
+            errors.push(`${name}: ${err.message || err}`);
+        }
     }
+    if (errors.length) {
+        setGdlStatus(`Indexed ${ok}/${paths.length}. Issues: ${errors.join("; ")}`, true);
+        btn.disabled = false;
+        return;
+    }
+    setGdlStatus("");
+    closeSyncModal();
+    alert(`Indexing started for ${ok} folder${ok === 1 ? "" : "s"}. Files download and index in the background — watch the Recent jobs panel.`);
 });
 
 // Google Drive: launch the OAuth flow in a popup. The callback closes its

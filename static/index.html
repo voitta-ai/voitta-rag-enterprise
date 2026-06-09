@@ -778,11 +778,13 @@
                         </div>
                         <ul id="sync-gdl-list" style="margin:0;padding:4px 0;max-height:36vh;overflow:auto;border:1px solid var(--border,#ccc);border-radius:4px;list-style:none;font-size:13px;"></ul>
                         <p class="hint" style="margin-top:6px;">
-                            Click a folder to open it. <strong>Connect &amp; index</strong>
-                            indexes the folder shown above (including its subfolders).
+                            Click <strong>▶</strong> to expand. <strong>Tick</strong> any
+                            folders to index — checking a folder covers all its
+                            subfolders. Each checked folder becomes its own indexed
+                            folder.
                         </p>
                         <div class="actions actions-right" style="margin-top:8px;">
-                            <button type="button" id="sync-gdl-connect" class="btn btn-primary btn-sm">Connect &amp; index this folder</button>
+                            <button type="button" id="sync-gdl-connect" class="btn btn-primary btn-sm" disabled>Connect &amp; index selected</button>
                         </div>
                         <p id="sync-gdl-status" class="hint" hidden style="margin-top:6px;"></p>
                     </div>
