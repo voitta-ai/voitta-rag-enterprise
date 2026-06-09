@@ -44,6 +44,7 @@ def get_registry() -> SyncRegistry:
     client libs — off the import path for callers that only need the registry
     type.
     """
+    from .cloud_local import CloudLocalConnector
     from .github import GitHubConnector
     from .google_drive import GoogleDriveConnector
     from .nfs import NfsConnector
@@ -52,6 +53,7 @@ def get_registry() -> SyncRegistry:
 
     r = SyncRegistry()
     for cls in (
+        CloudLocalConnector,
         GitHubConnector,
         GoogleDriveConnector,
         NfsConnector,

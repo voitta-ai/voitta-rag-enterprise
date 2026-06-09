@@ -14,6 +14,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import threading
 import time
 import traceback
@@ -172,8 +173,57 @@ def _run_extract_sync(file_id: int) -> None:
                 _mark_error(file_id, _format_exception("extract crashed"))
 
 
+def _export_native_doc(gdoc_path: Path) -> Path | None:
+    """Opportunistically export a native Google doc to a parseable file.
+
+    Reads the ``.gdoc/.gsheet/.gslides`` pointer for its ``doc_id`` and hits
+    Google's *anonymous* export endpoint. This succeeds only for link-shared /
+    public docs (private docs return 401) — exactly the no-credentials contract
+    we want. On success the rendered bytes (PDF/XLSX) are written to a temp file
+    whose suffix routes it to the right parser; the caller parses it and unlinks
+    it. Returns ``None`` (→ link-only) on any failure, never raising.
+
+    Note: we do NOT pass cookies/tokens — this is deliberately credential-free,
+    so private docs stay link-only until the OAuth connector handles them.
+    """
+    import tempfile
+    import urllib.request
+
+    from .sync.cloudstorage_local import read_gdoc_pointer
+
+    ptr = read_gdoc_pointer(gdoc_path)
+    if ptr is None or not ptr.doc_id:
+        return None
+    url = f"https://docs.google.com/{ptr.kind}/d/{ptr.doc_id}/export?format={ptr.export_format}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "voitta-rag/1.0"})
+        with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310 — fixed google host
+            if resp.status != 200:
+                return None
+            data = resp.read()
+    except Exception as e:  # noqa: BLE001 — network/auth failure → link-only
+        logger.info("native-doc export skipped for %s: %s", gdoc_path.name, e)
+        return None
+    if not data or len(data) < 64:
+        return None
+    # An HTML body means we got a sign-in / error page, not the rendered doc.
+    if data[:15].lstrip().lower().startswith((b"<!doctype html", b"<html")):
+        logger.info("native-doc export for %s returned HTML (not shared) — link-only", gdoc_path.name)
+        return None
+    try:
+        fd, tmp = tempfile.mkstemp(suffix=f".{ptr.export_format}", prefix="voitta-gdoc-")
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+    except OSError:
+        return None
+    logger.info(
+        "native-doc export ok: %s → %s (%d bytes)",
+        gdoc_path.name, ptr.export_format, len(data),
+    )
+    return Path(tmp)
+
+
 def _run_extract_inner(file_id: int) -> None:
-    extract_started = time.perf_counter()
     logger.info("extract begin")
 
     with _stage("resolve_path"):
@@ -187,6 +237,36 @@ def _run_extract_inner(file_id: int) -> None:
         _mark_state(file_id, state="deleted")
         return
 
+    # Native Google Workspace docs (.gdoc/.gsheet/.gslides) carry no usable
+    # local bytes — the file is a JSON pointer. Try an anonymous export (works
+    # for link-shared docs); parse the rendered copy if we get one, else leave
+    # the file as link-only (its source_url is already set from the sync
+    # sidecar) and mark it unsupported-with-reason rather than erroring.
+    import contextlib as _contextlib
+
+    from .sync.cloudstorage_local import is_native_doc
+
+    tmp_export: Path | None = None
+    try:
+        if is_native_doc(abs_path):
+            tmp_export = _export_native_doc(abs_path)
+            if tmp_export is None:
+                _mark_state(
+                    file_id,
+                    state="unsupported",
+                    error="native Google doc — indexed as link (not shared or export unavailable)",
+                )
+                return
+            abs_path = tmp_export
+        _extract_resolved(file_id, abs_path)
+    finally:
+        if tmp_export is not None:
+            with _contextlib.suppress(OSError):
+                tmp_export.unlink()
+
+
+def _extract_resolved(file_id: int, abs_path: Path) -> None:
+    extract_started = time.perf_counter()
     logger.debug("path=%s", abs_path)
     settings = get_settings()
     try:

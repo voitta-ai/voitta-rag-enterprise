@@ -1168,7 +1168,18 @@ def delete_folder(
     settings = get_settings()
     root = settings.root_path
     folder_path = Path(folder_path_str)
-    if root is not None and folder_path.exists():
+    # Cloud-local folders are indexed IN PLACE on the user's read-only Drive
+    # mount — their path is NOT app-managed storage. Never wipe it from disk:
+    # a delete inside ~/Library/CloudStorage would propagate UP to Google Drive
+    # via File Provider and destroy the user's cloud data. This explicit guard
+    # is path-independent (does not rely on the mount happening to fall outside
+    # VOITTA_ROOT_PATH), removing only the DB rows.
+    if folder.source_type == "google_drive_local":
+        logger.info(
+            "delete_folder %d is cloud-local (read-only Drive mount) — "
+            "removing index rows only, leaving Drive content untouched", folder_id
+        )
+    elif root is not None and folder_path.exists():
         try:
             resolved_root = root.resolve()
             resolved_folder = folder_path.resolve()

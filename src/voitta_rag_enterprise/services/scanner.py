@@ -56,13 +56,17 @@ class SidecarEntry:
     meta: dict | None = None
 
 
-def load_sidecar(folder_root: Path) -> dict[str, SidecarEntry]:
-    """Return the ``rel_path → SidecarEntry`` mapping from ``.voitta_sources.json``.
+def load_sidecar(folder_root: Path, sidecar_file: Path | None = None) -> dict[str, SidecarEntry]:
+    """Return the ``rel_path → SidecarEntry`` mapping from a sidecar JSON file.
 
     On-disk shape: ``{rel_path: {"url": …, "tab": …, "owner_email": …,
     "created_ts": …, …}}``. Unknown keys are ignored (forward-compat).
+
+    By default the sidecar is ``folder_root/.voitta_sources.json``. Cloud-local
+    folders (whose ``folder_root`` is the user's read-only Drive mount) pass an
+    explicit ``sidecar_file`` under ``data_dir`` so we never write into the Drive.
     """
-    sidecar = folder_root / SIDECAR_FILENAME
+    sidecar = sidecar_file if sidecar_file is not None else folder_root / SIDECAR_FILENAME
     if not sidecar.exists():
         return {}
     try:
@@ -111,7 +115,26 @@ def scan_folder(
         logger.warning("folder %s missing or not a directory", folder.path)
         return ScanResult(0, 0, 0)
 
-    sidecar = load_sidecar(root)
+    # Cloud-local folders (read-only Google Drive mount): two special rules.
+    #   1. Liveness guard — if the Drive app is offline or the mount is
+    #      transiently empty, a normal scan would see zero files and PURGE the
+    #      whole index. Skip the scan entirely instead (never delete on outage).
+    #   2. Sidecar lives under data_dir, never inside the Drive mount, so we
+    #      never write into the user's Drive.
+    sidecar_file: Path | None = None
+    if folder.source_type == "google_drive_local":
+        from .sync.cloud_local import cloud_sidecar_path
+        from .sync.cloudstorage_local import is_source_live
+
+        if not is_source_live(root):
+            logger.info(
+                "cloud folder %s not live (Drive offline / empty mount) — "
+                "skipping scan to avoid purging the index", folder.path
+            )
+            return ScanResult(0, 0, 0)
+        sidecar_file = cloud_sidecar_path(folder.id)
+
+    sidecar = load_sidecar(root, sidecar_file)
     now = int(time.time())
     seen: set[str] = set()
     added = updated = 0

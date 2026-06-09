@@ -250,6 +250,15 @@ class NfsSyncOut(BaseModel):
     nfs_status: str
 
 
+class GoogleDriveLocalSyncOut(BaseModel):
+    """Status for ``source_type == 'google_drive_local'`` (desktop, no creds)."""
+
+    account: str       # signed-in Google account email
+    path: str          # chosen subtree under ~/Library/CloudStorage
+    available: bool    # macOS + Drive app running + mount live right now
+    status: str        # "ok" | "offline" | "missing" | "unsupported"
+
+
 class SyncSourceOut(BaseModel):
     folder_id: int
     source_type: str
@@ -260,6 +269,7 @@ class SyncSourceOut(BaseModel):
     auto_sync_hours: int
     github: GithubSyncOut | None = None
     google_drive: GoogleDriveSyncOut | None = None
+    google_drive_local: GoogleDriveLocalSyncOut | None = None
     nfs: NfsSyncOut | None = None
     sharepoint: SharePointSyncOut | None = None
     teams: TeamsSyncOut | None = None
@@ -286,6 +296,31 @@ def _nfs_status_snapshot() -> tuple[str, bool, str]:
     except (PermissionError, OSError):
         return root, False, "unreadable"
     return root, True, "ok"
+
+
+def _gdl_status_snapshot(path: str) -> tuple[bool, str]:
+    """Return ``(available, status)`` for a google_drive_local source.
+
+    Re-checked on every render so an offline Drive app / signed-out account
+    shows as unavailable without a restart.
+    """
+    from ...services.sync.cloudstorage_local import (
+        is_macos,
+        is_source_live,
+        is_within_cloud_storage,
+    )
+
+    if not is_macos():
+        return False, "unsupported"
+    if not path or not is_within_cloud_storage(path):
+        return False, "missing"
+    from pathlib import Path as _P
+
+    if not _P(path).is_dir():
+        return False, "missing"
+    if not is_source_live(path):
+        return False, "offline"
+    return True, "ok"
 
 
 def _decode_nfs_subpaths(src: FolderSyncSource) -> list[str]:
@@ -316,6 +351,7 @@ def _decode_nfs_subpaths(src: FolderSyncSource) -> list[str]:
 def _to_out(src: FolderSyncSource) -> SyncSourceOut:
     gh = None
     gd = None
+    gdl = None
     nfs = None
     if src.source_type == "github":
         gh = GithubSyncOut(
@@ -381,6 +417,14 @@ def _to_out(src: FolderSyncSource) -> SyncSourceOut:
             use_loopback=bool(src.ms_use_loopback),
             connected=bool(src.ms_refresh_token),
         )
+    if src.source_type == "google_drive_local":
+        available, status_str = _gdl_status_snapshot(src.gdl_path or "")
+        gdl = GoogleDriveLocalSyncOut(
+            account=src.gdl_account or "",
+            path=src.gdl_path or "",
+            available=available,
+            status=status_str,
+        )
     return SyncSourceOut(
         folder_id=src.folder_id,
         source_type=src.source_type,
@@ -391,6 +435,7 @@ def _to_out(src: FolderSyncSource) -> SyncSourceOut:
         auto_sync_hours=int(src.auto_sync_hours),
         github=gh,
         google_drive=gd,
+        google_drive_local=gdl,
         nfs=nfs,
         sharepoint=sp,
         teams=tm,
@@ -1359,6 +1404,199 @@ def nfs_browse(
         parent=parent,
         entries=[NfsBrowseEntry(**e) for e in entries],
     )
+
+
+# ---------------------------------------------------------------------------
+# Google Drive — LOCAL (desktop, no credentials).
+#
+# Rides on the already-installed Google Drive for Desktop app. We enumerate the
+# signed-in accounts under ~/Library/CloudStorage, let the user browse the
+# (free, stub) tree, and register the chosen subtree as an indexed-in-place
+# folder. We NEVER download via API or write into the Drive.
+# ---------------------------------------------------------------------------
+
+
+class GdlAccountOut(BaseModel):
+    email: str
+    path: str
+    provider: str
+
+
+class GdlAccountsOut(BaseModel):
+    available: bool          # macOS + Drive app running
+    status: str              # "ok" | "unsupported" | "offline"
+    accounts: list[GdlAccountOut]
+
+
+class GdlBrowseEntry(BaseModel):
+    name: str
+    path: str                # absolute path under CloudStorage
+    is_dir: bool
+    is_native_doc: bool
+    is_stub: bool
+    size: int
+
+
+class GdlBrowseOut(BaseModel):
+    path: str
+    parent: str | None
+    entries: list[GdlBrowseEntry]
+
+
+@oauth_router.get("/local/accounts", response_model=GdlAccountsOut)
+def gdl_accounts(_: CurrentUser = Depends(current_user)) -> GdlAccountsOut:
+    """List signed-in Google Drive for Desktop accounts on this machine.
+
+    Cheap (one directory listing); the sync modal calls it on open. Returns
+    ``unsupported`` off macOS and ``offline`` when the Drive app isn't running.
+    """
+    from ...services.sync.cloudstorage_local import (
+        is_drive_app_running,
+        is_macos,
+        list_accounts,
+    )
+
+    if not is_macos():
+        return GdlAccountsOut(available=False, status="unsupported", accounts=[])
+    accounts = [GdlAccountOut(**a.as_dict()) for a in list_accounts()]
+    running = is_drive_app_running()
+    status_str = "ok" if running else "offline"
+    return GdlAccountsOut(
+        available=running and bool(accounts), status=status_str, accounts=accounts
+    )
+
+
+@oauth_router.get("/local/browse", response_model=GdlBrowseOut)
+def gdl_browse(
+    path: str = Query(..., description="Absolute path under ~/Library/CloudStorage"),
+    user: CurrentUser = Depends(current_user),
+) -> GdlBrowseOut:
+    """List the children of a directory in the local Google Drive mount.
+
+    Free + read-only (``scandir``/``stat`` only — never opens content, so
+    nothing downloads). Path-safety: must resolve under ~/Library/CloudStorage,
+    enforced by ``cloudstorage_local.browse``.
+    """
+    from ...services.sync.cloudstorage_local import (
+        CLOUD_STORAGE_ROOT,
+        browse,
+        is_within_cloud_storage,
+    )
+
+    try:
+        entries = browse(path)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
+    except OSError as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(e)) from e
+
+    from pathlib import Path as _P
+
+    p = _P(path).resolve(strict=False)
+    parent = None
+    # Offer a parent link as long as it stays within CloudStorage.
+    cand = p.parent
+    if cand != p and is_within_cloud_storage(cand) and cand != CLOUD_STORAGE_ROOT.resolve(strict=False):
+        parent = str(cand)
+    return GdlBrowseOut(
+        path=str(p),
+        parent=parent,
+        entries=[GdlBrowseEntry(**e.as_dict()) for e in entries],
+    )
+
+
+class GdlConnectIn(BaseModel):
+    account: str                       # signed-in email (provenance only)
+    path: str                          # chosen subtree under CloudStorage
+    display_name: str = ""
+    auto_sync_enabled: bool = False
+    auto_sync_hours: int = Field(default=6, ge=1, le=24)
+
+
+@oauth_router.post("/local/connect", response_model=SyncTriggerOut)
+def gdl_connect(
+    body: GdlConnectIn,
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(current_user),
+) -> SyncTriggerOut:
+    """Register a Google Drive subtree as an indexed-in-place folder.
+
+    Creates the ``Folder`` (its ``path`` IS the Drive subtree), attaches a
+    ``google_drive_local`` sync source, and enqueues the initial sync. No
+    download happens here — content materializes lazily as the extract worker
+    reads each file.
+    """
+    from sqlalchemy import select as _select
+
+    from ...services.acl import grant_folder
+    from ...services.sync.cloudstorage_local import (
+        is_macos,
+        is_source_live,
+        is_within_cloud_storage,
+    )
+
+    if not is_macos():
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Local Google Drive sync is only available on the macOS desktop app.",
+        )
+    path = (body.path or "").strip()
+    if not path or not is_within_cloud_storage(path):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Pick a folder inside your Google Drive (~/Library/CloudStorage).",
+        )
+    if not is_source_live(path):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Google Drive isn't available right now (app not running or folder "
+            "empty). Start Google Drive for Desktop and try again.",
+        )
+
+    from pathlib import Path as _P
+
+    abs_path = str(_P(path).resolve(strict=False))
+    existing = db.execute(
+        _select(Folder).where(Folder.path == abs_path)
+    ).scalar_one_or_none()
+    if existing is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"This folder is already indexed (id={existing.id}).",
+        )
+
+    display = (body.display_name or "").strip() or _P(abs_path).name or "Google Drive"
+    folder = Folder(
+        path=abs_path,
+        display_name=display,
+        source_type="google_drive_local",
+        owner_id=user.id,
+    )
+    db.add(folder)
+    db.flush()
+    grant_folder(db, folder.id, user.id)
+
+    src = FolderSyncSource(
+        folder_id=folder.id,
+        source_type="google_drive_local",
+        gdl_account=(body.account or "").strip(),
+        gdl_path=abs_path,
+        auto_sync_enabled=bool(body.auto_sync_enabled),
+        auto_sync_hours=int(body.auto_sync_hours),
+    )
+    db.add(src)
+    db.flush()
+
+    # Initial sync (builds the provenance sidecar under data_dir, then the
+    # post-sync rescan enqueues extracts). We deliberately do NOT start the
+    # filesystem watcher: FSEvents is unreliable on File Provider mounts, so
+    # refresh is driven by (auto-)sync rescans instead.
+    job_id = job_queue.enqueue(
+        db, "sync", {"folder_id": folder.id}, dedup_key=f"sync:{folder.id}"
+    )
+    db.commit()
+    events.publish("folders", {"type": "folder.added", "folder_id": folder.id})
+    return SyncTriggerOut(folder_id=folder.id, job_id=job_id)
 
 
 # ---------------------------------------------------------------------------

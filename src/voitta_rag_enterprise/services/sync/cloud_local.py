@@ -1,0 +1,208 @@
+"""Google Drive local-sync connector (desktop, no credentials).
+
+Rides on the already-installed *Google Drive for Desktop* app. Unlike the
+OAuth ``google_drive`` connector (which downloads via the API into a managed
+folder), this connector **indexes the Drive mount in place**: the folder's
+``path`` *is* the chosen subtree under ``~/Library/CloudStorage/GoogleDrive-…``.
+
+Consequences that shape this module:
+
+* **We never write into the Drive.** ``sync`` performs no download and no
+  in-tree write. File content materializes lazily when the extract worker
+  *reads* each file (a read makes the Drive app fetch it); ``scanner`` only
+  ``stat``s, so scanning costs nothing. The provenance **sidecar lives under
+  ``data_dir`` (:func:`cloud_sidecar_path`), never inside the mount.** Every
+  write target is asserted read-only-safe via
+  :func:`cloudstorage_local.assert_read_only_path`.
+* **Read-only / outage-safe.** ``sync`` refuses to run unless the source is
+  live (Drive app running, mount non-empty); ``scanner`` independently skips a
+  scan when the source isn't live, so a transient outage never purges the index.
+* **Native Google docs** (``.gdoc`` etc.) have no local content; the connector
+  records their web URL in the sidecar so they're searchable as links, and the
+  ``export_gdoc`` job opportunistically fetches a rendered copy of *shared* ones.
+
+macOS + desktop (single-user) only; gated by callers.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable
+
+from ...config import get_settings
+from .base import SyncConnector
+from .cloudstorage_local import (
+    GOOGLE_DOC_SUFFIXES,
+    assert_read_only_path,
+    is_native_doc,
+    is_source_live,
+    is_within_cloud_storage,
+    read_gdoc_pointer,
+)
+
+logger = logging.getLogger(__name__)
+
+SOURCE_TYPE = "google_drive_local"
+
+
+def cloud_sidecar_path(folder_id: int) -> Path:
+    """Where this folder's provenance sidecar lives — under ``data_dir``, NOT
+    inside the Drive mount. Keeping it here is what guarantees we never write
+    into the user's Google Drive."""
+    return get_settings().data_dir / "cloud_sidecars" / f"{folder_id}.json"
+
+
+@dataclass
+class CloudLocalSyncStats:
+    files_seen: int = 0
+    native_docs: int = 0
+    stubs: int = 0
+    materialized: int = 0
+    errors: list[str] = field(default_factory=list)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "files_seen": self.files_seen,
+            "native_docs": self.native_docs,
+            "stubs": self.stubs,
+            "materialized": self.materialized,
+            "errors": self.errors,
+        }
+
+
+class CloudLocalConnector(SyncConnector):
+    source_type = SOURCE_TYPE
+    supports_progress = True
+
+    def resolve_config(self, row) -> dict[str, Any]:  # FolderSyncSource
+        return {
+            "gdl_path": (row.gdl_path or "").strip(),
+            "gdl_account": (row.gdl_account or "").strip(),
+            "folder_id": row.folder_id,
+        }
+
+    async def sync(
+        self,
+        *,
+        folder_root: Path,
+        gdl_path: str = "",
+        gdl_account: str = "",
+        folder_id: int | None = None,
+        progress_cb: Callable[[str, int, int, dict | None], None] | None = None,
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            self._sync_sync,
+            folder_root=folder_root,
+            gdl_path=gdl_path,
+            gdl_account=gdl_account,
+            folder_id=folder_id,
+            progress_cb=progress_cb,
+        )
+
+    def _sync_sync(
+        self,
+        *,
+        folder_root: Path,
+        gdl_path: str,
+        gdl_account: str,
+        folder_id: int | None,
+        progress_cb: Callable[[str, int, int, dict | None], None] | None,
+    ) -> dict[str, Any]:
+        def _emit(phase: str, done: int, total: int, detail: dict | None = None) -> None:
+            if progress_cb is not None:
+                progress_cb(phase, done, total, detail)
+
+        # The source path is the chosen Drive subtree. Index in place.
+        root = Path(gdl_path or folder_root).expanduser()
+
+        # --- safety + liveness gates ---------------------------------------
+        if not is_within_cloud_storage(root):
+            raise RuntimeError(
+                f"cloud-local source is not under ~/Library/CloudStorage: {root}"
+            )
+        if not root.is_dir():
+            raise RuntimeError(f"cloud-local source path does not exist: {root}")
+        if not is_source_live(root):
+            raise RuntimeError(
+                "Google Drive is not available (app not running or the folder is "
+                "empty). Start Google Drive for Desktop and try again."
+            )
+
+        stats = CloudLocalSyncStats()
+        _emit("listing", 0, 0)
+
+        # Walk the tree (stat-only — NO content read, NO download) to build the
+        # provenance sidecar. Real files need no sidecar entry (scanner handles
+        # them); native docs get their web URL recorded so they're searchable
+        # as links and the export job can fetch shared ones.
+        sidecar: dict[str, dict] = {}
+        files: list[Path] = []
+        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+            dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
+            for fname in sorted(filenames):
+                if fname.startswith("."):
+                    continue
+                files.append(Path(dirpath) / fname)
+
+        total = len(files)
+        for i, fpath in enumerate(files):
+            try:
+                rel = fpath.relative_to(root).as_posix()
+            except ValueError:
+                continue
+            stats.files_seen += 1
+            try:
+                st = fpath.stat()  # metadata only — does not materialize
+                if st.st_size > 0 and st.st_blocks == 0:
+                    stats.stubs += 1
+                else:
+                    stats.materialized += 1
+            except OSError:
+                pass
+
+            if is_native_doc(fpath):
+                stats.native_docs += 1
+                ptr = read_gdoc_pointer(fpath)
+                if ptr is not None:
+                    entry: dict[str, Any] = {}
+                    if ptr.url:
+                        entry["url"] = ptr.url
+                    # Stash export hints for the export_gdoc job (ignored by the
+                    # scanner's sidecar reader, which only knows url/tab/meta).
+                    entry["gdoc"] = {
+                        "doc_id": ptr.doc_id,
+                        "kind": ptr.kind,
+                        "format": ptr.export_format,
+                    }
+                    sidecar[rel] = entry
+
+            if i % 200 == 0:
+                _emit("listing", i, total)
+
+        # --- persist the sidecar UNDER data_dir (never inside the Drive) ----
+        fid = folder_id if folder_id is not None else 0
+        sidecar_path = cloud_sidecar_path(fid)
+        assert_read_only_path(sidecar_path)  # belt-and-suspenders: must be outside the mount
+        sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+        sidecar_path.write_text(json.dumps(sidecar, indent=2, sort_keys=True))
+
+        _emit("done", total, total)
+        logger.info(
+            "cloud-local sync: %d files (%d stubs, %d native docs) under %s",
+            stats.files_seen, stats.stubs, stats.native_docs, root,
+        )
+        return stats.as_dict()
+
+
+__all__ = [
+    "CloudLocalConnector",
+    "CloudLocalSyncStats",
+    "SOURCE_TYPE",
+    "cloud_sidecar_path",
+    "GOOGLE_DOC_SUFFIXES",
+]

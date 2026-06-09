@@ -153,6 +153,11 @@ def init_db() -> None:
         # Source-object provenance (JSON) captured at sync time → meta_* Qdrant
         # payload. NULL for non-synced files / rows predating this column.
         _ensure_column(raw_conn, "files", "source_meta", "TEXT")
+        # Google Drive local-sync (desktop, no-credentials): the signed-in
+        # account email and the chosen subtree path under
+        # ~/Library/CloudStorage. NULL-safe for all existing rows.
+        _ensure_column(raw_conn, "folder_sync_sources", "gdl_account", "TEXT")
+        _ensure_column(raw_conn, "folder_sync_sources", "gdl_path", "TEXT")
         raw_conn.commit()
     finally:
         raw_conn.close()

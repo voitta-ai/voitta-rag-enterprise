@@ -240,6 +240,12 @@ class FolderSyncSource(Base):
     # source-of-truth for one release before removal.
     nfs_subpath: Mapped[str | None] = mapped_column(default=None)
     nfs_subpaths: Mapped[str | None] = mapped_column(default=None)
+    # Google Drive local-sync (desktop, no-credentials): the signed-in account
+    # email and the chosen subtree path under ~/Library/CloudStorage. The folder
+    # is indexed IN PLACE — folder.path IS gdl_path — so we never download or
+    # write into the Drive.
+    gdl_account: Mapped[str | None] = mapped_column(default=None)
+    gdl_path: Mapped[str | None] = mapped_column(default=None)
     # Status
     sync_status: Mapped[str] = mapped_column(default="idle")
     sync_error: Mapped[str | None] = mapped_column(default=None)
