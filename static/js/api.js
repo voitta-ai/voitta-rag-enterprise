@@ -169,6 +169,14 @@ export const api = {
     nfsStatus: () => req("GET", "/api/sync/nfs/status"),
     nfsBrowse: (rel = "") =>
         req("GET", `/api/sync/nfs/browse?rel=${encodeURIComponent(rel || "")}`),
+    // Google Drive LOCAL (desktop, no credentials). Enumerate signed-in
+    // accounts, browse the (free, stub) tree one level at a time, then
+    // register the chosen subtree as an indexed-in-place folder. Read-only:
+    // nothing is ever written back into the Drive mount.
+    gdlAccounts: () => req("GET", "/api/sync/local/accounts"),
+    gdlBrowse: (path) =>
+        req("GET", `/api/sync/local/browse?path=${encodeURIComponent(path)}`),
+    gdlConnect: (body) => req("POST", "/api/sync/local/connect", body),
     msAuthInit: (folderId) =>
         req("POST", `/api/folders/${folderId}/sync/microsoft/auth`),
     msListSites: (folderId) =>

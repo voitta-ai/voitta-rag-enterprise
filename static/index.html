@@ -581,6 +581,10 @@
                 <select id="sync-type">
                     <option value="github">GitHub / Git</option>
                     <option value="google_drive">Google Drive</option>
+                    <!-- Shown only on the macOS desktop app when the Google
+                         Drive for Desktop app is running. sync.js toggles this
+                         <option> on open via the /sync/local/accounts probe. -->
+                    <option value="google_drive_local" id="sync-type-option-gdl" hidden>Google Drive (this Mac — no setup)</option>
                     <option value="sharepoint">SharePoint</option>
                     <option value="teams">Teams meetings</option>
                     <!-- Shown only when the admin has configured an NFS
@@ -1003,6 +1007,40 @@
                     </div>
                     <ul id="sync-nfs-tree" class="nfs-tree" style="margin:0;padding:6px 0 6px 4px;max-height:40vh;overflow:auto;border:1px solid var(--border, #ccc);border-radius:4px;list-style:none;font-size:13px;"></ul>
                     <p class="hint" id="sync-nfs-hint" style="margin-top:6px;">Click ▶ to expand, click a checkbox to (de)select that subtree.</p>
+                </div>
+
+                <!-- Google Drive LOCAL (desktop, no credentials). Rides on the
+                     installed Google Drive for Desktop app: browse the (free,
+                     not-yet-downloaded) tree and index a chosen folder IN
+                     PLACE. Content downloads lazily as files are indexed; we
+                     never write back into the Drive. This form CREATES a new
+                     indexed folder (it doesn't configure the selected one), so
+                     it has its own "Connect & index" button. -->
+                <div id="sync-form-google_drive_local" hidden>
+                    <p class="hint" style="margin:0 0 6px;">
+                        Index a folder straight from the Google Drive app on this
+                        Mac — no client ID, no OAuth. Files download on demand as
+                        they're indexed; nothing is ever written back to Drive.
+                        Native Google Docs are added as links (shared ones are
+                        also exported and indexed).
+                    </p>
+                    <label>Account</label>
+                    <select id="sync-gdl-account"></select>
+
+                    <label style="margin-top:10px;">Folder to index</label>
+                    <div class="branches-row" style="margin-bottom:6px;gap:6px;flex-wrap:wrap;">
+                        <span id="sync-gdl-breadcrumb" class="hint" style="margin:0;word-break:break-all;">/</span>
+                        <span id="sync-gdl-count" class="hint" style="margin-left:auto;"></span>
+                    </div>
+                    <ul id="sync-gdl-list" style="margin:0;padding:4px 0;max-height:40vh;overflow:auto;border:1px solid var(--border,#ccc);border-radius:4px;list-style:none;font-size:13px;"></ul>
+                    <p class="hint" style="margin-top:6px;">
+                        Click a folder to open it. <strong>Connect &amp; index</strong>
+                        indexes the folder shown above (including its subfolders).
+                    </p>
+                    <div class="actions actions-right" style="margin-top:8px;">
+                        <button type="button" id="sync-gdl-connect" class="btn btn-primary btn-sm">Connect &amp; index this folder</button>
+                    </div>
+                    <p id="sync-gdl-status" class="hint" hidden style="margin-top:6px;"></p>
                 </div>
 
                 <!-- Auto-sync schedule. Common to all source types. The

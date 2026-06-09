@@ -165,6 +165,7 @@ function openSyncModal() {
     $("#sync-gd-provider-picker").value = "";
     $("#sync-gd-pane-oauth").classList.remove("provider-picked");
     nfsRefreshStatus();
+    gdlRefreshAvailability();
     // Reset MS picker selections; the populate path below fires the
     // admin call once for both connectors. ``loadSyncSource`` calls
     // ``loadMsForm`` which then preselects-by-client_id.
@@ -213,9 +214,19 @@ function updateGdRedirectHint() {
 function setSyncType(t) {
     $("#sync-form-github").hidden = t !== "github";
     $("#sync-form-google_drive").hidden = t !== "google_drive";
+    $("#sync-form-google_drive_local").hidden = t !== "google_drive_local";
     $("#sync-form-nfs").hidden = t !== "nfs";
     $("#sync-form-sharepoint").hidden = t !== "sharepoint";
     $("#sync-form-teams").hidden = t !== "teams";
+    // google_drive_local CREATES a new indexed folder (it doesn't configure the
+    // selected one), so it uses its own "Connect & index" button — hide the
+    // shared Save / Sync-now / Remove footer and the auto-sync row for it.
+    const isGdl = t === "google_drive_local";
+    $("#sync-save").hidden = isGdl;
+    $("#sync-trigger").hidden = isGdl;
+    if (isGdl) $("#sync-delete").hidden = true;
+    const autoRow = document.querySelector(".sync-auto-row");
+    if (autoRow) autoRow.hidden = isGdl;
     if (t === "google_drive") {
         updateGdRedirectHint();
     }
@@ -227,8 +238,119 @@ function setSyncType(t) {
             nfsRebuildTree(initial);
         });
     }
+    if (isGdl) gdlInit();
     if (t === "sharepoint") updateMsLoopbackHint("sp");
     if (t === "teams") updateMsLoopbackHint("tm");
+}
+
+// ---------------------------------------------------------------------------
+// Google Drive LOCAL picker (desktop, no credentials).
+//
+// Browse the (free, not-downloaded) Drive stub tree one level at a time and
+// register a chosen subtree as an indexed-in-place folder via
+// POST /sync/local/connect. Read-only: nothing is written back to the Drive.
+// ---------------------------------------------------------------------------
+
+let gdlAccounts = [];      // [{email, path, provider}]
+let gdlCurrentPath = "";   // absolute path currently shown
+let gdlAccountRoot = "";   // mount root for the selected account (browse floor)
+
+async function gdlRefreshAvailability() {
+    // Show the "Google Drive (this Mac)" option only when the desktop Drive
+    // app is running with at least one signed-in account. Mirrors how the NFS
+    // option is gated on a reachable root.
+    const opt = $("#sync-type-option-gdl");
+    if (!opt) return;
+    try {
+        const res = await api.gdlAccounts();
+        opt.hidden = !(res.available && (res.accounts || []).length);
+    } catch {
+        opt.hidden = true;
+    }
+}
+
+async function gdlInit() {
+    const sel = $("#sync-gdl-account");
+    setGdlStatus("");
+    try {
+        const res = await api.gdlAccounts();
+        gdlAccounts = res.accounts || [];
+    } catch {
+        gdlAccounts = [];
+    }
+    sel.innerHTML = "";
+    if (!gdlAccounts.length) {
+        setGdlStatus("Google Drive isn't available (app not running or no account signed in).", true);
+        $("#sync-gdl-list").innerHTML = "";
+        $("#sync-gdl-breadcrumb").textContent = "—";
+        return;
+    }
+    for (const a of gdlAccounts) {
+        const opt = document.createElement("option");
+        opt.value = a.path;
+        opt.textContent = a.email;
+        sel.appendChild(opt);
+    }
+    gdlAccountRoot = gdlAccounts[0].path;
+    await gdlBrowseTo(gdlAccountRoot);
+}
+
+function setGdlStatus(msg, isError) {
+    const el = $("#sync-gdl-status");
+    if (!el) return;
+    el.hidden = !msg;
+    el.textContent = msg || "";
+    el.style.color = isError ? "var(--danger, #c00)" : "";
+}
+
+async function gdlBrowseTo(path) {
+    gdlCurrentPath = path;
+    const list = $("#sync-gdl-list");
+    const crumb = $("#sync-gdl-breadcrumb");
+    // Show a path relative to the account mount for readability.
+    crumb.textContent = path === gdlAccountRoot
+        ? "/"
+        : "/" + path.slice(gdlAccountRoot.length).replace(/^\/+/, "");
+    list.innerHTML = "<li class='hint' style='padding:6px;'>Loading…</li>";
+    let res;
+    try {
+        res = await api.gdlBrowse(path);
+    } catch (e) {
+        list.innerHTML = "";
+        setGdlStatus(`Couldn't open folder: ${e.message || e}`, true);
+        return;
+    }
+    setGdlStatus("");
+    list.innerHTML = "";
+
+    // "Up" row (never above the account mount).
+    if (res.parent && path !== gdlAccountRoot) {
+        const up = document.createElement("li");
+        up.style.cssText = "padding:5px 8px;cursor:pointer;";
+        up.textContent = "⬆︎  ..";
+        up.addEventListener("click", () => gdlBrowseTo(res.parent));
+        list.appendChild(up);
+    }
+
+    const dirs = res.entries.filter((e) => e.is_dir);
+    const files = res.entries.filter((e) => !e.is_dir);
+    for (const d of dirs) {
+        const li = document.createElement("li");
+        li.style.cssText = "padding:5px 8px;cursor:pointer;";
+        li.textContent = `📁  ${d.name}`;
+        li.addEventListener("click", () => gdlBrowseTo(d.path));
+        list.appendChild(li);
+    }
+    // Files are shown (greyed) for context only — you pick a FOLDER to index.
+    for (const f of files) {
+        const li = document.createElement("li");
+        li.style.cssText = "padding:5px 8px;color:var(--text-muted,#888);";
+        const tag = f.is_native_doc ? "📄 (Google doc — link)" : "📄";
+        li.textContent = `${tag}  ${f.name}`;
+        list.appendChild(li);
+    }
+    $("#sync-gdl-count").textContent =
+        `${dirs.length} folder(s), ${files.length} file(s)`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1290,6 +1412,40 @@ $("#sync-trigger").addEventListener("click", async () => {
         closeSyncModal();
     } catch (err) {
         alert(err.message);
+    }
+});
+
+// Google Drive LOCAL: re-root the browser when the account changes.
+$("#sync-gdl-account").addEventListener("change", () => {
+    const path = $("#sync-gdl-account").value;
+    gdlAccountRoot = path;
+    gdlBrowseTo(path);
+});
+
+// Google Drive LOCAL: register the currently-shown folder as a new
+// indexed-in-place folder. Creates a folder (path = the Drive subtree) and
+// enqueues the initial sync; content downloads lazily as files are indexed.
+$("#sync-gdl-connect").addEventListener("click", async () => {
+    if (!gdlCurrentPath) return;
+    const account = $("#sync-gdl-account").value;
+    const rel = gdlCurrentPath.slice(gdlAccountRoot.length).replace(/^\/+/, "");
+    const name = rel ? rel.split("/").pop() : (account || "Google Drive");
+    const btn = $("#sync-gdl-connect");
+    btn.disabled = true;
+    setGdlStatus("Connecting…");
+    try {
+        await api.gdlConnect({
+            account,
+            path: gdlCurrentPath,
+            display_name: name,
+        });
+        setGdlStatus("");
+        closeSyncModal();
+        alert("Indexing started. Files download and index in the background — watch the Recent jobs panel.");
+    } catch (err) {
+        setGdlStatus(err.message || String(err), true);
+    } finally {
+        btn.disabled = false;
     }
 });
 
