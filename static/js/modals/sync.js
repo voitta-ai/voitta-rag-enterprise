@@ -264,10 +264,11 @@ function applyGdlChrome() {
 
 let gdlAccounts = [];          // [{email, path, provider}]
 let gdlAccountRoot = "";       // mount root for the selected account
-// Canonical set of chosen absolute paths — never two where one is an ancestor
-// of the other (the ancestor wins; descendants are pruned). Indexing is
-// recursive, so a checked parent already covers its whole subtree.
-const gdlSelected = new Set();
+// Single chosen Drive folder (this configures the OPENED folder, so exactly
+// one Drive folder is picked). Indexing is recursive — the chosen folder's
+// whole subtree is indexed.
+let gdlSelectedPath = "";
+let gdlSelectedRow = null;           // highlighted row element (to un-highlight)
 const gdlChildrenCache = new Map();  // path -> [entries] (dirs+files)
 
 async function gdlRefreshAvailability() {
@@ -318,30 +319,7 @@ function setGdlStatus(msg, isError) {
     el.style.color = isError ? "var(--danger, #c00)" : "";
 }
 
-// ---- 3-state selection model (ancestor-wins, like the NFS picker) ----------
-
-function gdlIsAncestorOrSelf(ancestor, candidate) {
-    return candidate === ancestor || candidate.startsWith(ancestor + "/");
-}
-function gdlIsCovered(path) {
-    for (const sel of gdlSelected) if (gdlIsAncestorOrSelf(sel, path)) return true;
-    return false;
-}
-function gdlHasSelectedDescendant(path) {
-    for (const sel of gdlSelected) {
-        if (sel !== path && gdlIsAncestorOrSelf(path, sel)) return true;
-    }
-    return false;
-}
-function gdlNodeState(path) {
-    if (gdlIsCovered(path)) return "checked";
-    if (gdlHasSelectedDescendant(path)) return "indeterminate";
-    return "unchecked";
-}
-function gdlApplyCheckboxState(cb, state) {
-    cb.checked = state === "checked";
-    cb.indeterminate = state === "indeterminate";
-}
+// ---- single-folder selection ----------------------------------------------
 
 async function gdlFetchChildren(path) {
     if (gdlChildrenCache.has(path)) return gdlChildrenCache.get(path);
@@ -351,62 +329,24 @@ async function gdlFetchChildren(path) {
     return entries;
 }
 
-function gdlSelect(path) {
-    if (gdlIsCovered(path)) return;  // already covered by self/ancestor
-    // This subtree subsumes any selected descendants — prune them.
-    for (const sel of [...gdlSelected]) {
-        if (gdlIsAncestorOrSelf(path, sel)) gdlSelected.delete(sel);
-    }
-    gdlSelected.add(path);
-}
-
-function gdlDeselect(path) {
-    if (gdlSelected.has(path)) { gdlSelected.delete(path); return; }
-    // Otherwise an ancestor covers it — split that ancestor into the siblings
-    // along the chain down to ``path`` (re-selecting everything except the
-    // branch we're removing), mirroring the NFS picker's behaviour.
-    let covering = "";
-    for (const sel of gdlSelected) {
-        if (gdlIsAncestorOrSelf(sel, path)) { covering = sel; break; }
-    }
-    if (!covering) return;
-    gdlSelected.delete(covering);
-    gdlExpandCoverage(covering, path).catch(() => {});
-}
-
-async function gdlExpandCoverage(coveringPath, removePath) {
-    let current = coveringPath;
-    const tail = removePath.slice(coveringPath.length).replace(/^\/+/, "");
-    for (const seg of tail.split("/")) {
-        const next = `${current}/${seg}`;
-        const children = await gdlFetchChildren(current);
-        for (const child of children) {
-            if (child.is_dir && child.path !== next && !gdlIsCovered(child.path)) {
-                gdlSelected.add(child.path);
-            }
-        }
-        current = next;
-    }
-    gdlRefreshTreeUi();
-}
-
-// Re-apply every visible checkbox's tri-state + refresh the chosen-count line
-// and the connect button. Cheap: only the currently-rendered nodes.
-function gdlRefreshTreeUi() {
-    for (const cb of $("#sync-gdl-list").querySelectorAll(".gdl-cb")) {
-        const li = cb.closest("li[data-gdl-path]");
-        if (li) gdlApplyCheckboxState(cb, gdlNodeState(li.dataset.gdlPath));
-    }
-    const n = gdlSelected.size;
-    $("#sync-gdl-breadcrumb").textContent =
-        n === 0 ? "No folders chosen" : `${n} folder${n === 1 ? "" : "s"} chosen`;
-    $("#sync-gdl-connect").disabled = n === 0;
+function gdlSelect(path, rowEl) {
+    if (gdlSelectedRow) gdlSelectedRow.style.background = "";
+    gdlSelectedRow = rowEl;
+    if (rowEl) rowEl.style.background = "rgba(74,144,226,0.30)";
+    gdlSelectedPath = path;
+    const rel = path === gdlAccountRoot
+        ? "/ (entire account)"
+        : "/" + path.slice(gdlAccountRoot.length).replace(/^\/+/, "");
+    $("#sync-gdl-breadcrumb").textContent = `Chosen: ${rel}`;
+    $("#sync-gdl-connect").disabled = false;
 }
 
 function gdlClearSelection() {
-    gdlSelected.clear();
+    gdlSelectedPath = "";
+    if (gdlSelectedRow) gdlSelectedRow.style.background = "";
+    gdlSelectedRow = null;
     gdlChildrenCache.clear();
-    $("#sync-gdl-breadcrumb").textContent = "No folders chosen";
+    $("#sync-gdl-breadcrumb").textContent = "No folder chosen";
     $("#sync-gdl-connect").disabled = true;
 }
 
@@ -417,7 +357,7 @@ async function gdlBuildTree() {
     gdlClearSelection();
     const list = $("#sync-gdl-list");
     $("#sync-gdl-count").textContent =
-        "Click ▶ to expand · tick a folder to index it (incl. its subfolders)";
+        "Click ▶ to expand · click a folder name to choose it (incl. its subfolders)";
     list.innerHTML = "<div class='hint' style='padding:6px;'>Loading…</div>";
     let res;
     try {
@@ -462,9 +402,9 @@ function gdlFileSummary(files) {
     return `${total} file${total === 1 ? "" : "s"} — ${shown.join(" · ")}`;
 }
 
-// One folder row: [▶ toggle][☑ checkbox][📁 label] + a hidden child <ul>. The
-// chevron expands/collapses (lazy-loading subfolders the first time); the
-// checkbox (de)selects that subtree with ancestor-wins tri-state.
+// One folder row: [▶ toggle][📁 label] + a hidden child <ul>. The chevron
+// expands/collapses (lazy-loading subfolders the first time); clicking the
+// label CHOOSES that folder (single selection) as the index target.
 function gdlBuildNode(path, name, level) {
     const li = document.createElement("li");
     li.dataset.gdlPath = path;
@@ -473,25 +413,19 @@ function gdlBuildNode(path, name, level) {
     const row = document.createElement("div");
     row.style.cssText =
         "display:flex;align-items:center;padding:3px 4px 3px " +
-        (4 + level * 16) + "px;";
+        (4 + level * 16) + "px;border-radius:4px;";
 
     const toggle = document.createElement("span");
     toggle.textContent = "▶";
     toggle.style.cssText =
         "cursor:pointer;width:14px;display:inline-block;user-select:none;color:var(--text-muted,#888);";
 
-    const cb = document.createElement("input");
-    cb.type = "checkbox";
-    cb.className = "gdl-cb";
-    cb.style.margin = "0 6px";
-    gdlApplyCheckboxState(cb, gdlNodeState(path));
-
     const label = document.createElement("span");
     label.textContent = `📁  ${name}`;
     label.title = name;
-    label.style.cssText = "cursor:pointer;flex:1;";
+    label.style.cssText = "cursor:pointer;flex:1;padding:1px 4px;";
 
-    row.append(toggle, cb, label);
+    row.append(toggle, label);
     li.append(row);
 
     const childUl = document.createElement("ul");
@@ -541,7 +475,6 @@ function gdlBuildNode(path, name, level) {
         await ensureLoaded();
         childUl.hidden = false;
         toggle.textContent = "▼";
-        gdlRefreshTreeUi();  // newly-rendered children pick up covered state
     }
     function collapse() {
         childUl.hidden = true;
@@ -550,15 +483,10 @@ function gdlBuildNode(path, name, level) {
     toggle.addEventListener("click", () => {
         if (childUl.hidden) expand(); else collapse();
     });
+    // Click the name to choose this folder AND reveal its subfolders.
     label.addEventListener("click", () => {
-        if (childUl.hidden) expand(); else collapse();
-    });
-    cb.addEventListener("change", () => {
-        // Decide by the model's current state, not the checkbox's post-click
-        // value: a click on an indeterminate box should SELECT the subtree.
-        if (gdlNodeState(path) === "checked") gdlDeselect(path);
-        else gdlSelect(path);
-        gdlRefreshTreeUi();
+        gdlSelect(path, row);
+        if (childUl.hidden) expand();
     });
     return li;
 }
@@ -1660,37 +1588,30 @@ $("#sync-gdl-account").addEventListener("change", () => {
     gdlBuildTree();
 });
 
-// Google Drive LOCAL: register every CHECKED folder as its own indexed-in-place
-// folder (path = the Drive subtree) and enqueue each sync. Content downloads
-// lazily as files are indexed. Failures (e.g. a folder already indexed → 409)
-// are collected per-path so one bad pick doesn't sink the rest.
+// Google Drive LOCAL: point the OPENED folder at the chosen Drive folder
+// (index in place) and enqueue its sync. Configures the folder whose dialog is
+// open — consistent with every other connector; it does NOT create new folders.
 $("#sync-gdl-connect").addEventListener("click", async () => {
-    const paths = [...gdlSelected];
-    if (!paths.length) return;
+    if (!gdlSelectedPath || !syncFolderId) return;
     const account = $("#sync-gdl-account").value;
     const btn = $("#sync-gdl-connect");
     btn.disabled = true;
-    let ok = 0;
-    const errors = [];
-    for (const path of paths) {
-        const rel = path.slice(gdlAccountRoot.length).replace(/^\/+/, "");
-        const name = rel ? rel.split("/").pop() : (account || "Google Drive");
-        setGdlStatus(`Connecting ${name}… (${ok + errors.length + 1}/${paths.length})`);
-        try {
-            await api.gdlConnect({ account, path, display_name: name });
-            ok++;
-        } catch (err) {
-            errors.push(`${name}: ${err.message || err}`);
-        }
-    }
-    if (errors.length) {
-        setGdlStatus(`Indexed ${ok}/${paths.length}. Issues: ${errors.join("; ")}`, true);
+    setGdlStatus("Connecting…");
+    try {
+        await api.gdlConnect({
+            folder_id: syncFolderId,
+            account,
+            path: gdlSelectedPath,
+            auto_sync_enabled: $("#sync-auto-enabled").checked,
+            auto_sync_hours: parseInt($("#sync-auto-hours").value, 10) || 6,
+        });
+        setGdlStatus("");
+        closeSyncModal();
+        alert("Google Drive folder connected. Files download and index in the background — watch the Recent jobs panel.");
+    } catch (err) {
+        setGdlStatus(err.message || String(err), true);
         btn.disabled = false;
-        return;
     }
-    setGdlStatus("");
-    closeSyncModal();
-    alert(`Indexing started for ${ok} folder${ok === 1 ? "" : "s"}. Files download and index in the background — watch the Recent jobs panel.`);
 });
 
 // Google Drive: launch the OAuth flow in a popup. The callback closes its

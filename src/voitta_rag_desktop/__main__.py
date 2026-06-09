@@ -30,6 +30,88 @@ _APP_SUPPORT_NAME = "Voitta RAG"
 _ROOT_FILES_DIRNAME = "voitta-files"
 
 
+def _ensure_userbase_on_path() -> None:
+    """Put the lazy-install ``userbase/`` site-packages on ``sys.path`` and
+    export it via ``PYTHONPATH`` + ``PIP_PREFIX``.
+
+    The heavy stack (mineru, torch, …) is pip-installed at first launch into
+    ``userbase/`` (prefix layout), NOT into the bundle. The main process adds it
+    to ``sys.path`` at startup, but **subprocesses don't inherit sys.path** — so
+    the MinerU parser daemon (and its spawn render workers) couldn't import
+    mineru. Exporting ``PYTHONPATH`` makes every child/grandchild inherit it;
+    inserting into ``sys.path`` covers the current process. Idempotent."""
+    user = _user_data_dir()
+    py_dir = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    user_prefix = user / "userbase"
+    user_site = user_prefix / "lib" / py_dir / "site-packages"
+    try:
+        user_site.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    os.environ["PIP_PREFIX"] = str(user_prefix)
+    us = str(user_site)
+    if us not in sys.path:
+        sys.path.insert(0, us)
+    # Prepend to PYTHONPATH so spawned children (e.g. MinerU's render pool)
+    # inherit it without re-running the app's startup path logic.
+    existing = os.environ.get("PYTHONPATH", "")
+    parts = existing.split(os.pathsep) if existing else []
+    if us not in parts:
+        os.environ["PYTHONPATH"] = os.pathsep.join([us, *parts]) if parts else us
+
+
+def _maybe_run_as_interpreter() -> int | None:
+    """Act as a plain Python interpreter when invoked with ``-m`` / ``-c``.
+
+    The Briefcase stub always launches this module (ignoring ``-m``/``-c`` on
+    the command line), and the bundle ships no standalone ``python`` binary —
+    so ``sys.executable`` IS this app. Anything that does
+    ``subprocess.Popen([sys.executable, "-m", …])`` or that uses the
+    multiprocessing **spawn** start method (which launches
+    ``sys.executable -c "from multiprocessing.spawn import spawn_main; …"``)
+    would otherwise just relaunch the menu-bar app, hit the single-instance
+    lock, and exit 0.
+
+    That is exactly what broke PDF parsing: the MinerU parser runs as a
+    ``-m`` daemon subprocess, and MinerU's page-render pool uses spawn. Both
+    silently no-op'd, so the daemon's first read returned empty and every PDF
+    was misreported as a 600s timeout. Routing ``-m``/``-c`` here makes the
+    stub behave like ``python`` so those subprocesses actually run.
+
+    Returns an exit code to propagate (we handled the invocation), or ``None``
+    to fall through to the normal menu-bar launch.
+    """
+    argv = sys.argv
+    if len(argv) >= 2 and argv[1] in ("-m", "-c"):
+        # The embedded (Briefcase) Python does NOT install CPython's default
+        # SIGPIPE→SIG_IGN, so the MinerU daemon and its spawn render workers
+        # would die with SIGPIPE (rc 141) the moment a multiprocessing pipe
+        # closes. Restore the normal Python behaviour for every interpreter-mode
+        # invocation. (The menu-bar path does this separately for the Cocoa
+        # SIGPIPE-reset issue.)
+        import signal as _sig
+
+        try:
+            _sig.signal(_sig.SIGPIPE, _sig.SIG_IGN)
+        except (ValueError, OSError):
+            pass
+    if len(argv) >= 3 and argv[1] == "-m":
+        _ensure_userbase_on_path()  # so the daemon can import mineru/torch
+        import runpy
+
+        module = argv[2]
+        sys.argv = [module, *argv[3:]]
+        runpy.run_module(module, run_name="__main__", alter_sys=True)
+        return 0
+    if len(argv) >= 2 and argv[1] == "-c":
+        _ensure_userbase_on_path()  # spawn render workers import mineru too
+        code = argv[2] if len(argv) >= 3 else ""
+        sys.argv = ["-c", *argv[3:]]
+        exec(compile(code, "<string>", "exec"), {"__name__": "__main__"})  # noqa: S102
+        return 0
+    return None
+
+
 def _is_mp_child() -> bool:
     if any("--multiprocessing-fork" in a for a in sys.argv):
         return True
@@ -72,6 +154,12 @@ def _acquire_instance_lock() -> bool:
 
 
 def main() -> int:
+    # Frozen-app interpreter shim — MUST be first so MinerU's parser daemon
+    # (-m) and its spawn-based render pool (-c) run Python code instead of
+    # relaunching the menu-bar app. See _maybe_run_as_interpreter.
+    rc = _maybe_run_as_interpreter()
+    if rc is not None:
+        return rc
     if _is_mp_child():
         return 0
     if not _acquire_instance_lock():
@@ -98,16 +186,11 @@ def main() -> int:
     user.mkdir(parents=True, exist_ok=True)
     res = _bundle_resources_dir()
 
-    # Lazy pip installs land in userbase/ (prefix layout so pip sees the
-    # already-bundled packages and skips them). Put its site-packages on the
-    # path so freshly-installed deps import in this same process.
-    py_dir = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    # Lazy pip installs land in userbase/ (prefix layout). Put its
+    # site-packages on sys.path + PYTHONPATH so freshly-installed deps import
+    # here AND in subprocesses (e.g. the MinerU parser daemon).
+    _ensure_userbase_on_path()
     user_prefix = user / "userbase"
-    user_site = user_prefix / "lib" / py_dir / "site-packages"
-    user_site.mkdir(parents=True, exist_ok=True)
-    os.environ["PIP_PREFIX"] = str(user_prefix)
-    if str(user_site) not in sys.path:
-        sys.path.insert(0, str(user_site))
 
     # Server environment — single-user, managed Qdrant (binary downloaded into
     # userbase/bin by the installer), writable data dir, a root for indexable
