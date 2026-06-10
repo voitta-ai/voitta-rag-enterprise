@@ -23,10 +23,27 @@ export function updateToolbarState() {
     // expand the tree and read files.
     const isOwned = !!(folder && folder.owned);
     const readOnly = !!folder && !isOwned;
+    // Synced folders (git, google drive, …) mirror a remote source: their
+    // contents are owned by the sync, so manual uploads/mkdir make no sense
+    // (the next sync would clobber or orphan them). Disable those buttons
+    // and explain why in the tooltip.
+    const isRegular = (folder?.sync_source_kind || "regular") === "regular";
+    const syncBlocked = !!folder && !isRegular;
+    const syncedTip = "Disabled — this folder is synced from a remote source " +
+        "(Git, Google Drive, …). Add files at the source and re-sync instead.";
 
-    $("#btn-new-subfolder").disabled = !folder || readOnly;
-    $("#btn-upload").disabled = !folder || readOnly;
-    $("#btn-upload-folder").disabled = !folder || readOnly;
+    $("#btn-new-subfolder").disabled = !folder || readOnly || syncBlocked;
+    $("#btn-new-subfolder").title = syncBlocked
+        ? syncedTip
+        : "Create a subfolder inside the selected managed folder";
+    $("#btn-upload").disabled = !folder || readOnly || syncBlocked;
+    $("#btn-upload").title = syncBlocked
+        ? syncedTip
+        : "Upload one or more files into the selected managed folder";
+    $("#btn-upload-folder").disabled = !folder || readOnly || syncBlocked;
+    $("#btn-upload-folder").title = syncBlocked
+        ? syncedTip
+        : "Upload a folder (with its full subdirectory tree preserved)";
     $("#btn-reindex").disabled = !folder || readOnly;
     // Sync button: only at the folder root. Hidden when the folder is
     // non-empty AND has no sync source — sync can't be configured on an
@@ -59,7 +76,6 @@ export function updateToolbarState() {
     }
     const selectedFileId = getSelectedFileId();
     const selectedRelDir = getSelectedRelDir();
-    const isRegular = (folder?.sync_source_kind || "regular") === "regular";
     // Remove enabled for: top-level folder (owner only), subdir (owned regular), file (owned regular)
     const canRemove = !!folder && isOwned && (
         isRoot ||

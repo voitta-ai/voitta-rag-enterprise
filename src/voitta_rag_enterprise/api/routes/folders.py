@@ -392,6 +392,7 @@ async def upload_file(
     while later files in the same POST are still uploading.
     """
     folder = _require_owner(db, folder_id, user)
+    _require_regular(folder, db.get(FolderSyncSource, folder_id), "upload into")
     folder_root = Path(folder.path).resolve()
 
     content_type = request.headers.get("content-type", "")
@@ -641,6 +642,7 @@ def mkdir(
     but no DB rows are created.
     """
     folder = _require_owner(db, folder_id, user)
+    _require_regular(folder, db.get(FolderSyncSource, folder_id), "create directories in")
     rel = _safe_rel_path(body.path)
     target = (Path(folder.path) / rel).resolve()
     folder_root = Path(folder.path).resolve()
@@ -1215,12 +1217,13 @@ def delete_folder(
     events.publish("folders", {"type": "folder.removed", "folder_id": folder_id})
 
 
-def _require_regular(folder: Folder, source: FolderSyncSource | None) -> None:
+def _require_regular(folder: Folder, source: FolderSyncSource | None, action: str) -> None:
     """Raise 409 if the folder has a sync source (files managed externally)."""
     if source is not None:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            "Cannot delete individual files from a synced folder.",
+            f"Cannot {action} a synced folder — its contents are managed by "
+            "the configured sync source (Git, Google Drive, …).",
         )
 
 
@@ -1234,7 +1237,7 @@ def delete_file(
     """Delete a single file (and its .voitta.meta sidecar if present) from a regular folder."""
     folder = _require_owner(db, folder_id, user)
     source = db.get(FolderSyncSource, folder_id)
-    _require_regular(folder, source)
+    _require_regular(folder, source, "delete files from")
 
     file = db.get(File, file_id)
     if file is None or file.folder_id != folder_id:
@@ -1264,7 +1267,7 @@ def delete_subdir(
     """Delete a subdirectory and all its contents from a regular folder."""
     folder = _require_owner(db, folder_id, user)
     source = db.get(FolderSyncSource, folder_id)
-    _require_regular(folder, source)
+    _require_regular(folder, source, "delete directories from")
 
     if not rel or rel in (".", "/"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Cannot delete the root directory.")

@@ -19,8 +19,22 @@
 
 import { api } from "../api.js";
 import { getSelectedFolderId, getSelectedRelDir } from "./selection.js";
+import { folders } from "../store.js";
 
 const $ = (sel) => document.querySelector(sel);
+
+// The currently-selected folder, but only if uploads are allowed into it:
+// it must exist, be owned by the user, and be a regular (non-synced)
+// folder. Synced folders (git, google drive, …) mirror a remote source,
+// so manually uploaded files would be clobbered or orphaned by the next
+// sync — the toolbar buttons are disabled for them and drag-and-drop must
+// refuse them too. Returns null when uploads are not allowed.
+function uploadTargetFolder() {
+    const folder = folders.get().find((f) => f.id === getSelectedFolderId());
+    if (!folder || !folder.owned) return null;
+    if ((folder.sync_source_kind || "regular") !== "regular") return null;
+    return folder;
+}
 
 // ---------------------------------------------------------------------------
 // Path helpers
@@ -122,7 +136,7 @@ async function collectFromDataTransfer(dt, selectedRelDir) {
 // ---------------------------------------------------------------------------
 
 async function runUpload(entries) {
-    if (!entries.length || !getSelectedFolderId()) return;
+    if (!entries.length || !uploadTargetFolder()) return;
 
     const wrap = $("#upload-progress");
     const fill = $("#upload-progress-fill");
@@ -249,29 +263,41 @@ $("#upload-folder-input").addEventListener("change", async (e) => {
 const dropTarget = document.querySelector(".browser-layout") || document.body;
 let dragDepth = 0;
 
+// preventDefault always fires for file drags (even when the target is
+// not uploadable) so a stray drop shows the no-drop cursor instead of
+// the browser navigating away to open the dropped file.
 dropTarget.addEventListener("dragenter", (e) => {
-    if (!getSelectedFolderId()) return;
     if (!e.dataTransfer?.types?.includes("Files")) return;
     e.preventDefault();
+    if (!uploadTargetFolder()) return;
     dragDepth++;
     dropTarget.classList.add("drop-active");
 });
 dropTarget.addEventListener("dragover", (e) => {
-    if (!getSelectedFolderId()) return;
     if (!e.dataTransfer?.types?.includes("Files")) return;
     e.preventDefault();
-    e.dataTransfer.dropEffect = "copy";
+    e.dataTransfer.dropEffect = uploadTargetFolder() ? "copy" : "none";
 });
 dropTarget.addEventListener("dragleave", () => {
     dragDepth = Math.max(0, dragDepth - 1);
     if (dragDepth === 0) dropTarget.classList.remove("drop-active");
 });
 dropTarget.addEventListener("drop", async (e) => {
-    if (!getSelectedFolderId()) return;
     if (!e.dataTransfer?.types?.includes("Files")) return;
     e.preventDefault();
     dragDepth = 0;
     dropTarget.classList.remove("drop-active");
+    if (!uploadTargetFolder()) {
+        const folder = folders.get().find((f) => f.id === getSelectedFolderId());
+        if (folder && (folder.sync_source_kind || "regular") !== "regular") {
+            alert(
+                `"${folder.display_name}" is synced from a remote source ` +
+                `(Git, Google Drive, …) — uploads are disabled.\n\n` +
+                `Add files at the source and re-sync instead.`,
+            );
+        }
+        return;
+    }
     const sel = getSelectedRelDir() || "";
     const entries = await collectFromDataTransfer(e.dataTransfer, sel);
     if (entries.length) await runUpload(entries);
