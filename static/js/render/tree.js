@@ -353,7 +353,16 @@ function onArtifactClick(e) {
 function onRowClick(e) {
     const li = e.currentTarget;
     if (li.dataset.fileId) {
-        selectNode(Number(li.dataset.folderId), li.dataset.relDir || "", Number(li.dataset.fileId));
+        const fileId = Number(li.dataset.fileId);
+        // Link-only files (native Google Docs that weren't indexed — they have
+        // no local content to preview) open their source URL in a new tab
+        // instead of selecting an empty preview pane.
+        const f = files.get().find((x) => x.id === fileId);
+        if (f && f.source_url && f.state !== "indexed") {
+            window.open(f.source_url, "_blank", "noopener");
+            return;
+        }
+        selectNode(Number(li.dataset.folderId), li.dataset.relDir || "", fileId);
     } else {
         selectNode(Number(li.dataset.folderId), li.dataset.relDir || "");
     }
