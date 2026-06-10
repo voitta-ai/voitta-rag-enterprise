@@ -1323,6 +1323,15 @@ def list_folder_dirs(
     folder = db.get(Folder, folder_id)
     if folder is None or not user_can_see_folder(db, folder_id, user.id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Folder not found")
+    # Cloud-local (Google Drive) folders: ``folder.path`` is the whole account
+    # MOUNT, so walking it would return EVERY directory in the Drive as an empty
+    # "ghost dir" — flooding the tree with folders the user never selected (and
+    # an expensive full-Drive walk on every boot). Ghost dirs only make sense
+    # for upload folders (mkdir → upload into). For a read-only Drive mirror we
+    # seed nothing: the tree is built purely from indexed file paths, so only
+    # folders that actually contain content appear.
+    if folder.source_type == "google_drive_local":
+        return []
     root = Path(folder.path)
     if not root.is_dir():
         return []
