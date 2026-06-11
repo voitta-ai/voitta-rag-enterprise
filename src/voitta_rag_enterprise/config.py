@@ -56,11 +56,24 @@ class Settings(BaseSettings):
     # "qdrant"). The subprocess binds localhost only; storage defaults to
     # ``data_dir/qdrant_managed`` (kept separate from the embedded backend's
     # ``data_dir/qdrant`` — the on-disk formats are NOT compatible).
+    # Ports default to 0 = pick a free ephemeral port at spawn time, which
+    # makes adopting a foreign/stale Qdrant on a well-known port impossible.
+    # Set explicit ports only when ops need a pinned port; a busy pinned port
+    # is then a hard boot error, never silently reused.
     qdrant_binary: str | None = None
     qdrant_managed_host: str = "127.0.0.1"
-    qdrant_managed_http_port: int = 6333
-    qdrant_managed_grpc_port: int = 6334
+    qdrant_managed_http_port: int = 0
+    qdrant_managed_grpc_port: int = 0
     qdrant_managed_startup_timeout_s: float = 30.0
+
+    # Cloud-local sources (Google Drive mount indexed in place): when False
+    # (default), the extract worker refuses to read "dataless" placeholder
+    # files — a read would make the provider download the full content
+    # synchronously with no timeout, which can freeze the (single-worker)
+    # indexing queue on a slow link. Such files are parked as unsupported
+    # with a clear reason. True restores download-on-read for deployments
+    # that want the whole mount materialized and indexed.
+    cloud_materialize_on_index: bool = False
 
     # Required parent for all user-registered folders. Every folder is created
     # under this path; arbitrary host paths cannot be registered.
@@ -272,9 +285,6 @@ class Settings(BaseSettings):
         dir distinct from the embedded backend's (incompatible on-disk format).
         """
         return self.qdrant_path or (self.data_dir / "qdrant_managed")
-
-    def managed_qdrant_url(self) -> str:
-        return f"http://{self.qdrant_managed_host}:{self.qdrant_managed_http_port}"
 
     def asset_url(self, token: str) -> str:
         """Build the public URL for a signed asset token.

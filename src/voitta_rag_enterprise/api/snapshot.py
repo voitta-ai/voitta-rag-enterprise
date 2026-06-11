@@ -51,6 +51,7 @@ def _folders_snapshot(
                 f,
                 has_sync_source=src is not None,
                 sync_source_kind=_sync_source_kind(src),
+                sync_status=(src.sync_status if src else "idle"),
                 owned=see_all or is_folder_owner(db, f.id, user_id),
                 active=folder_active_for_user(db, f.id, user_id),
             ).model_dump()

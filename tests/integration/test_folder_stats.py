@@ -169,6 +169,8 @@ def test_stats_empty_folder(client: TestClient, tmp_path: Path) -> None:
         "files_unsupported": 0,
         "files_in_progress": 0,
         "files_pending": 0,
+        "files_cloud_only": 0,
+        "dir": None,
         "index_health": {"status": "empty", "qdrant_chunk_points": 0},
         "chunks_total": 0,
         "images_total": 0,
@@ -176,3 +178,50 @@ def test_stats_empty_folder(client: TestClient, tmp_path: Path) -> None:
         "bytes_total": 0,
         "by_extension": {},
     }
+
+def test_stats_dir_param_scopes_counts(client: TestClient, tmp_path: Path) -> None:
+    fid = _seed(
+        client,
+        tmp_path / "src",
+        {"root.md": "top", "sub/a.md": "inner", "sub/deep/b.md": "deeper"},
+    )
+    full = client.get(f"/api/folders/{fid}/stats").json()
+    scoped = client.get(f"/api/folders/{fid}/stats", params={"dir": "sub"}).json()
+    assert full["files_total"] == 3
+    assert full["dir"] is None
+    assert scoped["files_total"] == 2
+    assert scoped["dir"] == "sub"
+    assert scoped["bytes_total"] < full["bytes_total"]
+    # index_health stays folder-level in scoped responses.
+    assert scoped["index_health"] == full["index_health"]
+
+def test_stats_dir_param_rejects_traversal(client: TestClient, tmp_path: Path) -> None:
+    src = tmp_path / "trav"
+    src.mkdir()
+    fid = client.post("/api/folders", json={"name": src.name}).json()["id"]
+    assert client.get(f"/api/folders/{fid}/stats", params={"dir": ".."}).status_code == 400
+    assert (
+        client.get(f"/api/folders/{fid}/stats", params={"dir": "a/../b"}).status_code
+        == 400
+    )
+
+def test_stats_dir_param_unknown_dir_returns_zeros(
+    client: TestClient, tmp_path: Path
+) -> None:
+    fid = _seed(client, tmp_path / "src", {"a.md": "hello"})
+    s = client.get(f"/api/folders/{fid}/stats", params={"dir": "nope"}).json()
+    assert s["files_total"] == 0
+    assert s["by_extension"] == {}
+    assert s["dir"] == "nope"
+
+def test_stats_cloud_only_count(client: TestClient, tmp_path: Path) -> None:
+    fid = _seed(client, tmp_path / "src", {"a.md": "hello", "b.md": "there"})
+    # Park one file the way the extract worker parks a dataless Drive stub.
+    init_db()
+    with session_scope() as s:
+        f = s.execute(select(File).where(File.folder_id == fid)).scalars().first()
+        f.state = "unsupported"
+        f.error = "cloud-only file — content not on disk; make it available offline"
+    out = client.get(f"/api/folders/{fid}/stats").json()
+    assert out["files_cloud_only"] == 1
+    assert out["files_unsupported"] == 1

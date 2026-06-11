@@ -20,6 +20,9 @@
     color: var(--color-accent);
 }
 .status-tag.pending { background: rgba(255, 149, 0, 0.15); color: var(--color-warning); }
+/* Sync source running (root rows only) — teal, matching the sync badge,
+   distinct from both the indexing blue and the indexed green. */
+.status-tag.syncing { background: rgba(16, 185, 129, 0.15); color: #10b981; }
 .status-tag.error { background: rgba(255, 59, 48, 0.15); color: var(--color-error); }
 .status-tag.unsupported,
 .status-tag.deleted,

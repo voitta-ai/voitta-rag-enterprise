@@ -690,12 +690,20 @@ class _MineruDaemon:
 
             if resp.get("status") != "ok":
                 detail = resp.get("detail") or "unknown error"
-                # Pass the subprocess traceback through to our log; the
-                # exception itself stays terse so it fits in the file.error
-                # column without a wall of stack.
-                if "traceback" in resp:
-                    logger.error("MinerU subprocess error:\n%s", resp["traceback"])
-                raise RuntimeError(f"MinerU error: {detail}")
+                tb = resp.get("traceback") or ""
+                if tb:
+                    logger.error("MinerU subprocess error:\n%s", tb)
+                # repr() of an OSError DROPS the filename argument, so
+                # ``detail`` alone can read "FileNotFoundError(2, 'No such
+                # file or directory')" with no path — undiagnosable from the
+                # file.error column. Append the last traceback lines (the
+                # raise site and exception message, which carry the path)
+                # so the stored error is self-sufficient.
+                tail = "\n".join(tb.strip().splitlines()[-6:])
+                raise RuntimeError(
+                    f"MinerU error: {detail}"
+                    + (f"\n--- subprocess traceback tail ---\n{tail}" if tail else "")
+                )
 
 
 _DAEMON: _MineruDaemon | None = None

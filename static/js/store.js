@@ -58,6 +58,11 @@ export const folderStats = createStore(new Map());
 // (which carries the per-phase listing/downloading counters that come
 // from the connector).
 export const syncSources = createStore(new Map());
+// The /api/auth/me payload, set once by ensureAuthenticated before any render
+// runs. ``null`` only behind the login gate. Consumers read deployment-mode
+// flags from it — e.g. the tree hides the per-folder Share switch when
+// ``me.get().single_user`` (no second user to share with).
+export const me = createStore(null);
 // Full admin-console state, delivered as a single ``admin.snapshot`` WS frame
 // (on connect to admins, and re-pushed after every admin mutation). The admin
 // modal renders from this store instead of fetching the five admin GET

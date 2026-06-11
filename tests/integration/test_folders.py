@@ -586,3 +586,33 @@ def test_unauthenticated_request_returns_401(env: None, tmp_path: Path) -> None:
     with TestClient(app2) as client:
         r = client.get("/api/folders")
         assert r.status_code == 200
+
+def test_folder_out_includes_sync_status(client: TestClient, tmp_path: Path) -> None:
+    """The tree pill needs boot truth for "syncing" — folder rows carry the
+    sync source's live status, defaulting to idle when there's no source."""
+    src = tmp_path / "src"
+    _seed(src, {"a.txt": "alpha"})
+    fid = client.post("/api/folders", json={"name": src.name}).json()["id"]
+
+    rows = client.get("/api/folders").json()
+    row = next(r for r in rows if r["id"] == fid)
+    assert row["sync_status"] == "idle"  # no sync source
+
+    from voitta_rag_enterprise.db.database import init_db, session_scope
+    from voitta_rag_enterprise.db.models import FolderSyncSource
+
+    init_db()
+    with session_scope() as s:
+        s.add(
+            FolderSyncSource(
+                folder_id=fid,
+                source_type="google_drive_local",
+                sync_status="syncing",
+                auto_sync_enabled=False,
+                auto_sync_hours=6,
+            )
+        )
+
+    rows = client.get("/api/folders").json()
+    row = next(r for r in rows if r["id"] == fid)
+    assert row["sync_status"] == "syncing"

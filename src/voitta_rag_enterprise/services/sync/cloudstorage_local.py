@@ -53,6 +53,15 @@ def is_macos() -> bool:
     return sys.platform == "darwin"
 
 
+def is_dataless_stub(st: os.stat_result) -> bool:
+    """True if a stat result describes a cloud placeholder with no local
+    bytes (a File Provider "dataless" file): nonzero logical size but zero
+    allocated blocks. *Reading* such a file forces the cloud provider to
+    download the full content synchronously — callers that only want local
+    bytes must check this first."""
+    return st.st_size > 0 and getattr(st, "st_blocks", 0) == 0
+
+
 # ---------------------------------------------------------------------------
 # Write-safety — the load-bearing guard for "never touch the Drive"
 # ---------------------------------------------------------------------------

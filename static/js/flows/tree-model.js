@@ -96,7 +96,7 @@ export function buildTree(folderFiles, folderId) {
 // as 'indexed' while thousands of their files were still pending. See
 // services/folder_active.py for the server-side counter.
 
-export function summariseSubtree(node, folderActive) {
+export function summariseSubtree(node, folderActive, folderSyncing = false) {
     /* Aggregates file totals across the subtree rooted at node.
 
        ``folderActive`` is true when the queue currently has at least one
@@ -104,7 +104,13 @@ export function summariseSubtree(node, folderActive) {
        AND a non-terminal file in the subtree to render 'indexing' —
        neither alone is sufficient (queue empty → stragglers; folder
        active but all this subtree's files are indexed → another subtree
-       is the one moving). */
+       is the one moving).
+
+       ``folderSyncing`` is true while the folder's sync source is in
+       sync_status == "syncing" (passed for ROOT rows only). It overrides
+       every status except 'error': a sync can run with ZERO queued jobs
+       (e.g. Google Drive materializing its tree slowly), and showing
+       'indexed' mid-sync is exactly the confusion this exists to fix. */
     let total = 0, indexed = 0, unsupported = 0, errored = 0, pending = 0, embedding = 0;
     function walk(n) {
         for (const f of n.files) {
@@ -133,5 +139,6 @@ export function summariseSubtree(node, folderActive) {
         else if (embedding > 0 || pending > 0) status = "pending";
         else status = "indexed";
     }
+    if (folderSyncing && status !== "error") status = "syncing";
     return { total, indexed, unsupported, errored, status };
 }

@@ -1,6 +1,7 @@
 // WebSocket connection manager with backoff reconnect.
 
 import { activeFolders, adminState, connStatus, folders, files, jobs, keysState, reindexProgress, syncConfigs, syncProgress, syncSources, folderStats } from "./store.js";
+import { invalidateFileArtifacts } from "./render/tree.js";
 
 const MAX_BACKOFF_MS = 30_000;
 // ``admin`` and ``keys`` are subscribed by everyone; the server only delivers
@@ -64,6 +65,15 @@ export function connect() {
     });
 }
 
+// Drop a folder's subtree-scoped stats entries (string keys "id:relDir");
+// the folder-level entry uses the numeric id and is managed separately.
+function deleteScopedStatsKeys(map, folderId) {
+    const prefix = `${folderId}:`;
+    for (const k of map.keys()) {
+        if (typeof k === "string" && k.startsWith(prefix)) map.delete(k);
+    }
+}
+
 // Apply a full-state snapshot frame by REPLACING the store wholesale, so
 // anything deleted while the socket was down disappears. Deltas that arrive
 // afterwards merge on top. This is the mechanism that makes reconnect
@@ -73,6 +83,10 @@ function applySnapshot(topic, items) {
     switch (topic) {
         case "folders":
             folders.set(items);
+            // Folder rows carry boot-truth sync_status; drop the delta-fed
+            // syncSources overlay so a "syncing" left over from a missed
+            // finish event can't pin the pill after a reconnect.
+            syncSources.set(new Map());
             return;
         case "active":
             activeFolders.set(new Set(items));
@@ -114,6 +128,16 @@ function handleEvent(event) {
                 else next.set(event.folder_id, event.config);
                 return next;
             });
+            if (event.config === null) {
+                // Config deleted mid-sync would otherwise pin a stale
+                // "syncing" pill — the source row is gone with the config.
+                syncSources.update((map) => {
+                    if (!map.has(event.folder_id)) return map;
+                    const next = new Map(map);
+                    next.delete(event.folder_id);
+                    return next;
+                });
+            }
             return;
         case "folder.added":
             folders.update((list) => [...list.filter(f => f.id !== event.folder.id), event.folder]);
@@ -133,9 +157,9 @@ function handleEvent(event) {
             folders.update((list) => list.filter(f => f.id !== event.folder_id));
             files.update((list) => list.filter(f => f.folder_id !== event.folder_id));
             folderStats.update((map) => {
-                if (!map.has(event.folder_id)) return map;
                 const next = new Map(map);
                 next.delete(event.folder_id);
+                deleteScopedStatsKeys(next, event.folder_id);
                 return next;
             });
             return;
@@ -143,10 +167,13 @@ function handleEvent(event) {
             // Per-folder snapshot. Backend coalesces by folder_id so a
             // 200-file extract burst delivers one event with the freshest
             // counts, not 200. We swap a fresh Map so the subscriber's
-            // identity check fires.
+            // identity check fires. Scoped (subtree) entries for the same
+            // folder are now stale — drop them so the sidebar refetches
+            // against the new snapshot (no-op when no subtree is selected).
             folderStats.update((map) => {
                 const next = new Map(map);
                 next.set(event.folder_id, event.stats);
+                deleteScopedStatsKeys(next, event.folder_id);
                 return next;
             });
             return;
@@ -231,6 +258,10 @@ function handleEvent(event) {
             return;
         case "file.upserted": {
             const f = event.file;
+            // Reaching "indexed" means the file's images/layout were just
+            // (re)committed — drop the lazily-fetched artifact cache so an
+            // expanded row refetches instead of showing pre-index emptiness.
+            if (f.state === "indexed") invalidateFileArtifacts(f.id);
             files.update((list) => {
                 const idx = list.findIndex(x => x.id === f.id);
                 if (idx === -1) return [...list, f];
@@ -241,6 +272,7 @@ function handleEvent(event) {
             return;
         }
         case "file.deleted":
+            invalidateFileArtifacts(event.file_id);
             files.update((list) => list.filter(f => f.id !== event.file_id));
             return;
         case "job.started": {

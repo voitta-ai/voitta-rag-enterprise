@@ -48,7 +48,10 @@ export const api = {
     renameFolder: (id, { display_name, name }) =>
         req("PATCH", `/api/folders/${id}/rename`, { display_name, name }),
     listFiles: (folderId) => req("GET", `/api/folders/${folderId}/files`),
-    folderStats: (folderId) => req("GET", `/api/folders/${folderId}/stats`),
+    folderStats: (folderId, dir) => req(
+        "GET",
+        `/api/folders/${folderId}/stats${dir ? `?dir=${encodeURIComponent(dir)}` : ""}`,
+    ),
     listAllFiles: async () => {
         const fs = await req("GET", "/api/folders");
         const all = await Promise.all(fs.map(f => req("GET", `/api/folders/${f.id}/files`)));

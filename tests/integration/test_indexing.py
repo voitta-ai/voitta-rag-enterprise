@@ -356,3 +356,57 @@ def test_extract_missing_file_marks_deleted(env: None, tmp_path: Path) -> None:
 
     with session_scope() as s:
         assert s.get(File, file_id).state == "deleted"
+
+def test_extract_skips_already_deleted_row(env: None, tmp_path: Path) -> None:
+    """A scan can mark a file deleted while its extract job is still queued;
+    the job must die with the row — not resurrect it, not read (and for cloud
+    stubs re-download) content the app considers gone."""
+    init_db()
+    folder = tmp_path / "src"
+    file_id = _seed_file(folder, "gone.md", "still on disk")
+    with session_scope() as s:
+        s.get(File, file_id).state = "deleted"
+
+    asyncio.run(_extract(file_id))
+
+    with session_scope() as s:
+        f = s.get(File, file_id)
+        assert f.state == "deleted"  # untouched — no resurrect, no error
+        assert f.file_cas_id is None  # nothing was read or indexed
+
+def test_extract_parks_dataless_cloud_stub(
+    env: None, tmp_path: Path, monkeypatch
+) -> None:
+    """A File Provider placeholder (size > 0, zero allocated blocks) under
+    ~/Library/CloudStorage must NOT be read — reading forces a synchronous,
+    untimed download of the full content. It's parked as unsupported with a
+    clear reason instead."""
+    init_db()
+    folder = tmp_path / "src"
+    file_id = _seed_file(folder, "huge-recording.mp4", "x")
+    # Recreate as a sparse file: logical size without allocated blocks — the
+    # same stat signature a dataless cloud placeholder has.
+    stub = folder / "huge-recording.mp4"
+    stub.unlink()
+    with stub.open("wb") as fh:
+        fh.truncate(50 * 1024 * 1024)
+    st = stub.stat()
+    if st.st_blocks != 0:  # pragma: no cover — non-sparse filesystem
+        import pytest
+
+        pytest.skip("filesystem does not create sparse files")
+    # The guard checks the path is under ~/Library/CloudStorage; tmp_path
+    # isn't, so stand in for that check.
+    from voitta_rag_enterprise.services.sync import cloudstorage_local
+
+    monkeypatch.setattr(
+        cloudstorage_local, "is_within_cloud_storage", lambda p: True
+    )
+
+    asyncio.run(_extract(file_id))
+
+    with session_scope() as s:
+        f = s.get(File, file_id)
+        assert f.state == "unsupported"
+        assert "cloud-only" in (f.error or "")
+        assert f.file_cas_id is None  # the content was never read

@@ -42,6 +42,7 @@ def _add_file(
     images: int = 0,
     source_url: str | None = None,
     source_meta: str | None = None,
+    error: str | None = None,
 ) -> int:
     with session_scope() as s:
         f = File(
@@ -53,6 +54,7 @@ def _add_file(
             state=state,
             source_url=source_url,
             source_meta=source_meta,
+            error=error,
         )
         s.add(f)
         s.flush()
@@ -255,6 +257,9 @@ async def test_publish_emits_folder_stats_changed(env: None) -> None:
             assert event["folder_id"] == fid
             assert event["stats"]["chunks_total"] == 2
             assert event["stats"]["files_indexed"] == 1
+            # The push is always folder-level and carries the new fields.
+            assert event["stats"]["files_cloud_only"] == 0
+            assert event["stats"]["dir"] is None
     finally:
         events.uninstall_loop()
 
@@ -296,3 +301,95 @@ async def test_publish_swallows_compute_errors(
     finally:
         events.uninstall_loop()
 
+
+# ---------------------------------------------------------------------------
+# rel_prefix scoping + cloud-only counting
+# ---------------------------------------------------------------------------
+
+
+def test_compute_scoped_to_rel_prefix(env: None) -> None:
+    fid = _seed()
+    _add_file(fid, "root.md", state="indexed", chunks=1, size=10)
+    _add_file(fid, "sub/a.md", state="indexed", chunks=3, size=100, images=2)
+    _add_file(fid, "sub/deep/b.pdf", state="pending", size=200)
+
+    with session_scope() as s:
+        folder = s.get(Folder, fid)
+        out = compute_folder_stats(s, folder, rel_prefix="sub")
+        full = compute_folder_stats(s, folder)
+
+    assert out["dir"] == "sub"
+    assert out["files_total"] == 2
+    assert out["files_indexed"] == 1
+    assert out["files_pending"] == 1
+    assert out["chunks_total"] == 3
+    assert out["bytes_total"] == 300
+    assert out["images_total"] == 2
+    assert set(out["by_extension"]) == {".md", ".pdf"}
+    assert out["by_extension"][".md"]["files"] == 1
+    # index_health is folder-level in BOTH modes (Qdrant points are
+    # tracked per folder, not per subtree).
+    assert out["index_health"] == full["index_health"]
+    assert full["files_total"] == 3
+    assert full["dir"] is None
+
+
+def test_compute_scoped_prefix_respects_dir_boundary(env: None) -> None:
+    fid = _seed()
+    _add_file(fid, "sub/a.md", state="indexed")
+    _add_file(fid, "subother/b.md", state="indexed")
+
+    with session_scope() as s:
+        folder = s.get(Folder, fid)
+        out = compute_folder_stats(s, folder, rel_prefix="sub")
+
+    assert out["files_total"] == 1  # 'subother/' must NOT match prefix 'sub'
+
+
+def test_compute_scoped_unknown_prefix_returns_zeros(env: None) -> None:
+    fid = _seed()
+    _add_file(fid, "a.md", state="indexed", chunks=2)
+
+    with session_scope() as s:
+        folder = s.get(Folder, fid)
+        out = compute_folder_stats(s, folder, rel_prefix="nope")
+
+    assert out["files_total"] == 0
+    assert out["chunks_total"] == 0
+    assert out["by_extension"] == {}
+
+
+def test_compute_counts_cloud_only(env: None) -> None:
+    fid = _seed()
+    _add_file(
+        fid, "rec.mp4", state="unsupported",
+        error="cloud-only file — content not on disk",
+    )
+    # Unsupported for another reason and a genuine error must NOT count.
+    _add_file(fid, "x.zzz", state="unsupported", error="no parser for .zzz")
+    _add_file(fid, "y.pdf", state="error", error="cloud-only-ish but errored")
+
+    with session_scope() as s:
+        folder = s.get(Folder, fid)
+        out = compute_folder_stats(s, folder)
+
+    assert out["files_cloud_only"] == 1
+    assert out["files_unsupported"] == 2  # cloud-only stays a subset
+
+
+def test_compute_cloud_only_respects_scope(env: None) -> None:
+    fid = _seed()
+    _add_file(
+        fid, "sub/rec.mp4", state="unsupported",
+        error="cloud-only file — content not on disk",
+    )
+    _add_file(
+        fid, "other/rec2.mp4", state="unsupported",
+        error="cloud-only file — content not on disk",
+    )
+
+    with session_scope() as s:
+        folder = s.get(Folder, fid)
+        out = compute_folder_stats(s, folder, rel_prefix="sub")
+
+    assert out["files_cloud_only"] == 1

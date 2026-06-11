@@ -76,7 +76,7 @@ import {
     summariseSubtree,
     userStateLabel,
 } from "../flows/tree-model.js";
-import { activeFolders, files, folders } from "../store.js";
+import { activeFolders, files, folders, me, syncSources } from "../store.js";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -119,6 +119,15 @@ function _isPdf(relPath) {
 // Lazy artifact caches: fileId → undefined (unfetched) | "loading" | item[]
 const _imageCache = new Map();
 const _layoutCache = new Map();
+
+// Drop a file's cached artifacts so the next render refetches them. Called
+// from ws.js when a file reaches "indexed" (its images/layout just changed —
+// an expanded row would otherwise keep showing the pre-index fetch, e.g.
+// "No previews", until a full page reload) and on file.deleted (free memory).
+export function invalidateFileArtifacts(fileId) {
+    _imageCache.delete(fileId);
+    _layoutCache.delete(fileId);
+}
 
 function _loadArtifacts(fileId, relPath) {
     if (!_imageCache.has(fileId)) {
@@ -448,8 +457,11 @@ function updateRootSwitches(li, folder) {
         : "MCP search excludes this folder. Click to include.";
     if (r.slot1.title !== activeTitle) r.slot1.title = activeTitle;
 
-    // Share toggle (slot2) — only for owners; non-owners get an invisible spacer.
-    if (folder.owned) {
+    // Share toggle (slot2) — only for owners, and only when there could be
+    // someone to share WITH: in single-user mode (desktop app) the flag is a
+    // no-op (the lone identity sees everything), so the switch is hidden
+    // entirely rather than rendered dead. Non-owners get an invisible spacer.
+    if (folder.owned && !me.get()?.single_user) {
         if (!li._shareSwitch) {
             const sw = buildSwitch({
                 title: "",
@@ -655,12 +667,18 @@ export function renderFolders(list) {
     // tree traversal below; subscribers in boot.js trigger a re-render
     // when the set changes.
     const activeFolderSet = activeFolders.get();
+    // Live sync-source overlay (folder.sync_source_changed deltas) with the
+    // boot-truth sync_status on the folder row as fallback. Root rows show
+    // "syncing" while a sync runs even when the job queue is empty.
+    const syncMap = syncSources.get();
     const targetRows = [];
     const seenKeys = new Set();
 
     for (const folder of sorted) {
         const folderFiles = allFiles.filter((x) => x.folder_id === folder.id);
         const tree = buildTree(folderFiles, folder.id);
+        const syncStatus =
+            syncMap.get(folder.id)?.sync_status ?? folder.sync_status ?? "idle";
         emitTreeRow({
             targetRows,
             seenKeys,
@@ -671,13 +689,16 @@ export function renderFolders(list) {
             depth: 0,
             isRoot: true,
             folderActive: activeFolderSet.has(folder.id),
+            folderSyncing: syncStatus === "syncing",
         });
     }
     reconcileChildren(ul, targetRows, seenKeys, rowCache);
 }
 
-function emitTreeRow({ targetRows, seenKeys, folder, node, relDir, displayName, depth, isRoot, folderActive }) {
-    const summary = summariseSubtree(node, !!folderActive);
+function emitTreeRow({ targetRows, seenKeys, folder, node, relDir, displayName, depth, isRoot, folderActive, folderSyncing }) {
+    // Sync is a folder-level operation — only the root row wears "syncing";
+    // child dirs keep their file-state pills.
+    const summary = summariseSubtree(node, !!folderActive, isRoot && !!folderSyncing);
     const hasChildren = node.dirs.size > 0 || node.files.length > 0;
     const isOpen = isExpanded(folder.id, relDir);
     // Dir/root row counts as "selected" only when no file is selected.

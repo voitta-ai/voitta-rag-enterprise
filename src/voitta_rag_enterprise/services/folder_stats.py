@@ -30,8 +30,16 @@ logger = logging.getLogger(__name__)
 _IN_PROGRESS_STATES = ("extracted", "embedding")
 
 
-def compute_folder_stats(session: Session, folder: Folder) -> dict:
+def compute_folder_stats(
+    session: Session, folder: Folder, rel_prefix: str | None = None
+) -> dict:
     """Return the same dict shape the REST endpoint ships.
+
+    With ``rel_prefix`` set, every count (files, by_extension, chunks,
+    images, bytes) is scoped to files under that subdirectory — the same
+    ``rel_path.startswith(prefix + "/")`` boundary the SPA's subtree view
+    uses. ``index_health`` stays folder-level either way: Qdrant point
+    counts are tracked per folder, not per subtree.
 
     The shape is plain JSON-able primitives so a caller can publish the
     return value as a WebSocket event without a Pydantic round-trip.
@@ -42,12 +50,23 @@ def compute_folder_stats(session: Session, folder: Folder) -> dict:
             select(File).where(File.folder_id == folder_id, File.state != "deleted")
         ).scalars()
     )
+    if rel_prefix:
+        files = [f for f in files if f.rel_path.startswith(rel_prefix + "/")]
     files_total = len(files)
     files_indexed = sum(1 for f in files if f.state == "indexed")
     files_error = sum(1 for f in files if f.state == "error")
     files_unsupported = sum(1 for f in files if f.state == "unsupported")
     files_in_progress = sum(1 for f in files if f.state in _IN_PROGRESS_STATES)
     files_pending = sum(1 for f in files if f.state == "pending")
+    # Cloud placeholders parked by the extract worker (Drive file with no
+    # local bytes) — a subset of unsupported, surfaced separately so the UI
+    # can say "N cloud-only (waiting for Google Drive)" instead of lumping
+    # them in with genuinely unparseable files.
+    files_cloud_only = sum(
+        1
+        for f in files
+        if f.state == "unsupported" and (f.error or "").startswith("cloud-only")
+    )
     bytes_total = sum(f.size_bytes or 0 for f in files)
     file_ids = [f.id for f in files]
 
@@ -116,6 +135,8 @@ def compute_folder_stats(session: Session, folder: Folder) -> dict:
         "files_unsupported": files_unsupported,
         "files_in_progress": files_in_progress,
         "files_pending": files_pending,
+        "files_cloud_only": files_cloud_only,
+        "dir": rel_prefix,
         "chunks_total": int(chunks_total),
         "images_total": int(images_total),
         "images_unique": int(images_unique),

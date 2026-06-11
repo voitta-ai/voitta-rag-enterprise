@@ -347,6 +347,12 @@ def create_app() -> FastAPI:
 
                     app.state.watcher.stop()
                     uninstall_default()
+                # Tear down the managed Qdrant sidecar as part of the normal
+                # shutdown path — atexit stays only as a backstop for exits
+                # that skip the lifespan. Idempotent no-op for other modes.
+                from .services.qdrant_process import stop_managed_qdrant
+
+                stop_managed_qdrant()
                 events.uninstall_loop()
                 logger.info("Voitta RAG Enterprise stopped")
 

@@ -8,11 +8,14 @@ folder), this connector **indexes the Drive mount in place**: the folder's
 Consequences that shape this module:
 
 * **We never write into the Drive.** ``sync`` performs no download and no
-  in-tree write. File content materializes lazily when the extract worker
-  *reads* each file (a read makes the Drive app fetch it); ``scanner`` only
-  ``stat``s, so scanning costs nothing. The provenance **sidecar lives under
-  ``data_dir`` (:func:`cloud_sidecar_path`), never inside the mount.** Every
-  write target is asserted read-only-safe via
+  in-tree write; ``scanner`` only ``stat``s, so scanning costs nothing. The
+  extract worker indexes files that have local bytes; *dataless* placeholders
+  are parked as unsupported ("cloud-only") rather than read, because a read
+  makes the Drive app download the full content synchronously — set
+  ``VOITTA_CLOUD_MATERIALIZE_ON_INDEX=true`` to restore download-on-read.
+  The provenance **sidecar lives under ``data_dir``
+  (:func:`cloud_sidecar_path`), never inside the mount.** Every write target
+  is asserted read-only-safe via
   :func:`cloudstorage_local.assert_read_only_path`.
 * **Read-only / outage-safe.** ``sync`` refuses to run unless the source is
   live (Drive app running, mount non-empty); ``scanner`` independently skips a
@@ -39,6 +42,7 @@ from .base import SyncConnector
 from .cloudstorage_local import (
     GOOGLE_DOC_SUFFIXES,
     assert_read_only_path,
+    is_dataless_stub,
     is_native_doc,
     is_source_live,
     is_within_cloud_storage,
@@ -182,7 +186,7 @@ class CloudLocalConnector(SyncConnector):
             stats.files_seen += 1
             try:
                 st = fpath.stat()  # metadata only — does not materialize
-                if st.st_size > 0 and st.st_blocks == 0:
+                if is_dataless_stub(st):
                     stats.stubs += 1
                 else:
                     stats.materialized += 1

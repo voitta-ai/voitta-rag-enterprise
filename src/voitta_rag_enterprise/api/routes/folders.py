@@ -67,6 +67,10 @@ class FolderOut(BaseModel):
     # Future connectors append new values; the frontend falls back
     # to the "regular" upload-folder icon for anything unknown.
     sync_source_kind: str = "regular"
+    # Live sync-source state ("idle" | "syncing" | "error"), folded down from
+    # the FolderSyncSource row so the tree pill can show "syncing" from boot
+    # truth; live transitions arrive as folder.sync_source_changed WS events.
+    sync_status: str = "idle"
     # Ownership / sharing — see services/acl.py docstring.
     owner_id: int | None = None
     owned: bool = False  # True if the calling user owns this folder
@@ -138,6 +142,7 @@ def _to_folder_out(
     *,
     has_sync_source: bool = False,
     sync_source_kind: str = "regular",
+    sync_status: str = "idle",
     owned: bool = False,
     active: bool = True,
 ) -> FolderOut:
@@ -150,6 +155,7 @@ def _to_folder_out(
         created_at=f.created_at,
         has_sync_source=has_sync_source,
         sync_source_kind=sync_source_kind,
+        sync_status=sync_status,
         owner_id=f.owner_id,
         owned=owned,
         shared=bool(f.shared),
@@ -690,6 +696,11 @@ class FolderStats(BaseModel):
     # look like nothing had happened despite half the work being done.
     files_in_progress: int
     files_pending: int
+    # Cloud placeholders parked by the extract worker (subset of unsupported);
+    # default keeps old serialized payloads valid.
+    files_cloud_only: int = 0
+    # Echo of the ?dir= scope this snapshot was computed for (None = folder).
+    dir: str | None = None
     chunks_total: int
     images_total: int
     images_unique: int  # distinct image SHAs (Qdrant point count after dedup)
@@ -701,6 +712,7 @@ class FolderStats(BaseModel):
 @router.get("/{folder_id}/stats", response_model=FolderStats)
 def folder_stats(
     folder_id: int,
+    dir: str | None = None,
     db: Session = Depends(db_session),
     user: CurrentUser = Depends(current_user),
 ) -> FolderStats:
@@ -711,13 +723,18 @@ def folder_stats(
     artifact under a folder. SPAs use this REST endpoint for first-load
     only; subsequent updates flow over the WS so chunks / images counts
     stay in lockstep with the live file states.
+
+    ``?dir=`` scopes every count to that subdirectory (the WS push is
+    always folder-level; the SPA refetches scoped stats when a subtree
+    is selected).
     """
     from ...services.folder_stats import compute_folder_stats
 
     folder = db.get(Folder, folder_id)
     if folder is None or not user_can_see_folder(db, folder_id, user.id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Folder not found")
-    return FolderStats(**compute_folder_stats(db, folder))
+    rel_prefix = str(_safe_rel_path(dir)) if dir else None
+    return FolderStats(**compute_folder_stats(db, folder, rel_prefix=rel_prefix))
 
 
 class GrantBody(BaseModel):
@@ -781,6 +798,7 @@ def set_share(
         folder,
         has_sync_source=sync_src is not None,
         sync_source_kind=_sync_source_kind(sync_src),
+        sync_status=(sync_src.sync_status if sync_src else "idle"),
         owned=True,
         active=folder_active_for_user(db, folder_id, user.id),
     )
@@ -815,6 +833,7 @@ def set_active_endpoint(
         folder,
         has_sync_source=sync_src is not None,
         sync_source_kind=_sync_source_kind(sync_src),
+        sync_status=(sync_src.sync_status if sync_src else "idle"),
         owned=is_folder_owner(db, folder_id, user.id),
         active=bool(body.active),
     )
@@ -937,6 +956,7 @@ def rename_folder(
         folder,
         has_sync_source=sync_src is not None,
         sync_source_kind=_sync_source_kind(sync_src),
+        sync_status=(sync_src.sync_status if sync_src else "idle"),
         owned=True,
         active=folder_active_for_user(db, folder_id, user.id),
     )
@@ -960,6 +980,11 @@ def list_folders(
                 f,
                 has_sync_source=f.id in sync_by_folder,
                 sync_source_kind=_sync_source_kind(sync_by_folder.get(f.id)),
+                sync_status=(
+                    sync_by_folder[f.id].sync_status
+                    if f.id in sync_by_folder
+                    else "idle"
+                ),
                 owned=True,
                 active=folder_active_for_user(db, f.id, user.id),
             )
@@ -971,6 +996,11 @@ def list_folders(
             f,
             has_sync_source=f.id in sync_by_folder,
             sync_source_kind=_sync_source_kind(sync_by_folder.get(f.id)),
+            sync_status=(
+                sync_by_folder[f.id].sync_status
+                if f.id in sync_by_folder
+                else "idle"
+            ),
             owned=is_folder_owner(db, f.id, user.id),
             active=folder_active_for_user(db, f.id, user.id),
         )

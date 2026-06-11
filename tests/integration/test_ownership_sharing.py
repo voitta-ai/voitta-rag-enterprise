@@ -363,3 +363,24 @@ def test_non_owner_cannot_configure_sync_on_shared_folder(
             },
         )
         assert r.status_code == 403, r.text
+
+def test_me_exposes_single_user_flag(env, monkeypatch, tmp_path):
+    """The SPA hides the per-folder Share switch in single-user mode; the
+    flag it keys on is MeOut.single_user."""
+    from fastapi.testclient import TestClient
+
+    from voitta_rag_enterprise.config import get_settings
+    from voitta_rag_enterprise.main import create_app
+
+    # Default (dev_user) deployment: multi-user → flag off.
+    monkeypatch.setenv("VOITTA_DEV_USER", "test@localhost")
+    get_settings.cache_clear()
+    with TestClient(create_app()) as c:
+        assert c.get("/api/auth/me").json()["single_user"] is False
+
+    # Desktop / single-user deployment → flag on.
+    monkeypatch.delenv("VOITTA_DEV_USER")
+    monkeypatch.setenv("VOITTA_SINGLE_USER", "true")
+    get_settings.cache_clear()
+    with TestClient(create_app()) as c:
+        assert c.get("/api/auth/me").json()["single_user"] is True

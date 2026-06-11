@@ -106,6 +106,8 @@ def test_ws_snapshot_reflects_existing_folder(client: TestClient, tmp_path: Path
         assert ws.receive_json()["type"] == "subscribed"
         snaps = _drain_snapshot(ws)
         assert [f["id"] for f in snaps["folders"]] == [fid]
+        # Boot truth for the tree pill: every folder row carries sync_status.
+        assert snaps["folders"][0]["sync_status"] == "idle"
 
 
 def test_empty_folder_is_private_to_owner(client: TestClient, tmp_path: Path) -> None:

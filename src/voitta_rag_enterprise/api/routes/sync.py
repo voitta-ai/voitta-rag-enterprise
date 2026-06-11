@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 from pathlib import Path
 from typing import Literal
@@ -255,6 +256,7 @@ class GoogleDriveLocalSyncOut(BaseModel):
 
     account: str       # signed-in Google account email
     path: str          # chosen subtree under ~/Library/CloudStorage
+    paths: list[str] = []  # ALL selected subtrees — the dialog pre-checks these
     available: bool    # macOS + Drive app running + mount live right now
     status: str        # "ok" | "offline" | "missing" | "unsupported"
 
@@ -419,9 +421,23 @@ def _to_out(src: FolderSyncSource) -> SyncSourceOut:
         )
     if src.source_type == "google_drive_local":
         available, status_str = _gdl_status_snapshot(src.gdl_path or "")
+        # Same precedence as CloudLocalConnector.resolve_config: the JSON
+        # list when present, else the legacy single path.
+        paths: list[str] = []
+        raw = (src.gdl_paths or "").strip()
+        if raw:
+            try:
+                decoded = json.loads(raw)
+                if isinstance(decoded, list):
+                    paths = [str(x) for x in decoded if x]
+            except (ValueError, TypeError):
+                paths = []
+        if not paths and src.gdl_path:
+            paths = [src.gdl_path]
         gdl = GoogleDriveLocalSyncOut(
             account=src.gdl_account or "",
             path=src.gdl_path or "",
+            paths=paths,
             available=available,
             status=status_str,
         )
@@ -707,9 +723,20 @@ def upsert_sync_source(
         # update so the UI doesn't need to refetch the folder list.
         _publish_folder_changed(folder, has_sync_source=True)
     out = _to_out(src)
-    # Push the full (secret-masked) config so an open sync modal in any tab
-    # reflects the save live, with no post-save refetch. Secrets are already
-    # reduced to has_* booleans by ``_to_out``.
+    _publish_sync_config_changed(folder_id, out)
+    return out
+
+
+def _publish_sync_config_changed(folder_id: int, out: SyncSourceOut) -> None:
+    """Push the full (secret-masked) config so an open sync modal in any tab
+    reflects the save live, with no post-save refetch. Secrets are already
+    reduced to has_* booleans by ``_to_out``.
+
+    EVERY route that creates or mutates a FolderSyncSource row must call
+    this — the SPA caches the config per folder and trusts that cache on
+    dialog open, so a missed publish leaves the dialog rendering a stale
+    (possibly empty) config until a full page reload.
+    """
     events.publish(
         "folders",
         {
@@ -718,7 +745,6 @@ def upsert_sync_source(
             "config": out.model_dump(),
         },
     )
-    return out
 
 
 def _clear_github_fields(src: FolderSyncSource) -> None:
@@ -941,6 +967,7 @@ def clear_sync_error(
                 "last_synced_at": src.last_synced_at,
             },
         )
+        _publish_sync_config_changed(folder_id, _to_out(src))
     return _to_out(src)
 
 
@@ -1619,8 +1646,20 @@ def gdl_connect(
         db, "sync", {"folder_id": folder.id}, dedup_key=f"sync:{folder.id}"
     )
     db.commit()
+    db.refresh(src)
+    # Same live-update contract as the PUT route: the modal's per-folder
+    # config cache is only as fresh as this event. Skipping it here is what
+    # made reopening the dialog show an empty form after a Drive connect.
+    _publish_sync_config_changed(folder.id, _to_out(src))
     events.publish(
-        "folders", {"type": "folder.sync_source_changed", "folder_id": folder.id}
+        "folders",
+        {
+            "type": "folder.sync_source_changed",
+            "folder_id": folder.id,
+            "sync_status": src.sync_status,
+            "sync_error": src.sync_error,
+            "last_synced_at": src.last_synced_at,
+        },
     )
     return SyncTriggerOut(folder_id=folder.id, job_id=job_id)
 

@@ -57,41 +57,36 @@ export function renderSidebar() {
         : folder.path;
     $("#folder-source-badge").textContent = folder.source_type;
 
-    // Subtree-scoped counts (fall back to whole folder when relDir is empty).
-    const allFolderFiles = files.get().filter((x) => x.folder_id === folder.id && x.state !== "deleted");
-    const subtreeFiles = getSelectedRelDir()
-        ? allFolderFiles.filter((f) => f.rel_path.startsWith(`${getSelectedRelDir()}/`))
-        : allFolderFiles;
-    const total = subtreeFiles.length;
-    const indexed = subtreeFiles.filter((x) => x.state === "indexed").length;
-    const errors = subtreeFiles.filter((x) => x.state === "error").length;
-    const unsupported = subtreeFiles.filter((x) => x.state === "unsupported").length;
-    // 'In progress' = chunks/images already committed (state ∈
-    // {extracted, embedding}) but the file hasn't reached 'indexed' yet.
-    // Pending = literally state == 'pending', i.e. not started. Splitting
-    // these stops the sidebar from showing 'Pending: 329, Chunks: 1943'
-    // when most of the work has actually landed and is just queued for
-    // GPU embedding.
-    const inProgress = subtreeFiles.filter(
-        (x) => x.state === "extracted" || x.state === "embedding",
-    ).length;
-    const pending = subtreeFiles.filter((x) => x.state === "pending").length;
-    $("#kv-files").textContent = total;
-    $("#kv-indexed").textContent = indexed;
-    $("#kv-errors").textContent = errors;
-    $("#kv-pending").textContent = pending;
+    // EVERY number in this panel renders from ONE server stats snapshot
+    // (folder-level pushed via folder.stats_changed; subtree-level fetched
+    // with ?dir= and cached under a `${id}:${relDir}` key). Mixing the
+    // client file store with server stats — the old way — produced panels
+    // whose top counters contradicted their own type table during a sync.
+    const relDir = getSelectedRelDir();
+    const statsKey = relDir ? `${folder.id}:${relDir}` : folder.id;
+    const s = folderStats.get().get(statsKey) || null;
+    if (!s) ensureFolderStats(folder.id, relDir);
+    $("#kv-files").textContent = s ? s.files_total : "…";
+    $("#kv-indexed").textContent = s ? s.files_indexed : "…";
+    $("#kv-errors").textContent = s ? s.files_error : "…";
+    $("#kv-pending").textContent = s ? s.files_pending : "…";
     const kvUnsupported = $("#kv-unsupported");
-    if (kvUnsupported) kvUnsupported.textContent = unsupported;
+    if (kvUnsupported) kvUnsupported.textContent = s ? s.files_unsupported : "…";
     const kvInProgress = $("#kv-in-progress");
-    if (kvInProgress) kvInProgress.textContent = inProgress;
+    if (kvInProgress) kvInProgress.textContent = s ? s.files_in_progress : "…";
 
-    // Folder-level stats live in the ``folderStats`` store, fed by
-    // ``folder.stats_changed`` over the WS. ``ensureFolderStats`` does
-    // the first-load REST fetch on demand so the panel never shows "…"
-    // for longer than the round-trip; subsequent updates flow over the
-    // socket and the subscriber re-runs ``renderSidebar`` automatically.
-    const s = folderStats.get().get(folder.id) || null;
-    if (!s) ensureFolderStats(folder.id);
+    // Cloud placeholders parked by the extract worker — only meaningful for
+    // Drive-mount folders, so the row hides entirely at 0.
+    const kvCloudK = $("#kv-cloud-only-k");
+    const kvCloud = $("#kv-cloud-only");
+    if (kvCloudK && kvCloud) {
+        const n = s ? s.files_cloud_only || 0 : 0;
+        kvCloudK.hidden = kvCloud.hidden = n === 0;
+        kvCloud.textContent = n;
+        kvCloud.title = kvCloudK.title =
+            "waiting for Google Drive — make the files available offline and reindex";
+    }
+
     $("#kv-bytes").textContent = s ? humanBytes(s.bytes_total) : "…";
     $("#kv-chunks").textContent = s ? s.chunks_total : "…";
     $("#kv-images").textContent = s ? s.images_total : "…";
@@ -104,7 +99,7 @@ export function renderSidebar() {
     if (s && s.index_health && s.index_health.status === "out_of_sync") {
         healthBadge.textContent = "⚠ Reindex needed";
         healthBadge.title =
-            `${indexed} file(s) indexed in DB but ${s.index_health.qdrant_chunk_points} ` +
+            `${s.files_indexed} file(s) indexed in DB but ${s.index_health.qdrant_chunk_points} ` +
             `chunk points in vector store. Click Reindex to repopulate.`;
         healthBadge.hidden = false;
     } else {
@@ -471,22 +466,41 @@ function humanBytes(n) {
     return `${v.toFixed(v >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
-// Tracks folder ids we've kicked a first-load fetch for so we don't
-// fan out 60 identical REST calls when the rAF render loop fires
-// before the first WS event lands.
+// Tracks stats keys we've kicked a fetch for so we don't fan out 60
+// identical REST calls when the rAF render loop fires before the first
+// WS event lands. Keys: folderId (number) for folder scope,
+// `${folderId}:${relDir}` (string) for subtree scope.
 const _statsInFlight = new Set();
+// Per-key trailing throttle for SCOPED refetches: ws.js deletes scoped
+// keys on every (coalesced) folder.stats_changed, and during heavy
+// indexing that could mean a refetch per event. ~750ms between fetches
+// per key caps it without starving the panel.
+const _statsLastFetch = new Map();
+const _SCOPED_THROTTLE_MS = 750;
 
-export async function ensureFolderStats(folderId) {
-    if (_statsInFlight.has(folderId)) return;
-    if (folderStats.get().has(folderId)) return;
-    _statsInFlight.add(folderId);
+export async function ensureFolderStats(folderId, relDir = "") {
+    const key = relDir ? `${folderId}:${relDir}` : folderId;
+    if (_statsInFlight.has(key)) return;
+    if (folderStats.get().has(key)) return;
+    if (relDir) {
+        const last = _statsLastFetch.get(key) || 0;
+        const wait = last + _SCOPED_THROTTLE_MS - Date.now();
+        if (wait > 0) {
+            // Trailing edge: re-enter after the window; the store/in-flight
+            // checks above make the retry a no-op if anything else filled it.
+            setTimeout(() => ensureFolderStats(folderId, relDir), wait);
+            return;
+        }
+    }
+    _statsInFlight.add(key);
+    _statsLastFetch.set(key, Date.now());
     try {
-        const s = await api.folderStats(folderId);
+        const s = await api.folderStats(folderId, relDir || undefined);
         // The store's set-by-key is mutate-Map-then-update so the
         // subscriber sees a fresh Map identity and re-renders.
         folderStats.update((map) => {
             const next = new Map(map);
-            next.set(folderId, s);
+            next.set(key, s);
             return next;
         });
     } catch (err) {
@@ -495,6 +509,6 @@ export async function ensureFolderStats(folderId) {
         // the stats endpoint is down.
         console.warn("stats first-load failed", err);
     } finally {
-        _statsInFlight.delete(folderId);
+        _statsInFlight.delete(key);
     }
 }

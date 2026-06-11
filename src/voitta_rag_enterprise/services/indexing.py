@@ -226,6 +226,21 @@ def _export_native_doc(gdoc_path: Path) -> Path | None:
 def _run_extract_inner(file_id: int) -> None:
     logger.info("extract begin")
 
+    # A scan may mark a file deleted while its extract job is still queued
+    # (observed at scale: 1833 queued extracts pointing at deleted rows after
+    # a Drive-mount rescan). Running them would re-read — and for cloud stubs
+    # re-DOWNLOAD — content the app considers gone. Dead row ⇒ dead job.
+    with _stage("check_row_state"):
+        with session_scope() as s:
+            file = s.get(File, file_id)
+            state = file.state if file is not None else None
+    if state is None or state == "deleted":
+        logger.info(
+            "extract abort: file row %s",
+            "gone" if state is None else "already deleted",
+        )
+        return  # ``delete_file`` cleans up
+
     with _stage("resolve_path"):
         abs_path = _resolve_path(file_id)
     if abs_path is None:
@@ -310,6 +325,33 @@ def _extract_resolved(file_id: int, abs_path: Path) -> None:
             error=(
                 f"{ext} size {stat.st_size} exceeds data_file_max_bytes "
                 f"{caps.data_file_max_bytes}"
+            ),
+        )
+        return
+
+    # Cloud placeholders (File Provider "dataless" files under
+    # ~/Library/CloudStorage) have a size but no local bytes; read_bytes()
+    # below would make the provider download the FULL content synchronously,
+    # with no timeout — one 398 MB recording on slow Wi-Fi froze the whole
+    # (single-worker) queue. Park them as unsupported-with-reason instead;
+    # they index normally once the user materializes them ("Available
+    # offline" in Drive) and reindexes, or opts in to downloads via
+    # VOITTA_CLOUD_MATERIALIZE_ON_INDEX.
+    from .sync.cloudstorage_local import is_dataless_stub, is_within_cloud_storage
+
+    if (
+        not settings.cloud_materialize_on_index
+        and is_dataless_stub(stat)
+        and is_within_cloud_storage(abs_path)
+    ):
+        logger.info("cloud-only stub (size=%d, no local bytes) — not downloading", stat.st_size)
+        _mark_state(
+            file_id,
+            state="unsupported",
+            error=(
+                "cloud-only file — content not on disk; make it available "
+                "offline in Google Drive and reindex, or set "
+                "VOITTA_CLOUD_MATERIALIZE_ON_INDEX=true to download while indexing"
             ),
         )
         return

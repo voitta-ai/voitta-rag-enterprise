@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import threading
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
@@ -82,10 +83,23 @@ def get_client() -> QdrantClient:
                 elif settings.qdrant_mode == "managed":
                     # Spawn (or reuse) the native Qdrant subprocess and connect
                     # over HTTP. start_managed_qdrant() raises on any failure —
-                    # no fallback to embedded.
-                    from .qdrant_process import start_managed_qdrant
+                    # no fallback to embedded. The per-boot API key is identity
+                    # (we only ever talk to the child we spawned), not transport
+                    # security — it's a localhost sidecar, so silence the
+                    # client's key-over-http warning.
+                    from .qdrant_process import (
+                        managed_qdrant_api_key,
+                        start_managed_qdrant,
+                    )
 
-                    _client = QdrantClient(url=start_managed_qdrant())
+                    url = start_managed_qdrant()
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings(
+                            "ignore", message=".*[Aa]pi key.*insecure.*"
+                        )
+                        _client = QdrantClient(
+                            url=url, api_key=managed_qdrant_api_key()
+                        )
                 else:
                     path = settings.resolved_qdrant_path()
                     path.mkdir(parents=True, exist_ok=True)

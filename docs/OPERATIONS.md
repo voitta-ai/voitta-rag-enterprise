@@ -102,6 +102,47 @@ flowchart TB
   RRF-fused) and `images` (SigLIP-2, searchable by text *or* image). Each
   point carries an `allowed_users` payload for the ACL filter.
 
+### Qdrant runtime modes
+
+`VOITTA_QDRANT_MODE` selects the vector-store backend
+([config.py](../src/voitta_rag_enterprise/config.py)):
+
+| Mode | What runs | Use |
+|------|-----------|-----|
+| `embedded` (default) | in-process `QdrantClient(path=…)` — pure Python, stripped-down engine | dev / small installs |
+| `standalone` | external Qdrant server at `VOITTA_QDRANT_URL` | Docker / k8s |
+| `managed` | the app spawns the **native Qdrant binary** as a localhost child process | desktop app, single-host server |
+
+**Managed mode is hard-fail by design** — if the binary is missing, won't
+launch, or doesn't become healthy, boot crashes; there is no fallback to
+embedded. The lifecycle
+([services/qdrant_process.py](../src/voitta_rag_enterprise/services/qdrant_process.py))
+guarantees cradle-to-grave ownership of the sidecar:
+
+```mermaid
+flowchart TB
+    BOOT["start_managed_qdrant()"] --> SWEEP["orphan sweep:<br/>qdrant.pid from a dirty death?<br/>verify pid runs OUR binary → kill"]
+    SWEEP --> PORT["ports: 0 (default) = pick free ephemeral;<br/>pinned port busy ⇒ HARD ERROR<br/>(never adopt a foreign Qdrant)"]
+    PORT --> SPAWN["spawn binary<br/>cwd=storage dir · per-boot API key<br/>stdout/stderr → qdrant.log (truncated)"]
+    SPAWN --> READY{"ready = child alive<br/>AND /readyz 200 with OUR key"}
+    READY -->|child died| FAIL["raise with qdrant.log tail"]
+    READY -->|ok| WATCH["watchdog thread: proc.wait()"]
+    WATCH -->|unexpected exit| DIE["CRITICAL log + SIGTERM self<br/>(hard-fail, no respawn)"]
+    WATCH -->|stop requested| QUIET["quiet — lifespan finally /<br/>atexit ran stop_managed_qdrant()"]
+```
+
+- **Storage** `data_dir/qdrant_managed/` (also holds `qdrant.pid`,
+  `qdrant.log`, and `snapshots/` — snapshots path is pinned via env and the
+  child's CWD is the storage dir, because Qdrant resolves `./snapshots/tmp`
+  relative to CWD and a `.app` bundle's inherited CWD is read-only).
+- **Identity, not just a port:** a per-boot random API key is passed to the
+  child and required on every readiness probe and client call
+  (`vector_store.get_client()` connects with it), so even a port race can't
+  attach the app to a Qdrant it doesn't own.
+- **Shutdown:** the lifespan `finally` calls `stop_managed_qdrant()`
+  (atexit is only a backstop); the pidfile sweep at next boot covers
+  SIGKILL/crash deaths.
+
 ---
 
 ## 2. File ingestion pipeline
@@ -165,8 +206,11 @@ Most stages are wrapped in a `_stage()` context manager for timing/logging
 
 | # | Stage | `_stage()`? | What it does |
 |---|-------|:---:|--------------|
+| 0 | `check_row_state` | ✓ | Dead row ⇒ dead job: abort if the File row is gone or already `deleted` (a scan can mark a file deleted while its extract is still queued; running it would re-read — for cloud stubs re-*download* — content the app considers gone) |
 | 1 | `resolve_path` | ✓ | File + Folder rows → absolute path |
-| 2 | `stat` | ✓ | Existence + size `< max_file_bytes` (indexing cap) |
+| — | native Google doc export | — | `.gdoc/.gsheet/.gslides` carry no local bytes: try the **anonymous** export endpoint (works for link-shared docs → parse the rendered PDF/XLSX); else park as `unsupported` "indexed as link" (its `source_url` stays searchable) |
+| 2 | `stat` | ✓ | Existence + size `< max_file_bytes` (indexing cap); oversized data files (json/csv/…) park as `unsupported` |
+| — | cloud-stub guard | — | A **dataless File Provider placeholder** under `~/Library/CloudStorage` (size > 0, zero blocks) is parked as `unsupported` "cloud-only" instead of read — reading would force a synchronous, untimed full download. `VOITTA_CLOUD_MATERIALIZE_ON_INDEX=true` restores download-on-read |
 | 3 | `read_bytes` | ✓ | Read full file into memory |
 | 4 | `sha256` | ✓ | Hash → `file_cas_id` |
 | — | short-circuit unchanged | — | Early return (no-op) if sha matches prior extract, after healing orphaned states |
@@ -177,6 +221,26 @@ Most stages are wrapped in a `_stage()` context manager for timing/logging
 | 9 | `commit_indexing` | ✓ | Txn: replace chunks/images, refcounts, `ChunkImageLink` |
 | 10 | `embed_text_inline` | ✓ | Dense + sparse vectors → `chunks` collection (if any chunks) |
 | 11 | `embed_image_inline` | ✓ | SigLIP-2 vectors → `images` collection, per-image (failures non-fatal) |
+
+### PDF parsing: the MinerU daemon
+
+PDFs parse in a **long-lived MinerU subprocess** (`_MineruDaemon` in
+[parsers/pdf_parser.py](../src/voitta_rag_enterprise/services/parsers/pdf_parser.py)):
+the first parse pays the ~5 s import + model load, later parses reuse the warm
+process, and a watchdog hard-kills it after `pdf_parse_timeout_s` (default
+600 s; the file parks as `error`, the queue moves on). PDFs over ~24 pages are
+split into **buckets of `pdf_pages_per_bucket`** (default 20) and parsed
+bucket-by-bucket under `gpu_lock`, then merged. On a subprocess failure the
+file's stored `error` includes the **subprocess traceback tail** (the raise
+site with the actual path/message — `repr()` of an `OSError` alone drops the
+filename), and the full traceback lands in `logs/indexing.log`.
+
+> **Lazy OCR models.** MinerU downloads some models on first *need*, not at
+> install — e.g. the seal/stamp detection model fetches the first time a page
+> contains a seal. Offline (or on a flaky link) that surfaces as
+> `FileNotFoundError: …/paddleocr_torch/seal_PP-OCRv4_det_server_infer.pth` —
+> the fix is to retry the file once online; the model caches permanently under
+> `~/.cache/huggingface/hub`.
 
 **Image ↔ chunk linkage:** every extracted image gets an *anchor chunk* (the
 chunk straddling its position in the markdown). Chunks within
@@ -231,7 +295,10 @@ The chevron is gated on *content*, decided up front from the file payload (which
 carries `image_count`) — no fetch, so a picture-free office doc shows no chevron
 rather than expanding to an empty "No previews". When expanded, the view loads
 an *images* row and (PDF only, since `page_layout.json` is PDF-only) a *layout*
-row.
+row. The fetched artifact lists are cached per file id; the cache is dropped
+when a `file.upserted` event arrives with `state == "indexed"` (the file's
+images/layout were just re-committed — an expanded row refetches live instead
+of showing the pre-index fetch) and on `file.deleted`.
 
 ```mermaid
 flowchart TB
@@ -289,7 +356,7 @@ flowchart LR
 | `extract` | `{file_id}` | watcher, scanner, reconcile | `run_extract` |
 | `embed_text` | `{file_id, round}` | inline (within extract) | `run_embed_text` |
 | `embed_image` | `{image_id, round}` | inline (within extract) | `run_embed_image` |
-| `delete_file` | `{file_id}` | watcher (on delete) | `run_delete_file` |
+| `delete_file` | `{file_id}` | watcher (on delete), scanner (vanished rows) | `run_delete_file` |
 | `sync` | `{folder_id}` | REST `/folders/{id}/sync`, auto-sync scheduler | `run_sync` |
 | `reindex_folder` | `{folder_id, file_ids}` | REST `/folders/{id}/reindex` | `run_reindex_folder` |
 
@@ -415,7 +482,10 @@ flowchart TB
   visibility, only the `admin` topic (an empty folder one user creates is
   invisible to every other user, admin or not). `visible = None` (no folder
   filter) is reserved for **single-user mode**, where the lone identity owns
-  everything. This mirrors `routes/folders.list_folders` exactly. Removals
+  everything — there the SPA also hides the per-folder **Share** switch
+  (keyed on `single_user` from `GET /api/auth/me`): with no second user the
+  flag is a no-op, so the control isn't rendered at all. This mirrors
+  `routes/folders.list_folders` exactly. Removals
   filter against the **union** of the pre- and post-refresh visible sets so
   `folder.removed` / `file.deleted` for a folder you *could* see still arrive
   (a folder you never could see stays filtered — no leak).
@@ -451,10 +521,48 @@ heavy indexing, tens of thousands of `file.upserted` events collapse to one
 final state per file id, and the pump emits one `send_text` per scheduling
 tick.
 
-> **Sync config note:** the heavy, secret-masked per-folder connector config is
-> *not* in the global snapshot. `folder.sync_config_changed` keeps an open sync
-> modal live (across tabs, and after save); the modal lazy-loads a folder's
-> config once via HTTP if it isn't cached yet.
+> **Sync config contract:** the heavy, secret-masked per-folder connector
+> config is *not* in the global snapshot. The sync modal caches it per folder
+> and trusts that cache on open; `folder.sync_config_changed` (full config
+> payload, `config: null` = deleted) is the **only** thing that keeps the
+> cache fresh. Therefore **every route that creates or mutates a
+> `folder_sync_sources` row must publish it** via
+> `_publish_sync_config_changed` in
+> [routes/sync.py](../src/voitta_rag_enterprise/api/routes/sync.py) — the PUT
+> upsert, the Drive-local connect (`gdl_connect`), and the clear-error route
+> all do. A route that skips the publish leaves the dialog rendering a stale
+> (possibly empty) config until a full page reload.
+
+### Folder stats — one snapshot, optionally subtree-scoped
+
+`compute_folder_stats` ([services/folder_stats.py](../src/voitta_rag_enterprise/services/folder_stats.py))
+is the single source for **every** number on the Details panel: file counts by
+state (including `files_cloud_only` — parked cloud placeholders, a subset of
+unsupported), chunks, images, bytes, and the by-extension table. One snapshot,
+so the panel can never contradict itself.
+
+- The WS push (`folder.stats_changed`) is always **folder-level**.
+- `GET /api/folders/{id}/stats?dir=<rel>` returns the same shape **scoped to a
+  subdirectory** (traversal-sanitized; `dir` is echoed in the payload;
+  `index_health` stays folder-level — Qdrant points are tracked per folder).
+- The SPA renders the panel from one cached snapshot per scope (key
+  `folderId` or `"folderId:relDir"`). A stats push stores the folder-level
+  payload and drops that folder's scoped keys; if a subtree is selected the
+  panel refetches the scoped snapshot, throttled to ~1 per 750 ms per key.
+
+### Tree pill: syncing → indexing → indexed
+
+The folder tree's status pill composes two server signals
+([flows/tree-model.js](../static/js/flows/tree-model.js)):
+
+- **`indexing`** — the folder has queued/running jobs (`folder.active_changed`
+  set) AND non-terminal files in the subtree.
+- **`syncing`** (root rows only, overrides everything except `error`) — the
+  folder's sync source has `sync_status == "syncing"`. A sync can run with
+  ZERO queued jobs (e.g. Google Drive materializing its tree), which is
+  exactly when "indexed" would lie. Boot truth ships as `sync_status` on
+  every folder row (REST + WS snapshot); live transitions arrive as
+  `folder.sync_source_changed`; the snapshot resets the overlay on reconnect.
 
 ---
 
@@ -814,11 +922,39 @@ credential fields.
 
 | Provider | `source_type` | Auth methods | Token storage | `supports_progress` |
 |----------|---------------|--------------|---------------|:---:|
-| Google Drive | `google_drive` | OAuth · service-account JSON | `gd_refresh_token` (per folder) | ✓ |
+| Google Drive (API) | `google_drive` | OAuth · service-account JSON | `gd_refresh_token` (per folder) | ✓ |
+| Google Drive (local) | `google_drive_local` | none — rides the installed *Drive for Desktop* app | — | ✓ |
 | GitHub | `github` | SSH key · PAT · none | `gh_token` / `gh_pat` (per folder) | ✗ |
 | SharePoint | `sharepoint` | OAuth · app-secret · app-cert | `ms_refresh_token` (OAuth) | ✓ |
 | Teams | `teams` | OAuth · app-secret · app-cert | `ms_refresh_token` (OAuth) | ✓ |
 | NFS | `nfs` | none (path under admin `nfs_root`) | — | ✓ |
+
+### Google Drive local (`google_drive_local`) — index-in-place, no credentials
+
+macOS desktop only ([services/sync/cloud_local.py](../src/voitta_rag_enterprise/services/sync/cloud_local.py)).
+Instead of downloading via the API, the folder's `path` *is* the account mount
+under `~/Library/CloudStorage/GoogleDrive-…`, and the user picks subtree(s)
+(`gdl_paths`) in the sync modal's "This Mac" tab (tri-state tree; reopening
+the dialog pre-checks the saved selection from the config payload's `paths`).
+
+- **Never writes into the Drive.** Sync is a **stat-only walk** of the
+  selected subtrees — no reads, no downloads. The provenance sidecar lives
+  under `data_dir/cloud_sidecars/<folder_id>.json`, never inside the mount.
+- **Outage-safe.** Sync and scan both refuse to run when the Drive app is
+  offline or the mount is empty — a transient outage never purges the index.
+- **No filesystem watcher** (FSEvents is unreliable on File Provider mounts);
+  refresh is driven by manual "Sync now" and the auto-sync scheduler, each
+  followed by a rescan.
+- **Dataless placeholders** (size > 0, zero local blocks) are parked by the
+  extract worker as `unsupported` "cloud-only" — counted as
+  `files_cloud_only` in folder stats and shown as a Cloud-only row in the
+  Details panel. Making the files "Available offline" in Drive and reindexing
+  indexes them; `VOITTA_CLOUD_MATERIALIZE_ON_INDEX=true` opts into
+  download-on-read instead.
+- **Native Google docs** (`.gdoc/.gsheet/.gslides`) are JSON pointers with no
+  local content: the sidecar records their web URL (searchable as links), and
+  the extract path tries the anonymous export for link-shared docs (see the
+  pipeline-stage table in §2).
 
 ### Connector contract & registry
 
@@ -834,13 +970,13 @@ dispatch path.
 ```mermaid
 flowchart TB
     RS["indexing.run_sync"] -->|"get_connector(type)"| REG["SyncRegistry.get()"]
-    REG --> C1["GitHubConnector"] & C2["GoogleDriveConnector"] & C3["NfsConnector"] & C4["SharePointConnector"] & C5["TeamsConnector"]
+    REG --> C1["GitHubConnector"] & C2["GoogleDriveConnector"] & C2L["CloudLocalConnector"] & C3["NfsConnector"] & C4["SharePointConnector"] & C5["TeamsConnector"]
     subgraph contract["SyncConnector ABC"]
         M1["source_type · supports_progress"]
         M2["resolve_config(row) → sync kwargs"]
         M3["async sync(folder_root, **cfg) → stats"]
     end
-    C1 & C2 & C3 & C4 & C5 -.implement.-> contract
+    C1 & C2 & C2L & C3 & C4 & C5 -.implement.-> contract
     RS -->|"if supports_progress: cfg['progress_cb']"| PROG["WS folder.sync_progress"]
 ```
 
@@ -961,6 +1097,8 @@ erDiagram
         string ms_refresh_token
         string gh_pat
         json gd_folder_id
+        string gdl_account
+        json gdl_paths
         bool auto_sync_enabled
         int auto_sync_hours
         string sync_status
@@ -1033,9 +1171,12 @@ REST-thread/worker-thread reindex race.
 
 ## 12. Logging & observability
 
-> **TL;DR — where the logs are:** `~/.voitta-rag-enterprise/logs/`. The
-> per-job detail stream is `indexing.log`. Watch a sync/extract live with
-> `tail -f ~/.voitta-rag-enterprise/logs/indexing.log`.
+> **TL;DR — where the logs are:** `<data_dir>/logs/` — server default
+> `~/.voitta-rag-enterprise/logs/`, **desktop app**
+> `~/Library/Application Support/Voitta RAG/data/logs/`. The per-job detail
+> stream is `indexing.log` — extract stages, sync connectors, MinerU
+> subprocess tracebacks, all ctx-tagged. Watch live with
+> `tail -f "<data_dir>/logs/indexing.log"`.
 
 ### Live progress surfaces (so long steps don't look frozen)
 
@@ -1088,11 +1229,22 @@ flowchart TB
 
 | File | Level | Contents |
 |------|-------|----------|
-| `indexing.log` | **DEBUG** | Everything from the `voitta_rag_enterprise` package — worker claim/done, the per-stage extract pipeline, **sync connectors**, embeds. The first place to look. |
+| `indexing.log` | **DEBUG** | Everything from the `voitta_rag_enterprise` package — worker claim/done, the per-stage extract pipeline, **sync connectors**, embeds, **MinerU subprocess tracebacks**. The first place to look. |
 | `app.log` | INFO (`VOITTA_LOG_LEVEL`) | Root catch-all + third-party (uvicorn.error, qdrant_client, …). Noisy libs (mineru, transformers, PIL, urllib3, …) pinned to WARNING. |
 | `mineru.log` | WARNING | MinerU/loguru internals (its own sink, redirected off stderr). |
 
 Each rotates at **10 MB**, keeping **5 backups** (`.log.1` … `.log.5`).
+
+### Desktop app log map
+
+The macOS app has **three** log surfaces under
+`~/Library/Application Support/Voitta RAG/`:
+
+| File | Written by | Contents |
+|------|-----------|----------|
+| `voitta-rag.log` | shell (`voitta_rag_desktop`) | menu-bar shell + installer + uvicorn banner/access lines + anything on raw stdout/stderr. Append-mode with per-session `===== … session start =====` banners; rolls to `.log.1` at 5 MB. **App-internal diagnostics are NOT here** — they're in `data/logs/` (below). |
+| `data/logs/*.log` | the enterprise app (`setup_logging`) | the standard server log set above — `indexing.log` is where extract/sync/MinerU failures land. |
+| `data/qdrant_managed/qdrant.log` | managed Qdrant sidecar | the child's stdout/stderr, truncated each boot; its tail is included in startup-failure errors and the watchdog's CRITICAL line. |
 
 ### Per-job context tagging
 

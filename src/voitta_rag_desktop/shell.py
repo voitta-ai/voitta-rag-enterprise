@@ -106,6 +106,11 @@ def _setup_logging() -> None:
     log.addHandler(handler)
     log.setLevel(logging.DEBUG)
     log.propagate = False  # don't double-log through uvicorn's root config
+    # NOTE: do NOT wire handlers for the enterprise app's loggers here — the
+    # server's logging_config.setup_logging() dictConfig replaces them at app
+    # startup anyway. The app's own logs land under <data_dir>/logs/ (see
+    # docs/OPERATIONS.md §12); voitta-rag.log carries only this shell,
+    # uvicorn, and raw stdout/stderr.
 
 
 class _LineTee:

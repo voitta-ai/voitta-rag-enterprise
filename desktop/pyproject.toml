@@ -14,7 +14,7 @@
 [tool.briefcase]
 project_name = "Voitta RAG Enterprise"
 bundle = "ai.voitta"
-version = "0.1.24"
+version = "0.1.32"
 url = "https://voitta.ai"
 license = "AGPL-3.0-or-later"
 author = "Voitta"

@@ -162,3 +162,30 @@ def test_live_browse_is_free_and_safe():
     # Every returned path stays within CloudStorage.
     for e in entries:
         assert cl.is_within_cloud_storage(e.path)
+
+
+def test_sync_source_out_exposes_saved_paths():
+    """The dialog pre-checks the saved subtrees on reopen — the API must
+    return them (JSON list first, legacy single path as fallback)."""
+    import json
+
+    from voitta_rag_enterprise.api.routes.sync import _to_out
+    from voitta_rag_enterprise.db.models import FolderSyncSource
+
+    paths = ["/mount/Shared drives/X/NDAs", "/mount/Shared drives/X/Ops"]
+    src = FolderSyncSource(
+        folder_id=1,
+        source_type="google_drive_local",
+        sync_status="idle",
+        auto_sync_enabled=False,
+        auto_sync_hours=6,
+        gdl_account="me@example.com",
+        gdl_path=paths[0],
+        gdl_paths=json.dumps(paths),
+    )
+    out = _to_out(src)
+    assert out.google_drive_local is not None
+    assert out.google_drive_local.paths == paths
+
+    src.gdl_paths = None  # legacy row: single path only
+    assert _to_out(src).google_drive_local.paths == [paths[0]]

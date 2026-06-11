@@ -269,6 +269,9 @@ let gdlAccountRoot = "";       // mount root for the selected account
 // recursive, so a checked parent already covers its whole subtree.
 const gdlSelected = new Set();
 const gdlChildrenCache = new Map();  // path -> [entries] (dirs+files)
+// Saved subtrees to re-check after the tree builds (set when reopening the
+// dialog for an already-connected folder; consumed once by gdlBuildTree).
+let gdlPendingRestore = [];
 
 async function gdlRefreshAvailability() {
     // Show the "This Mac (no setup)" Google Drive tab only when the desktop
@@ -307,6 +310,18 @@ async function gdlInit() {
         sel.appendChild(opt);
     }
     gdlAccountRoot = gdlAccounts[0].path;
+    // When restoring a saved selection, land on the account that owns it —
+    // the first account is wrong for multi-account Drives.
+    if (gdlPendingRestore.length) {
+        const first = gdlPendingRestore[0];
+        const owner = gdlAccounts.find(
+            (a) => first === a.path || first.startsWith(a.path + "/")
+        );
+        if (owner) {
+            gdlAccountRoot = owner.path;
+            sel.value = owner.path;
+        }
+    }
     await gdlBuildTree();
 }
 
@@ -439,6 +454,37 @@ async function gdlBuildTree() {
     }
     for (const d of dirs) ul.append(gdlBuildNode(d.path, d.name, 0));
     list.append(ul);
+
+    // Reopening an already-connected folder: re-check the saved subtrees and
+    // expand down to them so the dialog shows the real state (checked nodes,
+    // indeterminate ancestors) instead of a blank tree.
+    if (gdlPendingRestore.length) {
+        const saved = gdlPendingRestore.filter(
+            (p) => p === gdlAccountRoot || p.startsWith(gdlAccountRoot + "/")
+        );
+        gdlPendingRestore = [];
+        await gdlRestoreSelection(saved);
+    }
+}
+
+// Seed the tri-state model from saved paths and expand each one's ancestor
+// chain (lazy-loading as we go) so the restored selection is visible.
+async function gdlRestoreSelection(paths) {
+    if (!paths.length) return;
+    for (const p of paths) gdlSelect(p);
+    for (const p of paths) {
+        const rel = p.slice(gdlAccountRoot.length).replace(/^\/+/, "");
+        let current = gdlAccountRoot;
+        for (const seg of rel.split("/").slice(0, -1)) {
+            current = `${current}/${seg}`;
+            const li = document.querySelector(
+                `#sync-gdl-list li[data-gdl-path="${CSS.escape(current)}"]`
+            );
+            if (!li || !li.gdlExpand) break;  // ancestor gone from the Drive
+            try { await li.gdlExpand(); } catch { break; }
+        }
+    }
+    gdlRefreshTreeUi();
 }
 
 // Summarise a folder's files by type, e.g. "12 files — 5 pdf · 4 xlsx · 3 docx".
@@ -547,6 +593,7 @@ function gdlBuildNode(path, name, level) {
         childUl.hidden = true;
         toggle.textContent = "▶";
     }
+    li.gdlExpand = expand;  // for gdlRestoreSelection — awaits the lazy load
     toggle.addEventListener("click", () => {
         if (childUl.hidden) expand(); else collapse();
     });
@@ -1091,6 +1138,10 @@ async function loadSyncSource() {
             $("#sync-type").value = "google_drive";
             setSyncType("google_drive");
             $("#sync-gd-tab-local").hidden = false;
+            // Stash the saved subtrees BEFORE switching to the local tab —
+            // that triggers gdlInit → gdlBuildTree, which consumes this to
+            // pre-check the tree with the current selection.
+            gdlPendingRestore = src.google_drive_local?.paths || [];
             setGdAuthMode("local");
             const status = $("#sync-gdl-status");
             if (status && src.google_drive_local) {

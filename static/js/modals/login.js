@@ -8,6 +8,7 @@
 // rest of bootstrap bails.
 
 import { api } from "../api.js";
+import { me as meStore } from "../store.js";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -17,6 +18,7 @@ export async function ensureAuthenticated() {
     // we rendered the login gate and the rest of bootstrap should bail.
     try {
         const me = await api.me();
+        meStore.set(me);
         $("#user-pill").textContent = me.email;
         $("#user-pill").hidden = false;
         $("#btn-logout").hidden = false;

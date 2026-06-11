@@ -90,6 +90,11 @@ class MeOut(BaseModel):
     # never inherited via impersonation. The SPA uses this to decide
     # whether to render the Admin button.
     is_admin: bool
+    # True when the deployment runs with VOITTA_SINGLE_USER (desktop app,
+    # single-user server). The SPA hides multi-user-only affordances — the
+    # per-folder Share switch — because with one identity there is no one
+    # to share with.
+    single_user: bool = False
     # When the admin has chosen "view as <other>", these surface the
     # effective identity. UI shows a banner + a "Stop impersonating"
     # button. ``acting_as_user_id is None`` means no impersonation in
@@ -147,6 +152,7 @@ def me(
         email=user.email,
         display_name=eff_row.display_name if eff_row else None,
         is_admin=is_admin,
+        single_user=bool(s.single_user),
         acting_as_user_id=int(acting_id) if acting_id is not None else None,
         acting_as_email=acting_email,
     )
