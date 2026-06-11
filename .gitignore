@@ -62,3 +62,4 @@ src/voitta_rag_desktop/resources/static/
 # Local managed-Qdrant runtime state (binary + init marker)
 .local/
 .qdrant-initialized
+desktop/logs/
