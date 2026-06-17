@@ -36,7 +36,7 @@ import json
 import logging
 import re
 import shutil
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -183,6 +183,13 @@ class JiraSyncStats:
 # Module-level project listing — called from the "pick projects" route.
 # ---------------------------------------------------------------------------
 
+
+# Lower bound on issue recency: only issues updated on/after this date are
+# synced. Bounds an otherwise unbounded full-history pull (large orgs carry a
+# decade+ of issues) to a sane, still-comprehensive horizon. Issues untouched
+# since before this date are skipped; one with old ``created`` but recent
+# ``updated`` is still included. Override per folder via the Extra JQL field.
+ISSUES_UPDATED_SINCE = "2020-01-01"
 
 # Server-side project-search page size, also the picker's "type to narrow"
 # threshold. Kept in step with the frontend's PICKER_SEARCH_LIMIT.
@@ -457,51 +464,61 @@ class JiraConnector(SyncConnector):
         # and the progress pill advances project-by-project. With the old
         # all-projects-first listing, a large multi-project sync wrote nothing
         # for many minutes and looked hung.
+        # Stream each project PAGE BY PAGE: list a page of ~100 issue refs, then
+        # immediately download+write those before fetching the next page. Files
+        # land continuously (the watcher indexes them live and the Files count
+        # rises), so even a single 30k-issue project shows movement within
+        # seconds instead of sitting in a motionless multi-minute listing.
         total_projects = len(project_keys)
         async with httpx.AsyncClient(timeout=60.0) as client:
             for pidx, pkey in enumerate(project_keys):
-                emit("listing", pidx, total_projects, current_project=pkey)
+                emit(
+                    "listing", pidx, total_projects,
+                    current_project=pkey, projects_total=total_projects,
+                )
+                seen = 0  # issues seen so far in this project (across pages)
                 try:
-                    refs = await self._list_issue_refs(client, auth, [pkey], jql_extra)
+                    async for page in self._iter_issue_pages(client, auth, pkey, jql_extra):
+                        for ref in page:
+                            seen += 1
+                            expected_paths.add(ref.rel_path)
+                            new_revs[ref.rel_path] = ref.updated
+                            local = folder_root / ref.rel_path
+                            if local.exists() and old_revs.get(ref.rel_path) == ref.updated:
+                                stats.files_skipped += 1
+                                self._record_sidecar_from_ref(
+                                    ref, auth, old_sources, sidecar_sources, sidecar_times
+                                )
+                                continue
+                            try:
+                                issue = await self._fetch_issue(client, auth, ref.key)
+                                md = self._render_issue(issue, auth, field_map)
+                                existed = local.exists()
+                                local.parent.mkdir(parents=True, exist_ok=True)
+                                local.write_text(md, encoding="utf-8")
+                                if existed:
+                                    stats.files_updated += 1
+                                else:
+                                    stats.files_added += 1
+                                self._record_sidecar_from_issue(
+                                    issue, ref, auth, field_map,
+                                    sidecar_sources, sidecar_times,
+                                )
+                            except Exception as e:  # noqa: BLE001
+                                logger.warning("Jira: failed to sync %s: %s", ref.key, e)
+                                stats.errors.append(f"issue {ref.key}: {e}")
+                        # One progress event per page (~100 issues) — light on the
+                        # WS stream, frequent enough to animate the pill.
+                        emit(
+                            "downloading", pidx, total_projects,
+                            current_project=pkey, projects_total=total_projects,
+                            issue_done=seen,
+                        )
                 except Exception as e:  # noqa: BLE001
                     logger.warning("Jira: failed to list project %s: %s", pkey, e)
                     stats.errors.append(f"project {pkey}: {e}")
                     continue
-                n = len(refs)
-                logger.info("Jira: project %s — %d issues", pkey, n)
-                for j, ref in enumerate(refs):
-                    expected_paths.add(ref.rel_path)
-                    new_revs[ref.rel_path] = ref.updated
-                    local = folder_root / ref.rel_path
-                    if local.exists() and old_revs.get(ref.rel_path) == ref.updated:
-                        stats.files_skipped += 1
-                        self._record_sidecar_from_ref(
-                            ref, auth, old_sources, sidecar_sources, sidecar_times
-                        )
-                        continue
-                    # Throttle progress events — one per 10 issues is plenty and
-                    # keeps the WS stream light on tens-of-thousands-issue runs.
-                    if j % 10 == 0:
-                        emit(
-                            "downloading", pidx, total_projects,
-                            current_project=pkey, issue_done=j, issue_total=n,
-                        )
-                    try:
-                        issue = await self._fetch_issue(client, auth, ref.key)
-                        md = self._render_issue(issue, auth, field_map)
-                        existed = local.exists()
-                        local.parent.mkdir(parents=True, exist_ok=True)
-                        local.write_text(md, encoding="utf-8")
-                        if existed:
-                            stats.files_updated += 1
-                        else:
-                            stats.files_added += 1
-                        self._record_sidecar_from_issue(
-                            issue, ref, auth, field_map, sidecar_sources, sidecar_times
-                        )
-                    except Exception as e:  # noqa: BLE001
-                        logger.warning("Jira: failed to sync %s: %s", ref.key, e)
-                        stats.errors.append(f"issue {ref.key}: {e}")
+                logger.info("Jira: project %s — %d issues", pkey, seen)
                 stats.projects_synced += 1
 
         # One-time migration: older syncs wrote a flat ``issues/<type>/…`` tree.
@@ -588,21 +605,32 @@ class JiraConnector(SyncConnector):
     # Listing
     # ------------------------------------------------------------------
 
-    async def _list_issue_refs(
+    def _issue_jql(self, project_key: str, jql_extra: str) -> str:
+        """Build the per-project issue JQL, with the recency floor applied."""
+        clauses = [
+            f'project = "{project_key}"',
+            f'updated >= "{ISSUES_UPDATED_SINCE}"',
+        ]
+        if jql_extra:
+            clauses.append(f"({jql_extra})")
+        return " AND ".join(clauses) + " ORDER BY updated DESC"
+
+    async def _iter_issue_pages(
         self,
         client: httpx.AsyncClient,
         auth: AtlassianAuth,
-        project_keys: list[str],
+        project_key: str,
         jql_extra: str,
-    ) -> list[_IssueRef]:
-        quoted = ", ".join(f'"{k}"' for k in project_keys)
-        jql = f"project IN ({quoted})"
-        if jql_extra:
-            jql = f"({jql}) AND ({jql_extra})"
-        jql += " ORDER BY updated DESC"
+    ) -> AsyncIterator[list[_IssueRef]]:
+        """Yield issue refs one API page (~100) at a time for one project.
+
+        Streaming (vs. returning the full list) lets the caller download and
+        write each page before the next is fetched, so files flow continuously
+        even for very large projects.
+        """
+        jql = self._issue_jql(project_key, jql_extra)
         light = "key,issuetype,summary,updated,created"
 
-        refs: list[_IssueRef] = []
         if auth.is_cloud:
             token: str | None = None
             while True:
@@ -617,8 +645,7 @@ class JiraConnector(SyncConnector):
                 )
                 _raise_for_status(resp, "search issues")
                 data = resp.json()
-                for issue in data.get("issues", []):
-                    refs.append(self._ref_from_issue(issue))
+                yield [self._ref_from_issue(i) for i in data.get("issues", [])]
                 token = data.get("nextPageToken")
                 if data.get("isLast", True) or not token:
                     break
@@ -636,12 +663,10 @@ class JiraConnector(SyncConnector):
                 _raise_for_status(resp, "search issues")
                 data = resp.json()
                 issues = data.get("issues", [])
-                for issue in issues:
-                    refs.append(self._ref_from_issue(issue))
+                yield [self._ref_from_issue(i) for i in issues]
                 start_at += len(issues)
                 if not issues or start_at >= int(data.get("total", 0)):
                     break
-        return refs
 
     @staticmethod
     def _ref_from_issue(issue: dict) -> _IssueRef:

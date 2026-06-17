@@ -164,6 +164,13 @@ export function renderSidebar() {
             // and a side-of-the-bar items-skipped count when the ignore
             // matcher is dropping a lot of stuff.
             const parts = [];
+            // Jira: per-project breadcrumb (current project + N/total).
+            if (d.current_project) {
+                parts.push(d.current_project);
+                if (d.projects_total) {
+                    parts.push(`project ${(syncP.done || 0) + 1}/${d.projects_total}`);
+                }
+            }
             if (d.folders_total) {
                 parts.push(`folder ${d.folders_done || 0}/${d.folders_total}`);
             }
@@ -188,9 +195,20 @@ export function renderSidebar() {
                 ? `↓ Fetching docs — ${syncP.done}/${syncP.total}`
                 : "↓ Fetching docs";
         } else if (phase === "downloading") {
-            label = syncP.total > 0
-                ? `↓ Downloading — ${syncP.done}/${syncP.total}`
-                : "↓ Downloading";
+            if (d.current_project) {
+                // Jira: "↓ SIMS (3/55) — 1,240 issues". The grand total is
+                // unknown (issues stream per project), so we show the running
+                // per-project count rather than a done/total fraction.
+                const proj = d.projects_total
+                    ? ` (${(syncP.done || 0) + 1}/${d.projects_total})` : "";
+                const issues = typeof d.issue_done === "number"
+                    ? ` — ${d.issue_done.toLocaleString()} issues` : "";
+                label = `↓ ${d.current_project}${proj}${issues}`;
+            } else {
+                label = syncP.total > 0
+                    ? `↓ Downloading — ${syncP.done}/${syncP.total}`
+                    : "↓ Downloading";
+            }
         } else if (phase === "cleaning") {
             label = "↓ Cleaning up";
         } else {
