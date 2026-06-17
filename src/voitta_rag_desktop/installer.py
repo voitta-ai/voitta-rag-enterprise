@@ -198,6 +198,16 @@ def _install_deps(resources_dir: Path, reporter: InstallReporter, phase: int) ->
             "requirements-lock.txt missing from the bundle — build is broken."
         )
     base = ["install", "--no-warn-script-location", "--disable-pip-version-check"]
+    # Prefer wheels we pre-built into the bundle over building sdists at
+    # runtime. pip's build-isolation can't spawn an interpreter inside the
+    # frozen .app (sys.executable is the Briefcase stub), so any sdist-only
+    # package (e.g. pylatexenc, pulled in transitively by mineru) would fail
+    # to build with a misleading missing-output.json OSError. build_app.sh
+    # pre-builds those wheels into resources/wheels; --find-links makes pip use
+    # them. PyPI still serves everything else normally.
+    wheelhouse = resources_dir / "wheels"
+    if wheelhouse.is_dir():
+        base += ["--find-links", str(wheelhouse)]
     # Bulk install first — fast, and pip's own output (Collecting…/Installing…)
     # streams into the log via the shell's stdout tee, so the bar stays
     # indeterminate (set by phase_start) while lines scroll past.

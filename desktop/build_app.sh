@@ -167,6 +167,45 @@ if ! ls "$WHEELS"/rumps-*.whl >/dev/null 2>&1; then
 fi
 
 # ---------------------------------------------------------------------------
+# 5b. Pre-build the pylatexenc wheel into the bundled wheelhouse.
+#     pylatexenc is sdist-only on PyPI, and the first-run installer runs pip
+#     in-process inside the frozen .app, where pip's build-isolation can't
+#     spawn an interpreter (sys.executable is the Briefcase stub) — so a
+#     runtime sdist->wheel build dies with a misleading missing-output.json
+#     OSError (mineru pulls pylatexenc transitively). Build the wheel here,
+#     where isolation works, and ship it under resources/wheels so first-run
+#     pip installs it via --find-links instead of building. The spec is read
+#     from the generated lock so the shipped wheel can never drift from the
+#     version we pin.
+# ---------------------------------------------------------------------------
+RES_WHEELS="$RES/wheels"
+rm -rf "$RES_WHEELS"; mkdir -p "$RES_WHEELS"
+PYLATEX_SPEC=$(grep -E '^pylatexenc==' "$RES/requirements-lock.txt" | head -1)
+[ -n "$PYLATEX_SPEC" ] || { echo "[build_app] ERROR: pylatexenc not pinned in lock — unexpected" >&2; exit 1; }
+echo "[build_app] building $PYLATEX_SPEC wheel…"
+SD="$RES_WHEELS/sdist"; mkdir -p "$SD"
+"$VENV/bin/pip" download --no-binary :all: --no-deps -d "$SD" "$PYLATEX_SPEC" -q
+SRC="$SD/src_$$"; mkdir -p "$SRC"
+tar -xzf "$SD"/pylatexenc-*.tar.gz -C "$SRC" --strip-components=1
+"$PY" -m build --wheel --outdir "$RES_WHEELS" "$SRC" -q
+rm -rf "$SD"
+
+# Guardrail: any package that is sdist-only on PyPI must be pre-wheeled above,
+# or the frozen-app first-run installer will try (and fail) to build it. We
+# can't cheaply probe all ~769 pins against PyPI on every build, so the known
+# sdist-only deps are tracked explicitly here. If you add another sdist-only
+# dependency, pre-build its wheel above and add a line below.
+_require_wheel() {  # $1 = wheelhouse dir, $2 = distribution name
+  ls "$1"/"$2"-*.whl >/dev/null 2>&1 || {
+    echo "[build_app] ERROR: sdist-only package '$2' has no pre-built wheel in" \
+         "$1 — the first-run installer would fail to build it inside the .app" >&2
+    exit 1
+  }
+}
+_require_wheel "$WHEELS" rumps
+_require_wheel "$RES_WHEELS" pylatexenc
+
+# ---------------------------------------------------------------------------
 # 6. Stage the SPA into the bundle resources
 # ---------------------------------------------------------------------------
 echo "[build_app] staging static/ → resources/static"
