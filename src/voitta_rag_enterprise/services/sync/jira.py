@@ -1,9 +1,11 @@
 """Jira sync connector.
 
 Mirrors selected Jira projects onto disk as one markdown file per issue under
-``issues/<type>/<KEY>-<summary>.md``, then records each issue's structured
-attributes in the ``.voitta_sources.json`` sidecar so the indexer can promote
-them to filterable ``meta_*`` / ``attr_*`` Qdrant payload fields.
+``projects/<KEY>/<type>/<ISSUE-KEY>-<summary>.md`` — each project gets its own
+subtree, mirroring the SharePoint connector's ``sites/<site>/…`` layout so the
+folder structure is consistent across connectors. Each issue's structured
+attributes are recorded in the ``.voitta_sources.json`` sidecar so the indexer
+can promote them to filterable ``meta_*`` / ``attr_*`` Qdrant payload fields.
 
 Auth + URL shapes are delegated to :mod:`services.sync.atlassian_auth` (Cloud =
 Basic ``email:api_token``, REST v3; Server/DC = Bearer PAT, REST v2). This
@@ -33,6 +35,7 @@ import html as _html
 import json
 import logging
 import re
+import shutil
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -423,10 +426,18 @@ class JiraConnector(SyncConnector):
 
         stats.projects_synced = len(project_keys)
 
+        # One-time migration: older syncs wrote a flat ``issues/<type>/…`` tree.
+        # We now use ``projects/<KEY>/<type>/…``; drop the legacy directory so a
+        # re-sync doesn't leave its files orphaned (the folder scan then removes
+        # them from the index).
+        legacy_root = folder_root / "issues"
+        if legacy_root.exists():
+            shutil.rmtree(legacy_root, ignore_errors=True)
+
         # Phase 3 — mirror-delete issues no longer in the selection.
-        issues_root = folder_root / "issues"
-        if issues_root.exists():
-            for path in list(issues_root.rglob("*")):
+        projects_root = folder_root / "projects"
+        if projects_root.exists():
+            for path in list(projects_root.rglob("*")):
                 if not path.is_file() or path.name.startswith("."):
                     continue
                 rel = path.relative_to(folder_root).as_posix()
@@ -437,7 +448,7 @@ class JiraConnector(SyncConnector):
                     except OSError as e:
                         stats.errors.append(f"unlink {rel}: {e}")
             # Drop emptied directories.
-            for d in sorted(issues_root.rglob("*"), reverse=True):
+            for d in sorted(projects_root.rglob("*"), reverse=True):
                 if d.is_dir():
                     try:
                         d.rmdir()
@@ -560,9 +571,20 @@ class JiraConnector(SyncConnector):
         fields = issue.get("fields", {})
         issue_type = (fields.get("issuetype") or {}).get("name", "Other")
         summary = fields.get("summary", f"Issue-{key}")
+        # Each project gets its own subtree — ``projects/<KEY>/…`` — mirroring
+        # the SharePoint connector's ``sites/<site>/…`` so the folder structure
+        # is consistent across connectors. The project key is the prefix of the
+        # issue key (Jira keys are always ``PROJECTKEY-NUMBER``); fall back to
+        # the explicit project field if a key ever lacks a dash.
+        project_key = (
+            key.rsplit("-", 1)[0]
+            if "-" in key
+            else (fields.get("project") or {}).get("key", "UNKNOWN")
+        )
         return _IssueRef(
             key=key,
-            rel_path=f"issues/{safe_component(issue_type, 'Other')}/"
+            rel_path=f"projects/{safe_component(project_key, 'UNKNOWN')}/"
+            f"{safe_component(issue_type, 'Other')}/"
             f"{key}-{safe_component(summary, key)}.md",
             issue_type=issue_type,
             summary=summary,
