@@ -226,6 +226,15 @@
    instead of falling back to white native controls. Markup:
      .modal-body > .picker-filter (search) + .picker-list > li [> label] */
 .picker-filter { margin-bottom: var(--sm); }
+/* Multi-select pickers use a small textarea (not an <input>) so pasted
+   comma- AND newline-separated lists survive — <input> strips newlines. Keep
+   the proportional font (these are keys/names, not code) and a compact height
+   that the user can drag taller for a long pasted list. */
+.modal-body textarea.picker-filter-multi {
+    font: inherit;
+    min-height: 2.4em;
+    resize: vertical;
+}
 .picker-list {
     list-style: none;
     margin: 0;

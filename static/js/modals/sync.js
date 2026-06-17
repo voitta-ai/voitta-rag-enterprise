@@ -2498,16 +2498,32 @@ function escHtml(s) {
     ));
 }
 
+// Split a filter string into a trimmed, non-empty token list. Separators are
+// commas and newlines only (NOT spaces) so multi-word names survive. Two or
+// more tokens switches the picker into exact-match mode.
+function parsePickerTokens(s) {
+    return String(s || "").split(/[\n,]+/).map((t) => t.trim()).filter(Boolean);
+}
+
 // opts: {
 //   title, multi,
 //   keyOf(item)->str, primaryOf(item)->str, secondaryOf(item)->str,
+//   exactKeyOf(item)->str,           // value compared in multi-value exact mode
+//                                    //   (defaults to keyOf; client-side only)
 //   selectedKeys[], seedItems[],     // seedItems: full objects already selected
 //   items[] | search(query)->Promise<items[]>,   // static OR server-side source
 //   onConfirm(items[])               // multi: chosen items; single: [clicked]
 // }
+//
+// Filtering: a single term does substring matching (as you type). Pasting a
+// comma- or newline-separated list of 2+ values switches to EXACT matching on
+// the key (case-insensitive) and shows only those rows. For server-backed
+// pickers the raw filter string is handed to ``search`` which applies the same
+// rule server-side.
 function openListPicker(opts) {
     const {
         title, multi = false, keyOf, primaryOf, secondaryOf = () => "",
+        exactKeyOf = keyOf,
         selectedKeys = [], seedItems = [], items = null, search = null, onConfirm,
     } = opts;
 
@@ -2529,7 +2545,10 @@ function openListPicker(opts) {
                 <button type="button" class="btn-text picker-close">×</button>
             </div>
             <div class="modal-body">
-                <input type="search" class="picker-filter" placeholder="Filter…">
+                ${multi
+                    ? `<textarea class="picker-filter picker-filter-multi" rows="2"
+                        placeholder="Filter… or paste a comma / newline-separated list for exact matches"></textarea>`
+                    : `<input type="search" class="picker-filter" placeholder="Filter…">`}
                 <ul class="picker-list"></ul>
                 <p class="picker-more hint" hidden></p>
             </div>
@@ -2594,13 +2613,26 @@ function openListPicker(opts) {
                 moreHint.hidden = true;
             }
         } else {
-            const q = query.trim().toLowerCase();
-            const arr = q
-                ? items.filter((it) =>
-                    `${keyOf(it)} ${primaryOf(it)} ${secondaryOf(it)}`.toLowerCase().includes(q))
-                : items;
+            const tokens = parsePickerTokens(query);
+            let arr;
+            let exactMode = false;
+            if (tokens.length >= 2) {
+                // Multi-value: exact, case-insensitive key match only.
+                exactMode = true;
+                const want = new Set(tokens.map((t) => t.toLowerCase()));
+                arr = items.filter((it) => want.has(String(exactKeyOf(it)).toLowerCase()));
+            } else {
+                const q = (tokens[0] || "").toLowerCase();
+                arr = q
+                    ? items.filter((it) =>
+                        `${keyOf(it)} ${primaryOf(it)} ${secondaryOf(it)}`.toLowerCase().includes(q))
+                    : items;
+            }
             const { shown, total } = render(arr);
-            if (total > shown) {
+            if (exactMode) {
+                moreHint.hidden = total !== 0;
+                if (total === 0) moreHint.textContent = "No exact matches for the pasted list.";
+            } else if (total > shown) {
                 moreHint.hidden = false;
                 moreHint.textContent =
                     `Showing ${shown} of ${total} — refine the filter to narrow.`;
@@ -2679,6 +2711,9 @@ async function msPickSites() {
             keyOf: (s) => s.id,
             primaryOf: (s) => s.displayName || s.id,
             secondaryOf: (s) => s.webUrl || "",
+            // SP site "keys" are opaque GUIDs nobody pastes; exact multi-value
+            // matching compares the human-meaningful site name instead.
+            exactKeyOf: (s) => s.displayName || s.id,
             selectedKeys: spSites.map((s) => s.id),
             seedItems: spSites,
             onConfirm: (chosen) => {

@@ -228,20 +228,39 @@ async def list_projects(auth: AtlassianAuth) -> list[dict[str, str]]:
     return projects
 
 
+def _parse_query_tokens(query: str) -> list[str]:
+    """Split a picker query into trimmed, non-empty tokens.
+
+    Separators are commas and newlines only (not spaces), so multi-word values
+    survive. 2+ tokens means "exact key list" mode (see :func:`search_projects`).
+    """
+    return [t.strip() for t in re.split(r"[\n,]+", query or "") if t.strip()]
+
+
 async def search_projects(
     auth: AtlassianAuth, query: str = "", limit: int = SEARCH_LIMIT
 ) -> list[dict[str, str]]:
-    """Return up to ``limit`` projects matching ``query`` — for the picker.
+    """Return projects matching ``query`` — for the interactive picker.
 
-    Cloud searches server-side (``project/search?query=``) so enterprise tenants
-    with thousands of projects are never downloaded in full; an empty query
-    returns the first page. Server/DC has no project-search endpoint, so we fetch
-    the (typically small) full list once and filter by substring locally.
+    Matching rules (kept in step with the frontend picker):
+
+    * **2+ comma/newline-separated tokens** → exact, case-insensitive match on
+      the project **key** only; returns just those projects.
+    * **single token** → substring match on key or name (Cloud does this
+      server-side via ``project/search?query=`` so huge tenants aren't pulled
+      in full; an empty query returns the first page).
+
+    Server/DC has no project-search endpoint, so it fetches the (typically
+    small) full list once and filters locally for both modes.
     """
     if not auth.configured:
         raise RuntimeError("Jira not configured — set base URL, token (and email for Cloud).")
+    tokens = _parse_query_tokens(query)
+    if len(tokens) >= 2:
+        return await _projects_by_keys(auth, tokens)
+
+    q = tokens[0] if tokens else ""
     headers = auth.headers()
-    q = (query or "").strip()
     async with httpx.AsyncClient(timeout=30.0) as client:
         if auth.is_cloud:
             params: dict[str, Any] = {"startAt": 0, "maxResults": limit, "orderBy": "key"}
@@ -265,6 +284,39 @@ async def search_projects(
                 if ql in p["key"].lower() or ql in p["name"].lower()
             ]
         return all_projects[:limit]
+
+
+async def _projects_by_keys(
+    auth: AtlassianAuth, tokens: list[str]
+) -> list[dict[str, str]]:
+    """Exact, case-insensitive lookup of projects by key (multi-value mode).
+
+    Jira keys are uppercase, so tokens are upper-cased for comparison. Cloud
+    uses ``project/search?keys=`` (batched at 50, the API cap); Server/DC filters
+    the full list locally.
+    """
+    want = {t.upper() for t in tokens}
+    if auth.is_cloud:
+        headers = auth.headers()
+        out: list[dict[str, str]] = []
+        ordered = sorted(want)
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            for i in range(0, len(ordered), 50):
+                batch = ordered[i : i + 50]
+                resp = await client.get(
+                    f"{auth.base_url}/rest/api/3/project/search",
+                    params={"keys": batch, "maxResults": 50},
+                    headers=headers,
+                )
+                _raise_for_status(resp, "look up projects by key")
+                for p in resp.json().get("values", []):
+                    if p["key"].upper() in want:
+                        out.append({"key": p["key"], "name": p.get("name", p["key"])})
+        out.sort(key=lambda p: p["key"])
+        return out
+    # Server/DC: filter the full list.
+    all_projects = await list_projects(auth)
+    return [p for p in all_projects if p["key"].upper() in want]
 
 
 def _raise_for_status(resp: httpx.Response, action: str) -> None:
