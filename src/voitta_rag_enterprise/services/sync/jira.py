@@ -450,45 +450,59 @@ class JiraConnector(SyncConnector):
         new_revs: dict[str, str] = {}
         expected_paths: set[str] = set()
 
+        # Process ONE PROJECT AT A TIME — list its issues, then immediately
+        # download+write them — instead of enumerating every issue across all
+        # projects up front. The filesystem watcher then sees files land (and
+        # the Files/Indexed counts tick up) within seconds of the first project,
+        # and the progress pill advances project-by-project. With the old
+        # all-projects-first listing, a large multi-project sync wrote nothing
+        # for many minutes and looked hung.
+        total_projects = len(project_keys)
         async with httpx.AsyncClient(timeout=60.0) as client:
-            # Phase 1 — list issue refs across all selected projects.
-            emit("listing", 0, len(project_keys))
-            refs = await self._list_issue_refs(
-                client, auth, project_keys, jql_extra
-            )
-            total = len(refs)
-            logger.info("Jira: %d issues across %d project(s)", total, len(project_keys))
-
-            # Phase 2 — fetch + render changed issues.
-            for idx, ref in enumerate(refs):
-                expected_paths.add(ref.rel_path)
-                new_revs[ref.rel_path] = ref.updated
-                local = folder_root / ref.rel_path
-                if local.exists() and old_revs.get(ref.rel_path) == ref.updated:
-                    stats.files_skipped += 1
-                    self._record_sidecar_from_ref(
-                        ref, auth, old_sources, sidecar_sources, sidecar_times
-                    )
-                    continue
-                emit("downloading", idx, total, current_issue=ref.key)
+            for pidx, pkey in enumerate(project_keys):
+                emit("listing", pidx, total_projects, current_project=pkey)
                 try:
-                    issue = await self._fetch_issue(client, auth, ref.key)
-                    md = self._render_issue(issue, auth, field_map)
-                    existed = local.exists()
-                    local.parent.mkdir(parents=True, exist_ok=True)
-                    local.write_text(md, encoding="utf-8")
-                    if existed:
-                        stats.files_updated += 1
-                    else:
-                        stats.files_added += 1
-                    self._record_sidecar_from_issue(
-                        issue, ref, auth, field_map, sidecar_sources, sidecar_times
-                    )
+                    refs = await self._list_issue_refs(client, auth, [pkey], jql_extra)
                 except Exception as e:  # noqa: BLE001
-                    logger.warning("Jira: failed to sync %s: %s", ref.key, e)
-                    stats.errors.append(f"issue {ref.key}: {e}")
-
-        stats.projects_synced = len(project_keys)
+                    logger.warning("Jira: failed to list project %s: %s", pkey, e)
+                    stats.errors.append(f"project {pkey}: {e}")
+                    continue
+                n = len(refs)
+                logger.info("Jira: project %s — %d issues", pkey, n)
+                for j, ref in enumerate(refs):
+                    expected_paths.add(ref.rel_path)
+                    new_revs[ref.rel_path] = ref.updated
+                    local = folder_root / ref.rel_path
+                    if local.exists() and old_revs.get(ref.rel_path) == ref.updated:
+                        stats.files_skipped += 1
+                        self._record_sidecar_from_ref(
+                            ref, auth, old_sources, sidecar_sources, sidecar_times
+                        )
+                        continue
+                    # Throttle progress events — one per 10 issues is plenty and
+                    # keeps the WS stream light on tens-of-thousands-issue runs.
+                    if j % 10 == 0:
+                        emit(
+                            "downloading", pidx, total_projects,
+                            current_project=pkey, issue_done=j, issue_total=n,
+                        )
+                    try:
+                        issue = await self._fetch_issue(client, auth, ref.key)
+                        md = self._render_issue(issue, auth, field_map)
+                        existed = local.exists()
+                        local.parent.mkdir(parents=True, exist_ok=True)
+                        local.write_text(md, encoding="utf-8")
+                        if existed:
+                            stats.files_updated += 1
+                        else:
+                            stats.files_added += 1
+                        self._record_sidecar_from_issue(
+                            issue, ref, auth, field_map, sidecar_sources, sidecar_times
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("Jira: failed to sync %s: %s", ref.key, e)
+                        stats.errors.append(f"issue {ref.key}: {e}")
+                stats.projects_synced += 1
 
         # One-time migration: older syncs wrote a flat ``issues/<type>/…`` tree.
         # We now use ``projects/<KEY>/<type>/…``; drop the legacy directory so a

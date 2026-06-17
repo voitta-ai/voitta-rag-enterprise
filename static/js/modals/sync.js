@@ -2586,8 +2586,16 @@ function openListPicker(opts) {
         return { shown, total: arr.length };
     }
 
+    // Multi-value exact matches are auto-selected (checked) so pasting a list
+    // selects those rows; the user then unticks any they don't want.
+    function autoSelect(arr) {
+        if (multi) for (const it of arr) selected.add(String(keyOf(it)));
+    }
+
     let reqSeq = 0;
     async function load(query) {
+        const tokens = parsePickerTokens(query);
+        const exactMode = tokens.length >= 2;
         if (search) {
             const mine = ++reqSeq;
             moreHint.hidden = false;
@@ -2601,10 +2609,16 @@ function openListPicker(opts) {
             }
             if (mine !== reqSeq) return;  // a newer keystroke superseded this one
             remember(arr);
+            if (exactMode) autoSelect(arr);
             render(arr);
             if (!arr.length) {
                 moreHint.hidden = false;
-                moreHint.textContent = "No matches.";
+                moreHint.textContent = exactMode
+                    ? "No exact matches for the pasted list." : "No matches.";
+            } else if (exactMode) {
+                moreHint.hidden = false;
+                moreHint.textContent =
+                    `${arr.length} matched and selected — untick any you don't want.`;
             } else if (arr.length >= PICKER_SEARCH_LIMIT) {
                 moreHint.hidden = false;
                 moreHint.textContent =
@@ -2613,14 +2627,12 @@ function openListPicker(opts) {
                 moreHint.hidden = true;
             }
         } else {
-            const tokens = parsePickerTokens(query);
             let arr;
-            let exactMode = false;
-            if (tokens.length >= 2) {
+            if (exactMode) {
                 // Multi-value: exact, case-insensitive key match only.
-                exactMode = true;
                 const want = new Set(tokens.map((t) => t.toLowerCase()));
                 arr = items.filter((it) => want.has(String(exactKeyOf(it)).toLowerCase()));
+                autoSelect(arr);
             } else {
                 const q = (tokens[0] || "").toLowerCase();
                 arr = q
@@ -2630,8 +2642,10 @@ function openListPicker(opts) {
             }
             const { shown, total } = render(arr);
             if (exactMode) {
-                moreHint.hidden = total !== 0;
-                if (total === 0) moreHint.textContent = "No exact matches for the pasted list.";
+                moreHint.hidden = false;
+                moreHint.textContent = total === 0
+                    ? "No exact matches for the pasted list."
+                    : `${total} matched and selected — untick any you don't want.`;
             } else if (total > shown) {
                 moreHint.hidden = false;
                 moreHint.textContent =
