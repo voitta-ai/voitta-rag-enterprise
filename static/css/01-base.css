@@ -1,12 +1,21 @@
 /* Voitta RAG Enterprise — Apple-flavoured UI, lifted from voitta-rag's palette. */
 
 :root {
+    /* Tell the browser this is a light UI so native controls — scrollbars,
+       form widgets, the search-field clear button — render light. The dark
+       override below flips it; without this, dark mode keeps white scrollbars. */
+    color-scheme: light;
+
     --color-bg: #f5f5f7;
     --color-bg-elevated: #ffffff;
     --color-bg-hover: #e8e8ed;
     --color-text-primary: #1d1d1f;
     --color-text-secondary: #86868b;
     --color-text-tertiary: #aeaeb2;
+    /* Alias used throughout the CSS (panels, tree, admin, modal). Defined here
+       so those references resolve; tracks the active theme's primary text via
+       --color-text-primary, so it flips correctly in dark mode too. */
+    --color-text: var(--color-text-primary);
     --color-accent: #0071e3;
     --color-accent-hover: #0077ed;
     --color-border: #d2d2d7;
@@ -32,6 +41,8 @@
 }
 
 [data-theme="dark"] {
+    color-scheme: dark;
+
     --color-bg: #1d1d1f;
     --color-bg-elevated: #2c2c2e;
     --color-bg-hover: #3a3a3c;

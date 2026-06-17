@@ -22,13 +22,14 @@
 .modal.modal-wide { width: min(94vw, 720px); }
 .modal-body input[type="text"],
 .modal-body input[type="password"],
+.modal-body input[type="search"],
 .modal-body select,
 .modal-body textarea {
     background: var(--color-bg);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-md);
     padding: 6px 10px;
-    color: var(--color-text);
+    color: var(--color-text-primary);
     font: inherit;
     width: 100%;
     box-sizing: border-box;
@@ -218,3 +219,42 @@
 .agpl-footer a { color: var(--color-text-secondary); text-decoration: none; }
 .agpl-footer a:hover { color: var(--color-accent); }
 
+
+/* ---------- Inline list pickers ----------
+   The "Pick Jira projects / SharePoint sites / Teams user" overlays are built
+   in JS but themed here so they track light/dark like the rest of the app
+   instead of falling back to white native controls. Markup:
+     .modal-body > .picker-filter (search) + .picker-list > li [> label] */
+.picker-filter { margin-bottom: var(--sm); }
+.picker-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-height: 50vh;
+    overflow: auto;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    background: var(--color-bg);
+}
+.picker-list li {
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--color-border-light);
+}
+.picker-list li:last-child { border-bottom: 0; }
+.picker-list li:hover { background: var(--color-bg-hover); }
+.picker-list label {
+    display: flex;
+    gap: var(--sm);
+    align-items: center;
+    cursor: pointer;
+    margin: 0;
+    /* override the uppercase .modal-body label treatment — these are content */
+    text-transform: none;
+    letter-spacing: 0;
+    font-weight: 400;
+    font-size: 13px;
+    color: var(--color-text-primary);
+}
+.picker-list .picker-row { cursor: pointer; font-size: 13px; color: var(--color-text-primary); }
+.picker-list .picker-name { font-weight: 600; }
+.picker-sub { color: var(--color-text-secondary); font-size: 12px; }
