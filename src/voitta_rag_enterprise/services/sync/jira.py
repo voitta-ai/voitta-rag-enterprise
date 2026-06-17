@@ -24,7 +24,7 @@ Provenance & attributes captured per issue:
 * ``attrs_raw`` (full bag, retrievable not indexed) ← every other scalar
   field including all ``customfield_*`` values
 
-Incremental: a ``.jira_revisions.json`` sidecar maps rel_path → the issue's
+Incremental: a ``.voitta_jira_revisions.json`` sidecar maps rel_path → the issue's
 ``updated`` timestamp; unchanged issues are skipped and issues no longer in the
 selection are mirror-deleted.
 """
@@ -37,6 +37,7 @@ import logging
 import re
 import shutil
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -361,7 +362,18 @@ class JiraConnector(SyncConnector):
         field_map = await self._discover_field_map(auth)
 
         # Revision sidecar (rel_path -> issue 'updated' string) for incremental.
-        rev_file = folder_root / ".jira_revisions.json"
+        # Named with the ``.voitta_`` prefix so it's covered by the standard
+        # sidecar ignore globs and never indexed as content.
+        rev_file = folder_root / ".voitta_jira_revisions.json"
+        # One-time cleanup of the pre-rename file (it was getting indexed).
+        legacy_rev = folder_root / ".jira_revisions.json"
+        if legacy_rev.exists():
+            if not rev_file.exists():
+                with suppress(OSError):
+                    legacy_rev.rename(rev_file)
+            else:
+                with suppress(OSError):
+                    legacy_rev.unlink()
         old_revs: dict[str, str] = {}
         if rev_file.exists():
             try:
