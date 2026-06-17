@@ -60,7 +60,7 @@ from ...services.sync.atlassian_auth import AtlassianAuth, normalize_base_url
 from ...services.sync.jira import (
     coerce_projects_field as jira_coerce_projects,
     encode_projects_field as jira_encode_projects,
-    list_projects as jira_list_projects,
+    search_projects as jira_search_projects,
 )
 from ..deps import current_user, db_session
 
@@ -2006,13 +2006,16 @@ class JiraProjectsOut(BaseModel):
 @router.get("/jira/projects", response_model=JiraProjectsOut)
 async def jira_list_projects_endpoint(
     folder_id: int,
+    query: str = "",
     db: Session = Depends(db_session),
     user: CurrentUser = Depends(current_user),
 ) -> JiraProjectsOut:
-    """List Jira projects the stored credentials can see (for the picker).
+    """Search Jira projects the stored credentials can see (for the picker).
 
     Reads the persisted row, so the user must Save base URL + token (and email
     for Cloud) before picking projects — same flow as the SharePoint picker.
+    ``query`` filters server-side (Cloud) so large tenants aren't downloaded in
+    full; an empty query returns the first page.
     """
     _check_owner(folder_id, db, user)
     src = db.get(FolderSyncSource, folder_id)
@@ -2031,7 +2034,7 @@ async def jira_list_projects_endpoint(
             "listing projects.",
         )
     try:
-        projects = await jira_list_projects(auth)
+        projects = await jira_search_projects(auth, query)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
     return JiraProjectsOut(projects=[JiraProject(**p) for p in projects])

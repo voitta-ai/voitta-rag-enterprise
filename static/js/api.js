@@ -188,8 +188,9 @@ export const api = {
         req("GET", `/api/folders/${folderId}/sync/microsoft/users`),
     msScopeCheck: (folderId) =>
         req("GET", `/api/folders/${folderId}/sync/microsoft/scope-check`),
-    jiraListProjects: (folderId) =>
-        req("GET", `/api/folders/${folderId}/sync/jira/projects`),
+    jiraListProjects: (folderId, query = "") =>
+        req("GET", `/api/folders/${folderId}/sync/jira/projects`
+            + (query ? `?query=${encodeURIComponent(query)}` : "")),
     authConfig: () => req("GET", "/api/auth/config"),
     me: () => req("GET", "/api/auth/me"),
     logout: () => req("POST", "/api/auth/logout"),

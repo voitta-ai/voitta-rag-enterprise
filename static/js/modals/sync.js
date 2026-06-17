@@ -162,6 +162,7 @@ function openSyncModal() {
     $("#sync-jira-all-projects").checked = false;
     setJiraProjects([]);
     setJiraAuthMode("cloud");
+    jiraFormDirty = false;
     // Auto-sync defaults: off, 6h. loadSyncSource overrides from the row.
     $("#sync-auto-enabled").checked = false;
     $("#sync-auto-hours").value = "6";
@@ -2475,134 +2476,238 @@ function renderScopeWarning(panel, out) {
     panel.appendChild(ul);
 }
 
-// SharePoint sites picker — a simple modal-less list. Loads the full
-// site list, lets the user toggle checkboxes, writes back into spSites.
-async function msPickSites() {
-    let resp;
-    try {
-        resp = await api.msListSites(syncFolderId);
-    } catch (err) {
-        alert(err.message);
-        return;
-    }
-    const all = resp.sites || [];
-    const selected = new Set(spSites.map((s) => s.id));
-    // Render a quick inline modal — anchored to the SP form so we don't
-    // need extra DOM scaffolding in index.html.
+// ---------------------------------------------------------------------------
+// Shared list picker (Jira projects / SharePoint sites / Teams user)
+//
+// Built to stay responsive on enterprise-scale lists (thousands of rows). The
+// naive "render every row with a per-row listener, rebuild on every keystroke"
+// approach froze the whole tab on big Jira orgs. This helper instead:
+//   • renders at most PICKER_RENDER_CAP rows via a single innerHTML write,
+//   • uses ONE delegated listener for the whole list (not one per checkbox),
+//   • debounces filtering, and
+//   • supports an async ``search`` source so huge orgs are queried server-side
+//     instead of downloaded in full.
+// ---------------------------------------------------------------------------
+
+const PICKER_RENDER_CAP = 200;   // max rows painted at once (client-side)
+const PICKER_SEARCH_LIMIT = 100; // matches the server-side search page size
+
+function escHtml(s) {
+    return String(s ?? "").replace(/[&<>"']/g, (c) => (
+        { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+    ));
+}
+
+// opts: {
+//   title, multi,
+//   keyOf(item)->str, primaryOf(item)->str, secondaryOf(item)->str,
+//   selectedKeys[], seedItems[],     // seedItems: full objects already selected
+//   items[] | search(query)->Promise<items[]>,   // static OR server-side source
+//   onConfirm(items[])               // multi: chosen items; single: [clicked]
+// }
+function openListPicker(opts) {
+    const {
+        title, multi = false, keyOf, primaryOf, secondaryOf = () => "",
+        selectedKeys = [], seedItems = [], items = null, search = null, onConfirm,
+    } = opts;
+
+    const selected = new Set([...selectedKeys].map(String));
+    // Remember every item we've seen (across searches) so OK can reconstruct
+    // full objects even for selections not in the currently-shown results.
+    const seen = new Map();
+    const remember = (arr) => { for (const it of arr || []) seen.set(String(keyOf(it)), it); };
+    remember(seedItems);
+    if (items) remember(items);
+
     const overlay = document.createElement("div");
     overlay.className = "modal-backdrop";
     overlay.style.display = "flex";
     overlay.innerHTML = `
         <div class="modal" style="max-width:560px;">
             <div class="modal-header">
-                <h3>Pick SharePoint sites</h3>
-                <button type="button" class="btn-text ms-picker-close">×</button>
+                <h3>${escHtml(title)}</h3>
+                <button type="button" class="btn-text picker-close">×</button>
             </div>
             <div class="modal-body">
-                <input type="search" class="ms-picker-filter" placeholder="Filter sites…"
-                    style="width:100%;margin-bottom:8px;">
-                <ul class="ms-picker-list" style="max-height:50vh;overflow:auto;padding-left:0;list-style:none;"></ul>
+                <input type="search" class="picker-filter" placeholder="Filter…">
+                <ul class="picker-list"></ul>
+                <p class="picker-more hint" hidden></p>
             </div>
-            <div class="actions actions-right" style="padding:8px 16px;">
-                <button type="button" class="btn btn-secondary ms-picker-cancel">Cancel</button>
-                <button type="button" class="btn btn-primary ms-picker-ok">Use selection</button>
-            </div>
+            ${multi ? `<div class="actions actions-right" style="padding:8px 16px;">
+                <button type="button" class="btn btn-secondary picker-cancel">Cancel</button>
+                <button type="button" class="btn btn-primary picker-ok">Use selection</button>
+            </div>` : ""}
         </div>`;
     document.body.appendChild(overlay);
-    const list = overlay.querySelector(".ms-picker-list");
-    const filterInput = overlay.querySelector(".ms-picker-filter");
-    function paint(filter = "") {
-        const q = filter.toLowerCase();
-        list.innerHTML = "";
-        for (const s of all) {
-            if (q && !(s.displayName || "").toLowerCase().includes(q)) continue;
-            const li = document.createElement("li");
-            li.style.padding = "4px 0";
-            const cb = document.createElement("input");
-            cb.type = "checkbox";
-            cb.value = s.id;
-            cb.checked = selected.has(s.id);
-            cb.addEventListener("change", () => {
-                if (cb.checked) selected.add(s.id);
-                else selected.delete(s.id);
-            });
-            const label = document.createElement("label");
-            label.style.display = "flex";
-            label.style.gap = "8px";
-            label.style.alignItems = "center";
-            label.append(cb);
-            const text = document.createElement("span");
-            text.innerHTML = `<strong>${s.displayName || s.id}</strong>` +
-                (s.webUrl ? ` <small style="color:var(--muted, #666);">${s.webUrl}</small>` : "");
-            label.append(text);
-            li.append(label);
-            list.append(li);
+    const list = overlay.querySelector(".picker-list");
+    const moreHint = overlay.querySelector(".picker-more");
+    const filterInput = overlay.querySelector(".picker-filter");
+    const close = () => overlay.remove();
+
+    // Render an array of items (already filtered) — capped, single write.
+    function render(arr) {
+        let html = "";
+        const shown = Math.min(arr.length, PICKER_RENDER_CAP);
+        for (let i = 0; i < shown; i++) {
+            const it = arr[i];
+            const key = escHtml(keyOf(it));
+            const primary = escHtml(primaryOf(it) || keyOf(it));
+            const sec = secondaryOf(it) || "";
+            const subHtml = sec ? ` <span class="picker-sub">${escHtml(sec)}</span>` : "";
+            const inner = `<span class="picker-name">${primary}</span>${subHtml}`;
+            if (multi) {
+                const checked = selected.has(String(keyOf(it))) ? " checked" : "";
+                html += `<li data-key="${key}"><label><input type="checkbox"${checked}>`
+                    + `<span>${inner}</span></label></li>`;
+            } else {
+                html += `<li class="picker-row" data-key="${key}">${inner}</li>`;
+            }
+        }
+        list.innerHTML = html;
+        return { shown, total: arr.length };
+    }
+
+    let reqSeq = 0;
+    async function load(query) {
+        if (search) {
+            const mine = ++reqSeq;
+            moreHint.hidden = false;
+            moreHint.textContent = "Searching…";
+            let arr;
+            try {
+                arr = await search(query);
+            } catch (err) {
+                if (mine === reqSeq) { moreHint.hidden = false; moreHint.textContent = err.message; }
+                return;
+            }
+            if (mine !== reqSeq) return;  // a newer keystroke superseded this one
+            remember(arr);
+            render(arr);
+            if (!arr.length) {
+                moreHint.hidden = false;
+                moreHint.textContent = "No matches.";
+            } else if (arr.length >= PICKER_SEARCH_LIMIT) {
+                moreHint.hidden = false;
+                moreHint.textContent =
+                    `Showing first ${arr.length} matches — type to narrow.`;
+            } else {
+                moreHint.hidden = true;
+            }
+        } else {
+            const q = query.trim().toLowerCase();
+            const arr = q
+                ? items.filter((it) =>
+                    `${keyOf(it)} ${primaryOf(it)} ${secondaryOf(it)}`.toLowerCase().includes(q))
+                : items;
+            const { shown, total } = render(arr);
+            if (total > shown) {
+                moreHint.hidden = false;
+                moreHint.textContent =
+                    `Showing ${shown} of ${total} — refine the filter to narrow.`;
+            } else {
+                moreHint.hidden = true;
+            }
         }
     }
-    paint();
-    filterInput.addEventListener("input", () => paint(filterInput.value));
-    const close = () => overlay.remove();
-    overlay.querySelector(".ms-picker-close").addEventListener("click", close);
-    overlay.querySelector(".ms-picker-cancel").addEventListener("click", close);
-    overlay.querySelector(".ms-picker-ok").addEventListener("click", () => {
-        const byId = new Map(all.map((s) => [s.id, s]));
-        spSites = [...selected].map((id) => byId.get(id)).filter(Boolean);
-        updateSpSitesUi();
-        close();
+    load("");
+
+    let timer = null;
+    filterInput.addEventListener("input", () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => load(filterInput.value), search ? 250 : 150);
+    });
+
+    if (multi) {
+        // One delegated listener for every checkbox — toggling never re-renders.
+        list.addEventListener("change", (e) => {
+            const cb = e.target;
+            if (!cb || cb.tagName !== "INPUT") return;
+            const li = cb.closest("li[data-key]");
+            if (!li) return;
+            if (cb.checked) selected.add(li.dataset.key);
+            else selected.delete(li.dataset.key);
+        });
+        overlay.querySelector(".picker-ok").addEventListener("click", () => {
+            const chosen = [...selected].map((k) => seen.get(k)).filter(Boolean);
+            onConfirm(chosen);
+            close();
+        });
+        overlay.querySelector(".picker-cancel").addEventListener("click", close);
+    } else {
+        list.addEventListener("click", (e) => {
+            const li = e.target.closest("li[data-key]");
+            if (!li) return;
+            const it = seen.get(li.dataset.key);
+            if (it) onConfirm([it]);
+            close();
+        });
+    }
+    overlay.querySelector(".picker-close").addEventListener("click", close);
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+    filterInput.focus();
+}
+
+// Run an async picker-open with a "Loading…" state on its trigger button, so
+// the (possibly slow) initial fetch is legible and the button can't be
+// double-clicked into parallel fetches.
+async function withPickerButtonBusy(btn, fn) {
+    const prevLabel = btn.textContent;
+    const prevDisabled = btn.disabled;
+    btn.disabled = true;
+    btn.textContent = "Loading…";
+    try {
+        await fn();
+    } catch (err) {
+        alert(err.message);
+    } finally {
+        btn.textContent = prevLabel;
+        btn.disabled = prevDisabled;
+    }
+}
+
+// SharePoint sites picker — loads the full site list (tenants have few enough
+// sites that client-side filtering is fine), toggles into spSites.
+async function msPickSites() {
+    const btn = $("#sync-sp-pick-sites");
+    await withPickerButtonBusy(btn, async () => {
+        const resp = await api.msListSites(syncFolderId);
+        const all = resp.sites || [];
+        openListPicker({
+            title: "Pick SharePoint sites",
+            multi: true,
+            items: all,
+            keyOf: (s) => s.id,
+            primaryOf: (s) => s.displayName || s.id,
+            secondaryOf: (s) => s.webUrl || "",
+            selectedKeys: spSites.map((s) => s.id),
+            seedItems: spSites,
+            onConfirm: (chosen) => {
+                spSites = chosen.map((s) => ({
+                    id: s.id, displayName: s.displayName || "", webUrl: s.webUrl || "",
+                }));
+                updateSpSitesUi();
+            },
+        });
     });
 }
 $("#sync-sp-pick-sites").addEventListener("click", msPickSites);
 
-// Teams user picker — same modal pattern, single select.
+// Teams user picker — single select.
 async function msPickUser() {
-    let resp;
-    try {
-        resp = await api.msListUsers(syncFolderId);
-    } catch (err) {
-        alert(err.message);
-        return;
-    }
-    const all = resp.users || [];
-    const overlay = document.createElement("div");
-    overlay.className = "modal-backdrop";
-    overlay.style.display = "flex";
-    overlay.innerHTML = `
-        <div class="modal" style="max-width:520px;">
-            <div class="modal-header">
-                <h3>Pick a user</h3>
-                <button type="button" class="btn-text ms-picker-close">×</button>
-            </div>
-            <div class="modal-body">
-                <input type="search" class="ms-picker-filter" placeholder="Filter users…"
-                    style="width:100%;margin-bottom:8px;">
-                <ul class="ms-picker-list" style="max-height:50vh;overflow:auto;padding-left:0;list-style:none;"></ul>
-            </div>
-        </div>`;
-    document.body.appendChild(overlay);
-    const close = () => overlay.remove();
-    overlay.querySelector(".ms-picker-close").addEventListener("click", close);
-    const list = overlay.querySelector(".ms-picker-list");
-    const filterInput = overlay.querySelector(".ms-picker-filter");
-    function paint(filter = "") {
-        const q = filter.toLowerCase();
-        list.innerHTML = "";
-        for (const u of all) {
-            const haystack = `${u.displayName} ${u.userPrincipalName} ${u.mail}`.toLowerCase();
-            if (q && !haystack.includes(q)) continue;
-            const li = document.createElement("li");
-            li.style.cursor = "pointer";
-            li.style.padding = "6px 0";
-            li.innerHTML = `<strong>${u.displayName || u.userPrincipalName}</strong>` +
-                (u.userPrincipalName ? ` <small style="color:var(--muted, #666);">${u.userPrincipalName}</small>` : "");
-            li.addEventListener("click", () => {
-                $("#sync-tm-user-id").value = u.userPrincipalName || u.id;
-                close();
-            });
-            list.append(li);
-        }
-    }
-    paint();
-    filterInput.addEventListener("input", () => paint(filterInput.value));
+    const btn = $("#sync-tm-pick-user");
+    await withPickerButtonBusy(btn, async () => {
+        const resp = await api.msListUsers(syncFolderId);
+        const all = resp.users || [];
+        openListPicker({
+            title: "Pick a user",
+            multi: false,
+            items: all,
+            keyOf: (u) => u.userPrincipalName || u.id,
+            primaryOf: (u) => u.displayName || u.userPrincipalName,
+            secondaryOf: (u) => u.userPrincipalName || u.mail || "",
+            onConfirm: ([u]) => { $("#sync-tm-user-id").value = u.userPrincipalName || u.id; },
+        });
+    });
 }
 $("#sync-tm-pick-user").addEventListener("click", msPickUser);
 
@@ -2652,6 +2757,9 @@ window.__voittaMsAfterSave = msAfterSave;
 // ---------------------------------------------------------------------------
 
 let jiraProjects = [];
+// Whether credential fields changed since the last save. The picker re-saves
+// only when dirty (the project-list endpoint reads the stored row).
+let jiraFormDirty = false;
 
 function setJiraAuthMode(mode) {
     const m = mode === "server" ? "server" : "cloud";
@@ -2682,6 +2790,9 @@ function loadJiraForm(cfg) {
     $("#sync-jira-jql").value = cfg.jql || "";
     $("#sync-jira-all-projects").checked = !!cfg.all_projects;
     setJiraProjects(cfg.projects || []);
+    // Freshly loaded from the server → credentials match what's stored, so the
+    // picker needn't re-save before listing.
+    jiraFormDirty = false;
 }
 
 function jiraFormConfig() {
@@ -2746,95 +2857,48 @@ function jiraAfterSave(cfg) {
         ? "(saved — type to replace)" : "(paste API token / PAT)";
     $("#sync-jira-all-projects").checked = !!cfg.all_projects;
     setJiraProjects(cfg.projects || []);
+    jiraFormDirty = false;  // just persisted — stored row matches the form
 }
 
 async function jiraPickProjects() {
-    // The list endpoint reads the stored row, so persist the form first
-    // (same "save then pick" flow as the SharePoint sites picker).
-    try {
-        await _doSave();
-    } catch (err) {
-        alert(err.message);
-        return;
-    }
-    let resp;
-    try {
-        resp = await api.jiraListProjects(syncFolderId);
-    } catch (err) {
-        alert(err.message);
-        return;
-    }
-    const all = resp.projects || [];
-    const selected = new Set(jiraProjects.map((p) => p.key));
-    const overlay = document.createElement("div");
-    overlay.className = "modal-backdrop";
-    overlay.style.display = "flex";
-    overlay.innerHTML = `
-        <div class="modal" style="max-width:560px;">
-            <div class="modal-header">
-                <h3>Pick Jira projects</h3>
-                <button type="button" class="btn-text jira-picker-close">×</button>
-            </div>
-            <div class="modal-body">
-                <input type="search" class="jira-picker-filter" placeholder="Filter projects…"
-                    style="width:100%;margin-bottom:8px;">
-                <ul class="jira-picker-list" style="max-height:50vh;overflow:auto;padding-left:0;list-style:none;"></ul>
-            </div>
-            <div class="actions actions-right" style="padding:8px 16px;">
-                <button type="button" class="btn btn-secondary jira-picker-cancel">Cancel</button>
-                <button type="button" class="btn btn-primary jira-picker-ok">Use selection</button>
-            </div>
-        </div>`;
-    document.body.appendChild(overlay);
-    const list = overlay.querySelector(".jira-picker-list");
-    const filterInput = overlay.querySelector(".jira-picker-filter");
-    function paint(filter = "") {
-        const q = filter.toLowerCase();
-        list.innerHTML = "";
-        for (const p of all) {
-            const haystack = `${p.key} ${p.name || ""}`.toLowerCase();
-            if (q && !haystack.includes(q)) continue;
-            const li = document.createElement("li");
-            li.style.padding = "4px 0";
-            const cb = document.createElement("input");
-            cb.type = "checkbox";
-            cb.value = p.key;
-            cb.checked = selected.has(p.key);
-            cb.addEventListener("change", () => {
-                if (cb.checked) selected.add(p.key);
-                else selected.delete(p.key);
-            });
-            const label = document.createElement("label");
-            label.style.display = "flex";
-            label.style.gap = "8px";
-            label.style.alignItems = "center";
-            label.append(cb);
-            const text = document.createElement("span");
-            text.innerHTML = `<strong>${p.key}</strong>` +
-                (p.name && p.name !== p.key
-                    ? ` <small style="color:var(--muted, #666);">${p.name}</small>` : "");
-            label.append(text);
-            li.append(label);
-            list.append(li);
+    const btn = $("#sync-jira-pick-projects");
+    await withPickerButtonBusy(btn, async () => {
+        // The list endpoint reads the persisted row, so save first — but only
+        // when something actually changed (avoids a needless PUT round trip on
+        // every open).
+        if (jiraFormDirty) {
+            await _doSave();
+            jiraFormDirty = false;
         }
-    }
-    paint();
-    filterInput.addEventListener("input", () => paint(filterInput.value));
-    const close = () => overlay.remove();
-    overlay.querySelector(".jira-picker-close").addEventListener("click", close);
-    overlay.querySelector(".jira-picker-cancel").addEventListener("click", close);
-    overlay.querySelector(".jira-picker-ok").addEventListener("click", () => {
-        const byKey = new Map(all.map((p) => [p.key, p]));
-        jiraProjects = [...selected].map((k) => byKey.get(k)).filter(Boolean);
-        updateJiraProjectsUi();
-        close();
+        // Server-side search: the picker queries Jira on each keystroke instead
+        // of downloading every project (enterprise orgs have thousands), so the
+        // list appears immediately and never freezes the tab.
+        openListPicker({
+            title: "Pick Jira projects",
+            multi: true,
+            search: async (q) => {
+                const resp = await api.jiraListProjects(syncFolderId, q);
+                return resp.projects || [];
+            },
+            keyOf: (p) => p.key,
+            primaryOf: (p) => p.key,
+            secondaryOf: (p) => (p.name && p.name !== p.key ? p.name : ""),
+            selectedKeys: jiraProjects.map((p) => p.key),
+            seedItems: jiraProjects,
+            onConfirm: (chosen) => {
+                jiraProjects = chosen.map((p) => ({ key: p.key, name: p.name || p.key }));
+                updateJiraProjectsUi();
+            },
+        });
     });
 }
 
-$("#sync-jira-tab-cloud").addEventListener("click", () => setJiraAuthMode("cloud"));
-$("#sync-jira-tab-server").addEventListener("click", () => setJiraAuthMode("server"));
+$("#sync-jira-tab-cloud").addEventListener("click", () => { jiraFormDirty = true; setJiraAuthMode("cloud"); });
+$("#sync-jira-tab-server").addEventListener("click", () => { jiraFormDirty = true; setJiraAuthMode("server"); });
 $("#sync-jira-all-projects").addEventListener("change", updateJiraProjectsUi);
 $("#sync-jira-pick-projects").addEventListener("click", jiraPickProjects);
+// Credential edits mark the form dirty so the picker re-saves before listing;
+// other fields (projects, jql) don't affect the project-list query.
 for (const id of ["#sync-jira-base-url", "#sync-jira-email", "#sync-jira-token"]) {
-    $(id).addEventListener("input", updateJiraConnState);
+    $(id).addEventListener("input", () => { jiraFormDirty = true; updateJiraConnState(); });
 }

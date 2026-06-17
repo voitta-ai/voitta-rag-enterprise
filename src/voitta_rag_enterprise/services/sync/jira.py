@@ -180,8 +180,18 @@ class JiraSyncStats:
 # ---------------------------------------------------------------------------
 
 
+# Server-side project-search page size, also the picker's "type to narrow"
+# threshold. Kept in step with the frontend's PICKER_SEARCH_LIMIT.
+SEARCH_LIMIT = 100
+
+
 async def list_projects(auth: AtlassianAuth) -> list[dict[str, str]]:
-    """Return ``[{key, name}]`` for every project the credentials can see."""
+    """Return ``[{key, name}]`` for **every** project the credentials can see.
+
+    Used by ``sync`` to resolve ``all_projects`` into concrete keys, so it must
+    be exhaustive — it paginates the whole tenant. The interactive picker uses
+    :func:`search_projects` instead, which is capped and far cheaper.
+    """
     if not auth.configured:
         raise RuntimeError("Jira not configured — set base URL, token (and email for Cloud).")
     headers = auth.headers()
@@ -192,7 +202,7 @@ async def list_projects(auth: AtlassianAuth) -> list[dict[str, str]]:
             while True:
                 resp = await client.get(
                     f"{auth.base_url}/rest/api/3/project/search",
-                    params={"startAt": start_at, "maxResults": 50},
+                    params={"startAt": start_at, "maxResults": 100},
                     headers=headers,
                 )
                 _raise_for_status(resp, "list projects")
@@ -212,6 +222,45 @@ async def list_projects(auth: AtlassianAuth) -> list[dict[str, str]]:
                 projects.append({"key": p["key"], "name": p.get("name", p["key"])})
     projects.sort(key=lambda p: p["key"])
     return projects
+
+
+async def search_projects(
+    auth: AtlassianAuth, query: str = "", limit: int = SEARCH_LIMIT
+) -> list[dict[str, str]]:
+    """Return up to ``limit`` projects matching ``query`` — for the picker.
+
+    Cloud searches server-side (``project/search?query=``) so enterprise tenants
+    with thousands of projects are never downloaded in full; an empty query
+    returns the first page. Server/DC has no project-search endpoint, so we fetch
+    the (typically small) full list once and filter by substring locally.
+    """
+    if not auth.configured:
+        raise RuntimeError("Jira not configured — set base URL, token (and email for Cloud).")
+    headers = auth.headers()
+    q = (query or "").strip()
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        if auth.is_cloud:
+            params: dict[str, Any] = {"startAt": 0, "maxResults": limit, "orderBy": "key"}
+            if q:
+                params["query"] = q
+            resp = await client.get(
+                f"{auth.base_url}/rest/api/3/project/search",
+                params=params, headers=headers,
+            )
+            _raise_for_status(resp, "search projects")
+            values = resp.json().get("values", [])
+            out = [{"key": p["key"], "name": p.get("name", p["key"])} for p in values]
+            out.sort(key=lambda p: p["key"])
+            return out
+        # Server/DC: fetch all once, filter locally.
+        all_projects = await list_projects(auth)
+        if q:
+            ql = q.lower()
+            all_projects = [
+                p for p in all_projects
+                if ql in p["key"].lower() or ql in p["name"].lower()
+            ]
+        return all_projects[:limit]
 
 
 def _raise_for_status(resp: httpx.Response, action: str) -> None:
