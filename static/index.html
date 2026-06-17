@@ -584,6 +584,7 @@
                     <option value="google_drive">Google Drive</option>
                     <option value="sharepoint">SharePoint</option>
                     <option value="teams">Teams meetings</option>
+                    <option value="jira">Jira</option>
                     <!-- Shown only when the admin has configured an NFS
                          root and the path is reachable. sync.js drops
                          this <option> on open via setNfsAvailability. -->
@@ -1029,6 +1030,76 @@
                             Include meetings the user only attended (needs <code>CallRecords.Read.All</code>)
                         </span>
                     </label>
+                </div>
+
+                <!-- Jira sync pane. Cloud uses HTTP Basic (email + API
+                     token); Server/Data Center uses a Bearer PAT. A custom
+                     base URL is supported for on-prem. Projects are picked
+                     from a searchable multiselect once credentials are saved. -->
+                <div id="sync-form-jira" hidden>
+                    <p class="hint" style="margin:0 0 6px;">
+                        Mirrors selected Jira projects — one markdown file per
+                        issue, with status, assignee, labels, dates and other
+                        attributes captured as filterable fields. Cloud needs
+                        your Atlassian email + an API token; Server / Data Center
+                        needs a personal access token.
+                    </p>
+
+                    <div class="seg-tabs" role="tablist">
+                        <button type="button" id="sync-jira-tab-cloud"
+                            class="seg-tab active" role="tab" aria-selected="true">
+                            Cloud (atlassian.net)
+                        </button>
+                        <button type="button" id="sync-jira-tab-server"
+                            class="seg-tab" role="tab" aria-selected="false">
+                            Server / Data Center
+                        </button>
+                    </div>
+
+                    <label>Base URL</label>
+                    <input type="text" id="sync-jira-base-url"
+                        placeholder="https://your-org.atlassian.net"
+                        autocomplete="off" spellcheck="false"
+                        data-1p-ignore data-lpignore="true">
+
+                    <div id="sync-jira-email-row">
+                        <label>Atlassian email</label>
+                        <input type="text" id="sync-jira-email"
+                            placeholder="you@example.com" autocomplete="off"
+                            spellcheck="false" data-1p-ignore data-lpignore="true"
+                            data-form-type="other">
+                    </div>
+
+                    <label id="sync-jira-token-label">API token</label>
+                    <!-- type=text on purpose — see the GitHub PAT comment above.
+                         API/personal access tokens aren't login passwords; the
+                         browser password store would leak them cross-site. -->
+                    <input type="text" id="sync-jira-token"
+                        placeholder="(paste API token / PAT)" autocomplete="off"
+                        spellcheck="false" data-1p-ignore data-lpignore="true"
+                        data-form-type="other">
+
+                    <label style="margin-top:10px;">Projects</label>
+                    <div class="branches-row">
+                        <button type="button" id="sync-jira-pick-projects" class="btn btn-secondary btn-sm" disabled title="Save credentials first">Pick projects…</button>
+                        <label class="check-row" style="margin:0;">
+                            <input type="checkbox" id="sync-jira-all-projects">
+                            <span style="text-transform:none;letter-spacing:0;color:var(--color-text);font-size:12px;">
+                                Sync ALL accessible projects
+                            </span>
+                        </label>
+                        <span id="sync-jira-projects-count" class="hint">none selected</span>
+                    </div>
+                    <ul id="sync-jira-projects-list" style="margin:6px 0 0;padding-left:18px;font-size:13px;color:var(--muted, #666);"></ul>
+
+                    <label style="margin-top:10px;">Extra JQL (optional)</label>
+                    <input type="text" id="sync-jira-jql"
+                        placeholder='e.g. updated >= -90d AND status != Done'
+                        autocomplete="off" spellcheck="false">
+                    <p class="hint" style="margin:4px 0 0;">
+                        ANDed onto the project filter. Leave blank to sync every
+                        issue in the selected projects.
+                    </p>
                 </div>
 
                 <!-- NFS sync pane. ``nfs_root`` is admin-configured;

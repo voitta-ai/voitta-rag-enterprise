@@ -11,7 +11,8 @@ from voitta_rag_enterprise.services.sync import (
 )
 
 EXPECTED_TYPES = {
-    "github", "google_drive", "google_drive_local", "nfs", "sharepoint", "teams"
+    "github", "google_drive", "google_drive_local", "nfs", "sharepoint",
+    "teams", "jira",
 }
 
 
@@ -55,10 +56,12 @@ def _blank_row():
         "gd_folder_id gd_files_only gd_client_id gd_client_secret gd_refresh_token "
         "gd_service_account_json "
         "nfs_subpaths nfs_subpath "
-        "gdl_account gdl_path folder_id "
+        "gdl_account gdl_path gdl_paths folder_id "
         "ms_tenant_id ms_client_id ms_client_secret ms_cert_pem ms_refresh_token "
         "ms_auth_method sp_selected_sites sp_all_sites "
-        "tm_user_mode tm_user_id tm_include_attended"
+        "tm_user_mode tm_user_id tm_include_attended "
+        "jira_base_url jira_auth_method jira_email jira_token "
+        "jira_selected_projects jira_all_projects jira_jql"
     ).split()
     return SimpleNamespace(**{c: None for c in cols})
 
@@ -68,10 +71,11 @@ def _blank_row():
     [
         ("github", {"repo_url", "branches", "auth"}),
         ("google_drive", {"drive_folders", "files_only", "auth"}),
-        ("google_drive_local", {"gdl_path", "gdl_account", "folder_id"}),
+        ("google_drive_local", {"gdl_paths", "gdl_account", "folder_id"}),
         ("nfs", {"nfs_subpaths"}),
         ("sharepoint", {"auth", "sites", "all_sites"}),
         ("teams", {"auth", "user_mode", "user_id", "include_attended"}),
+        ("jira", {"auth", "projects", "all_projects", "jql_extra"}),
     ],
 )
 def test_resolve_config_builds_kwargs_from_row(source_type, must_have_keys) -> None:

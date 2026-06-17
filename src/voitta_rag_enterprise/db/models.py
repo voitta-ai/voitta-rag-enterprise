@@ -251,6 +251,20 @@ class FolderSyncSource(Base):
     gdl_account: Mapped[str | None] = mapped_column(default=None)
     gdl_path: Mapped[str | None] = mapped_column(default=None)
     gdl_paths: Mapped[str | None] = mapped_column(default=None)  # JSON list
+    # Jira. ``jira_auth_method`` is "cloud" (HTTP Basic with email:api_token,
+    # ``*.atlassian.net`` / REST v3) or "server" (Bearer PAT, Server/Data
+    # Center / REST v2) — set explicitly so on-prem instances on custom
+    # domains work without URL guessing. ``jira_selected_projects`` is a JSON
+    # array of ``{"key": str, "name": str}``; ignored when ``jira_all_projects``
+    # is True (then every accessible project is synced). ``jira_jql`` is an
+    # optional power-user filter ANDed onto the project selection.
+    jira_base_url: Mapped[str | None] = mapped_column(default=None)
+    jira_auth_method: Mapped[str | None] = mapped_column(default=None)
+    jira_email: Mapped[str | None] = mapped_column(default=None)
+    jira_token: Mapped[str | None] = mapped_column(default=None)
+    jira_selected_projects: Mapped[str | None] = mapped_column(default=None)
+    jira_all_projects: Mapped[bool] = mapped_column(default=False)
+    jira_jql: Mapped[str | None] = mapped_column(default=None)
     # Status
     sync_status: Mapped[str] = mapped_column(default="idle")
     sync_error: Mapped[str | None] = mapped_column(default=None)

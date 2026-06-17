@@ -25,7 +25,11 @@ from qdrant_client.http import models as qm
 
 from ..config import get_settings
 from .embedding import SparseVector
-from .source_meta import DATE_PAYLOAD_FIELDS, PEOPLE_PAYLOAD_FIELDS
+from .source_meta import (
+    ATTR_PAYLOAD_FIELDS,
+    DATE_PAYLOAD_FIELDS,
+    PEOPLE_PAYLOAD_FIELDS,
+)
 
 # Source-provenance payload indexes shared by both collections: people fields
 # are keyword (exact match), date fields are integer (range filters). Derived
@@ -33,6 +37,9 @@ from .source_meta import DATE_PAYLOAD_FIELDS, PEOPLE_PAYLOAD_FIELDS
 _META_PAYLOAD_INDEXES: tuple[tuple[str, str], ...] = tuple(
     [(f, "keyword") for f in PEOPLE_PAYLOAD_FIELDS]
     + [(f, "integer") for f in DATE_PAYLOAD_FIELDS]
+    # Curated connector attributes (Jira/Confluence): status, assignee, labels,
+    # … Each carries its own Qdrant type from source_meta.ATTR_PAYLOAD_FIELDS.
+    + list(ATTR_PAYLOAD_FIELDS)
 )
 
 logger = logging.getLogger(__name__)

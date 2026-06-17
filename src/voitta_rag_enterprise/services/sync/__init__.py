@@ -13,6 +13,7 @@ Supported ``source_type`` values: ``github``, ``google_drive``, ``nfs``,
 from .base import SyncConnector
 from .github import GitHubConnector
 from .google_drive import GoogleDriveConnector
+from .jira import JiraConnector
 from .nfs import NfsConnector
 from .registry import SyncRegistry, get_registry
 from .sharepoint import SharePointConnector
@@ -21,6 +22,7 @@ from .teams import TeamsConnector
 __all__ = [
     "GitHubConnector",
     "GoogleDriveConnector",
+    "JiraConnector",
     "NfsConnector",
     "SharePointConnector",
     "SyncConnector",

@@ -153,6 +153,15 @@ function openSyncModal() {
     $("#sync-gd-test-hint").textContent = "";
     setGdAuthMode("oauth");
     setGdConnState({ connected: false, hasClientSecret: false });
+    // Jira defaults — loadSyncSource overrides from the row when present.
+    $("#sync-jira-base-url").value = "";
+    $("#sync-jira-email").value = "";
+    $("#sync-jira-token").value = "";
+    $("#sync-jira-token").placeholder = "(paste API token / PAT)";
+    $("#sync-jira-jql").value = "";
+    $("#sync-jira-all-projects").checked = false;
+    setJiraProjects([]);
+    setJiraAuthMode("cloud");
     // Auto-sync defaults: off, 6h. loadSyncSource overrides from the row.
     $("#sync-auto-enabled").checked = false;
     $("#sync-auto-hours").value = "6";
@@ -217,6 +226,7 @@ function setSyncType(t) {
     $("#sync-form-nfs").hidden = t !== "nfs";
     $("#sync-form-sharepoint").hidden = t !== "sharepoint";
     $("#sync-form-teams").hidden = t !== "teams";
+    $("#sync-form-jira").hidden = t !== "jira";
     if (t === "google_drive") {
         updateGdRedirectHint();
     }
@@ -230,6 +240,7 @@ function setSyncType(t) {
     }
     if (t === "sharepoint") updateMsLoopbackHint("sp");
     if (t === "teams") updateMsLoopbackHint("tm");
+    if (t === "jira") setJiraAuthMode(getJiraAuthMode());
     // Reconcile the Save/Sync-now footer + shared GD selector with the active
     // Google Drive sub-tab (the local "This Mac" tab hides both).
     applyGdlChrome();
@@ -1221,6 +1232,8 @@ async function loadSyncSource() {
             $("#sync-tm-user-id").value = src.teams.user_id || "";
             $("#sync-tm-include-attended").checked = !!src.teams.include_attended;
             updateTmUserModeUi();
+        } else if (src.source_type === "jira" && src.jira) {
+            loadJiraForm(src.jira);
         }
         // Auto-sync schedule (common to both source types).
         $("#sync-auto-enabled").checked = !!src.auto_sync_enabled;
@@ -1385,6 +1398,7 @@ function syncBody() {
     }
     if (t === "sharepoint") return { ...base, source_type: "sharepoint", sharepoint: spFormConfig() };
     if (t === "teams") return { ...base, source_type: "teams", teams: tmFormConfig() };
+    if (t === "jira") return { ...base, source_type: "jira", jira: jiraFormConfig() };
     throw new Error(`Unknown source_type: ${t}`);
 }
 
@@ -1651,6 +1665,9 @@ async function _doSave() {
     // declaration in this module.
     if (typeof window.__voittaMsAfterSave === "function") {
         window.__voittaMsAfterSave(out);
+    }
+    if (out.source_type === "jira" && out.jira) {
+        jiraAfterSave(out.jira);
     }
     return out;
 }
@@ -2629,3 +2646,195 @@ function msAfterSave(out) {
     }
 }
 window.__voittaMsAfterSave = msAfterSave;
+
+// ---------------------------------------------------------------------------
+// Jira
+// ---------------------------------------------------------------------------
+
+let jiraProjects = [];
+
+function setJiraAuthMode(mode) {
+    const m = mode === "server" ? "server" : "cloud";
+    $("#sync-jira-tab-cloud").classList.toggle("active", m === "cloud");
+    $("#sync-jira-tab-cloud").setAttribute("aria-selected", m === "cloud" ? "true" : "false");
+    $("#sync-jira-tab-server").classList.toggle("active", m === "server");
+    $("#sync-jira-tab-server").setAttribute("aria-selected", m === "server" ? "true" : "false");
+    // Email is the Basic-auth username on Cloud; Server uses the PAT alone.
+    $("#sync-jira-email-row").hidden = m !== "cloud";
+    $("#sync-jira-token-label").textContent = m === "cloud"
+        ? "API token" : "Personal access token";
+    const form = $("#sync-form-jira");
+    if (form) form.dataset.authMode = m;
+    updateJiraConnState();
+}
+
+function getJiraAuthMode() {
+    return $("#sync-form-jira")?.dataset.authMode === "server" ? "server" : "cloud";
+}
+
+function loadJiraForm(cfg) {
+    setJiraAuthMode(cfg.auth_method || "cloud");
+    $("#sync-jira-base-url").value = cfg.base_url || "";
+    $("#sync-jira-email").value = cfg.email || "";
+    $("#sync-jira-token").value = "";
+    $("#sync-jira-token").placeholder = cfg.has_token
+        ? "(saved — type to replace)" : "(paste API token / PAT)";
+    $("#sync-jira-jql").value = cfg.jql || "";
+    $("#sync-jira-all-projects").checked = !!cfg.all_projects;
+    setJiraProjects(cfg.projects || []);
+}
+
+function jiraFormConfig() {
+    return {
+        base_url: $("#sync-jira-base-url").value.trim(),
+        auth_method: getJiraAuthMode(),
+        email: $("#sync-jira-email").value.trim(),
+        token: $("#sync-jira-token").value,
+        projects: jiraProjects,
+        all_projects: !!$("#sync-jira-all-projects").checked,
+        jql: $("#sync-jira-jql").value.trim(),
+    };
+}
+
+function setJiraProjects(projects) {
+    jiraProjects = (projects || []).map((p) => ({
+        key: String(p.key || ""),
+        name: p.name || p.key || "",
+    })).filter((p) => p.key);
+    updateJiraProjectsUi();
+}
+
+function updateJiraProjectsUi() {
+    const list = $("#sync-jira-projects-list");
+    const count = $("#sync-jira-projects-count");
+    list.innerHTML = "";
+    const allOn = $("#sync-jira-all-projects")?.checked;
+    if (allOn) {
+        count.textContent = "all accessible projects";
+    } else if (jiraProjects.length === 0) {
+        count.textContent = "none selected";
+    } else {
+        count.textContent =
+            `${jiraProjects.length} project${jiraProjects.length === 1 ? "" : "s"} selected`;
+        for (const p of jiraProjects) {
+            const li = document.createElement("li");
+            li.textContent = p.name && p.name !== p.key ? `${p.key} — ${p.name}` : p.key;
+            list.append(li);
+        }
+    }
+    updateJiraConnState();
+}
+
+function updateJiraConnState() {
+    const mode = getJiraAuthMode();
+    const baseUrl = $("#sync-jira-base-url").value.trim();
+    const emailOk = mode === "server" || $("#sync-jira-email").value.trim().length > 0;
+    const tokenOk = $("#sync-jira-token").value.length > 0
+        || $("#sync-jira-token").placeholder.startsWith("(saved");
+    const ready = !!(baseUrl && emailOk && tokenOk);
+    const allOn = $("#sync-jira-all-projects").checked;
+    const btn = $("#sync-jira-pick-projects");
+    btn.disabled = !ready || allOn;
+    btn.title = allOn
+        ? "Syncing all projects — no selection needed"
+        : (ready ? "" : "Enter base URL, token (and email for Cloud) first");
+}
+
+function jiraAfterSave(cfg) {
+    $("#sync-jira-token").value = "";
+    $("#sync-jira-token").placeholder = cfg.has_token
+        ? "(saved — type to replace)" : "(paste API token / PAT)";
+    $("#sync-jira-all-projects").checked = !!cfg.all_projects;
+    setJiraProjects(cfg.projects || []);
+}
+
+async function jiraPickProjects() {
+    // The list endpoint reads the stored row, so persist the form first
+    // (same "save then pick" flow as the SharePoint sites picker).
+    try {
+        await _doSave();
+    } catch (err) {
+        alert(err.message);
+        return;
+    }
+    let resp;
+    try {
+        resp = await api.jiraListProjects(syncFolderId);
+    } catch (err) {
+        alert(err.message);
+        return;
+    }
+    const all = resp.projects || [];
+    const selected = new Set(jiraProjects.map((p) => p.key));
+    const overlay = document.createElement("div");
+    overlay.className = "modal-backdrop";
+    overlay.style.display = "flex";
+    overlay.innerHTML = `
+        <div class="modal" style="max-width:560px;">
+            <div class="modal-header">
+                <h3>Pick Jira projects</h3>
+                <button type="button" class="btn-text jira-picker-close">×</button>
+            </div>
+            <div class="modal-body">
+                <input type="search" class="jira-picker-filter" placeholder="Filter projects…"
+                    style="width:100%;margin-bottom:8px;">
+                <ul class="jira-picker-list" style="max-height:50vh;overflow:auto;padding-left:0;list-style:none;"></ul>
+            </div>
+            <div class="actions actions-right" style="padding:8px 16px;">
+                <button type="button" class="btn btn-secondary jira-picker-cancel">Cancel</button>
+                <button type="button" class="btn btn-primary jira-picker-ok">Use selection</button>
+            </div>
+        </div>`;
+    document.body.appendChild(overlay);
+    const list = overlay.querySelector(".jira-picker-list");
+    const filterInput = overlay.querySelector(".jira-picker-filter");
+    function paint(filter = "") {
+        const q = filter.toLowerCase();
+        list.innerHTML = "";
+        for (const p of all) {
+            const haystack = `${p.key} ${p.name || ""}`.toLowerCase();
+            if (q && !haystack.includes(q)) continue;
+            const li = document.createElement("li");
+            li.style.padding = "4px 0";
+            const cb = document.createElement("input");
+            cb.type = "checkbox";
+            cb.value = p.key;
+            cb.checked = selected.has(p.key);
+            cb.addEventListener("change", () => {
+                if (cb.checked) selected.add(p.key);
+                else selected.delete(p.key);
+            });
+            const label = document.createElement("label");
+            label.style.display = "flex";
+            label.style.gap = "8px";
+            label.style.alignItems = "center";
+            label.append(cb);
+            const text = document.createElement("span");
+            text.innerHTML = `<strong>${p.key}</strong>` +
+                (p.name && p.name !== p.key
+                    ? ` <small style="color:var(--muted, #666);">${p.name}</small>` : "");
+            label.append(text);
+            li.append(label);
+            list.append(li);
+        }
+    }
+    paint();
+    filterInput.addEventListener("input", () => paint(filterInput.value));
+    const close = () => overlay.remove();
+    overlay.querySelector(".jira-picker-close").addEventListener("click", close);
+    overlay.querySelector(".jira-picker-cancel").addEventListener("click", close);
+    overlay.querySelector(".jira-picker-ok").addEventListener("click", () => {
+        const byKey = new Map(all.map((p) => [p.key, p]));
+        jiraProjects = [...selected].map((k) => byKey.get(k)).filter(Boolean);
+        updateJiraProjectsUi();
+        close();
+    });
+}
+
+$("#sync-jira-tab-cloud").addEventListener("click", () => setJiraAuthMode("cloud"));
+$("#sync-jira-tab-server").addEventListener("click", () => setJiraAuthMode("server"));
+$("#sync-jira-all-projects").addEventListener("change", updateJiraProjectsUi);
+$("#sync-jira-pick-projects").addEventListener("click", jiraPickProjects);
+for (const id of ["#sync-jira-base-url", "#sync-jira-email", "#sync-jira-token"]) {
+    $(id).addEventListener("input", updateJiraConnState);
+}

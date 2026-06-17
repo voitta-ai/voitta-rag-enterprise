@@ -47,6 +47,7 @@ def get_registry() -> SyncRegistry:
     from .cloud_local import CloudLocalConnector
     from .github import GitHubConnector
     from .google_drive import GoogleDriveConnector
+    from .jira import JiraConnector
     from .nfs import NfsConnector
     from .sharepoint import SharePointConnector
     from .teams import TeamsConnector
@@ -56,6 +57,7 @@ def get_registry() -> SyncRegistry:
         CloudLocalConnector,
         GitHubConnector,
         GoogleDriveConnector,
+        JiraConnector,
         NfsConnector,
         SharePointConnector,
         TeamsConnector,

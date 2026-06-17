@@ -56,6 +56,12 @@ from ...services.sync.sharepoint import (
     list_all_sites as sp_list_all_sites,
 )
 from ...services.sync.teams import list_tenant_users as tm_list_tenant_users
+from ...services.sync.atlassian_auth import AtlassianAuth, normalize_base_url
+from ...services.sync.jira import (
+    coerce_projects_field as jira_coerce_projects,
+    encode_projects_field as jira_encode_projects,
+    list_projects as jira_list_projects,
+)
 from ..deps import current_user, db_session
 
 logger = logging.getLogger(__name__)
@@ -140,6 +146,23 @@ class TeamsSyncIn(BaseModel):
     use_loopback: bool = False
 
 
+class JiraProject(BaseModel):
+    key: str
+    name: str = ""
+
+
+class JiraSyncIn(BaseModel):
+    """Payload when ``source_type == 'jira'``."""
+
+    base_url: str = ""
+    auth_method: Literal["cloud", "server"] = "cloud"
+    email: str = ""
+    token: str = ""
+    projects: list[JiraProject] = Field(default_factory=list)
+    all_projects: bool = False
+    jql: str = ""
+
+
 class NfsSyncIn(BaseModel):
     """Payload for ``PUT /folders/{id}/sync`` when ``source_type == 'nfs'``.
 
@@ -157,12 +180,15 @@ class NfsSyncIn(BaseModel):
 
 
 class SyncSourceIn(BaseModel):
-    source_type: Literal["github", "google_drive", "nfs", "sharepoint", "teams"]
+    source_type: Literal[
+        "github", "google_drive", "nfs", "sharepoint", "teams", "jira"
+    ]
     github: GithubSyncIn | None = None
     google_drive: GoogleDriveSyncIn | None = None
     nfs: NfsSyncIn | None = None
     sharepoint: SharePointSyncIn | None = None
     teams: TeamsSyncIn | None = None
+    jira: JiraSyncIn | None = None
     # Periodic auto-sync. ``auto_sync_hours`` is bounded to 1-24 by the
     # scheduler — wider intervals belong to a real cron, not this in-process
     # loop. Both fields are common to all source types so they live on the
@@ -237,6 +263,17 @@ class TeamsSyncOut(BaseModel):
     connected: bool
 
 
+class JiraSyncOut(BaseModel):
+    base_url: str
+    auth_method: str
+    email: str
+    projects: list[JiraProject]
+    all_projects: bool
+    jql: str
+    has_token: bool
+    connected: bool  # true once base_url + token (+ email for cloud) are stored
+
+
 class NfsSyncOut(BaseModel):
     # Multi-subpath selection. Always sent as ``subpaths``; the legacy
     # single-string ``subpath`` field is echoed for old clients that
@@ -275,6 +312,7 @@ class SyncSourceOut(BaseModel):
     nfs: NfsSyncOut | None = None
     sharepoint: SharePointSyncOut | None = None
     teams: TeamsSyncOut | None = None
+    jira: JiraSyncOut | None = None
 
 
 def _nfs_status_snapshot() -> tuple[str, bool, str]:
@@ -419,6 +457,25 @@ def _to_out(src: FolderSyncSource) -> SyncSourceOut:
             use_loopback=bool(src.ms_use_loopback),
             connected=bool(src.ms_refresh_token),
         )
+    jira = None
+    if src.source_type == "jira":
+        method = src.jira_auth_method or "cloud"
+        base = src.jira_base_url or ""
+        token_set = bool(src.jira_token)
+        email_set = bool(src.jira_email)
+        jira = JiraSyncOut(
+            base_url=base,
+            auth_method=method,
+            email=src.jira_email or "",
+            projects=[
+                JiraProject(**p)
+                for p in jira_coerce_projects(src.jira_selected_projects)
+            ],
+            all_projects=bool(src.jira_all_projects),
+            jql=src.jira_jql or "",
+            has_token=token_set,
+            connected=bool(base and token_set and (method == "server" or email_set)),
+        )
     if src.source_type == "google_drive_local":
         available, status_str = _gdl_status_snapshot(src.gdl_path or "")
         # Same precedence as CloudLocalConnector.resolve_config: the JSON
@@ -455,6 +512,7 @@ def _to_out(src: FolderSyncSource) -> SyncSourceOut:
         nfs=nfs,
         sharepoint=sp,
         teams=tm,
+        jira=jira,
     )
 
 
@@ -566,6 +624,7 @@ def upsert_sync_source(
         if existing is not None and existing.source_type != "github":
             _clear_google_drive_fields(src)
             _clear_microsoft_fields(src)
+            _clear_jira_fields(src)
         src.source_type = "github"
         if existing is not None and existing.source_type != "github":
             src.nfs_subpath = None
@@ -631,6 +690,7 @@ def upsert_sync_source(
             _clear_github_fields(src)
             _clear_google_drive_fields(src)
             _clear_microsoft_fields(src)
+            _clear_jira_fields(src)
         src.source_type = "nfs"
         import json as _json
         src.nfs_subpaths = _json.dumps(subpaths)
@@ -672,6 +732,7 @@ def upsert_sync_source(
         if existing is not None and existing.source_type != "google_drive":
             _clear_github_fields(src)
             _clear_microsoft_fields(src)
+            _clear_jira_fields(src)
             src.nfs_subpath = None
             src.nfs_subpaths = None
             # New source type → drop any stored refresh_token, it belongs to
@@ -701,6 +762,11 @@ def upsert_sync_source(
 
     elif body.source_type in ("sharepoint", "teams"):
         src = _apply_microsoft_config(
+            body=body, existing=existing, folder_id=folder_id
+        )
+
+    elif body.source_type == "jira":
+        src = _apply_jira_config(
             body=body, existing=existing, folder_id=folder_id
         )
 
@@ -774,6 +840,77 @@ def _clear_microsoft_fields(src: FolderSyncSource) -> None:
     src.tm_include_attended = True
 
 
+def _clear_jira_fields(src: FolderSyncSource) -> None:
+    src.jira_base_url = None
+    src.jira_auth_method = None
+    src.jira_email = None
+    src.jira_token = None
+    src.jira_selected_projects = None
+    src.jira_all_projects = False
+    src.jira_jql = None
+
+
+def _apply_jira_config(
+    *,
+    body: SyncSourceIn,
+    existing: FolderSyncSource | None,
+    folder_id: int,
+) -> FolderSyncSource:
+    """Apply a ``jira`` payload to a (new or existing) row.
+
+    Cloud needs an email (Basic ``email:token``); server needs only the PAT.
+    The token input is masked client-side, so a blank ``token`` on an existing
+    row means "leave the stored one alone", not "clear it".
+    """
+    cfg = body.jira
+    if cfg is None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "Missing 'jira' config"
+        )
+    base_url = normalize_base_url(cfg.base_url)
+    if not base_url:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "A Jira base URL is required (e.g. https://your-org.atlassian.net).",
+        )
+    if cfg.auth_method not in ("cloud", "server"):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "auth_method must be 'cloud' or 'server'.",
+        )
+    if cfg.auth_method == "cloud" and not cfg.email.strip():
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Jira Cloud requires the Atlassian account email.",
+        )
+    existing_has_token = bool(existing and existing.jira_token)
+    if not cfg.token and not existing_has_token:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "An API token (Cloud) or personal access token (Server) is required.",
+        )
+
+    src = existing or FolderSyncSource(folder_id=folder_id, source_type="jira")
+    if existing is not None and existing.source_type != "jira":
+        _clear_github_fields(src)
+        _clear_google_drive_fields(src)
+        _clear_microsoft_fields(src)
+        src.nfs_subpath = None
+        src.nfs_subpaths = None
+    src.source_type = "jira"
+    src.jira_base_url = base_url
+    src.jira_auth_method = cfg.auth_method
+    src.jira_email = cfg.email.strip() or None
+    if cfg.token:
+        src.jira_token = cfg.token
+    src.jira_selected_projects = jira_encode_projects(
+        [{"key": p.key, "name": p.name} for p in cfg.projects]
+    )
+    src.jira_all_projects = bool(cfg.all_projects)
+    src.jira_jql = cfg.jql.strip() or None
+    return src
+
+
 def _apply_microsoft_config(
     *,
     body: SyncSourceIn,
@@ -834,6 +971,7 @@ def _apply_microsoft_config(
     if existing is not None and existing.source_type != body.source_type:
         _clear_github_fields(src)
         _clear_google_drive_fields(src)
+        _clear_jira_fields(src)
         if existing.source_type not in ("sharepoint", "teams"):
             _clear_microsoft_fields(src)
         src.nfs_subpath = None
@@ -1018,6 +1156,12 @@ def trigger_sync(
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST,
                 "Pick a user for Teams 'specific user' mode before syncing.",
+            )
+    if src.source_type == "jira":
+        if not (src.jira_all_projects or jira_coerce_projects(src.jira_selected_projects)):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "Pick at least one Jira project (or enable 'all projects').",
             )
     job_id = job_queue.enqueue(
         db,
@@ -1853,6 +1997,44 @@ async def ms_oauth_callback(
         "<html><body><script>window.close()</script>"
         "<p>Microsoft account connected. You can close this tab.</p></body></html>"
     )
+
+
+class JiraProjectsOut(BaseModel):
+    projects: list[JiraProject]
+
+
+@router.get("/jira/projects", response_model=JiraProjectsOut)
+async def jira_list_projects_endpoint(
+    folder_id: int,
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(current_user),
+) -> JiraProjectsOut:
+    """List Jira projects the stored credentials can see (for the picker).
+
+    Reads the persisted row, so the user must Save base URL + token (and email
+    for Cloud) before picking projects — same flow as the SharePoint picker.
+    """
+    _check_owner(folder_id, db, user)
+    src = db.get(FolderSyncSource, folder_id)
+    if src is None or src.source_type != "jira":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No Jira source")
+    auth = AtlassianAuth(
+        base_url=normalize_base_url(src.jira_base_url or ""),
+        method=src.jira_auth_method or "cloud",
+        email=src.jira_email or "",
+        token=src.jira_token or "",
+    )
+    if not auth.configured:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Save the Jira base URL and token (and email for Cloud) before "
+            "listing projects.",
+        )
+    try:
+        projects = await jira_list_projects(auth)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
+    return JiraProjectsOut(projects=[JiraProject(**p) for p in projects])
 
 
 class MsSitesOut(BaseModel):

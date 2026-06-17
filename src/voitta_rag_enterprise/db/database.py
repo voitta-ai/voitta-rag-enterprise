@@ -161,6 +161,20 @@ def init_db() -> None:
         # JSON array of selected subtree paths (multi-select). NULL-safe; code
         # falls back to the single gdl_path when this is empty.
         _ensure_column(raw_conn, "folder_sync_sources", "gdl_paths", "TEXT")
+        # Jira sync. base_url + auth_method ("cloud"|"server") + email/token,
+        # plus the per-folder project selection (JSON array of {key,name}) and
+        # an "all projects" flag. Optional jira_jql is a power-user filter
+        # override. NULL/0 defaults keep every existing row untouched.
+        for col, decl in (
+            ("jira_base_url", "TEXT"),
+            ("jira_auth_method", "TEXT"),
+            ("jira_email", "TEXT"),
+            ("jira_token", "TEXT"),
+            ("jira_selected_projects", "TEXT"),
+            ("jira_all_projects", "INTEGER NOT NULL DEFAULT 0"),
+            ("jira_jql", "TEXT"),
+        ):
+            _ensure_column(raw_conn, "folder_sync_sources", col, decl)
         raw_conn.commit()
     finally:
         raw_conn.close()

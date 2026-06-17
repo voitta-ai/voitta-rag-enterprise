@@ -43,6 +43,10 @@ _META_KEYS = (
     "owner_name", "owner_email", "editor_name", "editor_email",
     "shared_by_name", "shared_by_email", "created_ts", "modified_ts",
 )
+# Nested attribute dicts a rich connector (Jira/Confluence) may also write:
+# ``attrs`` (curated, filterable) and ``attrs_raw`` (full bag). Carried through
+# verbatim so source_meta.payload_fields can expand them into attr_* fields.
+_META_DICT_KEYS = ("attrs", "attrs_raw")
 
 
 @dataclass
@@ -83,6 +87,9 @@ def load_sidecar(folder_root: Path, sidecar_file: Path | None = None) -> dict[st
         url = v.get("url")
         tab = v.get("tab")
         meta = {mk: v[mk] for mk in _META_KEYS if mk in v and v[mk] is not None}
+        for dk in _META_DICT_KEYS:
+            if isinstance(v.get(dk), dict) and v[dk]:
+                meta[dk] = v[dk]
         out[k] = SidecarEntry(
             url=str(url) if isinstance(url, str) else None,
             tab=str(tab) if isinstance(tab, str) else None,
