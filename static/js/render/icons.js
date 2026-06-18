@@ -90,6 +90,8 @@ function _sourceIcon(kind) {
             return `${M_FOLDER}/folder-network.svg`;
         case "sharepoint":
             return `${SIMPLE}/sharepoint.svg`;
+        case "jira":
+            return `${SIMPLE}/jira.svg`;
         case "s3":
         case "azure_data_lake":
         case "regular":
