@@ -378,6 +378,7 @@ class JiraConnector(SyncConnector):
             "projects": coerce_projects_field(row.jira_selected_projects),
             "all_projects": bool(row.jira_all_projects),
             "jql_extra": (row.jira_jql or "").strip(),
+            "updated_since": (row.jira_updated_since or "").strip(),
         }
 
     async def sync(
@@ -388,6 +389,7 @@ class JiraConnector(SyncConnector):
         projects: list[dict[str, str]],
         all_projects: bool,
         jql_extra: str = "",
+        updated_since: str = "",
         progress_cb: Callable[[str, int, int, dict[str, Any] | None], None]
         | None = None,
     ) -> JiraSyncStats:
@@ -478,7 +480,9 @@ class JiraConnector(SyncConnector):
                 )
                 seen = 0  # issues seen so far in this project (across pages)
                 try:
-                    async for page in self._iter_issue_pages(client, auth, pkey, jql_extra):
+                    async for page in self._iter_issue_pages(
+                        client, auth, pkey, jql_extra, updated_since
+                    ):
                         for ref in page:
                             seen += 1
                             expected_paths.add(ref.rel_path)
@@ -605,11 +609,16 @@ class JiraConnector(SyncConnector):
     # Listing
     # ------------------------------------------------------------------
 
-    def _issue_jql(self, project_key: str, jql_extra: str) -> str:
-        """Build the per-project issue JQL, with the recency floor applied."""
+    def _issue_jql(self, project_key: str, jql_extra: str, updated_since: str) -> str:
+        """Build the per-project issue JQL, with the recency floor applied.
+
+        ``updated_since`` (YYYY-MM-DD) overrides the built-in ISSUES_UPDATED_SINCE
+        default; the caller validates the format so it's safe to inline.
+        """
+        floor = updated_since or ISSUES_UPDATED_SINCE
         clauses = [
             f'project = "{project_key}"',
-            f'updated >= "{ISSUES_UPDATED_SINCE}"',
+            f'updated >= "{floor}"',
         ]
         if jql_extra:
             clauses.append(f"({jql_extra})")
@@ -621,6 +630,7 @@ class JiraConnector(SyncConnector):
         auth: AtlassianAuth,
         project_key: str,
         jql_extra: str,
+        updated_since: str = "",
     ) -> AsyncIterator[list[_IssueRef]]:
         """Yield issue refs one API page (~100) at a time for one project.
 
@@ -628,7 +638,7 @@ class JiraConnector(SyncConnector):
         write each page before the next is fetched, so files flow continuously
         even for very large projects.
         """
-        jql = self._issue_jql(project_key, jql_extra)
+        jql = self._issue_jql(project_key, jql_extra, updated_since)
         light = "key,issuetype,summary,updated,created"
 
         if auth.is_cloud:

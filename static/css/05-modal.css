@@ -23,6 +23,7 @@
 .modal-body input[type="text"],
 .modal-body input[type="password"],
 .modal-body input[type="search"],
+.modal-body input[type="date"],
 .modal-body select,
 .modal-body textarea {
     background: var(--color-bg);

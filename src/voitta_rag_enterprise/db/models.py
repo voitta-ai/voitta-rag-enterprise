@@ -265,6 +265,9 @@ class FolderSyncSource(Base):
     jira_selected_projects: Mapped[str | None] = mapped_column(default=None)
     jira_all_projects: Mapped[bool] = mapped_column(default=False)
     jira_jql: Mapped[str | None] = mapped_column(default=None)
+    # Recency floor (YYYY-MM-DD): only issues updated on/after this date are
+    # synced. NULL ⇒ the connector's built-in default (ISSUES_UPDATED_SINCE).
+    jira_updated_since: Mapped[str | None] = mapped_column(default=None)
     # Confluence. Same Cloud/Server auth split as Jira (``cf_auth_method`` is
     # "cloud" — Basic email:api_token, ``/wiki/rest/api`` — or "server" — Bearer
     # PAT, ``/rest/api``). ``cf_selected_spaces`` is a JSON array of
@@ -278,6 +281,9 @@ class FolderSyncSource(Base):
     cf_selected_spaces: Mapped[str | None] = mapped_column(default=None)
     cf_all_spaces: Mapped[bool] = mapped_column(default=False)
     cf_cql: Mapped[str | None] = mapped_column(default=None)
+    # Recency floor (YYYY-MM-DD): only pages modified on/after this date are
+    # synced. NULL ⇒ the connector's built-in default (PAGES_UPDATED_SINCE).
+    cf_updated_since: Mapped[str | None] = mapped_column(default=None)
     # Status
     sync_status: Mapped[str] = mapped_column(default="idle")
     sync_error: Mapped[str | None] = mapped_column(default=None)

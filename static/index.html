@@ -1093,13 +1093,18 @@
                     </div>
                     <ul id="sync-jira-projects-list" style="margin:6px 0 0;padding-left:18px;font-size:13px;color:var(--color-text-secondary);"></ul>
 
+                    <label style="margin-top:10px;">Sync issues modified since</label>
+                    <input type="date" id="sync-jira-updated-since">
+                    <p class="hint" style="margin:4px 0 0;">
+                        Only issues updated on/after this date are synced.
+                    </p>
+
                     <label style="margin-top:10px;">Extra JQL (optional)</label>
                     <input type="text" id="sync-jira-jql"
-                        placeholder='e.g. updated >= -90d AND status != Done'
+                        placeholder='e.g. status != Done'
                         autocomplete="off" spellcheck="false">
                     <p class="hint" style="margin:4px 0 0;">
-                        ANDed onto the project filter. Leave blank to sync every
-                        issue in the selected projects.
+                        ANDed onto the project + date filter.
                     </p>
                 </div>
 
@@ -1159,13 +1164,18 @@
                     </div>
                     <ul id="sync-cf-spaces-list" style="margin:6px 0 0;padding-left:18px;font-size:13px;color:var(--color-text-secondary);"></ul>
 
+                    <label style="margin-top:10px;">Sync pages modified since</label>
+                    <input type="date" id="sync-cf-updated-since">
+                    <p class="hint" style="margin:4px 0 0;">
+                        Only pages modified on/after this date are synced.
+                    </p>
+
                     <label style="margin-top:10px;">Extra CQL (optional)</label>
                     <input type="text" id="sync-cf-cql"
                         placeholder='e.g. label = "runbook"'
                         autocomplete="off" spellcheck="false">
                     <p class="hint" style="margin:4px 0 0;">
-                        ANDed onto the space filter. Pages are limited to those
-                        modified since 2026 by default.
+                        ANDed onto the space + date filter.
                     </p>
                 </div>
 

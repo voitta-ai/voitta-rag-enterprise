@@ -173,6 +173,7 @@ def init_db() -> None:
             ("jira_selected_projects", "TEXT"),
             ("jira_all_projects", "INTEGER NOT NULL DEFAULT 0"),
             ("jira_jql", "TEXT"),
+            ("jira_updated_since", "TEXT"),
         ):
             _ensure_column(raw_conn, "folder_sync_sources", col, decl)
         # Confluence — same Cloud/Server auth split as Jira, plus the per-folder
@@ -186,6 +187,7 @@ def init_db() -> None:
             ("cf_selected_spaces", "TEXT"),
             ("cf_all_spaces", "INTEGER NOT NULL DEFAULT 0"),
             ("cf_cql", "TEXT"),
+            ("cf_updated_since", "TEXT"),
         ):
             _ensure_column(raw_conn, "folder_sync_sources", col, decl)
         raw_conn.commit()

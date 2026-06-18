@@ -11,6 +11,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Literal
 
@@ -58,11 +59,13 @@ from ...services.sync.sharepoint import (
 from ...services.sync.teams import list_tenant_users as tm_list_tenant_users
 from ...services.sync.atlassian_auth import AtlassianAuth, normalize_base_url
 from ...services.sync.jira import (
+    ISSUES_UPDATED_SINCE as JIRA_DEFAULT_SINCE,
     coerce_projects_field as jira_coerce_projects,
     encode_projects_field as jira_encode_projects,
     search_projects as jira_search_projects,
 )
 from ...services.sync.confluence import (
+    PAGES_UPDATED_SINCE as CF_DEFAULT_SINCE,
     coerce_spaces_field as cf_coerce_spaces,
     encode_spaces_field as cf_encode_spaces,
     search_spaces as cf_search_spaces,
@@ -166,6 +169,7 @@ class JiraSyncIn(BaseModel):
     projects: list[JiraProject] = Field(default_factory=list)
     all_projects: bool = False
     jql: str = ""
+    updated_since: str = ""  # YYYY-MM-DD recency floor; "" → connector default
 
 
 class ConfluenceSpace(BaseModel):
@@ -183,6 +187,7 @@ class ConfluenceSyncIn(BaseModel):
     spaces: list[ConfluenceSpace] = Field(default_factory=list)
     all_spaces: bool = False
     cql: str = ""
+    updated_since: str = ""  # YYYY-MM-DD recency floor; "" → connector default
 
 
 class NfsSyncIn(BaseModel):
@@ -294,6 +299,8 @@ class JiraSyncOut(BaseModel):
     projects: list[JiraProject]
     all_projects: bool
     jql: str
+    updated_since: str   # stored recency floor, or "" when unset
+    default_since: str   # the connector's built-in default (shown when unset)
     has_token: bool
     connected: bool  # true once base_url + token (+ email for cloud) are stored
 
@@ -305,6 +312,8 @@ class ConfluenceSyncOut(BaseModel):
     spaces: list[ConfluenceSpace]
     all_spaces: bool
     cql: str
+    updated_since: str
+    default_since: str
     has_token: bool
     connected: bool
 
@@ -509,6 +518,8 @@ def _to_out(src: FolderSyncSource) -> SyncSourceOut:
             ],
             all_projects=bool(src.jira_all_projects),
             jql=src.jira_jql or "",
+            updated_since=src.jira_updated_since or "",
+            default_since=JIRA_DEFAULT_SINCE,
             has_token=token_set,
             connected=bool(base and token_set and (method == "server" or email_set)),
         )
@@ -528,6 +539,8 @@ def _to_out(src: FolderSyncSource) -> SyncSourceOut:
             ],
             all_spaces=bool(src.cf_all_spaces),
             cql=src.cf_cql or "",
+            updated_since=src.cf_updated_since or "",
+            default_since=CF_DEFAULT_SINCE,
             has_token=token_set,
             connected=bool(base and token_set and (method == "server" or email_set)),
         )
@@ -904,6 +917,27 @@ def _clear_microsoft_fields(src: FolderSyncSource) -> None:
     src.tm_include_attended = True
 
 
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _validate_since(value: str) -> str | None:
+    """Validate a YYYY-MM-DD recency-floor date from the UI.
+
+    Returns the trimmed string, or None when blank (→ connector default). The
+    value is inlined into JQL/CQL, so a strict format check both guards against
+    injection and catches typos before they hit the API.
+    """
+    v = (value or "").strip()
+    if not v:
+        return None
+    if not _DATE_RE.match(v):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Recency floor must be a date in YYYY-MM-DD form.",
+        )
+    return v
+
+
 def _clear_jira_fields(src: FolderSyncSource) -> None:
     src.jira_base_url = None
     src.jira_auth_method = None
@@ -912,6 +946,7 @@ def _clear_jira_fields(src: FolderSyncSource) -> None:
     src.jira_selected_projects = None
     src.jira_all_projects = False
     src.jira_jql = None
+    src.jira_updated_since = None
 
 
 def _apply_jira_config(
@@ -973,6 +1008,7 @@ def _apply_jira_config(
     )
     src.jira_all_projects = bool(cfg.all_projects)
     src.jira_jql = cfg.jql.strip() or None
+    src.jira_updated_since = _validate_since(cfg.updated_since)
     return src
 
 
@@ -984,6 +1020,7 @@ def _clear_confluence_fields(src: FolderSyncSource) -> None:
     src.cf_selected_spaces = None
     src.cf_all_spaces = False
     src.cf_cql = None
+    src.cf_updated_since = None
 
 
 def _apply_confluence_config(
@@ -1042,6 +1079,7 @@ def _apply_confluence_config(
     )
     src.cf_all_spaces = bool(cfg.all_spaces)
     src.cf_cql = cfg.cql.strip() or None
+    src.cf_updated_since = _validate_since(cfg.updated_since)
     return src
 
 

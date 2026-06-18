@@ -22,6 +22,12 @@ import { folders, syncConfigs, syncSources } from "../store.js";
 
 const $ = (sel) => document.querySelector(sel);
 
+// Default recency floor shown in the Jira/Confluence "modified since" date
+// inputs for a NEW folder (existing folders show the server's stored/default
+// value via loadJiraForm/loadConfluenceForm). Kept in step with the
+// connectors' ISSUES_UPDATED_SINCE / PAGES_UPDATED_SINCE defaults.
+const SYNC_DEFAULT_SINCE = "2026-01-01";
+
 // ----- Sync modal -----
 //
 // Shape: every managed folder root has zero or one sync source. The modal
@@ -159,6 +165,7 @@ function openSyncModal() {
     $("#sync-jira-token").value = "";
     $("#sync-jira-token").placeholder = "(paste API token / PAT)";
     $("#sync-jira-jql").value = "";
+    $("#sync-jira-updated-since").value = SYNC_DEFAULT_SINCE;
     $("#sync-jira-all-projects").checked = false;
     setJiraProjects([]);
     setJiraAuthMode("cloud");
@@ -169,6 +176,7 @@ function openSyncModal() {
     $("#sync-cf-token").value = "";
     $("#sync-cf-token").placeholder = "(paste API token / PAT)";
     $("#sync-cf-cql").value = "";
+    $("#sync-cf-updated-since").value = SYNC_DEFAULT_SINCE;
     $("#sync-cf-all-spaces").checked = false;
     setCfSpaces([]);
     setCfAuthMode("cloud");
@@ -2855,6 +2863,9 @@ function loadJiraForm(cfg) {
     $("#sync-jira-token").placeholder = cfg.has_token
         ? "(saved — type to replace)" : "(paste API token / PAT)";
     $("#sync-jira-jql").value = cfg.jql || "";
+    // Show the stored floor, else the connector's built-in default so the field
+    // is never blank/ambiguous.
+    $("#sync-jira-updated-since").value = cfg.updated_since || cfg.default_since || "";
     $("#sync-jira-all-projects").checked = !!cfg.all_projects;
     setJiraProjects(cfg.projects || []);
     // Freshly loaded from the server → credentials match what's stored, so the
@@ -2871,6 +2882,7 @@ function jiraFormConfig() {
         projects: jiraProjects,
         all_projects: !!$("#sync-jira-all-projects").checked,
         jql: $("#sync-jira-jql").value.trim(),
+        updated_since: $("#sync-jira-updated-since").value,
     };
 }
 
@@ -3006,6 +3018,7 @@ function loadConfluenceForm(cfg) {
     $("#sync-cf-token").placeholder = cfg.has_token
         ? "(saved — type to replace)" : "(paste API token / PAT)";
     $("#sync-cf-cql").value = cfg.cql || "";
+    $("#sync-cf-updated-since").value = cfg.updated_since || cfg.default_since || "";
     $("#sync-cf-all-spaces").checked = !!cfg.all_spaces;
     setCfSpaces(cfg.spaces || []);
     cfFormDirty = false;
@@ -3020,6 +3033,7 @@ function confluenceFormConfig() {
         spaces: cfSpaces,
         all_spaces: !!$("#sync-cf-all-spaces").checked,
         cql: $("#sync-cf-cql").value.trim(),
+        updated_since: $("#sync-cf-updated-since").value,
     };
 }
 

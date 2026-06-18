@@ -61,9 +61,9 @@ def _blank_row():
         "ms_auth_method sp_selected_sites sp_all_sites "
         "tm_user_mode tm_user_id tm_include_attended "
         "jira_base_url jira_auth_method jira_email jira_token "
-        "jira_selected_projects jira_all_projects jira_jql "
+        "jira_selected_projects jira_all_projects jira_jql jira_updated_since "
         "cf_base_url cf_auth_method cf_email cf_token "
-        "cf_selected_spaces cf_all_spaces cf_cql"
+        "cf_selected_spaces cf_all_spaces cf_cql cf_updated_since"
     ).split()
     return SimpleNamespace(**{c: None for c in cols})
 

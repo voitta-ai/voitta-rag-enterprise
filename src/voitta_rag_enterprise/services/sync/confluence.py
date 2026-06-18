@@ -289,6 +289,7 @@ class ConfluenceConnector(SyncConnector):
             "spaces": coerce_spaces_field(row.cf_selected_spaces),
             "all_spaces": bool(row.cf_all_spaces),
             "cql_extra": (row.cf_cql or "").strip(),
+            "updated_since": (row.cf_updated_since or "").strip(),
         }
 
     async def sync(
@@ -299,6 +300,7 @@ class ConfluenceConnector(SyncConnector):
         spaces: list[dict[str, str]],
         all_spaces: bool,
         cql_extra: str = "",
+        updated_since: str = "",
         progress_cb: Callable[[str, int, int, dict[str, Any] | None], None]
         | None = None,
     ) -> ConfluenceSyncStats:
@@ -367,7 +369,9 @@ class ConfluenceConnector(SyncConnector):
                      current_space=skey, spaces_total=total_spaces)
                 seen = 0
                 try:
-                    async for page in self._iter_page_refs(client, auth, skey, cql_extra):
+                    async for page in self._iter_page_refs(
+                        client, auth, skey, cql_extra, updated_since
+                    ):
                         for ref in page:
                             expected_paths.add(ref.rel_path)
                             new_revs[ref.rel_path] = ref.version
@@ -439,11 +443,17 @@ class ConfluenceConnector(SyncConnector):
     # Listing (CQL, streamed page by page)
     # ------------------------------------------------------------------
 
-    def _page_cql(self, space_key: str, cql_extra: str) -> str:
+    def _page_cql(self, space_key: str, cql_extra: str, updated_since: str) -> str:
+        """Build the per-space page CQL with the recency floor applied.
+
+        ``updated_since`` (YYYY-MM-DD) overrides PAGES_UPDATED_SINCE; the caller
+        validates the format so it's safe to inline.
+        """
+        floor = updated_since or PAGES_UPDATED_SINCE
         clauses = [
             f'space = "{space_key}"',
             "type = page",
-            f'lastmodified >= "{PAGES_UPDATED_SINCE}"',
+            f'lastmodified >= "{floor}"',
         ]
         if cql_extra:
             clauses.append(f"({cql_extra})")
@@ -455,6 +465,7 @@ class ConfluenceConnector(SyncConnector):
         auth: AtlassianAuth,
         space_key: str,
         cql_extra: str,
+        updated_since: str = "",
     ) -> AsyncIterator[list[_PageRef]]:
         """Yield page refs one API page (~50) at a time for one space.
 
@@ -465,7 +476,7 @@ class ConfluenceConnector(SyncConnector):
         """
         base = _api_base(auth)
         params: dict[str, Any] = {
-            "cql": self._page_cql(space_key, cql_extra),
+            "cql": self._page_cql(space_key, cql_extra, updated_since),
             "limit": 50,
             "expand": "version",
         }
