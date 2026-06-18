@@ -136,6 +136,8 @@ def _sync_source_kind(source: FolderSyncSource | None) -> str:
         return "teams"
     if source.source_type == "jira":
         return "jira"
+    if source.source_type == "confluence":
+        return "confluence"
     return "regular"
 
 

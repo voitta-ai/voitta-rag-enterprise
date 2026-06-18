@@ -265,6 +265,19 @@ class FolderSyncSource(Base):
     jira_selected_projects: Mapped[str | None] = mapped_column(default=None)
     jira_all_projects: Mapped[bool] = mapped_column(default=False)
     jira_jql: Mapped[str | None] = mapped_column(default=None)
+    # Confluence. Same Cloud/Server auth split as Jira (``cf_auth_method`` is
+    # "cloud" — Basic email:api_token, ``/wiki/rest/api`` — or "server" — Bearer
+    # PAT, ``/rest/api``). ``cf_selected_spaces`` is a JSON array of
+    # ``{"key": str, "name": str}``; ignored when ``cf_all_spaces`` is True (then
+    # every accessible global space is synced). ``cf_cql`` is an optional
+    # power-user filter ANDed onto the space + recency clauses.
+    cf_base_url: Mapped[str | None] = mapped_column(default=None)
+    cf_auth_method: Mapped[str | None] = mapped_column(default=None)
+    cf_email: Mapped[str | None] = mapped_column(default=None)
+    cf_token: Mapped[str | None] = mapped_column(default=None)
+    cf_selected_spaces: Mapped[str | None] = mapped_column(default=None)
+    cf_all_spaces: Mapped[bool] = mapped_column(default=False)
+    cf_cql: Mapped[str | None] = mapped_column(default=None)
     # Status
     sync_status: Mapped[str] = mapped_column(default="idle")
     sync_error: Mapped[str | None] = mapped_column(default=None)

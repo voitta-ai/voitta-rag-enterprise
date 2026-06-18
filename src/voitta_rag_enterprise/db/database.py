@@ -175,6 +175,19 @@ def init_db() -> None:
             ("jira_jql", "TEXT"),
         ):
             _ensure_column(raw_conn, "folder_sync_sources", col, decl)
+        # Confluence — same Cloud/Server auth split as Jira, plus the per-folder
+        # space selection (JSON array of {key,name}), an "all spaces" flag, and
+        # an optional CQL filter. NULL/0 defaults keep existing rows untouched.
+        for col, decl in (
+            ("cf_base_url", "TEXT"),
+            ("cf_auth_method", "TEXT"),
+            ("cf_email", "TEXT"),
+            ("cf_token", "TEXT"),
+            ("cf_selected_spaces", "TEXT"),
+            ("cf_all_spaces", "INTEGER NOT NULL DEFAULT 0"),
+            ("cf_cql", "TEXT"),
+        ):
+            _ensure_column(raw_conn, "folder_sync_sources", col, decl)
         raw_conn.commit()
     finally:
         raw_conn.close()

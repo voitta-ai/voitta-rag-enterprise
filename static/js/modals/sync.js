@@ -163,6 +163,16 @@ function openSyncModal() {
     setJiraProjects([]);
     setJiraAuthMode("cloud");
     jiraFormDirty = false;
+    // Confluence defaults — loadSyncSource overrides from the row when present.
+    $("#sync-cf-base-url").value = "";
+    $("#sync-cf-email").value = "";
+    $("#sync-cf-token").value = "";
+    $("#sync-cf-token").placeholder = "(paste API token / PAT)";
+    $("#sync-cf-cql").value = "";
+    $("#sync-cf-all-spaces").checked = false;
+    setCfSpaces([]);
+    setCfAuthMode("cloud");
+    cfFormDirty = false;
     // Auto-sync defaults: off, 6h. loadSyncSource overrides from the row.
     $("#sync-auto-enabled").checked = false;
     $("#sync-auto-hours").value = "6";
@@ -228,6 +238,7 @@ function setSyncType(t) {
     $("#sync-form-sharepoint").hidden = t !== "sharepoint";
     $("#sync-form-teams").hidden = t !== "teams";
     $("#sync-form-jira").hidden = t !== "jira";
+    $("#sync-form-confluence").hidden = t !== "confluence";
     if (t === "google_drive") {
         updateGdRedirectHint();
     }
@@ -242,6 +253,7 @@ function setSyncType(t) {
     if (t === "sharepoint") updateMsLoopbackHint("sp");
     if (t === "teams") updateMsLoopbackHint("tm");
     if (t === "jira") setJiraAuthMode(getJiraAuthMode());
+    if (t === "confluence") setCfAuthMode(getCfAuthMode());
     // Reconcile the Save/Sync-now footer + shared GD selector with the active
     // Google Drive sub-tab (the local "This Mac" tab hides both).
     applyGdlChrome();
@@ -1235,6 +1247,8 @@ async function loadSyncSource() {
             updateTmUserModeUi();
         } else if (src.source_type === "jira" && src.jira) {
             loadJiraForm(src.jira);
+        } else if (src.source_type === "confluence" && src.confluence) {
+            loadConfluenceForm(src.confluence);
         }
         // Auto-sync schedule (common to both source types).
         $("#sync-auto-enabled").checked = !!src.auto_sync_enabled;
@@ -1400,6 +1414,7 @@ function syncBody() {
     if (t === "sharepoint") return { ...base, source_type: "sharepoint", sharepoint: spFormConfig() };
     if (t === "teams") return { ...base, source_type: "teams", teams: tmFormConfig() };
     if (t === "jira") return { ...base, source_type: "jira", jira: jiraFormConfig() };
+    if (t === "confluence") return { ...base, source_type: "confluence", confluence: confluenceFormConfig() };
     throw new Error(`Unknown source_type: ${t}`);
 }
 
@@ -1669,6 +1684,9 @@ async function _doSave() {
     }
     if (out.source_type === "jira" && out.jira) {
         jiraAfterSave(out.jira);
+    }
+    if (out.source_type === "confluence" && out.confluence) {
+        confluenceAfterSave(out.confluence);
     }
     return out;
 }
@@ -2950,4 +2968,145 @@ $("#sync-jira-pick-projects").addEventListener("click", jiraPickProjects);
 // other fields (projects, jql) don't affect the project-list query.
 for (const id of ["#sync-jira-base-url", "#sync-jira-email", "#sync-jira-token"]) {
     $(id).addEventListener("input", () => { jiraFormDirty = true; updateJiraConnState(); });
+}
+
+// ---------------------------------------------------------------------------
+// Confluence — mirrors the Jira wiring (same Cloud/Server auth split + shared
+// openListPicker for the searchable multi-select spaces picker).
+// ---------------------------------------------------------------------------
+
+let cfSpaces = [];
+// Whether credential fields changed since the last save (the spaces endpoint
+// reads the stored row, so the picker re-saves only when dirty).
+let cfFormDirty = false;
+
+function setCfAuthMode(mode) {
+    const m = mode === "server" ? "server" : "cloud";
+    $("#sync-cf-tab-cloud").classList.toggle("active", m === "cloud");
+    $("#sync-cf-tab-cloud").setAttribute("aria-selected", m === "cloud" ? "true" : "false");
+    $("#sync-cf-tab-server").classList.toggle("active", m === "server");
+    $("#sync-cf-tab-server").setAttribute("aria-selected", m === "server" ? "true" : "false");
+    $("#sync-cf-email-row").hidden = m !== "cloud";
+    $("#sync-cf-token-label").textContent = m === "cloud"
+        ? "API token" : "Personal access token";
+    const form = $("#sync-form-confluence");
+    if (form) form.dataset.authMode = m;
+    updateCfConnState();
+}
+
+function getCfAuthMode() {
+    return $("#sync-form-confluence")?.dataset.authMode === "server" ? "server" : "cloud";
+}
+
+function loadConfluenceForm(cfg) {
+    setCfAuthMode(cfg.auth_method || "cloud");
+    $("#sync-cf-base-url").value = cfg.base_url || "";
+    $("#sync-cf-email").value = cfg.email || "";
+    $("#sync-cf-token").value = "";
+    $("#sync-cf-token").placeholder = cfg.has_token
+        ? "(saved — type to replace)" : "(paste API token / PAT)";
+    $("#sync-cf-cql").value = cfg.cql || "";
+    $("#sync-cf-all-spaces").checked = !!cfg.all_spaces;
+    setCfSpaces(cfg.spaces || []);
+    cfFormDirty = false;
+}
+
+function confluenceFormConfig() {
+    return {
+        base_url: $("#sync-cf-base-url").value.trim(),
+        auth_method: getCfAuthMode(),
+        email: $("#sync-cf-email").value.trim(),
+        token: $("#sync-cf-token").value,
+        spaces: cfSpaces,
+        all_spaces: !!$("#sync-cf-all-spaces").checked,
+        cql: $("#sync-cf-cql").value.trim(),
+    };
+}
+
+function setCfSpaces(spaces) {
+    cfSpaces = (spaces || []).map((s) => ({
+        key: String(s.key || ""),
+        name: s.name || s.key || "",
+    })).filter((s) => s.key);
+    updateCfSpacesUi();
+}
+
+function updateCfSpacesUi() {
+    const list = $("#sync-cf-spaces-list");
+    const count = $("#sync-cf-spaces-count");
+    list.innerHTML = "";
+    const allOn = $("#sync-cf-all-spaces")?.checked;
+    if (allOn) {
+        count.textContent = "all accessible spaces";
+    } else if (cfSpaces.length === 0) {
+        count.textContent = "none selected";
+    } else {
+        count.textContent =
+            `${cfSpaces.length} space${cfSpaces.length === 1 ? "" : "s"} selected`;
+        for (const s of cfSpaces) {
+            const li = document.createElement("li");
+            li.textContent = s.name && s.name !== s.key ? `${s.key} — ${s.name}` : s.key;
+            list.append(li);
+        }
+    }
+    updateCfConnState();
+}
+
+function updateCfConnState() {
+    const mode = getCfAuthMode();
+    const baseUrl = $("#sync-cf-base-url").value.trim();
+    const emailOk = mode === "server" || $("#sync-cf-email").value.trim().length > 0;
+    const tokenOk = $("#sync-cf-token").value.length > 0
+        || $("#sync-cf-token").placeholder.startsWith("(saved");
+    const ready = !!(baseUrl && emailOk && tokenOk);
+    const allOn = $("#sync-cf-all-spaces").checked;
+    const btn = $("#sync-cf-pick-spaces");
+    btn.disabled = !ready || allOn;
+    btn.title = allOn
+        ? "Syncing all spaces — no selection needed"
+        : (ready ? "" : "Enter base URL, token (and email for Cloud) first");
+}
+
+function confluenceAfterSave(cfg) {
+    $("#sync-cf-token").value = "";
+    $("#sync-cf-token").placeholder = cfg.has_token
+        ? "(saved — type to replace)" : "(paste API token / PAT)";
+    $("#sync-cf-all-spaces").checked = !!cfg.all_spaces;
+    setCfSpaces(cfg.spaces || []);
+    cfFormDirty = false;
+}
+
+async function confluencePickSpaces() {
+    const btn = $("#sync-cf-pick-spaces");
+    await withPickerButtonBusy(btn, async () => {
+        if (cfFormDirty) {
+            await _doSave();
+            cfFormDirty = false;
+        }
+        openListPicker({
+            title: "Pick Confluence spaces",
+            multi: true,
+            search: async (q) => {
+                const resp = await api.confluenceListSpaces(syncFolderId, q);
+                return resp.spaces || [];
+            },
+            keyOf: (s) => s.key,
+            primaryOf: (s) => s.key,
+            secondaryOf: (s) => (s.name && s.name !== s.key ? s.name : ""),
+            selectedKeys: cfSpaces.map((s) => s.key),
+            seedItems: cfSpaces,
+            onConfirm: (chosen) => {
+                cfSpaces = chosen.map((s) => ({ key: s.key, name: s.name || s.key }));
+                updateCfSpacesUi();
+            },
+        });
+    });
+}
+
+$("#sync-cf-tab-cloud").addEventListener("click", () => { cfFormDirty = true; setCfAuthMode("cloud"); });
+$("#sync-cf-tab-server").addEventListener("click", () => { cfFormDirty = true; setCfAuthMode("server"); });
+$("#sync-cf-all-spaces").addEventListener("change", updateCfSpacesUi);
+$("#sync-cf-pick-spaces").addEventListener("click", confluencePickSpaces);
+for (const id of ["#sync-cf-base-url", "#sync-cf-email", "#sync-cf-token"]) {
+    $(id).addEventListener("input", () => { cfFormDirty = true; updateCfConnState(); });
 }

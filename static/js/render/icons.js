@@ -92,6 +92,8 @@ function _sourceIcon(kind) {
             return `${SIMPLE}/sharepoint.svg`;
         case "jira":
             return `${SIMPLE}/jira.svg`;
+        case "confluence":
+            return `${SIMPLE}/confluence.svg`;
         case "s3":
         case "azure_data_lake":
         case "regular":

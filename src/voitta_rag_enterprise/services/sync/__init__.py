@@ -11,6 +11,7 @@ Supported ``source_type`` values: ``github``, ``google_drive``, ``nfs``,
 """
 
 from .base import SyncConnector
+from .confluence import ConfluenceConnector
 from .github import GitHubConnector
 from .google_drive import GoogleDriveConnector
 from .jira import JiraConnector
@@ -20,6 +21,7 @@ from .sharepoint import SharePointConnector
 from .teams import TeamsConnector
 
 __all__ = [
+    "ConfluenceConnector",
     "GitHubConnector",
     "GoogleDriveConnector",
     "JiraConnector",

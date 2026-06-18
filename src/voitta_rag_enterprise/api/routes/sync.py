@@ -62,6 +62,11 @@ from ...services.sync.jira import (
     encode_projects_field as jira_encode_projects,
     search_projects as jira_search_projects,
 )
+from ...services.sync.confluence import (
+    coerce_spaces_field as cf_coerce_spaces,
+    encode_spaces_field as cf_encode_spaces,
+    search_spaces as cf_search_spaces,
+)
 from ..deps import current_user, db_session
 
 logger = logging.getLogger(__name__)
@@ -163,6 +168,23 @@ class JiraSyncIn(BaseModel):
     jql: str = ""
 
 
+class ConfluenceSpace(BaseModel):
+    key: str
+    name: str = ""
+
+
+class ConfluenceSyncIn(BaseModel):
+    """Payload when ``source_type == 'confluence'``."""
+
+    base_url: str = ""
+    auth_method: Literal["cloud", "server"] = "cloud"
+    email: str = ""
+    token: str = ""
+    spaces: list[ConfluenceSpace] = Field(default_factory=list)
+    all_spaces: bool = False
+    cql: str = ""
+
+
 class NfsSyncIn(BaseModel):
     """Payload for ``PUT /folders/{id}/sync`` when ``source_type == 'nfs'``.
 
@@ -181,7 +203,8 @@ class NfsSyncIn(BaseModel):
 
 class SyncSourceIn(BaseModel):
     source_type: Literal[
-        "github", "google_drive", "nfs", "sharepoint", "teams", "jira"
+        "github", "google_drive", "nfs", "sharepoint", "teams", "jira",
+        "confluence",
     ]
     github: GithubSyncIn | None = None
     google_drive: GoogleDriveSyncIn | None = None
@@ -189,6 +212,7 @@ class SyncSourceIn(BaseModel):
     sharepoint: SharePointSyncIn | None = None
     teams: TeamsSyncIn | None = None
     jira: JiraSyncIn | None = None
+    confluence: ConfluenceSyncIn | None = None
     # Periodic auto-sync. ``auto_sync_hours`` is bounded to 1-24 by the
     # scheduler — wider intervals belong to a real cron, not this in-process
     # loop. Both fields are common to all source types so they live on the
@@ -274,6 +298,17 @@ class JiraSyncOut(BaseModel):
     connected: bool  # true once base_url + token (+ email for cloud) are stored
 
 
+class ConfluenceSyncOut(BaseModel):
+    base_url: str
+    auth_method: str
+    email: str
+    spaces: list[ConfluenceSpace]
+    all_spaces: bool
+    cql: str
+    has_token: bool
+    connected: bool
+
+
 class NfsSyncOut(BaseModel):
     # Multi-subpath selection. Always sent as ``subpaths``; the legacy
     # single-string ``subpath`` field is echoed for old clients that
@@ -313,6 +348,7 @@ class SyncSourceOut(BaseModel):
     sharepoint: SharePointSyncOut | None = None
     teams: TeamsSyncOut | None = None
     jira: JiraSyncOut | None = None
+    confluence: ConfluenceSyncOut | None = None
 
 
 def _nfs_status_snapshot() -> tuple[str, bool, str]:
@@ -476,6 +512,25 @@ def _to_out(src: FolderSyncSource) -> SyncSourceOut:
             has_token=token_set,
             connected=bool(base and token_set and (method == "server" or email_set)),
         )
+    confluence = None
+    if src.source_type == "confluence":
+        method = src.cf_auth_method or "cloud"
+        base = src.cf_base_url or ""
+        token_set = bool(src.cf_token)
+        email_set = bool(src.cf_email)
+        confluence = ConfluenceSyncOut(
+            base_url=base,
+            auth_method=method,
+            email=src.cf_email or "",
+            spaces=[
+                ConfluenceSpace(**s)
+                for s in cf_coerce_spaces(src.cf_selected_spaces)
+            ],
+            all_spaces=bool(src.cf_all_spaces),
+            cql=src.cf_cql or "",
+            has_token=token_set,
+            connected=bool(base and token_set and (method == "server" or email_set)),
+        )
     if src.source_type == "google_drive_local":
         available, status_str = _gdl_status_snapshot(src.gdl_path or "")
         # Same precedence as CloudLocalConnector.resolve_config: the JSON
@@ -513,6 +568,7 @@ def _to_out(src: FolderSyncSource) -> SyncSourceOut:
         sharepoint=sp,
         teams=tm,
         jira=jira,
+        confluence=confluence,
     )
 
 
@@ -625,6 +681,7 @@ def upsert_sync_source(
             _clear_google_drive_fields(src)
             _clear_microsoft_fields(src)
             _clear_jira_fields(src)
+            _clear_confluence_fields(src)
         src.source_type = "github"
         if existing is not None and existing.source_type != "github":
             src.nfs_subpath = None
@@ -691,6 +748,7 @@ def upsert_sync_source(
             _clear_google_drive_fields(src)
             _clear_microsoft_fields(src)
             _clear_jira_fields(src)
+            _clear_confluence_fields(src)
         src.source_type = "nfs"
         import json as _json
         src.nfs_subpaths = _json.dumps(subpaths)
@@ -733,6 +791,7 @@ def upsert_sync_source(
             _clear_github_fields(src)
             _clear_microsoft_fields(src)
             _clear_jira_fields(src)
+            _clear_confluence_fields(src)
             src.nfs_subpath = None
             src.nfs_subpaths = None
             # New source type → drop any stored refresh_token, it belongs to
@@ -767,6 +826,11 @@ def upsert_sync_source(
 
     elif body.source_type == "jira":
         src = _apply_jira_config(
+            body=body, existing=existing, folder_id=folder_id
+        )
+
+    elif body.source_type == "confluence":
+        src = _apply_confluence_config(
             body=body, existing=existing, folder_id=folder_id
         )
 
@@ -895,6 +959,7 @@ def _apply_jira_config(
         _clear_github_fields(src)
         _clear_google_drive_fields(src)
         _clear_microsoft_fields(src)
+        _clear_confluence_fields(src)
         src.nfs_subpath = None
         src.nfs_subpaths = None
     src.source_type = "jira"
@@ -908,6 +973,75 @@ def _apply_jira_config(
     )
     src.jira_all_projects = bool(cfg.all_projects)
     src.jira_jql = cfg.jql.strip() or None
+    return src
+
+
+def _clear_confluence_fields(src: FolderSyncSource) -> None:
+    src.cf_base_url = None
+    src.cf_auth_method = None
+    src.cf_email = None
+    src.cf_token = None
+    src.cf_selected_spaces = None
+    src.cf_all_spaces = False
+    src.cf_cql = None
+
+
+def _apply_confluence_config(
+    *,
+    body: SyncSourceIn,
+    existing: FolderSyncSource | None,
+    folder_id: int,
+) -> FolderSyncSource:
+    """Apply a ``confluence`` payload to a (new or existing) row.
+
+    Cloud needs an email (Basic ``email:token``); server needs only the PAT.
+    The token input is masked client-side, so a blank ``token`` on an existing
+    row means "leave the stored one alone", not "clear it".
+    """
+    cfg = body.confluence
+    if cfg is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Missing 'confluence' config")
+    base_url = normalize_base_url(cfg.base_url)
+    if not base_url:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "A Confluence base URL is required (e.g. https://your-org.atlassian.net).",
+        )
+    if cfg.auth_method not in ("cloud", "server"):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "auth_method must be 'cloud' or 'server'."
+        )
+    if cfg.auth_method == "cloud" and not cfg.email.strip():
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Confluence Cloud requires the Atlassian account email.",
+        )
+    existing_has_token = bool(existing and existing.cf_token)
+    if not cfg.token and not existing_has_token:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "An API token (Cloud) or personal access token (Server) is required.",
+        )
+
+    src = existing or FolderSyncSource(folder_id=folder_id, source_type="confluence")
+    if existing is not None and existing.source_type != "confluence":
+        _clear_github_fields(src)
+        _clear_google_drive_fields(src)
+        _clear_microsoft_fields(src)
+        _clear_jira_fields(src)
+        src.nfs_subpath = None
+        src.nfs_subpaths = None
+    src.source_type = "confluence"
+    src.cf_base_url = base_url
+    src.cf_auth_method = cfg.auth_method
+    src.cf_email = cfg.email.strip() or None
+    if cfg.token:
+        src.cf_token = cfg.token
+    src.cf_selected_spaces = cf_encode_spaces(
+        [{"key": s.key, "name": s.name} for s in cfg.spaces]
+    )
+    src.cf_all_spaces = bool(cfg.all_spaces)
+    src.cf_cql = cfg.cql.strip() or None
     return src
 
 
@@ -972,6 +1106,7 @@ def _apply_microsoft_config(
         _clear_github_fields(src)
         _clear_google_drive_fields(src)
         _clear_jira_fields(src)
+        _clear_confluence_fields(src)
         if existing.source_type not in ("sharepoint", "teams"):
             _clear_microsoft_fields(src)
         src.nfs_subpath = None
@@ -1162,6 +1297,12 @@ def trigger_sync(
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST,
                 "Pick at least one Jira project (or enable 'all projects').",
+            )
+    if src.source_type == "confluence":
+        if not (src.cf_all_spaces or cf_coerce_spaces(src.cf_selected_spaces)):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "Pick at least one Confluence space (or enable 'all spaces').",
             )
     job_id = job_queue.enqueue(
         db,
@@ -2038,6 +2179,46 @@ async def jira_list_projects_endpoint(
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
     return JiraProjectsOut(projects=[JiraProject(**p) for p in projects])
+
+
+class ConfluenceSpacesOut(BaseModel):
+    spaces: list[ConfluenceSpace]
+
+
+@router.get("/confluence/spaces", response_model=ConfluenceSpacesOut)
+async def confluence_list_spaces_endpoint(
+    folder_id: int,
+    query: str = "",
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(current_user),
+) -> ConfluenceSpacesOut:
+    """Search Confluence spaces the stored credentials can see (for the picker).
+
+    Reads the persisted row, so the user must Save base URL + token (and email
+    for Cloud) before picking spaces. ``query`` filters locally (Confluence has
+    no server-side space text search); an empty query returns the global list.
+    """
+    _check_owner(folder_id, db, user)
+    src = db.get(FolderSyncSource, folder_id)
+    if src is None or src.source_type != "confluence":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No Confluence source")
+    auth = AtlassianAuth(
+        base_url=normalize_base_url(src.cf_base_url or ""),
+        method=src.cf_auth_method or "cloud",
+        email=src.cf_email or "",
+        token=src.cf_token or "",
+    )
+    if not auth.configured:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Save the Confluence base URL and token (and email for Cloud) "
+            "before listing spaces.",
+        )
+    try:
+        spaces = await cf_search_spaces(auth, query)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
+    return ConfluenceSpacesOut(spaces=[ConfluenceSpace(**s) for s in spaces])
 
 
 class MsSitesOut(BaseModel):

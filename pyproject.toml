@@ -36,6 +36,11 @@ dependencies = [
     "google-auth-oauthlib>=1.2",
     "httpx>=0.28",
     "itsdangerous>=2.2",
+    # HTML→markdown for sync connectors that render rich content (Jira issues,
+    # Confluence pages, SharePoint Pages, OneNote). Each imports it with a crude
+    # regex-strip fallback, but declaring it here means they get faithful
+    # markdown (headings, bold, lists, tables) instead of the lossy fallback.
+    "markdownify>=0.13",
     # Real text embedder backbone (e5-base-v2 via SentenceTransformer).
     # ``transformers`` and ``torch`` arrive transitively via mineru[all],
     # so adding this here is essentially a no-op install-size-wise — but

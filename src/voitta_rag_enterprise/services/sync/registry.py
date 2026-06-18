@@ -45,6 +45,7 @@ def get_registry() -> SyncRegistry:
     type.
     """
     from .cloud_local import CloudLocalConnector
+    from .confluence import ConfluenceConnector
     from .github import GitHubConnector
     from .google_drive import GoogleDriveConnector
     from .jira import JiraConnector
@@ -55,6 +56,7 @@ def get_registry() -> SyncRegistry:
     r = SyncRegistry()
     for cls in (
         CloudLocalConnector,
+        ConfluenceConnector,
         GitHubConnector,
         GoogleDriveConnector,
         JiraConnector,
