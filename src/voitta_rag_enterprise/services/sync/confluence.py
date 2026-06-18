@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 # Lower bound on page recency: only pages modified on/after this date are synced
 # (CQL ``lastmodified >= …``). Bounds an otherwise unbounded full-history pull;
 # overridable per folder via the Extra CQL field. Mirrors the Jira connector.
-PAGES_UPDATED_SINCE = "2020-01-01"
+PAGES_UPDATED_SINCE = "2026-01-01"
 
 # Page-listing page size and the picker's render/"type to narrow" threshold.
 SEARCH_LIMIT = 100

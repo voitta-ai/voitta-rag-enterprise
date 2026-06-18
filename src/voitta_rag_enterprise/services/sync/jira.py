@@ -189,7 +189,7 @@ class JiraSyncStats:
 # decade+ of issues) to a sane, still-comprehensive horizon. Issues untouched
 # since before this date are skipped; one with old ``created`` but recent
 # ``updated`` is still included. Override per folder via the Extra JQL field.
-ISSUES_UPDATED_SINCE = "2020-01-01"
+ISSUES_UPDATED_SINCE = "2026-01-01"
 
 # Server-side project-search page size, also the picker's "type to narrow"
 # threshold. Kept in step with the frontend's PICKER_SEARCH_LIMIT.
