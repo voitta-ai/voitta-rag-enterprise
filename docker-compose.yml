@@ -1,0 +1,75 @@
+# Single-host deploy for Voitta RAG Enterprise.
+#
+# This is the "run it on a box" path — a VM, a NUC, an on-prem server —
+# complementing the GCP/Terraform path under terraform/. One container serves
+# the UI, REST, WebSocket and MCP; Qdrant runs EMBEDDED in-process (the default
+# backend), so no second container is needed for a normal deployment.
+#
+# Quickstart:
+#   cp .env.example .env          # then edit: set an auth mode (see below)
+#   docker compose up -d          # builds the image on first run
+#   curl http://localhost:8000/healthz      # → {"ok": true}
+#
+# Use the prebuilt image instead of building locally:
+#   echo 'VOITTA_IMAGE=ghcr.io/voitta-ai/voitta-rag-enterprise:latest' >> .env
+#   docker compose pull && docker compose up -d
+#
+# Auth: the app refuses anonymous access by default. For a private single-box
+# deploy set VOITTA_SINGLE_USER=true (no login) or VOITTA_DEV_USER=you@host in
+# .env. For public exposure configure Google login + an allowlist (see
+# .env.example) and put a TLS-terminating reverse proxy in front.
+
+services:
+  voitta:
+    # Build locally by default; override VOITTA_IMAGE in .env to pull the
+    # published image instead. When VOITTA_IMAGE is set, `docker compose pull`
+    # fetches it and the build is skipped.
+    image: ${VOITTA_IMAGE:-voitta-rag-enterprise:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    # .env supplies all VOITTA_* configuration (env_prefix = "VOITTA_").
+    env_file: .env
+    environment:
+      # Pin the in-container data dir regardless of what .env sets for the
+      # host-side default — everything persistent lives under the mounted
+      # volume below (SQLite DB, CAS blobs, embedded Qdrant, session secret).
+      VOITTA_DATA_DIR: /data
+      # The app listens on 8000 inside the container; the host port is mapped
+      # below. Keep this fixed so the healthcheck and EXPOSE line agree.
+      VOITTA_PORT: "8000"
+    ports:
+      # Host port is configurable; container port stays 8000.
+      - "${VOITTA_HOST_PORT:-8000}:8000"
+    volumes:
+      - ${VOITTA_DATA_PATH:-./voitta-data}:/data
+    healthcheck:
+      # Image has no curl in the slim runtime layer guaranteed? It does —
+      # base installs curl and runtime keeps it. Falls back cleanly if not.
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      # Model warmup + worker startup can take a while on first boot; don't
+      # mark unhealthy during that window.
+      start_period: 180s
+    # Give in-flight indexing a chance to finish on `compose down`.
+    stop_grace_period: 30s
+
+  # --- Optional: standalone Qdrant ------------------------------------------
+  # Embedded Qdrant (the default) is fine up to ~20k points. Beyond that, run
+  # Qdrant as its own container and point the app at it. To enable:
+  #   1. uncomment the `qdrant` service below,
+  #   2. set in .env:
+  #        VOITTA_QDRANT_MODE=standalone
+  #        VOITTA_QDRANT_URL=http://qdrant:6333
+  #   3. add `depends_on: [qdrant]` to the `voitta` service above.
+  #
+  # qdrant:
+  #   image: qdrant/qdrant:latest
+  #   restart: unless-stopped
+  #   volumes:
+  #     - ${VOITTA_QDRANT_PATH:-./qdrant-data}:/qdrant/storage
+  #   # No host port mapping needed — only `voitta` talks to it on the
+  #   # compose network. Expose 6333/6334 here if you want external access.

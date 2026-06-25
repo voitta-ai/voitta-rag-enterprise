@@ -1,0 +1,21 @@
+# Build-time pip constraints for the Docker image.
+#
+# A clean `pip install -e ".[ml]"` (mineru[all] + the transformers/torch stack)
+# sends pip's default resolver into `ResolutionTooDeep` because three recent
+# upstream releases mutually conflict — pip defaults to the newest of each and
+# then backtracks forever trying (and failing) to reconcile them:
+#
+#   pdftext (pulled via mineru) requires  pypdfium2 == 4.30.0   (pip picked 5.x)
+#   huggingface-hub 1.x          requires  typer     <  0.26     (pip picked 0.26.x)
+#   torch 2.12                   requires  setuptools <  82       (pip picked 82.x)
+#
+# Nothing else in the graph hard-requires the newer versions — pip only chose
+# them as "latest". Pinning each to the version its requirer demands removes the
+# conflicts and lets the resolver converge quickly into a consistent set.
+#
+# This is a build constraints file (passed via `pip install -c`), not a change
+# to the package's declared dependencies — native `pip install` outside Docker
+# is unaffected. Revisit when mineru / huggingface-hub / torch settle.
+pypdfium2==4.30.0
+typer<0.26
+setuptools<82

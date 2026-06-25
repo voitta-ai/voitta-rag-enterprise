@@ -17,7 +17,13 @@ __pycache__
 .env
 .env.local
 data/
+voitta-data/
+qdrant-data/
 users.txt
+
+# Compose files aren't needed inside the image
+docker-compose.yml
+docker-compose.override.yml
 
 # Build artefacts
 build/

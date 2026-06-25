@@ -19,8 +19,12 @@ htmlcov/
 .env.local
 
 # Data — including the ./local-data dir suggested for `docker run` smoke tests
+# and the ./voitta-data + ./qdrant-data dirs docker-compose mounts by default.
 data/
 local-data/
+voitta-data/
+qdrant-data/
+docker-compose.override.yml
 *.db
 *.db-journal
 *.db-wal

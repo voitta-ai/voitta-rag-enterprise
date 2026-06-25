@@ -228,6 +228,32 @@ python -m scripts.migrate_qdrant \
 
 The script scrolls all points from the local SQLite store and uploads them to the Docker instance in batches. The embedded store is left untouched. Once you've verified the point counts match, flip `VOITTA_QDRANT_MODE=standalone` and restart.
 
+## Deploy with Docker Compose
+
+For a single box — a VM, a NUC, an on-prem server — [`docker-compose.yml`](./docker-compose.yml) brings the whole app up in one command. One container serves the UI, REST, WebSocket and MCP; Qdrant runs **embedded in-process** (the default backend), so no second container is needed for a normal deployment.
+
+```bash
+cp .env.example .env
+# Edit .env and pick an auth mode (see below). For a quick private box:
+#   VOITTA_SINGLE_USER=true
+docker compose up -d            # builds the image on first run
+curl http://localhost:8000/healthz      # → {"ok": true}
+```
+
+The first build runs the model-warm stage (downloads ~5–7 GB of embedder + MinerU weights and bakes them in), so it takes a while and needs ~35 GB of free disk; subsequent boots are instant and do no network downloads.
+
+**Use the prebuilt image instead of building locally** — set `VOITTA_IMAGE` in `.env` to the published image, then:
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+**Config** comes from `.env` (every `VOITTA_*` var). Compose also reads a few deploy-only vars from the same file: `VOITTA_IMAGE`, `VOITTA_HOST_PORT` (host port → container 8000), `VOITTA_DATA_PATH` (host path backing `/data` — the SQLite DB, CAS blobs, embedded Qdrant and session secret all persist there), and `VOITTA_QDRANT_PATH`.
+
+**Auth.** The app refuses anonymous access by default. For a private single-box deploy set `VOITTA_SINGLE_USER=true` (no login) or `VOITTA_DEV_USER=you@host`. For public exposure, configure Google login + an allowlist (see `.env.example`) and put a TLS-terminating reverse proxy in front.
+
+**Scaling Qdrant.** Embedded is fine up to ~20k points. Beyond that, uncomment the `qdrant` service in `docker-compose.yml` and set `VOITTA_QDRANT_MODE=standalone` + `VOITTA_QDRANT_URL=http://qdrant:6333` (see [Qdrant in Docker](#qdrant-in-docker-standalone-mode)).
+
 ## Deploying on GCP
 
 The supported production target is a single-instance, per-customer deployment in the customer's own GCP project. Everything is co-located: app, worker, embedded Qdrant, SQLite, and CAS share one persistent disk; uploads and Google Drive sync land in the same volume. There is no horizontal scaling — indexing is deliberately serial (see [config.py](./src/voitta_rag_enterprise/config.py)).
