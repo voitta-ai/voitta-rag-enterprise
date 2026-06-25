@@ -80,15 +80,12 @@ WORKDIR /app
 # sentence-transformers + transformers; ``dev`` is intentionally NOT here.
 COPY pyproject.toml README.md constraints.txt ./
 COPY src ./src
-# mineru[all] + the transformers/torch stack is too large for pip's default
-# backtracking resolver — a clean (uncached) install explodes into
-# ResolutionTooDeep (200k rounds) regardless of constraints. The legacy resolver
-# takes first-compatible instead of exhaustively backtracking, so it converges;
-# ``-c constraints.txt`` then pins the three packages whose newest releases
-# would otherwise be installed in conflict (see constraints.txt). This pairing
-# is verified to install cleanly. The legacy resolver is deprecated-but-present
-# in current pip; a full pinned lockfile is the longer-term hardening.
-RUN pip install --use-deprecated=legacy-resolver -c constraints.txt -e ".[ml]"
+# ``-c constraints.txt`` pins three packages whose newest releases conflict with
+# the resolved set (see constraints.txt). The default resolver is used on
+# purpose: switching the dependency to mineru[pipeline] (from mineru[all])
+# removed the vllm GPU stack that was driving pip into ResolutionTooDeep, so the
+# correct resolver converges without the legacy fallback.
+RUN pip install -c constraints.txt -e ".[ml]"
 
 # SPA assets — copied after pip install so iterating on UI doesn't bust
 # the dep cache. ``main.py`` only registers the root route when this dir

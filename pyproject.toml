@@ -23,7 +23,14 @@ dependencies = [
     "fastmcp>=2.0",
     "email-validator>=2.0",
     "python-multipart>=0.0.9",
-    "mineru[all]>=2.0",
+    # MinerU's PIPELINE backend only (pp_doclayout — what pdf_parser.py uses).
+    # NOT mineru[all]: on Linux that pulls in mineru[vllm] → the vllm GPU stack,
+    # which (a) we never use — the app only runs the pipeline backend with
+    # parse_method auto/txt/ocr — and (b) its tight pin tree drives pip's
+    # resolver into ResolutionTooDeep on a clean build. The [pipeline] extra
+    # brings torch + torchvision + transformers, which the pp_doclayout model
+    # needs (without it PDF parsing dies on "No module named 'torchvision'").
+    "mineru[pipeline]>=2.0",
     "cairosvg>=2.7",
     "openpyxl>=3.1",
     # ``xlrd`` reads the legacy .xls (BIFF) binary format. SharePoint
@@ -42,7 +49,7 @@ dependencies = [
     # markdown (headings, bold, lists, tables) instead of the lossy fallback.
     "markdownify>=0.13",
     # Real text embedder backbone (e5-base-v2 via SentenceTransformer).
-    # ``transformers`` and ``torch`` arrive transitively via mineru[all],
+    # ``transformers`` and ``torch`` arrive transitively via mineru[pipeline],
     # so adding this here is essentially a no-op install-size-wise — but
     # it keeps prod deploys from breaking the moment someone unsets
     # VOITTA_USE_FAKE_EMBEDDERS. Dev and CI use the fake embedder env var
