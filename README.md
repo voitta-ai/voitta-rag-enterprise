@@ -230,29 +230,80 @@ The script scrolls all points from the local SQLite store and uploads them to th
 
 ## Deploy with Docker Compose
 
-For a single box — a VM, a NUC, an on-prem server — [`docker-compose.yml`](./docker-compose.yml) brings the whole app up in one command. One container serves the UI, REST, WebSocket and MCP; Qdrant runs **embedded in-process** (the default backend), so no second container is needed for a normal deployment.
+For a single box — a VM, a NUC, an on-prem server — [`docker-compose.yml`](./docker-compose.yml) brings the whole app up in one command. One container serves the UI, REST, WebSocket and MCP; Qdrant runs **embedded in-process** (the default backend), so no second container is needed for a normal deployment. (This complements the GCP/Terraform path in [`terraform/`](./terraform/) for cloud deploys.)
+
+### Quickstart
 
 ```bash
 cp .env.example .env
-# Edit .env and pick an auth mode (see below). For a quick private box:
-#   VOITTA_SINGLE_USER=true
+# Edit .env — at minimum set the three vars in "Minimum config" below.
 docker compose up -d            # builds the image on first run
 curl http://localhost:8000/healthz      # → {"ok": true}
+# Open the UI:
+open http://localhost:8000
 ```
 
-The first build runs the model-warm stage (downloads ~5–7 GB of embedder + MinerU weights and bakes them in), so it takes a while and needs ~35 GB of free disk; subsequent boots are instant and do no network downloads.
+### Minimum config
 
-**Use the prebuilt image instead of building locally** — set `VOITTA_IMAGE` in `.env` to the published image, then:
+The app starts with stricter defaults than a single-box test wants. Set these three in `.env` or you'll hit a login wall and a **dimmed "New folder" button**:
 
 ```bash
+# 1. Auth — pick ONE. Without it the app refuses anonymous access.
+VOITTA_SINGLE_USER=true                  # no login (private box); OR:
+# VOITTA_DEV_USER=you@example.com        # single named user, no login
+
+# 2. Managed-folder root — REQUIRED, or "New folder" stays disabled.
+#    Put it under /data so it persists in the mounted volume.
+VOITTA_ROOT_PATH=/data/folders
+
+# 3. Embeddings — leave UNSET for real semantic search (default). Set true
+#    only for a fast no-models smoke test (placeholder vectors, no relevance).
+# VOITTA_USE_FAKE_EMBEDDERS=true
+```
+
+For **public exposure** instead of `SINGLE_USER`: configure Google login (`VOITTA_GOOGLE_AUTH_CLIENT_ID` / `_SECRET`) + an email allowlist (see `.env.example`), and put a TLS-terminating reverse proxy in front.
+
+### Build vs. prebuilt image
+
+By default compose **builds the image locally** from the [`Dockerfile`](./Dockerfile). The first build runs the model-warm stage — it downloads ~5–7 GB of embedder + MinerU weights and **bakes them into the image**, so it needs **~35 GB of free disk** and takes 15–30 min. Subsequent boots are instant and do no network downloads.
+
+To **skip the build and pull the published image** instead, set `VOITTA_IMAGE` in `.env`:
+
+```bash
+echo 'VOITTA_IMAGE=ghcr.io/voitta-ai/voitta-rag-enterprise:latest' >> .env
 docker compose pull && docker compose up -d
 ```
 
-**Config** comes from `.env` (every `VOITTA_*` var). Compose also reads a few deploy-only vars from the same file: `VOITTA_IMAGE`, `VOITTA_HOST_PORT` (host port → container 8000), `VOITTA_DATA_PATH` (host path backing `/data` — the SQLite DB, CAS blobs, embedded Qdrant and session secret all persist there), and `VOITTA_QDRANT_PATH`.
+### Deploy-only compose vars
 
-**Auth.** The app refuses anonymous access by default. For a private single-box deploy set `VOITTA_SINGLE_USER=true` (no login) or `VOITTA_DEV_USER=you@host`. For public exposure, configure Google login + an allowlist (see `.env.example`) and put a TLS-terminating reverse proxy in front.
+Beyond the `VOITTA_*` app settings, `docker-compose.yml` reads a few vars from the same `.env`:
 
-**Scaling Qdrant.** Embedded is fine up to ~20k points. Beyond that, uncomment the `qdrant` service in `docker-compose.yml` and set `VOITTA_QDRANT_MODE=standalone` + `VOITTA_QDRANT_URL=http://qdrant:6333` (see [Qdrant in Docker](#qdrant-in-docker-standalone-mode)).
+| Var | Purpose | Default |
+|---|---|---|
+| `VOITTA_IMAGE` | Pull this image instead of building | _(build locally)_ |
+| `VOITTA_HOST_PORT` | Host port mapped to the container's 8000 | `8000` |
+| `VOITTA_DATA_PATH` | Host path backing `/data` — SQLite DB, CAS blobs, embedded Qdrant, session secret all persist here | `./voitta-data` |
+| `VOITTA_QDRANT_PATH` | Host path for standalone Qdrant storage (only with the optional `qdrant` service) | `./qdrant-data` |
+
+### Operating it
+
+```bash
+docker compose logs -f           # follow logs
+docker compose ps                # status + health
+docker compose down              # stop (data persists in the volume)
+docker compose up -d --build     # rebuild + recreate after a code/dep change
+```
+
+> **`compose build` does not restart the running container.** After a rebuild, run `docker compose up -d` to swap the new image in — otherwise you're still testing the old one.
+
+### First-run indexing notes
+
+- **PDFs/images** use MinerU. If you built the full image the models are baked in; if you're running a stripped image they download (~1 GB) into the cache on the **first** PDF, so that one is slow. **Text/Markdown/Office** files need no models and index immediately.
+- **No GPU?** On Docker Desktop (incl. macOS) there's no GPU passthrough, so MinerU runs **CPU-only** — layout/OCR on large PDFs is minutes-per-document, not seconds. This is environmental, not a fault. A GPU host (or the GCP deploy) is far faster.
+
+### Scaling Qdrant
+
+Embedded Qdrant is fine up to ~20k points. Beyond that, uncomment the `qdrant` service in `docker-compose.yml`, add `depends_on: [qdrant]` to the `voitta` service, and set `VOITTA_QDRANT_MODE=standalone` + `VOITTA_QDRANT_URL=http://qdrant:6333` (see also [Qdrant in Docker](#qdrant-in-docker-standalone-mode)).
 
 ## Deploying on GCP
 
