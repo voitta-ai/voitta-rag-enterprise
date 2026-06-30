@@ -44,6 +44,9 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
@@ -51,6 +54,67 @@ from urllib.parse import urlparse, urlunparse
 from .base import SyncConnector
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# YubiKey / hardware-key touch hints
+#
+# When an SSH git op (agent mode) blocks on a hardware-key touch, the key just
+# blinks with no on-screen cue. A caller can open a ``git_touch_scope(cb)``
+# around its git work; if any network git call then runs longer than
+# ``_TOUCH_HINT_DELAY_S`` (almost certainly because it's waiting for a tap),
+# ``cb("wait")`` fires so the UI can show "touch your YubiKey", and ``cb("done")``
+# fires when it finishes. The delay suppresses spurious prompts for fast auth
+# that needed no touch (cached/no-touch keys complete in well under a second).
+# The cb is carried in a ContextVar so no connector signatures change.
+# ---------------------------------------------------------------------------
+_TOUCH_HINT_DELAY_S = 1.5
+_git_touch_cb: ContextVar[Callable[[str], None] | None] = ContextVar(
+    "git_touch_cb", default=None
+)
+
+
+@contextmanager
+def git_touch_scope(cb: Callable[[str], None]) -> Iterator[None]:
+    """Install ``cb`` as the touch-hint sink for git work in this context."""
+    token = _git_touch_cb.set(cb)
+    try:
+        yield
+    finally:
+        _git_touch_cb.reset(token)
+
+
+class _TouchHint:
+    """Fire ``cb('wait')`` if the wrapped op outlives the delay, ``cb('done')``
+    on exit — but only if 'wait' fired. Timer runs off-thread; cb must be
+    thread-safe (events.publish is)."""
+
+    def __init__(self, cb: Callable[[str], None] | None) -> None:
+        self._cb = cb
+        self._timer: threading.Timer | None = None
+        self._fired = False
+
+    def __enter__(self) -> "_TouchHint":
+        if self._cb is not None:
+            self._timer = threading.Timer(_TOUCH_HINT_DELAY_S, self._fire)
+            self._timer.daemon = True
+            self._timer.start()
+        return self
+
+    def _fire(self) -> None:
+        self._fired = True
+        try:
+            self._cb("wait")  # type: ignore[misc]
+        except Exception:  # noqa: BLE001 — a UI hint must never break a sync
+            logger.debug("touch-hint 'wait' callback failed", exc_info=True)
+
+    def __exit__(self, *exc: object) -> None:
+        if self._timer is not None:
+            self._timer.cancel()
+        if self._fired and self._cb is not None:
+            try:
+                self._cb("done")
+            except Exception:  # noqa: BLE001
+                logger.debug("touch-hint 'done' callback failed", exc_info=True)
 
 # One process-wide lock around every git call. Cheap (we just hold it for the
 # duration of a clone/pull) and saves us from worrying about concurrent .git
@@ -360,8 +424,12 @@ def _run_git(
 ) -> tuple[int, str, str]:
     """Run a single git command synchronously under the global lock."""
     env, cleanup = _git_env(auth)
+    # Arm a touch hint only when a hardware-key touch is actually possible —
+    # SSH agent/key auth. Token/HTTPS never prompts for a tap.
+    touch_cb = _git_touch_cb.get()
+    armed = touch_cb if (auth and auth.method in ("agent", "ssh")) else None
     try:
-        with _GIT_LOCK:
+        with _GIT_LOCK, _TouchHint(armed):
             proc = subprocess.run(
                 ["git", *args],
                 cwd=cwd,

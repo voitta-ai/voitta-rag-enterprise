@@ -27,6 +27,7 @@ from ...services.sync.github import (
     GitAuth,
     coerce_branches_field,
     encode_branches_field,
+    git_touch_scope as gh_touch_scope,
     list_remote_branches,
 )
 from ...services.sync.google_drive import (
@@ -1385,8 +1386,16 @@ def list_branches(
         username=body.username,
         pat=body.pat,
     )
+    def _touch(state: str) -> None:
+        # state: "wait" → show the YubiKey-touch banner; "done" → clear it.
+        events.publish(
+            "folders",
+            {"type": "git.touch", "folder_id": folder_id, "state": state},
+        )
+
     try:
-        branches = list_remote_branches(body.repo.strip(), auth)
+        with gh_touch_scope(_touch):
+            branches = list_remote_branches(body.repo.strip(), auth)
     except Exception as e:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST, f"git ls-remote failed: {e}"

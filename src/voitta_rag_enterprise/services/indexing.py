@@ -1014,12 +1014,28 @@ async def _run_sync_inner(folder_id: int) -> None:
     # call (which can be seconds later if Drive auth is slow).
     _on_progress("queued", 0, 0)
 
+    # GitHub SSH/agent clones can block on a YubiKey touch; surface a banner via
+    # the same WS channel so the user knows to tap. No-op for other connectors.
+    def _git_touch(state: str) -> None:
+        events.publish(
+            "folders",
+            {"type": "git.touch", "folder_id": folder_id, "state": state},
+        )
+
     started = time.perf_counter()
     try:
-        stats = await connector.sync(
-            folder_root=Path(folder_path),
-            **cfg,
-        )
+        if source_type == "github":
+            from .sync.github import git_touch_scope
+
+            with git_touch_scope(_git_touch):
+                stats = await connector.sync(
+                    folder_root=Path(folder_path), **cfg
+                )
+        else:
+            stats = await connector.sync(
+                folder_root=Path(folder_path),
+                **cfg,
+            )
     except Exception:
         with session_scope() as s2:
             from ..db.models import FolderSyncSource

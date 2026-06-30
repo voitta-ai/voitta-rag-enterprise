@@ -107,10 +107,15 @@ function handleEvent(event) {
         case "snapshot":
             applySnapshot(event.topic, event.items || []);
             return;
-        case "synced":
+        case "synced": {
             // Baseline delivered; live deltas follow. The pill goes green.
             connStatus.set("connected");
+            // Safety: clear any stale YubiKey prompt — if a "done" was missed
+            // (e.g. the socket dropped mid-touch), a fresh sync clears it.
+            const banner = document.getElementById("yubikey-banner");
+            if (banner) banner.hidden = true;
             return;
+        }
         case "admin.snapshot":
             // Full admin-console state (connect snapshot + every admin
             // mutation). Replace wholesale — the admin modal renders from it.
@@ -139,6 +144,14 @@ function handleEvent(event) {
                 });
             }
             return;
+        case "git.touch": {
+            // A git SSH op is blocked waiting for a YubiKey tap ("wait"), or
+            // finished ("done"). Show/hide the prompt banner. Guarded so a
+            // missing "done" can't pin it forever — boot also hides it.
+            const banner = document.getElementById("yubikey-banner");
+            if (banner) banner.hidden = event.state !== "wait";
+            return;
+        }
         case "folder.added":
             folders.update((list) => [...list.filter(f => f.id !== event.folder.id), event.folder]);
             return;
