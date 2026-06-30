@@ -102,7 +102,20 @@ class TextParser(BaseParser):
         ".proto", ".thrift", ".fbs", ".graphql", ".gql",
         # i18n / docs assets
         ".po", ".pot",
+        # embedded / robotics / firmware config (ArduPilot, ROS2, STM32,
+        # device-tree). All plain UTF-8 text: parameter dumps, interface
+        # definitions, linker/board config, simulation worlds.
+        ".parm", ".param", ".idl", ".inc", ".ioc", ".msg", ".srv",
+        ".ino", ".ld", ".dts", ".dtsi", ".urdf", ".sdf", ".wbt",
     ]
+
+    # Ambiguous extensions that are text *some* of the time and binary the
+    # rest — accepted only when the content sniff confirms UTF-8 text. The
+    # canonical case is ArduPilot ``hwdef.dat`` board definitions (text)
+    # vs. binary dataflash/replay ``.dat`` logs. Unlike :attr:`extensions`
+    # (unconditional accept) and unknown extensions (unconditional drop),
+    # these route through :func:`_looks_like_text`.
+    sniff_extensions: ClassVar[set[str]] = {".dat"}
 
     # Files matched by exact name (case-sensitive). These are extensionless
     # or have an unknown extension but are reliably text in real projects.
@@ -139,6 +152,11 @@ class TextParser(BaseParser):
             return True
         if file_path.suffix.lower() in self.extensions:
             return True
+        # Ambiguous extensions (e.g. ``.dat``): text sometimes, binary other
+        # times. Accept only when the content actually reads as UTF-8 text,
+        # which keeps hwdef.dat board configs while dropping binary logs.
+        if file_path.suffix.lower() in self.sniff_extensions:
+            return _looks_like_text(file_path)
         # Extensionless files are common from synced sources — Google Meet
         # "29 13:00 PST - Chat" exports, Fireflies notes, etc. Extension
         # matching can't see them, so for a file with NO extension at all we

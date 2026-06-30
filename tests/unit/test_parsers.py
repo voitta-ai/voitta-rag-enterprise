@@ -69,6 +69,10 @@ def test_text_parser_covers_common_code_extensions() -> None:
         "schema.proto", "service.thrift", "query.graphql",
         "rules.bzl", "BUILD.bazel",
         "msgs.po", "kernel.cu",
+        # embedded / robotics / firmware config (ArduPilot, ROS2, STM32)
+        "rover.parm", "plane.param", "Transform.idl", "hwdef.inc",
+        "board.ioc", "Goal.msg", "Takeoff.srv", "sketch.ino",
+        "common.ld", "overlay.dts", "robot.urdf", "ocean.wbt",
     ]
     for name in must_match:
         assert parser.can_parse(Path(name)), f"{name} should be parseable"
@@ -154,6 +158,21 @@ def test_text_parser_unknown_extension_still_rejected(tmp_path: Path) -> None:
     p = tmp_path / "data.weirdext"
     p.write_text("plain text but odd extension", encoding="utf-8")
     assert not parser.can_parse(p)
+
+
+def test_text_parser_sniffs_ambiguous_dat_extension(tmp_path: Path) -> None:
+    """``.dat`` is text (ArduPilot hwdef board config) or binary (dataflash
+    logs) depending on the file, so it's accepted only when the content
+    actually reads as UTF-8 text."""
+    parser = TextParser()
+    hwdef = tmp_path / "hwdef.dat"
+    hwdef.write_text("# SPI buses\nQURT_SPIDEV \"INV3\"\n", encoding="utf-8")
+    assert parser.can_parse(hwdef)
+    assert get_default_registry().find(hwdef) is not None
+
+    binlog = tmp_path / "replay.dat"
+    binlog.write_bytes(b"\xa3\x95\x80\x00\x00logdata\x00\x00")
+    assert not parser.can_parse(binlog)
 
 
 def test_image_file_parser_returns_one_image(tmp_path: Path) -> None:
