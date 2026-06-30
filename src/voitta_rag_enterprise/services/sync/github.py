@@ -40,6 +40,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -105,6 +106,75 @@ def _inject_token_into_url(repo_url: str, username: str, token: str) -> str:
     return urlunparse(parsed._replace(netloc=netloc))
 
 
+def _clean_git_stderr(stderr: str) -> str:
+    """Trim git/ssh stderr to the actionable lines for UI display.
+
+    OpenSSH prints an ``@``-bordered warning box (e.g. "UNPROTECTED PRIVATE KEY
+    FILE") that renders as a wall of ``@`` in a one-line error toast. Drop those
+    border lines and the boilerplate advisory, keeping the lines that actually
+    say what went wrong (Permission denied, bad permissions, fatal: …).
+    """
+    keep: list[str] = []
+    for raw in stderr.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        # Strip the warning-box '@' border (whole-line border, or '@ … @' around
+        # the text) before inspecting the content.
+        inner = line.strip("@").strip()
+        if not inner:
+            continue
+        # Boilerplate that adds noise but no signal.
+        if inner.startswith(
+            (
+                "It is required that your private key",
+                "This private key will be ignored",
+                "WARNING: UNPROTECTED PRIVATE KEY FILE",
+            )
+        ):
+            continue
+        keep.append(inner)
+    cleaned = "; ".join(keep).strip()
+    return cleaned or stderr.strip()
+
+
+def _resolve_ssh_auth_sock() -> str | None:
+    """Find the ssh-agent socket for hardware-key (YubiKey/SSHCA) auth.
+
+    Precedence:
+      1. ``VOITTA_SSH_AUTH_SOCK`` — explicit operator override.
+      2. ``SSH_AUTH_SOCK`` already in the process env — set when the server was
+         launched from a shell that has the agent.
+      3. macOS ``launchctl getenv SSH_AUTH_SOCK`` — a GUI .app launched from
+         Finder/Dock does NOT inherit the shell's env, so the agent socket is
+         invisible to it. The common remedy is exporting it to launchd once
+         (``launchctl setenv SSH_AUTH_SOCK "$SSH_AUTH_SOCK"`` in a working
+         terminal); this reads it back so the app can reach the same agent.
+
+    Returns the socket path, or None when no agent can be located.
+    """
+    override = os.environ.get("VOITTA_SSH_AUTH_SOCK")
+    if override:
+        return override
+    sock = os.environ.get("SSH_AUTH_SOCK")
+    if sock:
+        return sock
+    if sys.platform == "darwin":
+        try:
+            out = subprocess.run(
+                ["launchctl", "getenv", "SSH_AUTH_SOCK"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            val = out.stdout.strip()
+            if val:
+                return val
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return None
+
+
 def _git_env(auth: GitAuth | None) -> tuple[dict[str, str], list[str]]:
     """Build the env + tempfiles for a single git invocation.
 
@@ -166,16 +236,20 @@ def _git_env(auth: GitAuth | None) -> tuple[dict[str, str], list[str]]:
     # Reached when method is explicitly "agent", or "ssh" with no pasted key
     # (the natural choice for an agent user).
     if auth.method in ("agent", "ssh"):
-        # A missing SSH_AUTH_SOCK is the usual reason agent auth silently fails
-        # on a headless/containerised server (the process can't reach the
-        # user's agent). Log it so the cause is obvious; ssh may still succeed
-        # via on-disk ``~/.ssh/id_*`` keys, so this is a warning, not an error.
-        if not env.get("SSH_AUTH_SOCK"):
+        # Make the ssh-agent reachable. A GUI .app (or headless service) won't
+        # have SSH_AUTH_SOCK in its env, so resolve it from the override / env /
+        # launchctl and inject it. Without an agent, ssh falls back to on-disk
+        # ~/.ssh keys — which for a hardware key (YubiKey/SSHCA) can't sign, so
+        # auth fails with "Permission denied (publickey)".
+        sock = _resolve_ssh_auth_sock()
+        if sock:
+            env["SSH_AUTH_SOCK"] = sock
+        else:
             logger.warning(
-                "git SSH agent mode: SSH_AUTH_SOCK is not set in the server's "
-                "environment — the ssh-agent (YubiKey/SSHCA) is unreachable. "
-                "Auth will fall back to on-disk keys in ~/.ssh and likely fail. "
-                "Start the server from a shell where `ssh-add -l` works."
+                "git SSH agent mode: no ssh-agent socket found (SSH_AUTH_SOCK "
+                "unset, VOITTA_SSH_AUTH_SOCK unset, launchctl empty). Hardware "
+                "keys (YubiKey/SSHCA) need the agent and will fail. In a working "
+                "terminal run: launchctl setenv SSH_AUTH_SOCK \"$SSH_AUTH_SOCK\""
             )
         env["GIT_SSH_COMMAND"] = (
             "ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
@@ -231,7 +305,7 @@ def list_remote_branches(repo_url: str, auth: GitAuth | None) -> list[str]:
         ["ls-remote", "--heads", url], auth=auth, timeout=30
     )
     if rc != 0:
-        raise RuntimeError(f"git ls-remote failed: {stderr.strip()}")
+        raise RuntimeError(f"git ls-remote failed: {_clean_git_stderr(stderr)}")
     branches: list[str] = []
     for line in stdout.strip().splitlines():
         parts = line.split("\t", 1)
@@ -321,7 +395,7 @@ def _sync_one_branch(
             auth=auth,
         )
         if rc != 0:
-            raise RuntimeError(f"git clone failed: {err.strip()}")
+            raise RuntimeError(f"git clone failed: {_clean_git_stderr(err)}")
 
     source_dir = repo_dir / subfolder if subfolder else repo_dir
     if not source_dir.exists():
