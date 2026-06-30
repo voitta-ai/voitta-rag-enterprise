@@ -138,18 +138,58 @@ def _clean_git_stderr(stderr: str) -> str:
     return cleaned or stderr.strip()
 
 
+# Cache for the (expensive) login-shell probe — the agent socket is stable for
+# the process's lifetime, so we resolve it at most once. Only successes are
+# cached, so a user who fixes their setup mid-session isn't stuck on a miss.
+_LOGIN_SHELL_SOCK: str | None = None
+
+
+def _ssh_auth_sock_from_login_shell() -> str | None:
+    """Read ``SSH_AUTH_SOCK`` the way an interactive terminal would.
+
+    This is the "rely on what just works" path: ``git`` succeeds in the user's
+    terminal because their shell rc (``~/.zprofile`` / ``~/.zshrc``) exports the
+    agent socket. A GUI app never runs those files, so we spawn the user's login
+    + interactive shell once and read the value back — identical to opening a
+    terminal and echoing the variable. Output is marker-wrapped so a shell
+    banner / MOTD can't pollute the captured value.
+    """
+    global _LOGIN_SHELL_SOCK
+    if _LOGIN_SHELL_SOCK:
+        return _LOGIN_SHELL_SOCK
+    shell = os.environ.get("SHELL") or "/bin/zsh"
+    # -l sources login files (~/.zprofile), -i sources interactive files
+    # (~/.zshrc) — agent exports live in one or the other depending on setup.
+    script = 'printf "__VOITTA_SOCK__%s__END__" "$SSH_AUTH_SOCK"'
+    try:
+        out = subprocess.run(
+            [shell, "-l", "-i", "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.search(r"__VOITTA_SOCK__(.*?)__END__", out.stdout, re.DOTALL)
+    if m and m.group(1).strip():
+        _LOGIN_SHELL_SOCK = m.group(1).strip()
+        return _LOGIN_SHELL_SOCK
+    return None
+
+
 def _resolve_ssh_auth_sock() -> str | None:
     """Find the ssh-agent socket for hardware-key (YubiKey/SSHCA) auth.
 
-    Precedence:
+    Precedence (cheapest/most-explicit first):
       1. ``VOITTA_SSH_AUTH_SOCK`` — explicit operator override.
       2. ``SSH_AUTH_SOCK`` already in the process env — set when the server was
          launched from a shell that has the agent.
-      3. macOS ``launchctl getenv SSH_AUTH_SOCK`` — a GUI .app launched from
-         Finder/Dock does NOT inherit the shell's env, so the agent socket is
-         invisible to it. The common remedy is exporting it to launchd once
-         (``launchctl setenv SSH_AUTH_SOCK "$SSH_AUTH_SOCK"`` in a working
-         terminal); this reads it back so the app can reach the same agent.
+      3. macOS ``launchctl getenv SSH_AUTH_SOCK`` — found if the user exported
+         it to launchd (``launchctl setenv SSH_AUTH_SOCK "$SSH_AUTH_SOCK"``).
+      4. The user's login+interactive shell — the most reliable source, since
+         ``git`` works in their terminal precisely because the shell rc exports
+         it there. This is what makes the app match "it just works in the
+         terminal" without any manual setup.
 
     Returns the socket path, or None when no agent can be located.
     """
@@ -172,7 +212,7 @@ def _resolve_ssh_auth_sock() -> str | None:
                 return val
         except (OSError, subprocess.SubprocessError):
             pass
-    return None
+    return _ssh_auth_sock_from_login_shell()
 
 
 def _git_env(auth: GitAuth | None) -> tuple[dict[str, str], list[str]]:
