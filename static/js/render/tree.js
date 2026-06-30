@@ -76,7 +76,7 @@ import {
     summariseSubtree,
     userStateLabel,
 } from "../flows/tree-model.js";
-import { activeFolders, files, folders, me, syncSources } from "../store.js";
+import { activeFolders, connStatus, files, folders, me, syncSources } from "../store.js";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -652,15 +652,53 @@ function ensureEmptyRow() {
     return el;
 }
 
+// Placeholder shown while the WebSocket baseline snapshot is still in
+// flight (initial load / slow network), so the folder list reads as
+// "loading" rather than flashing the "No folders yet" empty state before
+// the real folders arrive. Reuses the global ``voitta-spin`` keyframe.
+function ensureLoadingRow() {
+    let el = rowCache.get("loading");
+    if (!el) {
+        el = document.createElement("li");
+        el.className = "tree-row";
+        el.style.gridTemplateColumns = "auto 1fr";
+        el.style.alignItems = "center";
+        el.style.gap = "8px";
+        el.style.color = "var(--color-text-secondary)";
+        const spinner = document.createElement("span");
+        spinner.style.cssText =
+            "width:12px;height:12px;border-radius:50%;display:inline-block;" +
+            "border:2px solid var(--color-border,#ccc);" +
+            "border-top-color:var(--color-text-secondary);" +
+            "animation:voitta-spin 0.8s linear infinite;";
+        const label = document.createElement("span");
+        label.textContent = "Loading folders…";
+        el.append(spinner, label);
+        rowCache.set("loading", el);
+    }
+    return el;
+}
+
 export function renderFolders(list) {
     const ul = $("#folder-list");
     const sorted = [...list].sort((a, b) => a.id - b.id);
     if (sorted.length === 0) {
-        const seenKeys = new Set(["empty"]);
-        reconcileChildren(ul, [ensureEmptyRow()], seenKeys, rowCache);
+        // An empty list is ambiguous: either the folder snapshot hasn't
+        // landed yet (initial load / slow network) or the user genuinely
+        // has no folders. connStatus only reaches "connected" after the WS
+        // delivers its baseline snapshot + "synced" sentinel, so until then
+        // show a loading indicator instead of "No folders yet". (A filter
+        // that matches nothing happens post-connect, so it correctly falls
+        // through to the empty row.)
+        const loaded = connStatus.get() === "connected";
+        rowCache.delete(loaded ? "loading" : "empty");
+        const key = loaded ? "empty" : "loading";
+        const row = loaded ? ensureEmptyRow() : ensureLoadingRow();
+        reconcileChildren(ul, [row], new Set([key]), rowCache);
         return;
     }
     rowCache.delete("empty");
+    rowCache.delete("loading");
     const allFiles = files.get();
     // Server-pushed set of folder_ids currently having queued/running
     // work. Read once per render so the snapshot is stable across the

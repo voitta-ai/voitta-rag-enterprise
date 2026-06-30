@@ -63,6 +63,14 @@ setRenderers({
 folders.subscribe(() => {
     scheduleFullRender();
 });
+connStatus.subscribe(() => {
+    // The folder tree shows a "Loading folders…" placeholder until the WS
+    // baseline lands ("connected"); re-render on connection-state changes so
+    // it swaps to the real folders — or the "No folders yet" empty row on a
+    // genuinely empty install, where the folders store never changes and this
+    // is the only signal that the snapshot completed.
+    scheduleFullRender();
+});
 files.subscribe(() => {
     // Toolbar visibility depends on whether the selected folder has files,
     // which is computed from this store — handled inside scheduleFullRender.
