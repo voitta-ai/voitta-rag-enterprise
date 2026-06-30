@@ -177,42 +177,83 @@ def _ssh_auth_sock_from_login_shell() -> str | None:
     return None
 
 
-def _resolve_ssh_auth_sock() -> str | None:
-    """Find the ssh-agent socket for hardware-key (YubiKey/SSHCA) auth.
+def _sock_from_launchctl() -> str | None:
+    """macOS ``launchctl getenv SSH_AUTH_SOCK`` — the launchd-domain value a
+    GUI .app inherits. Often the *default* per-session agent, which may NOT hold
+    the user's hardware key (that's why we key-check candidates below)."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        out = subprocess.run(
+            ["launchctl", "getenv", "SSH_AUTH_SOCK"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return out.stdout.strip() or None
+    except (OSError, subprocess.SubprocessError):
+        return None
 
-    Precedence (cheapest/most-explicit first):
-      1. ``VOITTA_SSH_AUTH_SOCK`` — explicit operator override.
-      2. ``SSH_AUTH_SOCK`` already in the process env — set when the server was
-         launched from a shell that has the agent.
-      3. macOS ``launchctl getenv SSH_AUTH_SOCK`` — found if the user exported
-         it to launchd (``launchctl setenv SSH_AUTH_SOCK "$SSH_AUTH_SOCK"``).
-      4. The user's login+interactive shell — the most reliable source, since
-         ``git`` works in their terminal precisely because the shell rc exports
-         it there. This is what makes the app match "it just works in the
-         terminal" without any manual setup.
+
+def _agent_has_keys(sock: str) -> bool:
+    """True if the agent at ``sock`` has at least one identity loaded.
+
+    ``ssh-add -l`` exits 0 when identities are present, 1 when the agent is
+    reachable but empty, 2 when it can't connect. Only 0 means "this agent can
+    actually authenticate", which is exactly how we disambiguate the right
+    agent from a present-but-empty default one.
+    """
+    try:
+        r = subprocess.run(
+            ["ssh-add", "-l"],
+            env={**os.environ, "SSH_AUTH_SOCK": sock},
+            capture_output=True, text=True, timeout=5,
+        )
+        return r.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _resolve_ssh_auth_sock() -> str | None:
+    """Find the ssh-agent socket that can actually sign — for hardware-key
+    (YubiKey / SSHCA / touch2ssh) auth.
+
+    An explicit ``VOITTA_SSH_AUTH_SOCK`` override always wins. Otherwise we
+    gather every candidate — the process env, macOS ``launchctl``, and the
+    user's login+interactive shell (``git`` works in their terminal precisely
+    because the shell rc exports the socket there) — and pick the first whose
+    agent has **keys loaded**. This is the crucial bit: a Mac often has a
+    default launchd agent that's reachable but *empty*, while the real YubiKey
+    agent lives on a different socket from the user's shell. Key-checking avoids
+    locking onto the empty one. Falls back to the first candidate if none can be
+    probed (e.g. ``ssh-add`` missing).
 
     Returns the socket path, or None when no agent can be located.
     """
     override = os.environ.get("VOITTA_SSH_AUTH_SOCK")
     if override:
         return override
-    sock = os.environ.get("SSH_AUTH_SOCK")
-    if sock:
-        return sock
-    if sys.platform == "darwin":
-        try:
-            out = subprocess.run(
-                ["launchctl", "getenv", "SSH_AUTH_SOCK"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            val = out.stdout.strip()
-            if val:
-                return val
-        except (OSError, subprocess.SubprocessError):
-            pass
-    return _ssh_auth_sock_from_login_shell()
+
+    candidates: list[str] = []
+    for src in (
+        os.environ.get("SSH_AUTH_SOCK"),
+        _sock_from_launchctl(),
+        _ssh_auth_sock_from_login_shell(),
+    ):
+        if src and src not in candidates:
+            candidates.append(src)
+
+    if not candidates:
+        return None
+    for sock in candidates:
+        if _agent_has_keys(sock):
+            logger.info("git ssh-agent: using %s (has keys)", sock)
+            return sock
+    # None verified — return the first and let ssh try (ssh-add may be absent,
+    # or the agent needs a touch to even list). Logged so a failure is debuggable.
+    logger.warning(
+        "git ssh-agent: no candidate socket reported loaded keys; trying %s. "
+        "Candidates: %s", candidates[0], candidates
+    )
+    return candidates[0]
 
 
 def _git_env(auth: GitAuth | None) -> tuple[dict[str, str], list[str]]:
