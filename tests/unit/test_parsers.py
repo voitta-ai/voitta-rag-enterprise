@@ -42,6 +42,15 @@ def test_text_parser_can_parse_extensions() -> None:
     assert not parser.can_parse(Path("a.pdf"))
 
 
+def test_text_parser_covers_doc_markup_and_windows_shell() -> None:
+    # Doc-markup variants (MDX & friends) and Windows shells were previously
+    # dropped as "unknown extension" — they're plain text and should index.
+    parser = TextParser()
+    for ext in (".mdx", ".mdoc", ".textile", ".pod", ".mediawiki", ".wiki",
+                ".ps1", ".psm1", ".psd1", ".bat", ".cmd"):
+        assert parser.can_parse(Path(f"doc{ext}")), ext
+
+
 def test_text_parser_covers_common_code_extensions() -> None:
     """Spot-check the expanded code-file allowlist.
 

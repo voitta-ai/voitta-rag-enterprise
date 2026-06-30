@@ -57,6 +57,12 @@ class TextParser(BaseParser):
         # plain text + docs
         ".txt", ".md", ".markdown", ".rst", ".rst_t", ".log", ".tex", ".bib",
         ".adoc", ".asciidoc", ".org", ".patch", ".diff", ".man",
+        # doc-markup variants — Markdown supersets / wiki / lightweight markup.
+        # All plain UTF-8 text; embedded JSX/components (.mdx/.mdoc) are just
+        # tag noise that's fine for semantic indexing.
+        ".mdx", ".mdoc", ".markdoc", ".mkd", ".mkdn", ".mdown", ".litcoffee",
+        ".textile", ".pod", ".rdoc", ".wiki", ".mediawiki", ".creole",
+        ".asc", ".text",
         # data + config
         ".json", ".jsonl", ".ndjson", ".yaml", ".yml", ".toml", ".csv", ".tsv",
         ".xml", ".ini", ".cfg", ".cnf", ".conf", ".env", ".properties", ".sql",
@@ -85,6 +91,9 @@ class TextParser(BaseParser):
         ".pas", ".f", ".f90", ".f95", ".cr",
         # shell + build
         ".sh", ".bash", ".zsh", ".fish", ".ksh", ".csh",
+        # Windows shells — PowerShell (.ps1 script, .psm1 module, .psd1
+        # manifest) and legacy batch (.bat/.cmd). All plain text.
+        ".ps1", ".psm1", ".psd1", ".bat", ".cmd",
         ".gradle", ".cmake", ".mk", ".am", ".ac", ".m4",
         # infra / data-language
         ".tf", ".tfvars", ".hcl",
