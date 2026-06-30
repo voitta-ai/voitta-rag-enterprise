@@ -152,6 +152,36 @@ def _git_env(auth: GitAuth | None) -> tuple[dict[str, str], list[str]]:
         cleanup.append(keyfile.name)
         return env, cleanup
 
+    # SSH agent mode — use the host's running ssh-agent + ``~/.ssh/config``.
+    # This is the ONLY way hardware-backed keys work (YubiKey / SSHCA /
+    # touch2ssh): the private key never leaves the device, so there's nothing to
+    # paste, and the cert + host mappings live in ``~/.ssh/config``. Crucially we
+    # do NOT pass ``-F /dev/null`` here (that would discard ``~/.ssh/config`` and
+    # break the agent flow — e.g. the harmless "CARD AUTH pubkey ... agent
+    # refused operation" line then never falls through to the working cert key).
+    # We inherit ``SSH_AUTH_SOCK`` via ``os.environ`` above. ``BatchMode=yes``
+    # keeps a headless run from hanging on a prompt; a YubiKey touch/PIN is
+    # handled by the agent out-of-band and is unaffected by it.
+    #
+    # Reached when method is explicitly "agent", or "ssh" with no pasted key
+    # (the natural choice for an agent user).
+    if auth.method in ("agent", "ssh"):
+        # A missing SSH_AUTH_SOCK is the usual reason agent auth silently fails
+        # on a headless/containerised server (the process can't reach the
+        # user's agent). Log it so the cause is obvious; ssh may still succeed
+        # via on-disk ``~/.ssh/id_*`` keys, so this is a warning, not an error.
+        if not env.get("SSH_AUTH_SOCK"):
+            logger.warning(
+                "git SSH agent mode: SSH_AUTH_SOCK is not set in the server's "
+                "environment — the ssh-agent (YubiKey/SSHCA) is unreachable. "
+                "Auth will fall back to on-disk keys in ~/.ssh and likely fail. "
+                "Start the server from a shell where `ssh-add -l` works."
+            )
+        env["GIT_SSH_COMMAND"] = (
+            "ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
+        )
+        return env, cleanup
+
     # No auth configured — anonymous (works for public repos over HTTPS).
     env["GIT_SSH_COMMAND"] = (
         "ssh -F /dev/null -o StrictHostKeyChecking=accept-new -o BatchMode=yes"

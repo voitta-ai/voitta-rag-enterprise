@@ -602,12 +602,26 @@
                     <label>Authentication</label>
                     <div class="radio-row">
                         <label><input type="radio" name="sync-gh-auth" value="ssh" checked> SSH key</label>
+                        <label><input type="radio" name="sync-gh-auth" value="agent"> SSH agent</label>
                         <label><input type="radio" name="sync-gh-auth" value="token"> Personal access token</label>
                     </div>
 
                     <div id="sync-gh-ssh">
                         <label>SSH private key (PEM)</label>
                         <textarea id="sync-gh-ssh-key" rows="4" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;…&#10;-----END OPENSSH PRIVATE KEY-----"></textarea>
+                    </div>
+                    <div id="sync-gh-agent" hidden>
+                        <p class="hint" style="margin:0;">
+                            Uses the ssh-agent and <code>~/.ssh/config</code> of the
+                            account running this server — the right choice for
+                            hardware keys (YubiKey / SSHCA / touch2ssh), where the
+                            private key can't be exported. Use an SSH repo URL
+                            (<code>git@github.com:org/repo.git</code> or your org's
+                            <code>org-…@github.com:…</code> form). The server must be
+                            started from an environment where <code>ssh-add -l</code>
+                            lists your key; a YubiKey touch/PIN, if required, is
+                            handled by the agent.
+                        </p>
                     </div>
                     <div id="sync-gh-token" hidden>
                         <label>Username</label>

@@ -1138,6 +1138,9 @@ function closeSyncModal() {
 function setGhAuth(method) {
     $("#sync-gh-ssh").hidden = method !== "ssh";
     $("#sync-gh-token").hidden = method !== "token";
+    // Agent mode has no credential input — it uses the host's ssh-agent.
+    const agentEl = $("#sync-gh-agent");
+    if (agentEl) agentEl.hidden = method !== "agent";
     document.querySelectorAll('input[name="sync-gh-auth"]').forEach((el) => {
         el.checked = el.value === method;
     });

@@ -89,7 +89,9 @@ class GithubSyncIn(BaseModel):
     branches: list[str] = Field(default_factory=list)
     all_branches: bool = False
     extended: bool = False
-    auth_method: Literal["ssh", "token", ""] = ""
+    # "agent" = use the server host's ssh-agent + ~/.ssh/config (the only mode
+    # that works with hardware keys: YubiKey / SSHCA / touch2ssh).
+    auth_method: Literal["ssh", "token", "agent", ""] = ""
     username: str = ""
     pat: str = ""
     ssh_key: str = ""
@@ -682,7 +684,7 @@ def upsert_sync_source(
                 status.HTTP_400_BAD_REQUEST,
                 "Either set all_branches=true or pick at least one branch",
             )
-        if gh_cfg.auth_method not in ("", "ssh", "token"):
+        if gh_cfg.auth_method not in ("", "ssh", "token", "agent"):
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST,
                 f"Invalid auth_method: {gh_cfg.auth_method!r}",
@@ -1354,7 +1356,7 @@ def trigger_sync(
 
 class BranchListIn(BaseModel):
     repo: str
-    auth_method: Literal["ssh", "token", ""] = ""
+    auth_method: Literal["ssh", "token", "agent", ""] = ""
     username: str = ""
     pat: str = ""
     ssh_key: str = ""
