@@ -1264,8 +1264,31 @@ def _run_reindex_sync(folder_id: int | None, file_ids: list[int]) -> None:
             folder_id, phase="queueing", done=queued, total=total
         )
 
-    for fid in upserts:
-        publish_file_upserted(fid)
+    # Notify the SPA that every row flipped back to pending. Emit the
+    # per-file events in ONE session and recompute folder stats just once
+    # per touched folder.
+    #
+    # Do NOT call publish_file_upserted() in a per-file loop here: each call
+    # recomputes full-folder stats (compute_folder_stats scans every file in
+    # the folder + aggregate chunk/image queries + a Qdrant health probe), so
+    # N files cost O(N^2). A 7k-file reindex wedged the single indexer worker
+    # for many minutes spinning in compute_folder_stats (py-spy caught it
+    # mid-loop), starving the queued extract jobs that share that one worker.
+    from .folder_stats import publish_folder_stats
+
+    touched_folders: set[int] = set()
+    with session_scope() as s:
+        for fid in upserts:
+            file = s.get(File, fid)
+            if file is None:
+                continue
+            events.publish(
+                "files",
+                {"type": "file.upserted", "file": file_event_payload(file)},
+            )
+            touched_folders.add(file.folder_id)
+        for touched in touched_folders:
+            publish_folder_stats(s, touched)
     _publish_reindex_progress(folder_id, phase="done", done=total, total=total)
 
 
