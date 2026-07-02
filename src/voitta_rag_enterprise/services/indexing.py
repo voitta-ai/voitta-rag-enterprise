@@ -1826,7 +1826,12 @@ def reconcile_abandoned_extracts() -> int:
                 f.pending_embeds,
             )
             f.state = "pending"
-            f.pending_embeds = 0
+            # pending_embeds is deliberately preserved: a positive count is
+            # the signal _short_circuit_unchanged relies on to force a full
+            # re-extract. Zeroing it here would let the re-enqueued extract
+            # short-circuit on the unchanged sha and heal the row straight
+            # to 'indexed' while its Qdrant points (lost with the embeds
+            # this extract died in the middle of) are missing.
             f.error = None
             # Re-enqueue an extract job; reclaim_abandoned_jobs already ran
             # so this won't dedup against the dead one.
@@ -1844,8 +1849,13 @@ def reconcile_abandoned_extracts() -> int:
         stranded_pending = list(
             s.execute(select(File).where(File.state == "pending")).scalars()
         )
+        already_repaired = set(repaired_ids)
         for f in stranded_pending:
-            if f.id in live_files:
+            # Skip rows the candidate loop above just reset to 'pending' —
+            # their extract is already enqueued; re-visiting them here only
+            # double-counted them in the repaired total and published a
+            # duplicate event.
+            if f.id in live_files or f.id in already_repaired:
                 continue
             logger.warning(
                 "reconcile: re-enqueueing stranded pending file_id=%d", f.id

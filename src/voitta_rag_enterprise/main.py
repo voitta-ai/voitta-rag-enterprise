@@ -167,7 +167,14 @@ def create_app() -> FastAPI:
         events.install_loop(asyncio.get_running_loop())
         _seed_users()
         _seed_auth_providers()
-        _startup_scan()
+        if settings.disable_background:
+            # Background startup is disabled (tests / tooling): scan inline
+            # so folder rows still reconcile with disk. In normal runs the
+            # scan happens inside _finish_startup — after the job-queue
+            # recovery sweeps (so its enqueues don't dedup against zombie
+            # jobs from a killed process) and after the watcher starts (so
+            # files landing mid-scan aren't invisible until next restart).
+            _startup_scan()
 
         app.state.startup_status = {"phase": "starting", "ready": False}
 
@@ -192,27 +199,52 @@ def create_app() -> FastAPI:
                 )
                 from .services.worker import DEFAULT_HANDLERS, WorkerPool
 
+                # Every recovery step below is individually non-fatal: a
+                # failed sweep must never prevent the watcher and workers
+                # from starting — a half-repaired app that indexes beats a
+                # fully-diagnosed one that doesn't.
                 _set_phase("reconciling jobs")
-                requeued, killed = job_queue.reclaim_abandoned_jobs()
-                if requeued or killed:
-                    logger.warning(
-                        "abandoned-jobs reconcile: requeued=%d killed=%d",
-                        requeued,
-                        killed,
-                    )
-                # Bootstrap the folder-active tracker *after* the abandoned-job
-                # sweep so we don't count rows that are about to be flipped to
-                # 'error'. Subsequent enqueue/finish hooks maintain it incrementally.
+                try:
+                    requeued, killed = job_queue.reclaim_abandoned_jobs()
+                    if requeued or killed:
+                        logger.warning(
+                            "abandoned-jobs reconcile: requeued=%d killed=%d",
+                            requeued,
+                            killed,
+                        )
+                except Exception:
+                    logger.exception("abandoned-jobs reconcile failed at startup")
+
+                # Disk-aware recovery: cross-checks queued jobs and file rows
+                # against the filesystem (cancels delete jobs whose target is
+                # on disk, resurrects wrongly-deleted rows, finishes
+                # interrupted deletes, snaps drifted counters, retries
+                # I/O-shaped errors). Must run after reclaim_abandoned_jobs
+                # and before folder_active.init_from_db.
+                _set_phase("recovering state")
+                try:
+                    from .services.startup_recovery import run_startup_recovery
+
+                    run_startup_recovery()
+                except Exception:
+                    logger.exception("startup recovery failed")
+
+                # Bootstrap the folder-active tracker *after* the sweeps so
+                # the counts reflect the settled queue. Subsequent
+                # enqueue/finish hooks maintain it incrementally.
                 from .services import folder_active
 
                 folder_active.init_from_db()
-                extracts_repaired = reconcile_abandoned_extracts()
-                if extracts_repaired:
-                    logger.warning(
-                        "reset %d file(s) from extracted/embedding -> pending"
-                        " (extract job was abandoned)",
-                        extracts_repaired,
-                    )
+                try:
+                    extracts_repaired = reconcile_abandoned_extracts()
+                    if extracts_repaired:
+                        logger.warning(
+                            "reset %d file(s) from extracted/embedding -> pending"
+                            " (extract job was abandoned)",
+                            extracts_repaired,
+                        )
+                except Exception:
+                    logger.exception("abandoned-extracts reconcile failed at startup")
 
                 # Qdrant orphan-point sweep. Cleans points whose payload id
                 # no longer matches any SQLite row:
@@ -275,6 +307,19 @@ def create_app() -> FastAPI:
                 watcher = from_settings_for_all_folders()
                 watcher.start()
                 install_default(watcher)
+
+                # Scan AFTER the watcher is live so a file landing mid-scan
+                # is caught by the watcher instead of falling into the old
+                # walked-past-already gap (invisible until the next restart).
+                # Duplicate enqueues from watcher+scan coalesce via dedup_key.
+                # Also after the job sweeps above, so the scan's enqueues
+                # don't dedup against a killed process's zombie jobs.
+                _set_phase("scanning folders")
+                try:
+                    await asyncio.to_thread(_startup_scan)
+                except Exception:
+                    logger.exception("startup folder scan failed")
+
                 handlers = {**DEFAULT_HANDLERS, **INDEXING_HANDLERS}
                 # Pre-warm the embedders before any worker can claim a job.
                 # Lazy-loading them on first use means the load (CUDA weight

@@ -232,3 +232,36 @@ def test_reconcile_re_enqueues_stranded_pending(client: TestClient) -> None:
             select(Job).where(Job.dedup_key == f"extract:{fid_with_job}")
         ).scalars().all()
         assert len(existing) == 1
+
+
+def test_reconcile_preserves_pending_embeds_on_reset(client: TestClient) -> None:
+    """An extract that died mid-inline-embed leaves state='extracted' with
+    pending_embeds > 0: chunks committed, Qdrant vectors missing. The reset
+    back to 'pending' must keep that counter — it is what stops the
+    re-enqueued extract from sha-short-circuiting straight to 'indexed'
+    with no vectors behind it. Each repaired row is also counted exactly
+    once (the stranded-pending sweep must not re-visit it)."""
+    from voitta_rag_enterprise.services.indexing import reconcile_abandoned_extracts
+
+    fid = _make_file_row("pe")
+    with session_scope() as s:
+        f = s.get(File, fid)
+        f.state = "extracted"
+        f.file_cas_id = "sha-x"
+        f.pending_embeds = 2
+
+    repaired = reconcile_abandoned_extracts()
+    assert repaired == 1
+
+    with session_scope() as s:
+        f = s.get(File, fid)
+        assert f.state == "pending"
+        assert f.pending_embeds == 2  # preserved -> forces full re-extract
+        live = s.execute(
+            select(Job).where(
+                Job.kind == "extract",
+                Job.state == "queued",
+                Job.dedup_key == f"extract:{fid}",
+            )
+        ).scalars().all()
+        assert len(live) == 1

@@ -98,6 +98,93 @@ def load_sidecar(folder_root: Path, sidecar_file: Path | None = None) -> dict[st
     return out
 
 
+def resolve_scan_roots(session: Session, folder: Folder) -> list[Path] | None:
+    """The subtrees a scan of ``folder`` walks, or ``None`` when the folder's
+    disk state cannot be trusted right now.
+
+    ``None`` is a hard "hands off" answer — root missing, cloud mount offline
+    or transiently empty, no selected subtree present. Callers (the scan, the
+    startup-recovery sweep) must then neither purge nor repair anything for
+    this folder: absence of evidence is not evidence of absence.
+
+    For a regular folder this is just ``[folder.path]``. For a cloud-local
+    (Google Drive mount) folder, ``folder.path`` is the account mount and only
+    the user-selected subtrees are in scope — a file under a *deselected*
+    subtree exists on disk but does not belong in the index. rel_paths are
+    always relative to ``folder.path`` regardless, so the Drive's folder
+    structure is mirrored under the folder.
+    """
+    root = Path(folder.path)
+    if not root.is_dir():
+        logger.warning("folder %s missing or not a directory", folder.path)
+        return None
+    if folder.source_type != "google_drive_local":
+        return [root]
+
+    from .sync.cloudstorage_local import is_source_live
+
+    # Liveness guard — an offline Drive app or a transiently empty mount
+    # must never be mistaken for "all files deleted".
+    if not is_source_live(root):
+        logger.info(
+            "cloud folder %s not live (Drive offline / empty mount) — "
+            "disk state unknown", folder.path
+        )
+        return None
+
+    from ..db.models import FolderSyncSource
+
+    src = session.get(FolderSyncSource, folder.id)
+    selected: list[str] = []
+    if src is not None:
+        raw = (src.gdl_paths or "").strip()
+        if raw:
+            try:
+                decoded = json.loads(raw)
+                if isinstance(decoded, list):
+                    selected = [str(x) for x in decoded if x]
+            except (ValueError, TypeError):
+                selected = []
+        if not selected and src.gdl_path:
+            selected = [src.gdl_path]
+    # Keep only selections that exist and live under the mount.
+    roots = [
+        Path(p) for p in selected
+        if (Path(p) == root or str(Path(p)).startswith(str(root) + "/"))
+        and Path(p).is_dir()
+    ]
+    if not roots:
+        logger.info(
+            "cloud folder %s: no selected subtree currently present — "
+            "disk state unknown", folder.path
+        )
+        return None
+    return roots
+
+
+def file_present_in_scope(
+    root: Path, scan_roots: list[Path], ignore: IgnoreMatcher, rel_path: str
+) -> bool:
+    """True when ``rel_path`` exists as a regular file under one of the
+    scanned subtrees and isn't ignore-listed — i.e. a scan walking right now
+    would (re)index it.
+
+    The single answer to "is this file really here?", shared by the scan's
+    vanish sweep and the startup-recovery sweep so the two can never disagree.
+    Unreadable (OSError on stat) counts as absent: a file the indexer cannot
+    stat cannot be indexed either.
+    """
+    if ignore.matches(rel_path):
+        return False
+    p = root / rel_path
+    if not any(p == r or str(p).startswith(f"{r}/") for r in scan_roots):
+        return False
+    try:
+        return p.is_file()
+    except OSError:
+        return False
+
+
 def scan_folder(
     session: Session,
     folder: Folder,
@@ -118,67 +205,17 @@ def scan_folder(
         max_file_bytes = get_caps().max_file_bytes
 
     root = Path(folder.path)
-    if not root.exists() or not root.is_dir():
-        logger.warning("folder %s missing or not a directory", folder.path)
+    scan_roots = resolve_scan_roots(session, folder)
+    if scan_roots is None:
         return ScanResult(0, 0, 0)
 
-    # Cloud-local folders (read-only Google Drive mount): two special rules.
-    #   1. Liveness guard — if the Drive app is offline or the mount is
-    #      transiently empty, a normal scan would see zero files and PURGE the
-    #      whole index. Skip the scan entirely instead (never delete on outage).
-    #   2. Sidecar lives under data_dir, never inside the Drive mount, so we
-    #      never write into the user's Drive.
-    # ``scan_roots`` are the subtrees to walk; ``rel`` is always computed
-    # relative to ``root`` (folder.path). For a regular folder that's just the
-    # folder itself. For a cloud-local (Google Drive) folder, ``root`` is the
-    # account mount and we walk ONLY the user-selected subtrees — but still
-    # number rel_paths relative to the mount, so the Drive's folder structure
-    # (incl. parent dirs the user didn't select) is mirrored under the folder.
+    # Cloud-local sidecar lives under data_dir, never inside the (read-only)
+    # Drive mount; regular folders keep it at the folder root.
     sidecar_file: Path | None = None
-    scan_roots: list[Path] = [root]
     if folder.source_type == "google_drive_local":
-        import json as _json
-
         from .sync.cloud_local import cloud_sidecar_path
-        from .sync.cloudstorage_local import is_source_live
 
-        if not is_source_live(root):
-            logger.info(
-                "cloud folder %s not live (Drive offline / empty mount) — "
-                "skipping scan to avoid purging the index", folder.path
-            )
-            return ScanResult(0, 0, 0)
         sidecar_file = cloud_sidecar_path(folder.id)
-
-        # Resolve the selected subtrees from the sync source.
-        from ..db.models import FolderSyncSource
-
-        src = session.get(FolderSyncSource, folder.id)
-        selected: list[str] = []
-        if src is not None:
-            raw = (src.gdl_paths or "").strip()
-            if raw:
-                try:
-                    decoded = _json.loads(raw)
-                    if isinstance(decoded, list):
-                        selected = [str(x) for x in decoded if x]
-                except (ValueError, TypeError):
-                    selected = []
-            if not selected and src.gdl_path:
-                selected = [src.gdl_path]
-        # Keep only selections that exist and live under the mount; if none are
-        # currently present, skip (outage guard — never purge).
-        scan_roots = [
-            Path(p) for p in selected
-            if (Path(p) == root or str(Path(p)).startswith(str(root) + "/"))
-            and Path(p).is_dir()
-        ]
-        if not scan_roots:
-            logger.info(
-                "cloud folder %s: no selected subtree currently present — "
-                "skipping scan to avoid purging the index", folder.path
-            )
-            return ScanResult(0, 0, 0)
 
     sidecar = load_sidecar(root, sidecar_file)
     now = int(time.time())
@@ -272,13 +309,21 @@ def scan_folder(
         .all()
     )
     for f in rows:
-        if f.rel_path not in seen:
-            f.state = "deleted"
-            job_queue.enqueue(
-                session, "delete_file", {"file_id": f.id}, dedup_key=f"delete:{f.id}"
-            )
-            vanished += 1
-            vanished_ids.append(f.id)
+        if f.rel_path in seen:
+            continue
+        # Not seen by the walk — but that alone isn't proof it's gone: a file
+        # can land while the walk is running (upload burst, git sync), with
+        # its row inserted by the watcher after the walk already passed its
+        # directory. Purging those made freshly-uploaded files disappear from
+        # the index while sitting on disk. Re-stat before declaring vanished.
+        if file_present_in_scope(root, scan_roots, ignore, f.rel_path):
+            continue
+        f.state = "deleted"
+        job_queue.enqueue(
+            session, "delete_file", {"file_id": f.id}, dedup_key=f"delete:{f.id}"
+        )
+        vanished += 1
+        vanished_ids.append(f.id)
 
     return ScanResult(
         added=added,
