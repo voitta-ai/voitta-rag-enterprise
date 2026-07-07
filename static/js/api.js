@@ -273,6 +273,10 @@ export const api = {
     // Admin — Clerk directory (read-only proxy; requires the Clerk
     // toggle + secret key on the Sign-in gate tab).
     adminClerkDirectory: () => req("GET", "/api/admin/clerk/directory"),
+    // Super-admin only: impersonate a Clerk-directory user (provisions
+    // their accounts on the fly; company_id '' = Personal).
+    adminClerkImpersonate: (email, companyId = "") =>
+        req("POST", "/api/admin/clerk/impersonate", { email, company_id: companyId }),
 
     // Account switch — pick which (email, company) account is active.
     switchAccount: (accountId) => req("POST", `/api/auth/account/${accountId}`),

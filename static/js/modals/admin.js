@@ -11,7 +11,7 @@
 // its own close + tab + form-submit handlers at module load.
 
 import { api } from "../api.js";
-import { adminState } from "../store.js";
+import { adminState, me as meStore } from "../store.js";
 import { createChipSelect } from "../components/chip_select.js";
 import { sourceBadges } from "../components/badges.js";
 
@@ -300,11 +300,36 @@ function renderClerkDirectory() {
     renderClerkCompanies();
 }
 
+// Super-admin only: "View as" a Clerk user (accounts are provisioned on
+// the fly server-side; company_id picks the scope the view lands in).
+function _clerkViewAsBtn(email, companyId) {
+    const btn = document.createElement("button");
+    btn.className = "btn btn-secondary btn-xs";
+    btn.textContent = "View as";
+    btn.title = companyId
+        ? "Impersonate this user in this company's scope"
+        : "Impersonate this user (Personal account)";
+    btn.addEventListener("click", async (e) => {
+        e.preventDefault();
+        e.stopPropagation();  // don't toggle the surrounding <details>
+        try {
+            await api.adminClerkImpersonate(email, companyId);
+            window.location.reload();
+        } catch (err) { alert(err.message); }
+    });
+    return btn;
+}
+
+function _isSuperAdmin() {
+    return !!meStore.get()?.is_super_admin;
+}
+
 function renderClerkUsersTable() {
     const tbody = $("#admin-clerk-users-table tbody");
     if (!tbody || !_clerkDir) return;
     tbody.innerHTML = "";
     const users = _clerkDir.users || [];
+    const superAdmin = _isSuperAdmin();
     const q = _clerkUserFilter.trim().toLowerCase();
     const rows = q
         ? users.filter((u) =>
@@ -325,6 +350,12 @@ function renderClerkUsersTable() {
             td((u.org_names || []).join(", ") || "—"),
             td(_fmtClerkDate(u.last_sign_in_at)),
         );
+        const tdActions = document.createElement("td");
+        tdActions.className = "admin-actions-cell";
+        if (superAdmin && u.email) {
+            tdActions.appendChild(_clerkViewAsBtn(u.email, ""));
+        }
+        tr.appendChild(tdActions);
         tbody.appendChild(tr);
     }
     const countEl = $("#admin-clerk-users-count");
@@ -373,11 +404,12 @@ function renderClerkCompanies() {
         head.append(title, adminEl, count);
         card.appendChild(head);
 
+        const superAdmin = _isSuperAdmin();
         const table = document.createElement("table");
         table.className = "admin-table";
         const thead = document.createElement("thead");
         const hr = document.createElement("tr");
-        for (const h of ["Email", "Name", "Role"]) {
+        for (const h of ["Email", "Name", "Role", ""]) {
             const th = document.createElement("th");
             th.textContent = h;
             hr.appendChild(th);
@@ -399,7 +431,13 @@ function renderClerkCompanies() {
                 badge.textContent = "ADMIN";
                 roleTd.appendChild(badge);
             }
-            tr.append(td(m.email || "—"), td(m.name || "—"), roleTd);
+            const actTd = document.createElement("td");
+            actTd.className = "admin-actions-cell";
+            if (superAdmin && m.email) {
+                // Lands the impersonation in THIS company's account scope.
+                actTd.appendChild(_clerkViewAsBtn(m.email, org.id));
+            }
+            tr.append(td(m.email || "—"), td(m.name || "—"), roleTd, actTd);
             tbody.appendChild(tr);
         }
         table.append(thead, tbody);
