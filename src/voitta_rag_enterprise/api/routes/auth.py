@@ -208,26 +208,48 @@ def switch_account(
     db: Session = Depends(db_session),
     user: CurrentUser = Depends(real_user),
 ) -> AccountSwitchOut:
-    # real_user, not current_user: you always switch YOUR OWN account —
-    # impersonation ("view as") is a separate session flag that already
-    # targets a specific account row.
+    # real_user, not current_user: the caller switches THEIR OWN accounts —
+    # validated by email, not a session-stored list, so it can't go stale.
+    # Impersonation twist: while an admin is "viewing as" someone, the
+    # dropdown shows the impersonated persona's accounts; switching one of
+    # those retargets the impersonation (acting_as_user_id), not the
+    # admin's own active account.
     from ...db.models import User as _User
+    from ...services.acl import person_is_admin
 
     target = db.get(_User, account_id)
-    # Only the caller's own accounts are switchable — validated by email,
-    # not by a session-stored list, so it can't go stale.
-    if target is None or target.email != user.email:
+    if target is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Account not found")
-    request.session["active_account_id"] = target.id
-    logger.info(
-        "account switch: %s -> id=%d (%s)",
-        user.email, target.id, target.company_name or "Personal",
-    )
-    return AccountSwitchOut(
-        active_account_id=target.id,
-        company_id=target.company_id or "",
-        company_name=target.company_name or "",
-    )
+
+    if target.email == user.email:
+        request.session["active_account_id"] = target.id
+        logger.info(
+            "account switch: %s -> id=%d (%s)",
+            user.email, target.id, target.company_name or "Personal",
+        )
+        return AccountSwitchOut(
+            active_account_id=target.id,
+            company_id=target.company_id or "",
+            company_name=target.company_name or "",
+        )
+
+    acting_id = request.session.get("acting_as_user_id")
+    if acting_id is not None and person_is_admin(db, user.email):
+        acting = db.get(_User, int(acting_id))
+        if acting is not None and acting.email == target.email:
+            request.session["acting_as_user_id"] = target.id
+            logger.info(
+                "impersonation account switch: %s viewing %s -> id=%d (%s)",
+                user.email, target.email, target.id,
+                target.company_name or "Personal",
+            )
+            return AccountSwitchOut(
+                active_account_id=target.id,
+                company_id=target.company_id or "",
+                company_name=target.company_name or "",
+            )
+
+    raise HTTPException(status.HTTP_404_NOT_FOUND, "Account not found")
 
 
 # ---------------------------------------------------------------------------

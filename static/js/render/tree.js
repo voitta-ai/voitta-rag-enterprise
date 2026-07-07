@@ -457,11 +457,17 @@ function updateRootSwitches(li, folder) {
         : "MCP search excludes this folder. Click to include.";
     if (r.slot1.title !== activeTitle) r.slot1.title = activeTitle;
 
-    // Share toggle (slot2) — only for owners, and only when there could be
-    // someone to share WITH: in single-user mode (desktop app) the flag is a
-    // no-op (the lone identity sees everything), so the switch is hidden
-    // entirely rather than rendered dead. Non-owners get an invisible spacer.
-    if (folder.owned && !me.get()?.single_user) {
+    // Share toggle (slot2) — only for owners, and only when there is a
+    // community to share WITH. Hidden in single-user mode (the lone
+    // identity sees everything) and for accounts with no sharing
+    // community (Personal account of a Clerk-only user): sharing is
+    // company-centric — a company account shares with its company, a
+    // native Personal account with the native userbase — never global.
+    const _me = me.get();
+    const shareCommunity = _me?.company_id
+        ? (_me.company_name || "this company")
+        : ((_me?.native_allowed || _me?.is_super_admin) ? "all Voitta Native users" : null);
+    if (folder.owned && !_me?.single_user && shareCommunity) {
         if (!li._shareSwitch) {
             const sw = buildSwitch({
                 title: "",
@@ -475,8 +481,8 @@ function updateRootSwitches(li, folder) {
         }
         setIfChanged(li._shareSwitch, "checked", !!folder.shared);
         const shareTitle = folder.shared
-            ? "Folder is shared with everyone. Click to unshare."
-            : "Folder is private. Click to share with everyone.";
+            ? `Folder is shared with ${shareCommunity}. Click to unshare.`
+            : `Folder is private. Click to share with ${shareCommunity}.`;
         if (r.slot2.title !== shareTitle) r.slot2.title = shareTitle;
     } else if (li._shareSwitch) {
         // Owner status flipped from owned to not-owned (rare but possible

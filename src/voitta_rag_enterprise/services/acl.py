@@ -166,17 +166,55 @@ def folder_user_ids(session: Session, folder_id: int) -> list[int]:
     ]
 
 
+def account_community(session: Session, user_id: int) -> str | None:
+    """The sharing community of an account, or None when it has none.
+
+    - Company account → its ``company_id`` (all accounts of that Clerk org).
+    - Personal account of a natively-allowed email (allowlist user/domain
+      or super-admin) → the ``"native"`` community.
+    - Personal account of a Clerk-only user → **no community**: it can
+      neither share out nor see community-shared folders (grants and
+      ownership still work normally).
+    """
+    from . import admin_store
+
+    row = session.get(User, user_id)
+    if row is None:
+        return None
+    if row.company_id:
+        return row.company_id
+    if admin_store.is_native_allowed(row.email) or admin_store.is_super_admin(
+        row.email
+    ):
+        return "native"
+    return None
+
+
+def _owner_community(session: Session, owner_id: int | None) -> str | None:
+    """Community a shared folder is shared INTO — the owner's community.
+
+    Legacy escape hatch: an unowned shared folder (``owner_id`` NULL, e.g.
+    its owner was deleted) counts as native so it doesn't silently vanish
+    for the operator community.
+    """
+    if owner_id is None:
+        return "native"
+    return account_community(session, owner_id)
+
+
 def visible_folder_ids(session: Session, user_id: int) -> list[int]:
-    """Folders the user can see.
+    """Folders the account can see.
 
     Union of three sources:
 
-    - **Owned** (``folders.owner_id == user_id``) — folders this user
+    - **Owned** (``folders.owner_id == user_id``) — folders this account
       registered. Always visible to the owner.
     - **Granted** (``folder_acl(folder_id, user_id)``) — folders explicitly
-      shared with this user via the grant API.
-    - **Shared globally** (``folders.shared = 1``) — folders the owner
-      flipped to public; visible to everyone (read-only for non-owners).
+      shared with this account via the grant API.
+    - **Community-shared** (``folders.shared = 1``) — visible only when the
+      viewer account and the folder owner's account are in the SAME
+      community (same Clerk company, or both native). Sharing is
+      company-centric, never global.
     """
     owned = {
         f.id
@@ -190,12 +228,14 @@ def visible_folder_ids(session: Session, user_id: int) -> list[int]:
             select(FolderAcl).where(FolderAcl.user_id == user_id)
         ).scalars()
     }
-    shared = {
-        f.id
+    shared: set[int] = set()
+    community = account_community(session, user_id)
+    if community is not None:
         for f in session.execute(
             select(_Folder).where(_Folder.shared.is_(True))
-        ).scalars()
-    }
+        ).scalars():
+            if _owner_community(session, f.owner_id) == community:
+                shared.add(f.id)
     return sorted(owned | granted | shared)
 
 
@@ -227,8 +267,14 @@ def user_can_see_folder(session: Session, folder_id: int, user_id: int) -> bool:
     folder = session.get(_Folder, folder_id)
     if folder is None:
         return False
-    if folder.owner_id == user_id or folder.shared:
+    if folder.owner_id == user_id:
         return True
+    if folder.shared:
+        # Community-scoped, mirroring visible_folder_ids: shared reaches
+        # only accounts in the owner's community.
+        viewer = account_community(session, user_id)
+        if viewer is not None and viewer == _owner_community(session, folder.owner_id):
+            return True
     return (
         session.execute(
             select(FolderAcl).where(

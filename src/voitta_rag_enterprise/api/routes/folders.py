@@ -806,10 +806,21 @@ def set_share(
     db: Session = Depends(db_session),
     user: CurrentUser = Depends(current_user),
 ) -> FolderOut:
-    """Owner-only toggle: when ``shared=true`` every signed-in user sees the
-    folder in their listing (read-only for non-owners). Default off.
+    """Owner-only toggle. Sharing is COMMUNITY-scoped: the folder becomes
+    visible (read-only) to accounts in the owner account's community — the
+    same Clerk company for a company account, or the native userbase for a
+    natively-allowed Personal account. Personal accounts of Clerk-only
+    users have no community and cannot share (grants still work).
     """
+    from ...services.acl import account_community
+
     folder = _require_owner(db, folder_id, user)
+    if body.shared and account_community(db, user.id) is None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "This account has no sharing community. Switch to a company "
+            "account to share with that company.",
+        )
     folder.shared = bool(body.shared)
     db.commit()
     db.refresh(folder)
