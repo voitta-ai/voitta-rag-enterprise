@@ -335,8 +335,9 @@ function renderClerkUsersTable() {
     }
 }
 
-// One card per organization: name + member count header, then a
-// read-only member table (role column mirrors Clerk's org:admin/member).
+// One COLLAPSED card per organization: name + admin email(s) + member
+// count in the summary row; the read-only member table (role column
+// mirrors Clerk's org:admin/member) renders only when expanded.
 function renderClerkCompanies() {
     const host = $("#admin-clerk-companies");
     if (!host || !_clerkDir) return;
@@ -350,19 +351,26 @@ function renderClerkCompanies() {
         return;
     }
     for (const org of orgs) {
-        const card = document.createElement("div");
-        card.className = "admin-provider-card";
+        const members = org.members || [];
+        const card = document.createElement("details");
+        card.className = "admin-provider-card admin-clerk-org";
 
-        const head = document.createElement("div");
-        head.className = "provider-card-head";
+        const head = document.createElement("summary");
+        head.className = "admin-clerk-org-head";
         const title = document.createElement("span");
         title.className = "provider-card-title";
         title.textContent = org.name;
+        const admins = members.filter((m) => m.role === "admin");
+        const adminEl = document.createElement("span");
+        adminEl.className = "hint admin-clerk-org-admin";
+        adminEl.textContent = admins.length
+            ? admins.map((a) => a.email || a.name).filter(Boolean).join(", ")
+            : "";
+        if (adminEl.textContent) adminEl.title = "Organization admin";
         const count = document.createElement("span");
-        count.className = "hint";
-        const n = (org.members || []).length;
-        count.textContent = `${n} member${n === 1 ? "" : "s"}`;
-        head.append(title, count);
+        count.className = "hint admin-clerk-org-count";
+        count.textContent = `${members.length} member${members.length === 1 ? "" : "s"}`;
+        head.append(title, adminEl, count);
         card.appendChild(head);
 
         const table = document.createElement("table");
@@ -376,7 +384,7 @@ function renderClerkCompanies() {
         }
         thead.appendChild(hr);
         const tbody = document.createElement("tbody");
-        for (const m of org.members || []) {
+        for (const m of members) {
             const tr = document.createElement("tr");
             const td = (text) => {
                 const el = document.createElement("td");

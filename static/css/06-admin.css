@@ -475,3 +475,30 @@
 .src-badge-native { background: var(--color-accent); color: #fff; }
 .src-badge-clerk  { background: #6c47ff; color: #fff; }   /* Clerk purple */
 
+/* Clerk companies tab — collapsed <details> card per organization.
+   Summary row: name · admin email(s) · member count; table shows on expand. */
+.admin-clerk-org-head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    cursor: pointer;
+    list-style: none; /* hide the default triangle; the chevron below replaces it */
+}
+.admin-clerk-org-head::-webkit-details-marker { display: none; }
+.admin-clerk-org-head::before {
+    content: "▸";
+    font-size: 11px;
+    opacity: 0.6;
+    transition: transform 0.12s ease;
+}
+details[open] > .admin-clerk-org-head::before { transform: rotate(90deg); }
+.admin-clerk-org-admin {
+    margin-left: auto;   /* pushes admin email + count to the right edge */
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 45%;
+}
+.admin-clerk-org-count { white-space: nowrap; }
+.admin-clerk-org > .admin-table { margin-top: 10px; }
+
