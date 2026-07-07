@@ -402,6 +402,12 @@
         <div class="modal" style="max-width:420px;text-align:center;">
             <div class="modal-header"><h3>Sign in to Voitta RAG Enterprise</h3></div>
             <div class="modal-body" style="padding:20px 24px 28px;">
+                <!-- Populated by login.js from the ?login_error= redirect the
+                     OAuth callback issues on a denied/failed sign-in. -->
+                <p id="login-gate-error" hidden
+                   style="margin:0 0 14px;padding:10px 12px;border-radius:6px;text-align:left;
+                          background:rgba(220,53,69,0.12);border:1px solid rgba(220,53,69,0.4);
+                          color:#dc3545;font-size:13px;line-height:1.45;"></p>
                 <p class="hint" id="login-gate-hint">Sign in with your Google account to continue.</p>
                 <a id="login-gate-google" href="/api/auth/login/google" class="gsi-button" role="button">
                     <span class="gsi-button-icon" aria-hidden="true">

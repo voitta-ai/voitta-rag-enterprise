@@ -315,18 +315,25 @@ async def google_login_callback(
         logger.exception("Google login failed")
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Google login failed: {e}") from e
 
+    def _deny(reason: str, addr: str = "") -> RedirectResponse:
+        # The callback is a full-page browser navigation — raising here
+        # would render raw JSON. Bounce back to the SPA instead; the login
+        # gate reads ``login_error`` (+ ``email``) and shows a human
+        # message above the Sign-in button.
+        params = {"login_error": reason}
+        if addr:
+            params["email"] = addr
+        return RedirectResponse(
+            "/?" + urlencode(params), status_code=status.HTTP_303_SEE_OTHER
+        )
+
     email = (profile.get("email") or "").strip().lower()
     if not email:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST, "Google profile did not include an email"
-        )
+        return _deny("no_email")
     if not profile.get("email_verified", True):
         # Reject unverified addresses — anyone could attach the email to a
         # fake Google account otherwise.
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            "Google reports this email is not verified",
-        )
+        return _deny("unverified", email)
 
     # Admission — native gate first (block-list / super-admin / allowlists).
     # When the Clerk directory is enabled, membership there is an additional
@@ -361,11 +368,7 @@ async def google_login_callback(
     blocked = email in set(admin_store.list_blocked_users())
     if blocked or (not native_ok and clerk_info is None):
         logger.warning("login_denied: %s", email)
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN,
-            "Your account is not authorized for this deployment. "
-            "Contact your administrator.",
-        )
+        return _deny("denied", email)
 
     # Account provisioning. Every admitted user gets the reserved Personal
     # account (company_id=''); each Clerk org membership gets its own

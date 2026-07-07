@@ -57,8 +57,32 @@ export async function ensureAuthenticated() {
         $("#login-gate-google").hidden = true;
         $("#login-gate-disabled").hidden = false;
     }
+    renderLoginError();
     $("#login-gate").hidden = false;
     return false;
+}
+
+// A denied OAuth callback redirects to /?login_error=…&email=… instead of
+// rendering raw JSON. Surface it as a human message above the Sign-in
+// button, then scrub the params from the URL so a reload doesn't re-show it.
+function renderLoginError() {
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get("login_error");
+    if (!code) return;
+    const email = params.get("email");
+    const who = email ? `${email}` : "That account";
+    const messages = {
+        denied: `${who} isn't authorized for this deployment. ` +
+            "Ask your administrator to add you to the allowlist — or sign in with a different Google account.",
+        unverified: `Google reports ${email ? email : "this address"} as unverified. ` +
+            "Verify the address in your Google account, then try again.",
+        no_email: "Google didn't share an email address for that account. " +
+            "Try a different account.",
+    };
+    const el = $("#login-gate-error");
+    el.textContent = messages[code] || "Sign-in failed. Please try again.";
+    el.hidden = false;
+    window.history.replaceState(null, "", window.location.pathname);
 }
 
 // Company dropdown: one entry per account (Personal + each Clerk company).
