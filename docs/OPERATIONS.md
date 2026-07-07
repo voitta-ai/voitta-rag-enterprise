@@ -687,7 +687,16 @@ in Clerk can't fork accounts — identity is the id). Everything downstream —
 `folders.owner_id`, `folder_acl`, `folder_user_settings`, `api_keys`,
 `user_groups` — hangs off `users.id`, so **all of it is account-scoped for
 free**: Ivan-as-Agnitio and Ivan-as-Demo are strangers unless a folder is
-explicitly granted or globally shared.
+explicitly granted or community-shared.
+
+**Sharing is community-scoped, never global** (`folders.shared = 1`): a
+company account shares into its Clerk company; a natively-allowed Personal
+account shares into the `"native"` community (allowlist users/domains +
+super-admins); accounts with no community can't share and see no community
+shares (`services/acl.py:account_community`). An unowned shared folder
+(owner deleted) falls back to native visibility. Explicit `folder_acl`
+grants are unaffected and are fanned out to all accounts of the grantee's
+email at grant time.
 
 Two person-level exceptions, both keyed by email across all account rows:
 
@@ -712,10 +721,18 @@ flowchart TB
     NAT --> CK{"Clerk toggle on?"}
     CK -->|off| DENY2["403"]
     CK -->|on| FETCH["fetch Clerk directory FRESH<br/>(fail closed on error)"]
-    FETCH --> M{"email in Clerk users?"}
-    M -->|yes| ADMIT["provision accounts:<br/>Personal + one per Clerk org<br/>set session cookie"]
+    FETCH --> M{"email in Clerk users<br/>AND member of ≥1 org?"}
+    M -->|yes| ADMIT["provision accounts:<br/>Personal anchor + one per Clerk org<br/>set session cookie"]
     M -->|no| DENY2
 ```
+
+**Org membership is the Clerk credential**: a Clerk user who belongs to no
+organization is not admitted via the Clerk path (they may still pass the
+native rules). Every account-holder gets a Personal row as a stable anchor,
+but it is **offered** (dropdown, account switch, default landing) only to
+natively-allowed emails — Clerk-only users operate exclusively in their
+company accounts, and their Personal anchor is unreachable even by direct
+API call (`services/acl.py:offered_accounts_for_email`).
 
 Admission via Clerk pulls the directory **live during the callback** — never
 from a cache. If Clerk is unreachable, only the native rules apply

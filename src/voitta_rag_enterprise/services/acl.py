@@ -122,6 +122,33 @@ def accounts_for_email(session: Session, email: str) -> list[User]:
     return rows
 
 
+def offered_accounts_for_email(session: Session, email: str) -> list[User]:
+    """The accounts a user may actually operate as (dropdown + switch).
+
+    Natively-allowed emails (allowlist user/domain, super-admins) get every
+    account, Personal first. Clerk-only users get **company accounts only**
+    — their Personal row still exists in the DB as the stable anchor, but
+    it is never offered. Fallback: a user with no company accounts (admin
+    pre-created local row, dev shortcut) keeps Personal so the list is
+    never empty.
+    """
+    from . import admin_store
+
+    accs = accounts_for_email(session, email)
+    if admin_store.is_native_allowed(email) or admin_store.is_super_admin(email):
+        return accs
+    with_company = [a for a in accs if a.company_id]
+    return with_company or accs
+
+
+def default_account_for_email(session: Session, email: str) -> User:
+    """Where a session lands with no (valid) active account selected."""
+    offered = offered_accounts_for_email(session, email)
+    if offered:
+        return offered[0]
+    return get_or_create_user(session, email)
+
+
 def person_is_admin(session: Session, email: str) -> bool:
     """Person-level admin check: True when ANY of the email's accounts has
     the flag. Admin rights belong to the person, not the active company —

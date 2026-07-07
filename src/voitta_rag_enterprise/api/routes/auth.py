@@ -139,7 +139,7 @@ def me(
         real_email = "root@localhost"
     elif s.dev_user:
         real_email = s.dev_user
-    from ...services.acl import accounts_for_email, person_is_admin
+    from ...services.acl import offered_accounts_for_email, person_is_admin
 
     # Person-level admin for the real identity (any of the email's accounts).
     is_admin = person_is_admin(db, real_email) if real_email else False
@@ -164,13 +164,15 @@ def me(
 
     # Accounts + provenance describe the *effective* identity (so "view as"
     # shows the impersonated user's accounts, matching the rest of the UI).
+    # OFFERED accounts only: Clerk-only users never see their Personal
+    # anchor row in the dropdown.
     accounts = [
         {
             "id": a.id,
             "company_id": a.company_id or "",
             "company_name": a.company_name or "",
         }
-        for a in accounts_for_email(db, user.email)
+        for a in offered_accounts_for_email(db, user.email)
     ]
     return MeOut(
         id=user.id,
@@ -215,10 +217,14 @@ def switch_account(
     # those retargets the impersonation (acting_as_user_id), not the
     # admin's own active account.
     from ...db.models import User as _User
-    from ...services.acl import person_is_admin
+    from ...services.acl import offered_accounts_for_email, person_is_admin
 
     target = db.get(_User, account_id)
     if target is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Account not found")
+    # Only OFFERED accounts are switchable — a Clerk-only user's hidden
+    # Personal anchor row is not reachable even by direct API call.
+    if not any(a.id == target.id for a in offered_accounts_for_email(db, target.email)):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Account not found")
 
     if target.email == user.email:
@@ -377,11 +383,20 @@ async def google_login_callback(
                      if (u.get("email") or "").strip().lower() == email),
                     None,
                 )
-                if match is not None:
+                # Org membership is the credential: a Clerk user with no
+                # organization is NOT admitted via the Clerk path (they
+                # may still pass natively). Every Clerk-admitted user
+                # therefore has at least one company account to land in.
+                if match is not None and (match.get("orgs") or []):
                     clerk_info = {
                         "clerk_orgs": match.get("orgs") or [],
                         "clerk_name": match.get("name") or "",
                     }
+                elif match is not None:
+                    logger.info(
+                        "login: %s is in Clerk but belongs to no organization"
+                        " — Clerk path not applicable", email,
+                    )
             except clerk_svc.ClerkError as e:
                 logger.warning("login: Clerk directory check failed: %s", e)
 
@@ -422,14 +437,22 @@ async def google_login_callback(
     db.commit()
 
     request.session["user_email"] = email
-    # Keep the previously-active account across re-logins when it still
-    # belongs to this login's offer; otherwise land on Personal.
+    # Keep the previously-active account across re-logins when it's still
+    # offered; otherwise land on the default — Personal for natively-
+    # allowed users, the first company account for Clerk-only users
+    # (their Personal row exists as an anchor but is never offered).
+    from ...services.acl import offered_accounts_for_email
+
+    offered_ids = [a.id for a in offered_accounts_for_email(db, email)]
     prev_active = request.session.get("active_account_id")
-    if prev_active not in account_ids:
-        request.session["active_account_id"] = user.id
+    if prev_active not in offered_ids:
+        request.session["active_account_id"] = (
+            offered_ids[0] if offered_ids else user.id
+        )
     logger.info(
-        "login: %s (accounts=%s, active=%s)",
-        email, account_ids, request.session.get("active_account_id"),
+        "login: %s (accounts=%s, offered=%s, active=%s)",
+        email, account_ids, offered_ids,
+        request.session.get("active_account_id"),
     )
 
     # Land back on the SPA. Use 303 so the browser switches to GET.

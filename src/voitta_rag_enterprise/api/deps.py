@@ -14,7 +14,8 @@ from ..db.models import User
 from ..services.acl import (
     ROOT_EMAIL,
     CurrentUser,
-    get_or_create_user,
+    default_account_for_email,
+    offered_accounts_for_email,
     person_is_admin,
     resolve_user_email,
     stamp_person_admin,
@@ -35,17 +36,21 @@ def _resolve_account(
 ) -> User:
     """Resolve the ACTIVE account row for an authenticated email.
 
-    ``active_account_id`` in the session picks among the email's accounts;
-    it's validated to belong to this email on every request (a stale or
-    forged id falls back rather than crossing identities). Default — and
-    the dev/single-user path — is the Personal account (company_id='').
+    ``active_account_id`` in the session picks among the email's OFFERED
+    accounts (Personal only for natively-allowed emails; company accounts
+    for Clerk users). It's validated on every request — a stale, forged,
+    or no-longer-offered id falls back to the default account rather than
+    crossing identities or landing a Clerk-only user in their hidden
+    Personal scope. Dev/single-user resolve to Personal via the fallback.
     """
     active_id = session.get("active_account_id") if session else None
     if active_id is not None:
         row = db.get(User, int(active_id))
-        if row is not None and row.email == email:
+        if row is not None and row.email == email and any(
+            a.id == row.id for a in offered_accounts_for_email(db, email)
+        ):
             return row
-    return get_or_create_user(db, email)
+    return default_account_for_email(db, email)
 
 
 def db_session() -> Iterator[Session]:
