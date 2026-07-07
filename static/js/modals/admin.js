@@ -13,6 +13,7 @@
 import { api } from "../api.js";
 import { adminState } from "../store.js";
 import { createChipSelect } from "../components/chip_select.js";
+import { sourceBadges } from "../components/badges.js";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -52,10 +53,18 @@ function wireAdminStore() {
 // caps / Storage. Pure DOM toggle; refreshAdmin always pulls every
 // section regardless of which tab is visible, so flipping tabs is
 // instant.
-const ADMIN_TABS = ["access", "users", "groups", "oauth", "caps", "storage"];
+const ADMIN_TABS = [
+    "access", "users", "groups", "clerk-users", "clerk-companies",
+    "oauth", "caps", "storage",
+];
 
 function setAdminTab(name) {
     if (!ADMIN_TABS.includes(name)) name = "access";
+    // Directory tabs come and go with the toggles on the Sign-in gate tab.
+    // Landing on a hidden one (stale click, toggle flipped under us) falls
+    // back to the gate tab.
+    const targetBtn = $(`#admin-tab-btn-${name}`);
+    if (targetBtn && targetBtn.hidden) name = "access";
     // Always land on the list views (not a stuck editor) when (re)entering.
     if (typeof closeUserEditor === "function") closeUserEditor();
     if (typeof closeGroupEditor === "function") closeGroupEditor();
@@ -82,6 +91,8 @@ function renderAdminFromState(state) {
     renderAuthProvidersTable(state.auth_providers);
     renderCapsTable(state.indexing_caps);
     renderStorageSettings(state.settings);
+    renderDirectorySettings(state.settings);
+    applyDirectoryModes(state.settings);
 }
 
 // Render the current store value. Mutations no longer refetch — the server
@@ -153,6 +164,239 @@ function paintNfsStatus(el, settings) {
     } else {
         el.classList.add("err");
         el.textContent = `Unavailable (${status}). Fix the mount or pick another path; users won't see NFS as a sync option.`;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Directory sources (native + Clerk)
+//
+// Display-only: the Sign-in gate tab hosts two independent toggles. "Native
+// directory" shows/hides the local Users + Groups tabs; "Clerk directory"
+// (toggle + secret key) shows/hides the read-only Clerk users + Clerk
+// companies tabs. Any combination can be on. Sign-in and authorization are
+// untouched.
+// ---------------------------------------------------------------------------
+
+let _clerkOn = false;
+let _nativeOn = true;
+let _clerkDir = null;          // cached /admin/clerk/directory payload
+let _clerkDirPromise = null;   // in-flight guard
+let _clerkUserFilter = "";
+
+function renderDirectorySettings(settings) {
+    const nativeCb = $("#admin-native-enabled");
+    const nativeStatus = $("#admin-native-status");
+    const cb = $("#admin-clerk-enabled");
+    const key = $("#admin-clerk-key");
+    const status = $("#admin-clerk-status");
+    if (!cb || !key || !status || !nativeCb) return;
+    nativeCb.checked = settings.native_directory_enabled !== false;
+    if (nativeStatus) {
+        nativeStatus.textContent = nativeCb.checked
+            ? "" : "Hidden — the Users and Groups tabs are not shown.";
+    }
+    cb.checked = !!settings.clerk_enabled;
+    if (document.activeElement !== key) {
+        key.value = settings.clerk_secret_key || "";
+    }
+    if (settings.clerk_enabled) {
+        status.textContent = settings.clerk_key_from_env
+            ? "Enabled — key pre-filled from .env (CLERK_SECRET_KEY)."
+            : "Enabled.";
+    } else {
+        status.textContent = settings.clerk_secret_key
+            ? (settings.clerk_key_from_env
+                ? "Disabled — key pre-filled from .env, toggle on to use it."
+                : "Disabled.")
+            : "Disabled — paste your Clerk secret key to get started.";
+    }
+}
+
+async function saveNativeSettings(enabled) {
+    const cb = $("#admin-native-enabled");
+    if (document.activeElement) document.activeElement.blur();
+    try {
+        const out = await api.adminUpdateSettings({ native_directory_enabled: enabled });
+        renderDirectorySettings(out);
+        applyDirectoryModes(out);
+    } catch (err) {
+        cb.checked = _nativeOn;  // revert the optimistic flip
+        alert(err.message || "save failed");
+    }
+}
+
+async function saveClerkSettings(enabled) {
+    const key = $("#admin-clerk-key");
+    const cb = $("#admin-clerk-enabled");
+    const status = $("#admin-clerk-status");
+    // Blur so the WS snapshot push isn't skipped by the focus guard.
+    if (document.activeElement) document.activeElement.blur();
+    status.textContent = "Saving…";
+    try {
+        const out = await api.adminUpdateSettings({
+            clerk_enabled: enabled,
+            clerk_secret_key: key.value.trim(),
+        });
+        _clerkDir = null;  // key/mode changed — refetch on next render
+        renderDirectorySettings(out);
+        applyDirectoryModes(out);
+    } catch (err) {
+        cb.checked = _clerkOn;  // revert the optimistic flip
+        status.textContent = "✗ " + (err.message || "save failed");
+    }
+}
+
+// Show/hide the four directory tabs to match the toggles, and kick off the
+// directory fetch when Clerk mode is on.
+function applyDirectoryModes(settings) {
+    _nativeOn = !!(settings && settings.native_directory_enabled !== false);
+    _clerkOn = !!(settings && settings.clerk_enabled);
+
+    const vis = {
+        "users": _nativeOn,
+        "groups": _nativeOn,
+        "clerk-users": _clerkOn,
+        "clerk-companies": _clerkOn,
+    };
+    let activeHidden = false;
+    for (const [tab, show] of Object.entries(vis)) {
+        const btn = $(`#admin-tab-btn-${tab}`);
+        if (!btn) continue;
+        btn.hidden = !show;
+        if (!show && btn.classList.contains("active")) activeHidden = true;
+    }
+    // The active tab just disappeared — bounce to the gate tab.
+    if (activeHidden) setAdminTab("access");
+
+    if (_clerkOn) loadClerkDirectory();
+}
+
+function loadClerkDirectory() {
+    if (_clerkDir) { renderClerkDirectory(); return; }
+    if (_clerkDirPromise) return;
+    setClerkDirStatus("Loading directory from Clerk…");
+    _clerkDirPromise = api.adminClerkDirectory()
+        .then((dir) => { _clerkDir = dir; renderClerkDirectory(); })
+        .catch((err) => setClerkDirStatus("✗ " + (err.message || "Clerk fetch failed")))
+        .finally(() => { _clerkDirPromise = null; });
+}
+
+function setClerkDirStatus(msg) {
+    for (const sel of ["#admin-clerk-users-status", "#admin-clerk-companies-status"]) {
+        const el = $(sel);
+        if (el) el.textContent = msg;
+    }
+}
+
+function _fmtClerkDate(ms) {
+    if (!ms) return "—";
+    try { return new Date(ms).toLocaleDateString(); } catch { return "—"; }
+}
+
+function renderClerkDirectory() {
+    if (!_clerkDir) return;
+    setClerkDirStatus("");
+    renderClerkUsersTable();
+    renderClerkCompanies();
+}
+
+function renderClerkUsersTable() {
+    const tbody = $("#admin-clerk-users-table tbody");
+    if (!tbody || !_clerkDir) return;
+    tbody.innerHTML = "";
+    const users = _clerkDir.users || [];
+    const q = _clerkUserFilter.trim().toLowerCase();
+    const rows = q
+        ? users.filter((u) =>
+            u.email.toLowerCase().includes(q) ||
+            (u.name || "").toLowerCase().includes(q) ||
+            (u.org_names || []).some((n) => n.toLowerCase().includes(q)))
+        : users;
+    for (const u of rows) {
+        const tr = document.createElement("tr");
+        const td = (text) => {
+            const el = document.createElement("td");
+            el.textContent = text;
+            return el;
+        };
+        tr.append(
+            td(u.email || "—"),
+            td(u.name || "—"),
+            td((u.org_names || []).join(", ") || "—"),
+            td(_fmtClerkDate(u.last_sign_in_at)),
+        );
+        tbody.appendChild(tr);
+    }
+    const countEl = $("#admin-clerk-users-count");
+    if (countEl) {
+        countEl.textContent = rows.length === users.length
+            ? `${users.length} user${users.length === 1 ? "" : "s"} (from Clerk)`
+            : `${rows.length} of ${users.length} users (from Clerk)`;
+    }
+}
+
+// One card per organization: name + member count header, then a
+// read-only member table (role column mirrors Clerk's org:admin/member).
+function renderClerkCompanies() {
+    const host = $("#admin-clerk-companies");
+    if (!host || !_clerkDir) return;
+    host.innerHTML = "";
+    const orgs = _clerkDir.organizations || [];
+    if (!orgs.length) {
+        const p = document.createElement("p");
+        p.className = "hint";
+        p.textContent = "No organizations in this Clerk instance.";
+        host.appendChild(p);
+        return;
+    }
+    for (const org of orgs) {
+        const card = document.createElement("div");
+        card.className = "admin-provider-card";
+
+        const head = document.createElement("div");
+        head.className = "provider-card-head";
+        const title = document.createElement("span");
+        title.className = "provider-card-title";
+        title.textContent = org.name;
+        const count = document.createElement("span");
+        count.className = "hint";
+        const n = (org.members || []).length;
+        count.textContent = `${n} member${n === 1 ? "" : "s"}`;
+        head.append(title, count);
+        card.appendChild(head);
+
+        const table = document.createElement("table");
+        table.className = "admin-table";
+        const thead = document.createElement("thead");
+        const hr = document.createElement("tr");
+        for (const h of ["Email", "Name", "Role"]) {
+            const th = document.createElement("th");
+            th.textContent = h;
+            hr.appendChild(th);
+        }
+        thead.appendChild(hr);
+        const tbody = document.createElement("tbody");
+        for (const m of org.members || []) {
+            const tr = document.createElement("tr");
+            const td = (text) => {
+                const el = document.createElement("td");
+                el.textContent = text;
+                return el;
+            };
+            const roleTd = td(m.role || "member");
+            if (m.role === "admin") {
+                roleTd.textContent = "";
+                const badge = document.createElement("span");
+                badge.className = "badge-super";
+                badge.textContent = "ADMIN";
+                roleTd.appendChild(badge);
+            }
+            tr.append(td(m.email || "—"), td(m.name || "—"), roleTd);
+            tbody.appendChild(tr);
+        }
+        table.append(thead, tbody);
+        card.appendChild(table);
+        host.appendChild(card);
     }
 }
 
@@ -542,32 +786,56 @@ function renderList(sel, items, _kind, removeFn) {
 
 let _userFilter = "";
 
+// Group account rows by email so a multi-account person reads as ONE row:
+// email + person-level flags from the first account, plus one company chip
+// per account. Actions (edit/view-as/delete) target the PERSONAL account
+// when present, else the first account.
+function _groupByEmail(users) {
+    const by = new Map();
+    for (const u of users) {
+        if (!by.has(u.email)) by.set(u.email, []);
+        by.get(u.email).push(u);
+    }
+    return [...by.values()].map((accounts) => {
+        const primary = accounts.find((a) => !a.company_id) || accounts[0];
+        const groups = [...new Set(accounts.flatMap((a) => a.groups || []))];
+        return { primary, accounts, groups };
+    });
+}
+
 function renderUsersTable(users) {
     const tbody = $("#admin-users-table tbody");
     tbody.innerHTML = "";
     const q = _userFilter.trim().toLowerCase();
-    const rows = q
-        ? users.filter((u) =>
-            u.email.toLowerCase().includes(q) ||
-            (u.display_name || "").toLowerCase().includes(q) ||
-            (u.groups || []).some((g) => g.toLowerCase().includes(q)))
-        : users;
-    for (const u of rows) {
+    const people = _groupByEmail(users).filter(({ primary, accounts, groups }) => {
+        if (!q) return true;
+        return primary.email.toLowerCase().includes(q) ||
+            accounts.some((a) => (a.display_name || "").toLowerCase().includes(q) ||
+                (a.company_name || "").toLowerCase().includes(q)) ||
+            groups.some((g) => g.toLowerCase().includes(q));
+    });
+    for (const { primary, accounts, groups } of people) {
+        const u = primary;
         const tr = document.createElement("tr");
 
         const tdEmail = document.createElement("td");
         tdEmail.textContent = u.email;
-        if (u.is_super_admin) {
-            const badge = document.createElement("span");
-            badge.className = "badge-super";
-            badge.textContent = "SUPER";
-            badge.title = "From VOITTA_SUPER_ADMINS — can't be demoted via UI.";
-            tdEmail.appendChild(badge);
+        // Person-level badges + one chip per company account.
+        tdEmail.appendChild(sourceBadges({
+            is_super_admin: u.is_super_admin,
+            native_allowed: u.native_allowed,
+            company_id: "",
+        }));
+        for (const a of accounts) {
+            if (a.company_id) {
+                tdEmail.appendChild(sourceBadges({ company_id: a.company_id, company_name: a.company_name }));
+            }
         }
         tr.appendChild(tdEmail);
 
         const tdName = document.createElement("td");
-        tdName.textContent = u.display_name || "—";
+        tdName.textContent = u.display_name ||
+            accounts.map((a) => a.display_name).find(Boolean) || "—";
         tr.appendChild(tdName);
 
         const tdAdmin = document.createElement("td");
@@ -584,7 +852,7 @@ function renderUsersTable(users) {
 
         const tdGroups = document.createElement("td");
         tdGroups.className = "admin-cell-groups";
-        tdGroups.textContent = (u.groups && u.groups.length) ? u.groups.join(", ") : "—";
+        tdGroups.textContent = groups.length ? groups.join(", ") : "—";
         tr.appendChild(tdGroups);
 
         const tdActions = document.createElement("td");
@@ -618,8 +886,11 @@ function renderUsersTable(users) {
             delBtn.title = "Delete user";
             delBtn.setAttribute("aria-label", `Delete ${u.email}`);
             delBtn.addEventListener("click", async () => {
-                if (!confirm(`Delete user ${u.email}?\n\nThis removes their account, API keys, and folder grants. Folders they own become unowned.`)) return;
-                try { await api.adminDeleteUser(u.id); }
+                const n = accounts.length;
+                if (!confirm(`Delete user ${u.email}?\n\nThis removes ${n > 1 ? `all ${n} of their accounts` : "their account"}, API keys, and folder grants. Folders they own become unowned.`)) return;
+                try {
+                    for (const a of accounts) await api.adminDeleteUser(a.id);
+                }
                 catch (err) { alert(err.message); }
             });
             actions.appendChild(delBtn);
@@ -631,7 +902,7 @@ function renderUsersTable(users) {
     }
     const countEl = $("#admin-users-count");
     if (countEl) {
-        const shown = rows.length, total = users.length;
+        const total = _groupByEmail(users).length, shown = people.length;
         countEl.textContent = shown === total
             ? `${total} user${total === 1 ? "" : "s"}`
             : `${shown} of ${total} users`;
@@ -925,6 +1196,26 @@ $("#admin-backdrop").addEventListener("click", (e) => {
 
 wireAdminAdd("#admin-domain-input", "#admin-domain-add", api.adminAddDomain);
 wireAdminAdd("#admin-block-input", "#admin-block-add", api.adminBlock);
+
+// Directory toggles: commit immediately on change. The Clerk toggle also
+// carries whatever key is in the field; Save commits the key while keeping
+// the current mode.
+$("#admin-native-enabled").addEventListener("change", (e) =>
+    saveNativeSettings(e.target.checked));
+$("#admin-clerk-enabled").addEventListener("change", (e) =>
+    saveClerkSettings(e.target.checked));
+$("#admin-clerk-save").addEventListener("click", () =>
+    saveClerkSettings($("#admin-clerk-enabled").checked));
+$("#admin-clerk-key").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+        e.preventDefault();
+        saveClerkSettings($("#admin-clerk-enabled").checked);
+    }
+});
+$("#admin-clerk-user-filter").addEventListener("input", (e) => {
+    _clerkUserFilter = e.target.value;
+    renderClerkUsersTable();
+});
 
 // Users tab: filter + add + slide-over editor.
 $("#admin-user-filter").addEventListener("input", (e) => {

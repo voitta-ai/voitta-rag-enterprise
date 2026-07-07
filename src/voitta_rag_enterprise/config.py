@@ -13,7 +13,7 @@ from typing import Any
 
 from typing import Literal
 
-from pydantic import field_validator, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -218,6 +218,21 @@ class Settings(BaseSettings):
     # survive restarts.
     google_auth_client_id: str | None = None
     google_auth_client_secret: str | None = None
+    # Clerk (clerk.com) Backend API — server-side directory reads (users,
+    # organizations, memberships) against https://api.clerk.com/v1. The
+    # secret key comes from Clerk Dashboard → Configure → API Keys
+    # (``sk_test_…`` for the Development instance, ``sk_live_…`` for
+    # Production; each instance has its own users/orgs). Accepted under
+    # either the repo-conventional ``VOITTA_CLERK_SECRET_KEY`` or Clerk's
+    # own conventional name ``CLERK_SECRET_KEY``. Backend-only secret —
+    # never expose it to the SPA.
+    clerk_secret_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "VOITTA_CLERK_SECRET_KEY", "CLERK_SECRET_KEY"
+        ),
+    )
+    clerk_api_base: str = "https://api.clerk.com/v1"
     session_secret: str | None = None
     # Cookie lifetime for the signed session. 30 days is the same default the
     # voitta-rag app uses; tune via env when stricter rotation is needed.
@@ -335,6 +350,10 @@ class Settings(BaseSettings):
     @property
     def google_auth_enabled(self) -> bool:
         return bool(self.google_auth_client_id and self.google_auth_client_secret)
+
+    @property
+    def clerk_enabled(self) -> bool:
+        return bool(self.clerk_secret_key)
 
     def resolved_session_secret(self) -> str:
         """Return the cookie-signing secret, generating + persisting one on

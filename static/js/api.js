@@ -269,4 +269,11 @@ export const api = {
     // at write time and refuses bad paths.
     adminGetSettings: () => req("GET", "/api/admin/settings"),
     adminUpdateSettings: (partial) => req("PATCH", "/api/admin/settings", partial),
+
+    // Admin — Clerk directory (read-only proxy; requires the Clerk
+    // toggle + secret key on the Sign-in gate tab).
+    adminClerkDirectory: () => req("GET", "/api/admin/clerk/directory"),
+
+    // Account switch — pick which (email, company) account is active.
+    switchAccount: (accountId) => req("POST", `/api/auth/account/${accountId}`),
 };

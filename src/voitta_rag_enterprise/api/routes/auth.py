@@ -31,9 +31,10 @@ from ...config import get_settings
 from ...db.database import session_scope
 from ...db.models import ApiKey
 from ...services import events
+from ...services import admin_store
 from ...services.acl import CurrentUser, get_or_create_user
 from ...services.admin_store import is_email_allowed, is_super_admin
-from ..deps import current_user, db_session
+from ..deps import current_user, db_session, real_user
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +102,17 @@ class MeOut(BaseModel):
     # progress and the SPA renders the user's own data.
     acting_as_user_id: int | None
     acting_as_email: str | None
+    # Sign-in provenance for the top-bar badges — computed live (env +
+    # allowlist reads are cheap). Display-only.
+    is_super_admin: bool = False
+    native_allowed: bool = False
+    # Active account scope ('' = Personal) and every account this email
+    # owns — feeds the top-bar company dropdown. Rows created by past
+    # logins persist even if Clerk drops the org; they stay switchable
+    # until an admin cleans them up.
+    company_id: str = ""
+    company_name: str = ""
+    accounts: list[dict] = []
 
 
 @router.get("/me", response_model=MeOut)
@@ -127,26 +139,39 @@ def me(
         real_email = "root@localhost"
     elif s.dev_user:
         real_email = s.dev_user
-    real_row = (
-        db.query(_User).filter(_User.email == real_email).one_or_none()
-        if real_email
-        else None
-    )
-    is_admin = bool(real_row.is_admin) if real_row else False
+    from ...services.acl import accounts_for_email, person_is_admin
+
+    # Person-level admin for the real identity (any of the email's accounts).
+    is_admin = person_is_admin(db, real_email) if real_email else False
 
     acting_id = (
         request.session.get("acting_as_user_id")
         if hasattr(request, "session")
         else None
     )
+    # Impersonation is "on" when the effective row is some OTHER person's
+    # account (switching between your own accounts is not impersonation).
     acting_email: str | None = None
-    if acting_id is not None and is_admin and eff_row is not None and eff_row.id != (
-        real_row.id if real_row else -1
+    if (
+        acting_id is not None
+        and is_admin
+        and eff_row is not None
+        and eff_row.email != real_email
     ):
         acting_email = eff_row.email
     else:
         acting_id = None
 
+    # Accounts + provenance describe the *effective* identity (so "view as"
+    # shows the impersonated user's accounts, matching the rest of the UI).
+    accounts = [
+        {
+            "id": a.id,
+            "company_id": a.company_id or "",
+            "company_name": a.company_name or "",
+        }
+        for a in accounts_for_email(db, user.email)
+    ]
     return MeOut(
         id=user.id,
         email=user.email,
@@ -155,6 +180,53 @@ def me(
         single_user=bool(s.single_user),
         acting_as_user_id=int(acting_id) if acting_id is not None else None,
         acting_as_email=acting_email,
+        is_super_admin=is_super_admin(user.email),
+        native_allowed=admin_store.is_native_allowed(user.email),
+        company_id=user.company_id,
+        company_name=user.company_name,
+        accounts=accounts,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Account switch — pick which of your (email, company) accounts is active.
+# Session-scoped, same pattern as impersonation. The SPA reloads after
+# switching so every store re-keys to the new account id.
+# ---------------------------------------------------------------------------
+
+
+class AccountSwitchOut(BaseModel):
+    active_account_id: int
+    company_id: str
+    company_name: str
+
+
+@router.post("/account/{account_id}", response_model=AccountSwitchOut)
+def switch_account(
+    account_id: int,
+    request: Request,
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(real_user),
+) -> AccountSwitchOut:
+    # real_user, not current_user: you always switch YOUR OWN account —
+    # impersonation ("view as") is a separate session flag that already
+    # targets a specific account row.
+    from ...db.models import User as _User
+
+    target = db.get(_User, account_id)
+    # Only the caller's own accounts are switchable — validated by email,
+    # not by a session-stored list, so it can't go stale.
+    if target is None or target.email != user.email:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Account not found")
+    request.session["active_account_id"] = target.id
+    logger.info(
+        "account switch: %s -> id=%d (%s)",
+        user.email, target.id, target.company_name or "Personal",
+    )
+    return AccountSwitchOut(
+        active_account_id=target.id,
+        company_id=target.company_id or "",
+        company_name=target.company_name or "",
     )
 
 
@@ -256,7 +328,38 @@ async def google_login_callback(
             "Google reports this email is not verified",
         )
 
-    if not is_email_allowed(email):
+    # Admission — native gate first (block-list / super-admin / allowlists).
+    # When the Clerk directory is enabled, membership there is an additional
+    # admission path: pull the directory *fresh* during the callback and admit
+    # any email that matches a Clerk user. Fail closed: if Clerk is
+    # unreachable, only the native rules apply (and any previous Clerk stamp
+    # is left untouched rather than cleared on bad data).
+    native_ok = is_email_allowed(email)
+    clerk_info: dict | None = None
+    if admin_store.get_clerk_enabled():
+        clerk_key = admin_store.get_clerk_secret_key()
+        if clerk_key:
+            from ...services import clerk as clerk_svc
+
+            try:
+                directory = await clerk_svc.fetch_directory(clerk_key)
+                match = next(
+                    (u for u in directory["users"]
+                     if (u.get("email") or "").strip().lower() == email),
+                    None,
+                )
+                if match is not None:
+                    clerk_info = {
+                        "clerk_orgs": match.get("orgs") or [],
+                        "clerk_name": match.get("name") or "",
+                    }
+            except clerk_svc.ClerkError as e:
+                logger.warning("login: Clerk directory check failed: %s", e)
+
+    # Block-list trumps Clerk too: is_email_allowed already rejected blocked
+    # addresses, but a blocked user could still match Clerk — check explicitly.
+    blocked = email in set(admin_store.list_blocked_users())
+    if blocked or (not native_ok and clerk_info is None):
         logger.warning("login_denied: %s", email)
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
@@ -264,20 +367,45 @@ async def google_login_callback(
             "Contact your administrator.",
         )
 
-    display_name = profile.get("name") or email.split("@")[0]
-    user = get_or_create_user(db, email)
+    # Account provisioning. Every admitted user gets the reserved Personal
+    # account (company_id=''); each Clerk org membership gets its own
+    # (email, org_id) account, with the display name refreshed from Clerk.
+    # Accounts are never deleted here — a user dropped from an org just
+    # stops seeing that account offered (the row and its folders/keys
+    # persist for admin recovery). No Clerk data is cached beyond these
+    # identity columns; everything else about Clerk is fetched live.
+    display_name = (clerk_info or {}).get("clerk_name") or profile.get("name") or email.split("@")[0]
+    user = get_or_create_user(db, email)  # Personal
     if not user.display_name and display_name:
         user.display_name = display_name
+    account_ids = [user.id]
+    for org in (clerk_info or {}).get("clerk_orgs", []):
+        if not org.get("id"):
+            continue
+        acc = get_or_create_user(db, email, org["id"], org.get("name", ""))
+        if not acc.display_name and display_name:
+            acc.display_name = display_name
+        account_ids.append(acc.id)
     # Bootstrap admins are stamped on every sign-in: even if a previous
     # admin flipped the flag off in the DB, the next sign-in re-grants it.
     # That makes the env var the recoverable source of truth — wipe it
-    # to demote, redeploy to promote.
+    # to demote, redeploy to promote. Person-level: all account rows.
     if is_super_admin(email):
-        user.is_admin = True
+        from ...services.acl import stamp_person_admin
+
+        stamp_person_admin(db, email, True)
     db.commit()
 
     request.session["user_email"] = email
-    logger.info("login: %s (id=%d)", email, user.id)
+    # Keep the previously-active account across re-logins when it still
+    # belongs to this login's offer; otherwise land on Personal.
+    prev_active = request.session.get("active_account_id")
+    if prev_active not in account_ids:
+        request.session["active_account_id"] = user.id
+    logger.info(
+        "login: %s (accounts=%s, active=%s)",
+        email, account_ids, request.session.get("active_account_id"),
+    )
 
     # Land back on the SPA. Use 303 so the browser switches to GET.
     return RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)

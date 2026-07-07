@@ -34,7 +34,10 @@
             <a href="/" class="logo">Voitta RAG Enterprise</a>
             <div class="header-actions">
                 <span id="conn-status" class="status-pill disconnected">disconnected</span>
-                <button id="user-pill" class="btn-text hint" hidden style="margin-left:8px;cursor:pointer;background:none;border:none;text-decoration:underline;" title="Open settings"></button>
+                <button id="user-pill" class="btn-text hint" hidden style="margin-left:8px;cursor:pointer;background:none;border:none;text-decoration:underline;" title="Open settings"></button><!--
+                --><select id="account-select" class="hint" hidden
+                    title="Switch account — folders, sharing and API keys are scoped per account"
+                    style="margin-left:6px;max-width:180px;"></select><span id="user-badges"></span>
                 <button id="btn-admin" class="btn btn-secondary btn-sm" hidden style="margin-left:6px;" title="Admin panel">🔒 Admin</button>
                 <button id="btn-logout" class="btn btn-secondary btn-sm" hidden style="margin-left:6px;">Sign out</button>
             </div>
@@ -68,12 +71,23 @@
                     <button type="button" id="admin-tab-btn-access"
                         class="seg-tab active" role="tab" aria-selected="true"
                         aria-controls="admin-tab-pane-access">Sign-in gate</button>
+                    <!-- Directory tabs. Users/Groups follow the "Native
+                         directory" toggle; the Clerk pair follows the
+                         "Clerk directory" toggle (Sign-in gate tab). Any
+                         combination can be visible — modals/admin.js
+                         drives the hidden flags. -->
                     <button type="button" id="admin-tab-btn-users"
                         class="seg-tab" role="tab" aria-selected="false"
                         aria-controls="admin-tab-pane-users">Users</button>
                     <button type="button" id="admin-tab-btn-groups"
                         class="seg-tab" role="tab" aria-selected="false"
                         aria-controls="admin-tab-pane-groups">Groups</button>
+                    <button type="button" id="admin-tab-btn-clerk-users"
+                        class="seg-tab" role="tab" aria-selected="false"
+                        aria-controls="admin-tab-pane-clerk-users" hidden>Clerk users</button>
+                    <button type="button" id="admin-tab-btn-clerk-companies"
+                        class="seg-tab" role="tab" aria-selected="false"
+                        aria-controls="admin-tab-pane-clerk-companies" hidden>Clerk companies</button>
                     <button type="button" id="admin-tab-btn-oauth"
                         class="seg-tab" role="tab" aria-selected="false"
                         aria-controls="admin-tab-pane-oauth">OAuth providers</button>
@@ -105,6 +119,36 @@
                                 <button id="admin-block-add" class="btn btn-secondary btn-sm">Block</button>
                             </div>
                         </section>
+
+                        <!-- Directory sources — display-only: the toggles
+                             show/hide the four directory tabs (Users, Groups,
+                             Clerk users, Clerk companies). Any combination.
+                             No effect on sign-in or authorization. -->
+                        <section class="admin-section">
+                            <header>
+                                <h4>Directories</h4>
+                                <span class="hint">
+                                    Which directory tabs are shown. Sign-in and permissions are unaffected.
+                                </span>
+                            </header>
+                            <label class="admin-inline-check">
+                                <input id="admin-native-enabled" type="checkbox" checked />
+                                Native directory (Users &amp; Groups, managed here)
+                            </label>
+                            <div id="admin-native-status" class="hint" style="margin:2px 0 10px 24px;"></div>
+                            <label class="admin-inline-check">
+                                <input id="admin-clerk-enabled" type="checkbox" />
+                                Clerk directory (read-only, from
+                                <a href="https://dashboard.clerk.com" target="_blank" rel="noopener">clerk.com</a>)
+                            </label>
+                            <div class="admin-add-row" style="margin-top:8px;">
+                                <input id="admin-clerk-key" type="text"
+                                    placeholder="sk_test_… or sk_live_…"
+                                    autocomplete="off" spellcheck="false" />
+                                <button id="admin-clerk-save" class="btn btn-primary btn-sm">Save</button>
+                            </div>
+                            <div id="admin-clerk-status" class="hint" style="margin-top:6px;"></div>
+                        </section>
                     </div>
                 </div>
 
@@ -126,6 +170,7 @@
                         </table>
                         <p class="admin-table-count" id="admin-users-count"></p>
                     </section>
+
 
                     <!-- Full-pane editor view (swaps with the list) -->
                     <section id="admin-user-editor" class="admin-editor-pane" hidden>
@@ -210,6 +255,38 @@
                             <button id="admin-ge-cancel" class="btn btn-secondary btn-sm">Cancel</button>
                             <button id="admin-ge-save" class="btn btn-primary btn-sm">Save</button>
                         </footer>
+                    </section>
+                </div>
+
+                <!-- Tab: Clerk users (Clerk toggle only) — read-only. -->
+                <div id="admin-tab-pane-clerk-users" class="admin-tab-pane" role="tabpanel" hidden>
+                    <section class="admin-section admin-users">
+                        <header>
+                            <h4>Clerk users</h4>
+                            <span class="hint">Read-only — this directory is managed in <a href="https://dashboard.clerk.com" target="_blank" rel="noopener">Clerk</a>.</span>
+                        </header>
+                        <div class="admin-toolbar">
+                            <input id="admin-clerk-user-filter" type="search" placeholder="Filter users…" />
+                        </div>
+                        <table id="admin-clerk-users-table" class="admin-table">
+                            <thead><tr><th>Email</th><th>Name</th><th>Companies</th><th>Last sign-in</th></tr></thead>
+                            <tbody></tbody>
+                        </table>
+                        <p class="admin-table-count" id="admin-clerk-users-count"></p>
+                        <p id="admin-clerk-users-status" class="hint"></p>
+                    </section>
+                </div>
+
+                <!-- Tab: Clerk companies (Clerk toggle only) — read-only view
+                     of Clerk organizations + memberships. -->
+                <div id="admin-tab-pane-clerk-companies" class="admin-tab-pane" role="tabpanel" hidden>
+                    <section class="admin-section">
+                        <header>
+                            <h4>Clerk companies</h4>
+                            <span class="hint">Organizations from your Clerk instance, read-only. Managed in <a href="https://dashboard.clerk.com" target="_blank" rel="noopener">Clerk</a>.</span>
+                        </header>
+                        <div id="admin-clerk-companies"></div>
+                        <p id="admin-clerk-companies-status" class="hint"></p>
                     </section>
                 </div>
 

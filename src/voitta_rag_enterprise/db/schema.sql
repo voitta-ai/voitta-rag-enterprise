@@ -2,15 +2,29 @@
 -- Source of truth for DDL. Models in db/models.py mirror it.
 -- v1 has no migrations: change this file and rebuild the DB.
 
+-- One row per ACCOUNT, not per person: a user signing in via the Clerk
+-- directory gets one row per Clerk organization (company_id = Clerk org id,
+-- e.g. 'org_3FP…') plus the reserved Personal account (company_id = '').
+-- Native-only users have just the Personal row. Everything downstream
+-- (folders.owner_id, folder_acl, api_keys, groups) hangs off users.id and
+-- is therefore account-scoped for free. company_name is display-only and
+-- refreshed from Clerk at login; identity is (email, company_id).
+-- Admin status is PERSON-level by convention: checks look at every row
+-- sharing the email (see api/deps.py); the flag is stamped on all of them.
+-- Existing DBs are rebuilt into this shape by _migrate_users_accounts()
+-- in db/database.py (the old email-UNIQUE constraint must go away).
 CREATE TABLE IF NOT EXISTS users (
     id           INTEGER PRIMARY KEY,
-    email        TEXT UNIQUE NOT NULL,
+    email        TEXT NOT NULL,
+    company_id   TEXT NOT NULL DEFAULT '',
+    company_name TEXT NOT NULL DEFAULT '',
     display_name TEXT,
     -- 1 = full admin: can edit allowlist/blocklist, toggle other admins,
     -- and impersonate other users. Bootstrap admins listed in
     -- VOITTA_SUPER_ADMINS get is_admin=1 stamped on every sign-in.
     is_admin     INTEGER NOT NULL DEFAULT 0,
-    created_at   INTEGER NOT NULL
+    created_at   INTEGER NOT NULL,
+    UNIQUE (email, company_id)
 );
 
 CREATE TABLE IF NOT EXISTS folders (

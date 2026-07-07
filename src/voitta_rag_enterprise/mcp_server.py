@@ -65,7 +65,15 @@ from .services.vector_store import (
 
 logger = logging.getLogger(__name__)
 
-_current_user: ContextVar[str | None] = ContextVar("voitta_mcp_user", default=None)
+# (email, account_id) of the bearer-authenticated caller. The account id —
+# ApiKey.user_id — is what scopes visibility: a key minted while an account
+# was active stays scoped to that account (multi-account users hold one key
+# per account, so the key IS the account selector). Email rides along for
+# logging/display; resolving identity by email alone is no longer possible
+# now that one email may own several account rows.
+_current_user: ContextVar[tuple[str, int] | None] = ContextVar(
+    "voitta_mcp_user", default=None
+)
 
 _INSTRUCTIONS = """
 You are connected to Voitta RAG Enterprise — a filesystem-driven RAG index with
@@ -145,23 +153,29 @@ def _resolved_user() -> str:
         return ROOT_EMAIL
     if s.dev_user:
         return s.dev_user
-    return _current_user.get() or "anonymous"
+    ctx = _current_user.get()
+    return ctx[0] if ctx else "anonymous"
 
 
 def _resolved_user_id() -> int | None:
-    """Resolve the caller's user id, creating the user row on first call.
+    """Resolve the caller's ACCOUNT id (users.id) for visibility filters.
 
+    Bearer path: the id comes straight from the verified ApiKey.user_id via
+    the ContextVar — no email lookup (an email may own several account rows).
+    Dev-user path: the Personal account row, created on first call.
     Returns ``None`` when single-user mode is on — the search-time ACL filter
     becomes a no-op.
     """
-    if get_settings().single_user:
+    s = get_settings()
+    if s.single_user:
         return None
-    email = _resolved_user()
-    if email == "anonymous":
-        return None
-    with session_scope() as s:
-        user = get_or_create_user(s, email)
-        return user.id
+    # Same priority as _resolved_user: dev-mode shortcut first, then the
+    # bearer-verified account from the ContextVar.
+    if s.dev_user:
+        with session_scope() as db:
+            return get_or_create_user(db, s.dev_user).id
+    ctx = _current_user.get()
+    return ctx[1] if ctx is not None else None
 
 
 # ---------------------------------------------------------------------------
@@ -1436,18 +1450,20 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
             key = verify_token(db, bearer)
             if key is None:
                 return _unauthorized("Invalid or revoked API key")
-            # Materialise the email while the row is still attached.
+            # Materialise (email, account_id) while the row is still
+            # attached. The id is the ACCOUNT the key was minted under —
+            # that, not the email, drives every visibility filter.
             from .db.models import User as _User
 
             user = db.get(_User, key.user_id)
-            email = user.email if user else None
+            identity = (user.email, user.id) if user else None
             db.commit()
 
-        if not email:
+        if identity is None:
             # Defensive: orphaned key (user row gone). Treat as 401.
             return _unauthorized("Token does not map to a known user")
 
-        ctx_token = _current_user.set(email)
+        ctx_token = _current_user.set(identity)
         try:
             return await call_next(request)
         finally:

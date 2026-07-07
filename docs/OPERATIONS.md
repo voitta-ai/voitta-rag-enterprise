@@ -16,12 +16,13 @@
 4. [File & job state machines](#4-file--job-state-machines)
 5. [Event system & websocket propagation](#5-event-system--websocket-propagation)
 6. [Search query path](#6-search-query-path)
-7. [Admin settings: storage & propagation](#7-admin-settings-storage--propagation)
-8. [OAuth providers: admin defines → user consumes](#8-oauth-providers-admin-defines--user-consumes)
-9. [Sync OAuth runtime flows](#9-sync-oauth-runtime-flows)
-10. [Data model](#10-data-model)
-11. [Locking model](#11-locking-model)
-12. [Logging & observability](#12-logging--observability)
+7. [Identity & accounts: sign-in gate, Clerk directory, switching](#7-identity--accounts-sign-in-gate-clerk-directory-switching)
+8. [Admin settings: storage & propagation](#8-admin-settings-storage--propagation)
+9. [OAuth providers: admin defines → user consumes](#9-oauth-providers-admin-defines--user-consumes)
+10. [Sync OAuth runtime flows](#10-sync-oauth-runtime-flows)
+11. [Data model](#11-data-model)
+12. [Locking model](#12-locking-model)
+13. [Logging & observability](#13-logging--observability)
 
 ---
 
@@ -598,7 +599,9 @@ sequenceDiagram
 ```
 
 **ACL model:** access control is enforced **at the folder level, in Python**,
-before the Qdrant call. `_resolve_folder_ids` intersects the caller's requested
+before the Qdrant call. The caller's identity is their **active account**
+(`users.id`, see §7) — for MCP, the account the API key was minted under.
+`_resolve_folder_ids` intersects the caller's requested
 `folder_ids` with their *visible* set (`visible_folder_ids` — owned + ACL-granted
 + shared), so a request can't reach into another user's folder; an empty
 intersection becomes `[-1]` (an impossible id) to give Qdrant a cheap no-match
@@ -672,7 +675,111 @@ name + download + body. Provenance lives only on the Meta tab.)
 
 ---
 
-## 7. Admin settings: storage & propagation
+## 7. Identity & accounts: sign-in gate, Clerk directory, switching
+
+### The account model
+
+A `users` row is an **account**, not a person: the unique key is
+`(email, company_id)`. `company_id = ''` is the reserved **Personal** account;
+a real company account's id is the **Clerk organization id** (`org_…`), with
+`company_name` as a display-only label refreshed at every login (an org rename
+in Clerk can't fork accounts — identity is the id). Everything downstream —
+`folders.owner_id`, `folder_acl`, `folder_user_settings`, `api_keys`,
+`user_groups` — hangs off `users.id`, so **all of it is account-scoped for
+free**: Ivan-as-Agnitio and Ivan-as-Demo are strangers unless a folder is
+explicitly granted or globally shared.
+
+Two person-level exceptions, both keyed by email across all account rows:
+
+- **Admin** (`is_admin`) — checked with "any row of this email has the flag"
+  and stamped onto every row on change (`services/acl.py:person_is_admin` /
+  `stamp_person_admin`). A per-account admin flag would be confusing and
+  provide no real isolation.
+- **Sharing** — `POST /folders/{id}/grant` (and revoke) expands the target
+  account id to **all accounts of that email** (snapshot semantics: accounts
+  created by later logins don't inherit past grants).
+
+### Sign-in gate (Google OAuth callback)
+
+```mermaid
+flowchart TB
+    CB["/api/auth/google/callback<br/>(verified Google email)"] --> BL{"blocked_users.txt?"}
+    BL -->|listed| DENY["403 — trumps everything"]
+    BL --> SA{"VOITTA_SUPER_ADMINS?"}
+    SA -->|yes| ADMIT
+    SA --> NAT{"allowed_users.txt /<br/>allowed_domains.txt?"}
+    NAT -->|match| ADMIT
+    NAT --> CK{"Clerk toggle on?"}
+    CK -->|off| DENY2["403"]
+    CK -->|on| FETCH["fetch Clerk directory FRESH<br/>(fail closed on error)"]
+    FETCH --> M{"email in Clerk users?"}
+    M -->|yes| ADMIT["provision accounts:<br/>Personal + one per Clerk org<br/>set session cookie"]
+    M -->|no| DENY2
+```
+
+Admission via Clerk pulls the directory **live during the callback** — never
+from a cache. If Clerk is unreachable, only the native rules apply
+(Clerk-only users are denied until Clerk is back; native users are
+unaffected). **No Clerk data is persisted beyond the identity columns**
+(`company_id`, `company_name`, display name) — there is no directory cache on
+disk; the admin UI's Clerk tabs are a live proxy too.
+
+Super-admins get `is_admin` re-stamped (person-level) on every sign-in, so
+the env var stays the recoverable source of truth.
+
+### Session & per-request resolution
+
+The session is a signed cookie (Starlette `SessionMiddleware`) holding
+`user_email`, `active_account_id`, and (for admins) `acting_as_user_id` —
+ids only, nothing Clerk-derived. On every request/WS connect,
+`api/deps.py:_resolve_account` maps the email + `active_account_id` to the
+active `users` row, **validating the row belongs to that email** (a stale or
+forged id falls back to Personal rather than crossing identities).
+`VOITTA_SINGLE_USER` / `VOITTA_DEV_USER` resolve to the Personal account.
+
+- `GET /api/auth/me` → active account (`company_id`/`company_name`) + the
+  full `accounts` list + provenance flags (`is_super_admin`,
+  `native_allowed`).
+- `POST /api/auth/account/{id}` → switch the active account (own accounts
+  only; 404 otherwise). The SPA's company dropdown (next to the user pill,
+  hidden for single-account users) calls this and hard-reloads so every
+  store re-keys.
+- **MCP**: `BearerAuthMiddleware` resolves the API key to
+  `(email, account_id)` — the account the key was minted under **is** the
+  key's scope; multi-account users hold one key per account.
+
+### Provenance badges
+
+Rendered from `/me` (top bar) and per row in Admin → Users
+(`static/js/components/badges.js`):
+
+| Badge | Meaning |
+|-------|---------|
+| `SUPERADMIN` | email in `VOITTA_SUPER_ADMINS` (always shown) |
+| `VOITTA NATIVE` | active account is Personal and the email passes the native allowlist |
+| *company name* (purple) | active account is a company account (from Clerk) |
+| `CLERK` | Personal account of a Clerk-directory user with no native allowlist entry |
+
+### Directory tabs (admin modal)
+
+Two independent display-only toggles on the Sign-in gate tab (persisted in
+`settings.json`): **Native directory** shows/hides the editable Users +
+Groups tabs; **Clerk directory** (toggle + `sk_…` secret key, pre-filled
+from `CLERK_SECRET_KEY` / `VOITTA_CLERK_SECRET_KEY` in `.env` when the
+stored value is empty) shows/hides read-only **Clerk users** / **Clerk
+companies** tabs. Those render from `GET /api/admin/clerk/directory` — a
+live, uncached proxy to the Clerk Backend API
+([services/clerk.py](../src/voitta_rag_enterprise/services/clerk.py);
+note: Clerk sits behind Cloudflare, which 403s generic user-agents — the
+client sends an explicit UA). The Clerk toggle is also what arms the
+Clerk admission path in the sign-in gate above.
+
+Admin → Users groups the per-account rows by email — one line per person,
+one company chip per account; delete removes all of the person's accounts.
+
+---
+
+## 8. Admin settings: storage & propagation
 
 Two things to keep separate here:
 
@@ -694,17 +801,18 @@ flowchart TB
 
     subgraph routes["routes/admin.py — mutations gated by admin_user (403 else)"]
         R1["allowlist domains/users/blocklist"]
-        R2["users CRUD: create · PATCH (admin/name/groups) · DELETE"]
+        R2["users CRUD: create · PATCH (admin/name/groups) · DELETE<br/>(admin flag is person-level: all account rows of the email)"]
         R3["auth-providers CRUD + /check"]
         R4["indexing-caps GET/PATCH"]
-        R5["settings GET/PATCH (nfs_root)"]
+        R5["settings GET/PATCH<br/>(nfs_root · native/Clerk directory toggles · clerk key)"]
         R6["groups CRUD + members<br/>(services/groups.py)"]
+        R7["clerk/directory GET<br/>(live proxy, uncached)"]
         PUB["publish_admin_state()<br/>→ admin.snapshot (admin topic)"]
     end
 
     subgraph store["Persistence (services/admin_store.py + others)"]
         F1["allowed_domains.txt<br/>allowed_users.txt<br/>blocked_users.txt"]
-        F2["settings.json (nfs_root)"]
+        F2["settings.json<br/>(nfs_root · native_directory_enabled ·<br/>clerk_enabled · clerk_secret_key)"]
         F3["indexing_caps.json"]
         F4[("SQLite: users.is_admin · display_name")]
         F5[("SQLite: auth_providers")]
@@ -733,8 +841,9 @@ flowchart TB
 
 | Setting | Persistence | Read path | Invalidation |
 |---------|-------------|-----------|--------------|
-| Allowed domains / users / blocklist | plain `.txt` files (`<data>/admin/`) | `is_email_allowed()` | takes effect at next sign-in |
-| `is_admin` flag · `display_name` | SQLite `users` | `admin_user` dep, per request | next request; super-admins re-stamped each login |
+| Allowed domains / users / blocklist | plain `.txt` files (`<data>/admin/`) | `is_email_allowed()` at sign-in (Clerk path layered on top — see §7) | takes effect at next sign-in |
+| `is_admin` flag · `display_name` | SQLite `users` (flag stamped on **all** account rows of the email) | `admin_user` dep (person-level check), per request | next request; super-admins re-stamped each login |
+| Directory toggles + Clerk secret key | `settings.json` (`native_directory_enabled`, `clerk_enabled`, `clerk_secret_key` — empty key falls back to `.env`) | sign-in gate (Clerk admission) + admin UI tab visibility | next sign-in / next `admin.snapshot` |
 | User groups (organizational only) | SQLite `groups` + `user_groups` | `services/groups.py`; in `admin.snapshot` | live WS push on every group/membership change |
 | Auth providers (OAuth catalog) | SQLite `auth_providers` | read at login / sync-config time | next login or restart (env rows re-seed) |
 | NFS root | `settings.json` | `get_nfs_root()` | re-probed on every browse/sync call |
@@ -782,7 +891,7 @@ sequenceDiagram
 
 ---
 
-## 8. OAuth providers: admin defines → user consumes
+## 9. OAuth providers: admin defines → user consumes
 
 There are **two separate provider mechanisms** — don't conflate them:
 
@@ -819,7 +928,7 @@ flowchart TB
         LG["login.js: GET /api/auth/config<br/>{google_enabled}"]
         LG -->|if enabled show button| BTN["Sign in with Google"]
         BTN -->|GET /api/auth/login/google| OAUTH["Google consent<br/>scopes: openid email profile"]
-        OAUTH -->|/api/auth/google/callback| GATE["is_email_allowed? →<br/>create User, set session cookie"]
+        OAUTH -->|/api/auth/google/callback| GATE["sign-in gate (§7):<br/>blocked → super → native → Clerk<br/>→ provision accounts, set session cookie"]
     end
 
     subgraph syncpicker["Sync modal reuses the catalog (any authenticated user)"]
@@ -871,7 +980,7 @@ sequenceDiagram
 
 ---
 
-## 9. Sync OAuth runtime flows
+## 10. Sync OAuth runtime flows
 
 Once a folder's sync source has client credentials (typed or pre-filled from
 the catalog), the per-folder OAuth dance runs in a popup. The `folder_id` is
@@ -987,7 +1096,7 @@ new connector module + one registry line — no edit to `run_sync`.
 
 ---
 
-## 10. Data model
+## 11. Data model
 
 SQLite holds **metadata only**. Content lives in CAS; vectors live in Qdrant.
 
@@ -1010,9 +1119,11 @@ erDiagram
 
     users {
         int id PK
-        string email
+        string email "UNIQUE with company_id"
+        string company_id "'' = Personal, else Clerk org id"
+        string company_name "display-only, refreshed at login"
         string display_name
-        bool is_admin
+        bool is_admin "person-level: stamped on all rows of the email"
     }
     groups {
         int id PK
@@ -1127,7 +1238,7 @@ accumulate rather than being swept at runtime.
 
 ---
 
-## 11. Locking model
+## 12. Locking model
 
 Three coordination primitives keep the C-level libraries, the GPU, and
 QdrantLocal's thread-pinned SQLite connection safe.
@@ -1169,7 +1280,7 @@ REST-thread/worker-thread reindex race.
 
 ---
 
-## 12. Logging & observability
+## 13. Logging & observability
 
 > **TL;DR — where the logs are:** `<data_dir>/logs/` — server default
 > `~/.voitta-rag-enterprise/logs/`, **desktop app**

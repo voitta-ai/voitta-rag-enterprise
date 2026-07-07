@@ -27,10 +27,20 @@ def _now_s() -> int:
 
 
 class User(Base):
+    """One row per ACCOUNT — (email, company_id) — not per person.
+
+    ``company_id`` is '' for the reserved Personal account or a Clerk org
+    id ('org_…') for a company account; ``company_name`` is display-only,
+    refreshed from Clerk at login. Admin status is person-level by
+    convention: check/stamp every row sharing the email (api/deps.py).
+    """
+
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     email: Mapped[str]
+    company_id: Mapped[str] = mapped_column(default="")
+    company_name: Mapped[str] = mapped_column(default="")
     display_name: Mapped[str | None] = mapped_column(default=None)
     is_admin: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[int] = mapped_column(default=_now_s)

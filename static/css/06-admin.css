@@ -459,3 +459,19 @@
     font-family: var(--font);
 }
 
+/* Sign-in provenance badges (top bar + admin Users table).
+   SUPERADMIN / VOITTA NATIVE / Clerk company chips. */
+.src-badge {
+    font-size: 9px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    margin-left: 6px;
+    letter-spacing: 0.04em;
+    font-family: var(--font);
+    white-space: nowrap;
+    vertical-align: middle;
+}
+.src-badge-super  { background: #b45309; color: #fff; }   /* amber-700 */
+.src-badge-native { background: var(--color-accent); color: #fff; }
+.src-badge-clerk  { background: #6c47ff; color: #fff; }   /* Clerk purple */
+

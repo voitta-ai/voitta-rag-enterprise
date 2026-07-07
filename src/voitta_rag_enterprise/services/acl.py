@@ -55,6 +55,9 @@ ROOT_EMAIL = "root@localhost"
 class CurrentUser:
     id: int
     email: str
+    # Active account's company scope. '' = the Personal account.
+    company_id: str = ""
+    company_name: str = ""
 
 
 def resolve_user_email(session_email: str | None = None) -> str:
@@ -85,13 +88,52 @@ def resolve_user_email(session_email: str | None = None) -> str:
     return session_email
 
 
-def get_or_create_user(session: Session, email: str) -> User:
-    user = session.execute(select(User).where(User.email == email)).scalar_one_or_none()
+def get_or_create_user(
+    session: Session, email: str, company_id: str = "", company_name: str = ""
+) -> User:
+    """Return the (email, company_id) ACCOUNT row, creating it if missing.
+
+    Default ``company_id=''`` is the Personal account, which keeps every
+    legacy call site working: dev/single-user shortcuts, seeding, and
+    admin pre-creation all land on the Personal row. ``company_name`` is
+    refreshed on every call when non-empty (Clerk renames propagate at
+    login without forking accounts — identity is the org *id*).
+    """
+    user = session.execute(
+        select(User).where(User.email == email, User.company_id == company_id)
+    ).scalar_one_or_none()
     if user is None:
-        user = User(email=email)
+        user = User(email=email, company_id=company_id, company_name=company_name)
         session.add(user)
         session.flush()
+    elif company_name and user.company_name != company_name:
+        user.company_name = company_name
     return user
+
+
+def accounts_for_email(session: Session, email: str) -> list[User]:
+    """Every account row for ``email``, Personal first, then by company name."""
+    rows = list(
+        session.execute(
+            select(User).where(User.email == email)
+        ).scalars()
+    )
+    rows.sort(key=lambda u: (u.company_id != "", u.company_name.lower()))
+    return rows
+
+
+def person_is_admin(session: Session, email: str) -> bool:
+    """Person-level admin check: True when ANY of the email's accounts has
+    the flag. Admin rights belong to the person, not the active company —
+    a per-account flag would be confusing and provide no real isolation."""
+    rows = session.execute(select(User.is_admin).where(User.email == email)).all()
+    return any(bool(r[0]) for r in rows)
+
+
+def stamp_person_admin(session: Session, email: str, is_admin: bool) -> None:
+    """Set the admin flag on every account row of ``email``."""
+    for u in session.execute(select(User).where(User.email == email)).scalars():
+        u.is_admin = is_admin
 
 
 def grant_folder(session: Session, folder_id: int, user_id: int) -> None:
@@ -304,10 +346,10 @@ def seed_users_from_file(session: Session, path: Path) -> int:
         if not email or email.startswith("#"):
             continue
         existing = session.execute(
-            select(User).where(User.email == email)
+            select(User).where(User.email == email, User.company_id == "")
         ).scalar_one_or_none()
         if existing is None:
-            session.add(User(email=email))
+            session.add(User(email=email))  # Personal account (company_id='')
             added += 1
     if added:
         session.flush()

@@ -163,12 +163,18 @@ def remove_block(
 
 
 class AdminUserOut(BaseModel):
+    # One row per ACCOUNT — (email, company_id). The UI groups rows by
+    # email so a multi-account person reads as one entry with chips.
     id: int
     email: str
+    company_id: str = ""
+    company_name: str = ""
     display_name: str | None
     is_admin: bool
     is_super_admin: bool
     groups: list[str] = []
+    # Live allowlist check (badge provenance). Display-only.
+    native_allowed: bool = False
 
 
 def _super_set() -> set[str]:
@@ -177,15 +183,23 @@ def _super_set() -> set[str]:
     return {sa.lower() for sa in get_settings().super_admin_list()}
 
 
-def _user_out(user: User, *, groups: list[str], supers: set[str] | None = None) -> AdminUserOut:
+def _user_out(
+    user: User,
+    *,
+    groups: list[str],
+    supers: set[str] | None = None,
+) -> AdminUserOut:
     supers = _super_set() if supers is None else supers
     return AdminUserOut(
         id=user.id,
         email=user.email,
+        company_id=user.company_id or "",
+        company_name=user.company_name or "",
         display_name=user.display_name,
         is_admin=bool(user.is_admin),
         is_super_admin=user.email.lower() in supers,
         groups=groups,
+        native_allowed=admin_store.is_native_allowed(user.email),
     )
 
 
@@ -255,7 +269,9 @@ def list_users(
 
     supers = _super_set()
     by_user = groups_svc.group_names_by_user(db)
-    rows = db.execute(select(User).order_by(User.email)).scalars().all()
+    rows = db.execute(
+        select(User).order_by(User.email, User.company_id)
+    ).scalars().all()
     return [
         _user_out(u, groups=by_user.get(u.id, []), supers=supers) for u in rows
     ]
@@ -281,7 +297,10 @@ def update_user(
     if target is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
     if body.is_admin is not None:
-        target.is_admin = bool(body.is_admin)
+        # Person-level: the flag applies to every account of this email.
+        from ...services.acl import stamp_person_admin
+
+        stamp_person_admin(db, target.email, bool(body.is_admin))
     if body.display_name is not None:
         target.display_name = body.display_name.strip() or None
     if body.groups is not None:
@@ -649,6 +668,19 @@ class AdminSettingsOut(BaseModel):
     # restart.
     nfs_available: bool
     nfs_status: str  # 'disabled' | 'ok' | 'missing' | 'not_a_directory' | 'unreadable'
+    # Directory toggles. ``native_directory_enabled`` shows/hides the local
+    # Users + Groups tabs; ``clerk_enabled`` the read-only Clerk Users +
+    # Companies tabs. Independent — any combination is valid. Display-only:
+    # neither affects sign-in or authorization.
+    native_directory_enabled: bool
+    # ``clerk_secret_key`` is the *effective* key (admin-stored value,
+    # falling back to CLERK_SECRET_KEY from .env) — plaintext, same posture
+    # as auth-provider secrets: this endpoint is admin-gated and admins can
+    # already read .env. ``clerk_key_from_env`` tells the UI to badge the
+    # pre-filled value.
+    clerk_enabled: bool
+    clerk_secret_key: str
+    clerk_key_from_env: bool
 
 
 class _AdminSettingsPatchIn(BaseModel):
@@ -657,6 +689,11 @@ class _AdminSettingsPatchIn(BaseModel):
     # string is a valid value (disables the feature) so we can't use
     # ``None`` as the "leave alone" signal; require the key's presence.
     nfs_root: str | None = None
+    native_directory_enabled: bool | None = None
+    clerk_enabled: bool | None = None
+    # Empty string clears the stored key (the .env fallback, if any,
+    # then takes over again).
+    clerk_secret_key: str | None = None
 
 
 def _probe_nfs_root(value: str) -> tuple[bool, str]:
@@ -685,6 +722,10 @@ def _admin_settings_out() -> AdminSettingsOut:
         nfs_root=nfs_root,
         nfs_available=ok,
         nfs_status=status_str,
+        native_directory_enabled=admin_store.get_native_directory_enabled(),
+        clerk_enabled=admin_store.get_clerk_enabled(),
+        clerk_secret_key=admin_store.get_clerk_secret_key(),
+        clerk_key_from_env=admin_store.clerk_key_from_env(),
     )
 
 
@@ -718,11 +759,66 @@ def update_admin_settings(
                     f"NFS root {value!r} cannot be used: {status_str}",
                 )
         updates["nfs_root"] = value
+    if body.native_directory_enabled is not None:
+        updates["native_directory_enabled"] = bool(body.native_directory_enabled)
+    if body.clerk_enabled is not None:
+        if body.clerk_enabled and not (
+            (body.clerk_secret_key or "").strip()
+            or admin_store.get_clerk_secret_key()
+        ):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "Set a Clerk secret key (sk_…) before enabling Clerk mode.",
+            )
+        updates["clerk_enabled"] = bool(body.clerk_enabled)
+    if body.clerk_secret_key is not None:
+        value = body.clerk_secret_key.strip()
+        if value and not value.startswith("sk_"):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "Clerk secret keys start with sk_test_ or sk_live_.",
+            )
+        # Storing the same value .env provides would shadow future .env
+        # rotations for no benefit — keep the store empty in that case.
+        from ...config import get_settings
+
+        if value == (get_settings().clerk_secret_key or "").strip():
+            value = ""
+        updates["clerk_secret_key"] = value
     if updates:
         admin_store.save_settings(updates)
         logger.info("admin: %s updated settings: keys=%s", me.email, sorted(updates))
         publish_admin_state()
     return _admin_settings_out()
+
+
+# ---------------------------------------------------------------------------
+# Clerk directory (read-only) — live proxy to the Clerk Backend API.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/clerk/directory")
+async def get_clerk_directory(
+    _: CurrentUser = Depends(admin_user),
+) -> dict:
+    """Users + organizations + memberships from Clerk, UI-ready.
+
+    Fetched live on every call (no caching): the admin view is
+    low-traffic and staleness would be more confusing than the
+    ~1 s round-trip. 400 when Clerk mode is off or no key is set;
+    502 when Clerk itself rejects us.
+    """
+    from ...services import clerk as clerk_svc
+
+    if not admin_store.get_clerk_enabled():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Clerk mode is not enabled.")
+    key = admin_store.get_clerk_secret_key()
+    if not key:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No Clerk secret key configured.")
+    try:
+        return await clerk_svc.fetch_directory(key)
+    except clerk_svc.ClerkError as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e)) from e
 
 
 # ---------------------------------------------------------------------------
@@ -894,7 +990,9 @@ def build_admin_state(db: Session) -> dict:
     super_list = get_settings().super_admin_list()
     supers = {sa.lower() for sa in super_list}
     by_user = groups_svc.group_names_by_user(db)
-    users = db.execute(select(User).order_by(User.email)).scalars().all()
+    users = db.execute(
+        select(User).order_by(User.email, User.company_id)
+    ).scalars().all()
     providers = db.execute(select(AuthProvider).order_by(AuthProvider.id)).scalars().all()
     return {
         "allowlist": AllowlistOut(

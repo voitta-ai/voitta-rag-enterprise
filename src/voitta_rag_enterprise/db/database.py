@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import logging
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -13,6 +15,8 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from ..config import get_settings
+
+logger = logging.getLogger(__name__)
 
 SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
 
@@ -88,6 +92,11 @@ def init_db() -> None:
     try:
         raw_conn.executescript(sql)
         _ensure_column(raw_conn, "users", "is_admin", "INTEGER NOT NULL DEFAULT 0")
+        # Multi-account users: rebuild the table when the legacy email-UNIQUE
+        # constraint is still present (fresh DBs are born with the new shape
+        # via schema.sql). Must run before anything inserts a second account
+        # for an email.
+        _migrate_users_accounts(raw_conn)
         # 'figure' default keeps every legacy row classified as a cropped
         # extract; 'page_render' is reserved for the per-page WebP rasters
         # the PDF parser now emits.
@@ -193,6 +202,85 @@ def init_db() -> None:
         raw_conn.commit()
     finally:
         raw_conn.close()
+
+
+def _migrate_users_accounts(conn: sqlite3.Connection) -> None:
+    """Rebuild ``users`` into the multi-account shape (one row per
+    (email, company_id) pair, no bare-email UNIQUE).
+
+    Trigger is the presence of the legacy column-level UNIQUE on email —
+    detected via the auto-index SQLite creates for it — NOT a missing
+    company column: ADD COLUMN alone would leave the old constraint in
+    place and the first second-account insert would blow up. Idempotent:
+    fresh DBs (born from the new schema.sql) and already-migrated DBs
+    have a multi-column unique index instead and are skipped.
+
+    SQLite can't drop a constraint, so this is the standard rebuild dance.
+    A timestamped backup copy of the DB file is written next to it first;
+    existing rows become the users' Personal accounts (company_id='').
+    """
+    def _is_legacy_email_unique(row: tuple) -> bool:
+        # (seq, name, unique, origin, partial): origin 'u' = UNIQUE clause.
+        # Legacy = a SINGLE-column unique on email. The new shape's
+        # UNIQUE(email, company_id) also starts with email — requiring
+        # exactly one column keeps this from re-triggering every boot.
+        if row[3] != "u":
+            return False
+        cols = conn.execute(f"PRAGMA index_info({row[1]!r})").fetchall()
+        return len(cols) == 1 and cols[0][2] == "email"
+
+    legacy_unique = any(
+        _is_legacy_email_unique(row)
+        for row in conn.execute("PRAGMA index_list(users)").fetchall()
+    )
+    if not legacy_unique:
+        return
+
+    # Best-effort file backup before the rebuild (skips :memory: engines).
+    import shutil
+    import time as _time
+
+    db_file = conn.execute("PRAGMA database_list").fetchall()[0][2]
+    if db_file:
+        backup = f"{db_file}.bak-accounts-{int(_time.time())}"
+        with contextlib.suppress(OSError):
+            shutil.copy2(db_file, backup)
+            logger.info("users migration: backed up DB to %s", backup)
+
+    logger.info("users migration: rebuilding users table for multi-account")
+    _ensure_column(conn, "users", "company_id", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "users", "company_name", "TEXT NOT NULL DEFAULT ''")
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.execute("BEGIN")
+        conn.execute(
+            """
+            CREATE TABLE users_new (
+                id           INTEGER PRIMARY KEY,
+                email        TEXT NOT NULL,
+                company_id   TEXT NOT NULL DEFAULT '',
+                company_name TEXT NOT NULL DEFAULT '',
+                display_name TEXT,
+                is_admin     INTEGER NOT NULL DEFAULT 0,
+                created_at   INTEGER NOT NULL,
+                UNIQUE (email, company_id)
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO users_new (id, email, company_id, company_name,"
+            " display_name, is_admin, created_at)"
+            " SELECT id, email, company_id, company_name, display_name,"
+            " is_admin, created_at FROM users"
+        )
+        conn.execute("DROP TABLE users")
+        conn.execute("ALTER TABLE users_new RENAME TO users")
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:

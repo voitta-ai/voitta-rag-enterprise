@@ -15,8 +15,37 @@ from ..services.acl import (
     ROOT_EMAIL,
     CurrentUser,
     get_or_create_user,
+    person_is_admin,
     resolve_user_email,
+    stamp_person_admin,
 )
+
+
+def _cu(u: User) -> CurrentUser:
+    return CurrentUser(
+        id=u.id,
+        email=u.email,
+        company_id=u.company_id or "",
+        company_name=u.company_name or "",
+    )
+
+
+def _resolve_account(
+    db: Session, email: str, session: Mapping[str, Any] | None
+) -> User:
+    """Resolve the ACTIVE account row for an authenticated email.
+
+    ``active_account_id`` in the session picks among the email's accounts;
+    it's validated to belong to this email on every request (a stale or
+    forged id falls back rather than crossing identities). Default — and
+    the dev/single-user path — is the Personal account (company_id='').
+    """
+    active_id = session.get("active_account_id") if session else None
+    if active_id is not None:
+        row = db.get(User, int(active_id))
+        if row is not None and row.email == email:
+            return row
+    return get_or_create_user(db, email)
 
 
 def db_session() -> Iterator[Session]:
@@ -44,15 +73,14 @@ def real_user(
     """
     from ..services.admin_store import is_super_admin
 
-    session_email = (
-        request.session.get("user_email") if hasattr(request, "session") else None
-    )
+    sess = request.session if hasattr(request, "session") else None
+    session_email = sess.get("user_email") if sess else None
     email = resolve_user_email(session_email)
-    u = get_or_create_user(db, email)
+    u = _resolve_account(db, email, sess)
     if is_super_admin(email) and not u.is_admin:
-        u.is_admin = True
+        stamp_person_admin(db, email, True)
     db.commit()
-    return CurrentUser(id=u.id, email=u.email)
+    return _cu(u)
 
 
 def current_user(
@@ -73,10 +101,10 @@ def current_user(
     if target_id is None:
         return me
 
-    # Impersonation only honoured for admins. If the flag survives a demotion
+    # Impersonation only honoured for admins (person-level: any of the
+    # email's accounts carrying the flag). If the flag survives a demotion
     # we silently strip it so the user sees their own data, not a phantom.
-    me_row = db.get(User, me.id)
-    if me_row is None or not me_row.is_admin:
+    if not person_is_admin(db, me.email):
         if sess is not None:
             sess.pop("acting_as_user_id", None)
         return me
@@ -86,7 +114,7 @@ def current_user(
         if sess is not None:
             sess.pop("acting_as_user_id", None)
         return me
-    return CurrentUser(id=target.id, email=target.email)
+    return _cu(target)
 
 
 def resolve_ws_user(
@@ -118,19 +146,19 @@ def resolve_ws_user(
     else:
         return None
 
-    real = get_or_create_user(db, email)
+    real = _resolve_account(db, email, session)
     if is_super_admin(email) and not real.is_admin:
-        real.is_admin = True
+        stamp_person_admin(db, email, True)
     db.commit()
-    real_is_admin = bool(real.is_admin)
-    effective = CurrentUser(id=real.id, email=real.email)
+    real_is_admin = person_is_admin(db, email)
+    effective = _cu(real)
 
     # Impersonation ("view as") — only honoured for a real admin.
     target_id = session.get("acting_as_user_id") if session else None
     if target_id is not None and real_is_admin:
         target = db.get(User, int(target_id))
         if target is not None:
-            effective = CurrentUser(id=target.id, email=target.email)
+            effective = _cu(target)
 
     return effective, real_is_admin
 
@@ -139,9 +167,12 @@ def admin_user(
     me: CurrentUser = Depends(real_user),
     db: Session = Depends(db_session),
 ) -> CurrentUser:
-    """Real-identity admin guard for ``/api/admin/*`` routes."""
-    row = db.get(User, me.id)
-    if row is None or not row.is_admin:
+    """Real-identity admin guard for ``/api/admin/*`` routes.
+
+    Person-level: admin on any of the email's accounts counts, so an
+    admin doesn't lose the Admin button by switching to a company
+    account whose row happens to lack the flag."""
+    if not person_is_admin(db, me.email):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Admin only"
         )

@@ -745,6 +745,22 @@ class GrantBody(BaseModel):
     user_id: int
 
 
+def _grantee_account_ids(db: Session, user_id: int) -> list[int]:
+    """Expand one account id to ALL accounts of that email.
+
+    Sharing is person-directed: "share with ivan@…" should reach Ivan no
+    matter which company account he's switched to. Snapshot semantics —
+    accounts created by later logins don't inherit past grants.
+    """
+    from ...db.models import User as _User
+    from ...services.acl import accounts_for_email
+
+    row = db.get(_User, user_id)
+    if row is None:
+        return [user_id]
+    return [a.id for a in accounts_for_email(db, row.email)]
+
+
 @router.post("/{folder_id}/grant", status_code=status.HTTP_204_NO_CONTENT)
 def grant(
     folder_id: int,
@@ -753,7 +769,8 @@ def grant(
     user: CurrentUser = Depends(current_user),
 ) -> None:
     _require_owner(db, folder_id, user)
-    grant_folder(db, folder_id, body.user_id)
+    for uid in _grantee_account_ids(db, body.user_id):
+        grant_folder(db, folder_id, uid)
     db.commit()
     # Visibility changed for the grantee — make live WS connections recompute.
     events.bump_acl_version()
@@ -767,7 +784,8 @@ def revoke(
     user: CurrentUser = Depends(current_user),
 ) -> None:
     _require_owner(db, folder_id, user)
-    revoke_folder(db, folder_id, body.user_id)
+    for uid in _grantee_account_ids(db, body.user_id):
+        revoke_folder(db, folder_id, uid)
     db.commit()
     # Visibility changed for the revokee — make live WS connections recompute.
     events.bump_acl_version()

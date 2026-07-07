@@ -9,6 +9,7 @@
 
 import { api } from "../api.js";
 import { me as meStore } from "../store.js";
+import { sourceBadges } from "../components/badges.js";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -21,6 +22,12 @@ export async function ensureAuthenticated() {
         meStore.set(me);
         $("#user-pill").textContent = me.email;
         $("#user-pill").hidden = false;
+        // Provenance badges for the ACTIVE account: SUPERADMIN /
+        // VOITTA NATIVE / company chip.
+        const badges = $("#user-badges");
+        badges.innerHTML = "";
+        badges.appendChild(sourceBadges(me));
+        renderAccountSelect(me);
         $("#btn-logout").hidden = false;
         // Admin button is gated on the *real* user's flag — impersonation
         // never grants admin powers. The /api/auth/me endpoint enforces
@@ -52,6 +59,36 @@ export async function ensureAuthenticated() {
     }
     $("#login-gate").hidden = false;
     return false;
+}
+
+// Company dropdown: one entry per account (Personal + each Clerk company).
+// Hidden for single-account users. Switching POSTs the account id and hard
+// reloads — every store (folders, files, WS) re-keys to the new identity.
+function renderAccountSelect(me) {
+    const sel = $("#account-select");
+    if (!sel) return;
+    const accounts = me.accounts || [];
+    if (accounts.length < 2) { sel.hidden = true; return; }
+    sel.innerHTML = "";
+    for (const a of accounts) {
+        const opt = document.createElement("option");
+        opt.value = String(a.id);
+        opt.textContent = a.company_id ? (a.company_name || a.company_id) : "Personal";
+        if (a.id === me.id) opt.selected = true;
+        sel.appendChild(opt);
+    }
+    sel.hidden = false;
+    if (!sel._bound) {
+        sel._bound = true;
+        sel.addEventListener("change", async () => {
+            try {
+                await api.switchAccount(Number(sel.value));
+                window.location.reload();
+            } catch (err) {
+                alert(err.message || "account switch failed");
+            }
+        });
+    }
 }
 
 $("#btn-logout").addEventListener("click", async () => {
