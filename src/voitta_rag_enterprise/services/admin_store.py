@@ -278,8 +278,13 @@ def is_native_allowed(email: str) -> bool:
 
     This is the "VOITTA NATIVE" provenance test: the address would be
     admitted by ``allowed_users.txt`` / ``allowed_domains.txt`` alone.
+    ``root@localhost`` — the VOITTA_SINGLE_USER / local-dev identity —
+    is native by definition: it never goes through the OAuth allowlist,
+    but it owns local data and shares into the native community.
     """
     addr = email.strip().lower()
+    if addr == "root@localhost":
+        return True
     if "@" not in addr:
         return False
     if addr in set(list_allowed_users()):

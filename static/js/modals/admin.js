@@ -849,11 +849,20 @@ function _groupByEmail(users) {
     });
 }
 
+// A person belongs on the (native) Users tab when they are native-allowed
+// (allowlist/super-admin, incl. root@localhost) or purely local (no Clerk
+// company accounts — e.g. admin pre-created). Clerk-only people live on
+// the read-only "Clerk users" / "Clerk companies" tabs instead.
+function _isNativePerson({ primary, accounts }) {
+    return primary.native_allowed || primary.is_super_admin ||
+        accounts.every((a) => !a.company_id);
+}
+
 function renderUsersTable(users) {
     const tbody = $("#admin-users-table tbody");
     tbody.innerHTML = "";
     const q = _userFilter.trim().toLowerCase();
-    const people = _groupByEmail(users).filter(({ primary, accounts, groups }) => {
+    const people = _groupByEmail(users).filter(_isNativePerson).filter(({ primary, accounts, groups }) => {
         if (!q) return true;
         return primary.email.toLowerCase().includes(q) ||
             accounts.some((a) => (a.display_name || "").toLowerCase().includes(q) ||
@@ -1132,8 +1141,12 @@ function refreshGroupMembers(group, users) {
 
     const host = $("#admin-ge-addmember");
     host.innerHTML = "";
-    const nonMembers = users.filter((u) => !(u.groups || []).includes(group.name));
-    const byLabel = new Map(nonMembers.map((u) => [u.email, u.id]));
+    // Offer only native people (same population as the Users tab), anchored
+    // to their personal-account id — raw rows would also surface Clerk-only
+    // users and let a company account id win for multi-account emails.
+    const candidates = _groupByEmail(users).filter(_isNativePerson)
+        .filter(({ groups }) => !groups.includes(group.name));
+    const byLabel = new Map(candidates.map(({ primary }) => [primary.email, primary.id]));
     _gdMemberSelect = createChipSelect({
         selected: [],
         options: () => [...byLabel.keys()],

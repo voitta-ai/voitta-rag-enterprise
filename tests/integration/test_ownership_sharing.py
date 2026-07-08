@@ -50,6 +50,17 @@ def _register(client: TestClient, app, email: str, path: Path) -> dict:
     return r.json()
 
 
+def _allow_native(*emails: str) -> None:
+    """Sharing is community-scoped: a Personal account can share (and see
+    native-shared folders) only when its email is natively allowed. Put the
+    test users on the allowlist so alice@x / bob@x form the native
+    community."""
+    from voitta_rag_enterprise.services import admin_store
+
+    for email in emails or ("alice@x", "bob@x"):
+        admin_store.add_allowed_user(email)
+
+
 # ---------------------------------------------------------------------------
 # Ownership
 # ---------------------------------------------------------------------------
@@ -105,6 +116,7 @@ def test_share_makes_folder_visible_read_only_to_others(
     but every owner-only mutation comes back 403 (visible-but-not-owner)."""
     src = tmp_path / "alice"
     _seed(src, {"a.md": "alpha"})
+    _allow_native()
     app = _app()
     with TestClient(app) as client:
         a = _register(client, app, "alice@x", src)
@@ -140,6 +152,7 @@ def test_share_makes_folder_visible_read_only_to_others(
 def test_unshare_hides_folder_from_others(env: None, tmp_path: Path) -> None:
     src = tmp_path / "alice"
     _seed(src, {"a.md": "alpha"})
+    _allow_native()
     app = _app()
     with TestClient(app) as client:
         a = _register(client, app, "alice@x", src)
@@ -253,6 +266,7 @@ def test_search_respects_visible_folder_set(
 
     src = tmp_path / "alice"
     _seed(src, {"a.md": "extraordinary unique phrase apricot"})
+    _allow_native()
     app = _app()
     with TestClient(app) as client:
         a = _register(client, app, "alice@x", src)
@@ -342,6 +356,7 @@ def test_non_owner_cannot_configure_sync_on_shared_folder(
 
     reset_settings_cache()
 
+    _allow_native()
     app = _app()
     with TestClient(app) as client:
         auth_as(app, "alice@x")
