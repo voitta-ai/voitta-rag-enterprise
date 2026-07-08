@@ -29,6 +29,13 @@ def env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None]:
     for k in list(os.environ):
         if k.startswith("VOITTA_"):
             monkeypatch.delenv(k, raising=False)
+    # Settings loads ``.env`` from the CWD (pydantic env_file) — running
+    # from the repo root would leak the developer's real .env (ports,
+    # OAuth clients, Clerk keys) into "hermetic" tests. chdir to the test
+    # tmp dir so no .env is found. Package-relative paths (static/,
+    # schema.sql) are unaffected; CWD-relative defaults (users.txt) simply
+    # don't exist here, which is the correct blank slate.
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("VOITTA_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("VOITTA_ROOT_PATH", str(tmp_path))
     monkeypatch.setenv("VOITTA_DISABLE_BACKGROUND", "true")

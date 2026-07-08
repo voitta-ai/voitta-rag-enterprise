@@ -116,6 +116,9 @@ def get_client() -> QdrantClient:
 
 def reset_client_cache() -> None:
     global _client, _executor
+    # New client may point at a different backend (tests recycle engines and
+    # drop collections) — force ensure_* to re-verify on next use.
+    _ensured_collections.clear()
     if _executor is not None:
         # Close the client on its own thread, then tear down the executor.
         if _client is not None:
@@ -140,8 +143,20 @@ def reset_client_cache() -> None:
     stop_managed_qdrant()
 
 
+# Collections verified by THIS process. ensure_* used to re-issue the whole
+# existence check + ~16 create_payload_index round-trips on every embedded
+# file (~0.5s/file against a standalone Qdrant) for a state that can't
+# change underneath us: nothing in the app deletes collections at runtime,
+# and a managed-Qdrant death hard-fails the process. Checked once per
+# process per collection; reset_client_cache() clears it (tests recycle the
+# engine and may drop collections between cases).
+_ensured_collections: set[str] = set()
+
+
 def ensure_chunks_collection(text_dim: int) -> None:
     """Idempotent — only the chunks (text) collection."""
+    if CHUNKS in _ensured_collections:
+        return
 
     def _do() -> None:
         client = get_client()
@@ -159,10 +174,13 @@ def ensure_chunks_collection(text_dim: int) -> None:
         _ensure_payload_indexes(client, CHUNKS, _CHUNK_PAYLOAD_INDEXES)
 
     run_on_qdrant(_do)
+    _ensured_collections.add(CHUNKS)
 
 
 def ensure_images_collection(image_dim: int) -> None:
     """Idempotent — only the images collection."""
+    if IMAGES in _ensured_collections:
+        return
 
     def _do() -> None:
         client = get_client()
@@ -177,6 +195,7 @@ def ensure_images_collection(image_dim: int) -> None:
         _ensure_payload_indexes(client, IMAGES, _IMAGE_PAYLOAD_INDEXES)
 
     run_on_qdrant(_do)
+    _ensured_collections.add(IMAGES)
 
 
 # Payload indexes wanted on each collection. ``page`` + the ``layout_*``
@@ -186,6 +205,13 @@ def ensure_images_collection(image_dim: int) -> None:
 # These calls are idempotent — Qdrant returns 200 if the index already
 # exists at the same type, so we re-issue them on every startup.
 _CHUNK_PAYLOAD_INDEXES: tuple[tuple[str, str], ...] = (
+    # file_id: replace_chunks_for_file deletes by this filter on EVERY
+    # embed — unindexed, that's a full-collection scan per file, and it
+    # gets slower as the index grows (measured 1.1s/file at ~100k points).
+    # folder_id: every search request filters on the caller's visible
+    # folder set (ACL). Both are hot paths, not nice-to-haves.
+    ("file_id", "integer"),
+    ("folder_id", "integer"),
     ("page", "integer"),
     ("layout_kind", "keyword"),
     ("layout_has_image", "bool"),
@@ -196,6 +222,12 @@ _CHUNK_PAYLOAD_INDEXES: tuple[tuple[str, str], ...] = (
     *_META_PAYLOAD_INDEXES,
 )
 _IMAGE_PAYLOAD_INDEXES: tuple[tuple[str, str], ...] = (
+    # Same rationale as chunks. Image points carry ``file_ids`` (an ARRAY —
+    # CAS-dedup means one point can belong to several files); Qdrant's
+    # integer index covers array elements, so MatchValue/MatchAny filters
+    # on it are accelerated. Search ACL filters on folder_id.
+    ("file_ids", "integer"),
+    ("folder_id", "integer"),
     ("page", "integer"),
     ("layout_kind", "keyword"),
     ("layout_has_image", "bool"),
@@ -391,8 +423,20 @@ def replace_chunks_for_file(file_id: int, points: list[ChunkPoint]) -> None:
             )
             for p in points
         ]
+        # Interior batches don't wait for application — Qdrant applies
+        # updates to a collection in submission order, and all our calls
+        # flow through the single qdrant worker thread, so the FINAL
+        # batch's wait=True acts as the durability barrier for the whole
+        # file. Only the last batch's ack gates the caller's state flip,
+        # preserving the "indexed ⇒ vectors durably applied" invariant.
+        # (Single-batch files — the common case — are unaffected.)
+        last_start = ((len(structs) - 1) // _UPSERT_BATCH_POINTS) * _UPSERT_BATCH_POINTS
         for start in range(0, len(structs), _UPSERT_BATCH_POINTS):
-            client.upsert(CHUNKS, points=structs[start : start + _UPSERT_BATCH_POINTS])
+            client.upsert(
+                CHUNKS,
+                points=structs[start : start + _UPSERT_BATCH_POINTS],
+                wait=(start == last_start),
+            )
 
     run_on_qdrant(_do)
 

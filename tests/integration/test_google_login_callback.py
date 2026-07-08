@@ -68,6 +68,10 @@ def google_app(
     from voitta_rag_enterprise.config import reset_settings_cache
     from voitta_rag_enterprise.main import create_app
 
+    # TestClient speaks plain http — a Secure-only session cookie would be
+    # dropped and the OAuth state check would 400. (This used to leak in
+    # from the developer's .env before conftest chdir-isolated the suite.)
+    monkeypatch.setenv("VOITTA_COOKIE_SECURE", "false")
     monkeypatch.setenv("VOITTA_GOOGLE_AUTH_CLIENT_ID", "stub-client-id")
     monkeypatch.setenv("VOITTA_GOOGLE_AUTH_CLIENT_SECRET", "stub-client-secret")
     monkeypatch.setenv("VOITTA_SESSION_SECRET", "x" * 64)
@@ -97,6 +101,11 @@ def _login(
             f"/api/auth/google/callback?code=stub&state={state}",
             follow_redirects=False,
         )
+        # Redirect responses carry their meaning in Location (the callback
+        # bounces to "/" on success and "/?login_error=…" on denial), so
+        # return that; error responses carry it in the body.
+        if resp.status_code in (302, 303, 307):
+            return resp.status_code, resp.headers.get("location", "")
         return resp.status_code, resp.text
 
 
@@ -129,9 +138,12 @@ def test_login_denied_when_neither_matches(
     from voitta_rag_enterprise.services import admin_store
 
     admin_store.add_allowed_domain("customer.com")
-    code, body = _login(google_app, "eve@evil.example")
-    assert code == 403
-    assert "not authorized" in body.lower()
+    code, location = _login(google_app, "eve@evil.example")
+    # Denial is a redirect back to the SPA login gate with a human-readable
+    # error code — not raw 403 JSON (the callback is a full-page navigation).
+    assert code == 303
+    assert "login_error=denied" in location
+    assert "eve%40evil.example" in location  # email echoed for the banner
 
 
 def test_super_admin_signs_in_on_empty_allowlist(
@@ -157,5 +169,6 @@ def test_login_denied_when_no_allowlist_configured(
     super-admins, every sign-in is rejected.
     """
     app = google_app
-    code, _ = _login(app, "alice@customer.com")
-    assert code == 403
+    code, location = _login(app, "alice@customer.com")
+    assert code == 303
+    assert "login_error=denied" in location

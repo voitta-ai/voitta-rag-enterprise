@@ -22,13 +22,15 @@ from voitta_rag_enterprise.services.vector_store import (
 class _FakeClient:
     def __init__(self) -> None:
         self.upsert_batch_sizes: list[int] = []
+        self.upsert_waits: list[bool] = []
         self.deletes = 0
 
     def delete(self, *a, **k) -> None:
         self.deletes += 1
 
-    def upsert(self, _collection, *, points) -> None:
+    def upsert(self, _collection, *, points, wait=True) -> None:
         self.upsert_batch_sizes.append(len(points))
+        self.upsert_waits.append(bool(wait))
 
 
 def _point(i: int) -> ChunkPoint:
@@ -66,11 +68,18 @@ def test_upsert_batched_for_large_file(monkeypatch) -> None:
     # No batch exceeds the cap, and every point is upserted exactly once.
     assert all(sz <= _UPSERT_BATCH_POINTS for sz in fake.upsert_batch_sizes)
     assert sum(fake.upsert_batch_sizes) == n
+    # Interior batches are fire-and-forget; ONLY the final batch waits —
+    # its ack is the durability barrier before the caller flips file state.
+    assert fake.upsert_waits[:-1] == [False] * (len(fake.upsert_waits) - 1)
+    assert fake.upsert_waits[-1] is True
 
 
 def test_small_file_single_upsert(monkeypatch) -> None:
     fake = _run(monkeypatch, 10)
     assert fake.upsert_batch_sizes == [10]
+    # Single-batch files (the common case) always wait — the "indexed ⇒
+    # vectors durably applied" invariant is untouched for them.
+    assert fake.upsert_waits == [True]
 
 
 def test_no_points_skips_upsert(monkeypatch) -> None:

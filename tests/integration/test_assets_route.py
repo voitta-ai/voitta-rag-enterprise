@@ -233,9 +233,11 @@ def test_list_assets_reads_parser_menu(env: None, tmp_path: Path) -> None:
     from voitta_rag_enterprise.mcp_server import list_assets
 
     out = list_assets(file_id)
-    assert len(out) == 1
-    assert out[0]["asset_type"] == "cad_projection"
-    assert out[0]["slug"] == "foo"
+    # The synthetic "original" entry is always present (raw bytes via a
+    # signed URL); the parser-menu asset rides alongside it.
+    by_type = {a["asset_type"]: a for a in out}
+    assert set(by_type) == {"original", "cad_projection"}
+    assert by_type["cad_projection"]["slug"] == "foo"
 
 
 def test_request_asset_invokes_handler_and_returns_urls(
