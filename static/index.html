@@ -164,10 +164,12 @@
                             <input id="admin-user-filter" type="search" placeholder="Filter users…" />
                             <button id="admin-user-add-btn" class="btn btn-primary btn-sm">+ Add user</button>
                         </div>
-                        <table id="admin-users-table" class="admin-table">
-                            <thead><tr><th>Email</th><th>Name</th><th class="col-admin">Admin</th><th>Groups</th><th class="col-actions"></th></tr></thead>
-                            <tbody></tbody>
-                        </table>
+                        <div class="admin-scroll">
+                            <table id="admin-users-table" class="admin-table">
+                                <thead><tr><th>Email</th><th>Name</th><th class="col-admin">Admin</th><th>Groups</th><th class="col-actions"></th></tr></thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
                         <p class="admin-table-count" id="admin-users-count"></p>
                     </section>
 
@@ -222,7 +224,7 @@
                             <input id="admin-group-filter" type="search" placeholder="Filter groups…" />
                             <button id="admin-group-add-btn" class="btn btn-primary btn-sm">+ New group</button>
                         </div>
-                        <ul id="admin-groups-list" class="admin-list admin-groups-list"></ul>
+                        <ul id="admin-groups-list" class="admin-list admin-groups-list admin-scroll"></ul>
                         <p class="admin-table-count" id="admin-groups-count"></p>
                     </section>
 
@@ -268,10 +270,12 @@
                         <div class="admin-toolbar">
                             <input id="admin-clerk-user-filter" type="search" placeholder="Filter users…" />
                         </div>
-                        <table id="admin-clerk-users-table" class="admin-table">
-                            <thead><tr><th>Email</th><th>Name</th><th>Companies</th><th>Last sign-in</th><th class="col-actions"></th></tr></thead>
-                            <tbody></tbody>
-                        </table>
+                        <div class="admin-scroll">
+                            <table id="admin-clerk-users-table" class="admin-table">
+                                <thead><tr><th>Email</th><th>Name</th><th>Companies</th><th>Last sign-in</th><th class="col-actions"></th></tr></thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
                         <p class="admin-table-count" id="admin-clerk-users-count"></p>
                         <p id="admin-clerk-users-status" class="hint"></p>
                     </section>
@@ -285,7 +289,7 @@
                             <h4>Clerk companies</h4>
                             <span class="hint">Organizations from your Clerk instance, read-only. Managed in <a href="https://dashboard.clerk.com" target="_blank" rel="noopener">Clerk</a>.</span>
                         </header>
-                        <div id="admin-clerk-companies"></div>
+                        <div id="admin-clerk-companies" class="admin-scroll"></div>
                         <p id="admin-clerk-companies-status" class="hint"></p>
                     </section>
                 </div>
@@ -356,18 +360,20 @@
                                 Bytes accept human suffixes (e.g. <code>5MB</code>, <code>1GB</code>).
                             </span>
                         </header>
-                        <table id="admin-caps-table" class="admin-table">
-                            <thead>
-                                <tr>
-                                    <th>Setting</th>
-                                    <th>Value</th>
-                                    <th>Default</th>
-                                    <th>Range</th>
-                                    <th></th>
-                                </tr>
-                            </thead>
-                            <tbody></tbody>
-                        </table>
+                        <div class="admin-scroll">
+                            <table id="admin-caps-table" class="admin-table">
+                                <thead>
+                                    <tr>
+                                        <th>Setting</th>
+                                        <th>Value</th>
+                                        <th>Default</th>
+                                        <th>Range</th>
+                                        <th></th>
+                                    </tr>
+                                </thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
                     </section>
                 </div>
 

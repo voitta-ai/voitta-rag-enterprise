@@ -344,10 +344,13 @@ function renderClerkUsersTable() {
             el.textContent = text;
             return el;
         };
+        const orgs = (u.org_names || []).join(", ");
+        const tdOrgs = td(orgs || "—");
+        if (orgs) tdOrgs.title = orgs;   // cell ellipsizes; hover shows all
         tr.append(
             td(u.email || "—"),
             td(u.name || "—"),
-            td((u.org_names || []).join(", ") || "—"),
+            tdOrgs,
             td(_fmtClerkDate(u.last_sign_in_at)),
         );
         const tdActions = document.createElement("td");

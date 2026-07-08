@@ -14,10 +14,52 @@
    wide tables (OAuth providers has 7 columns) that need real room. ``width``
    not just ``max-width``, or the 720px cap from .modal-wide wins. */
 .admin-modal { width: min(96vw, 1400px); max-width: none; }
-/* A floor on the body height so short tabs (Storage, an empty Groups list)
-   don't collapse the dialog to a sliver — the modal keeps a stable, roomy
-   footprint across tabs. */
-.admin-body { padding: 16px 20px; gap: 14px; min-height: 460px; }
+/* FIXED height: the dialog keeps one footprint across every tab — short
+   tabs (Storage) don't collapse it, long tables don't grow it. Scrolling
+   happens INSIDE each tab (see .admin-scroll below), never on the dialog. */
+.admin-modal { height: min(85vh, 940px); }  /* ≤ .modal's 85vh max-height */
+.admin-body {
+    padding: 16px 20px; gap: 14px;
+    flex: 1; min-height: 0;
+    overflow: hidden;   /* the body itself never scrolls — panes do */
+}
+.admin-tabs { flex-shrink: 0; }
+
+/* Default pane behavior: fill the body and scroll as a whole (Sign-in
+   gate, OAuth providers, Storage — mixed content with no single table). */
+.admin-tab-pane { flex: 1; min-height: 0; overflow-y: auto; }
+
+/* Panes that contain a dedicated scroll area (.admin-scroll wraps the
+   data table / card list): the pane is a fixed frame — header, filter
+   toolbar and count stay put; only the data area scrolls. */
+.admin-tab-pane:has(.admin-scroll) { overflow: hidden; }
+.admin-tab-pane:has(.admin-scroll) > section {
+    flex: 1 1 auto; min-height: 0;
+}
+/* Inside the fixed frame only the scroll area gives way — header, filter
+   toolbar and row count keep their natural height. */
+.admin-tab-pane:has(.admin-scroll) > section > :not(.admin-scroll) {
+    flex-shrink: 0;
+}
+.admin-scroll {
+    flex: 1 1 auto; min-height: 0;
+    overflow-y: auto;
+}
+/* Sticky column headers inside a scroll area. Opaque background (the th
+   is transparent by default) and an inset shadow standing in for the
+   border, which border-collapse drops on sticky cells. */
+.admin-scroll .admin-table thead th {
+    position: sticky; top: 0; z-index: 2;
+    background: var(--color-bg-elevated);
+    box-shadow: inset 0 -1px 0 var(--color-border);
+}
+/* Long list variant (Groups): same fill-and-scroll, drop the 140px cap
+   meant for the small embedded lists on the Sign-in gate tab. */
+.admin-list.admin-scroll { max-height: none; }
+/* Editor views (user/group) live in the same fixed frame: the form body
+   scrolls, the Back header and Save/Cancel footer stay pinned. */
+.admin-tab-pane > .admin-editor-pane { flex: 1 1 auto; min-height: 0; }
+.admin-editor-pane .admin-editor-body { overflow-y: auto; min-height: 0; }
 
 /* Consistent control sizing across the whole admin panel — every text input
    and select shares one height + full-width-within-column so forms read as a
@@ -176,6 +218,20 @@
 .admin-users .admin-table td:nth-child(4) { width: 16%; }     /* Groups  */
 .admin-users .admin-table th:nth-child(5),
 .admin-users .admin-table td:nth-child(5) { width: 200px; }   /* Actions */
+
+/* The Clerk users table shares .admin-users styling but has its own column
+   set (Email / Name / Companies / Last sign-in / Actions) — without these
+   overrides it inherits the native table's widths and "Companies" lands in
+   the 64px checkbox column. */
+#admin-clerk-users-table th:nth-child(3),
+#admin-clerk-users-table td:nth-child(3) { width: 24%; text-align: left; }  /* Companies    */
+#admin-clerk-users-table th:nth-child(4),
+#admin-clerk-users-table td:nth-child(4) { width: 120px; }                  /* Last sign-in */
+#admin-clerk-users-table th:nth-child(5),
+#admin-clerk-users-table td:nth-child(5) { width: 110px; }                  /* Actions      */
+#admin-clerk-users-table td:nth-child(3) {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 /* Ellipsize the text columns instead of wrapping into the buttons. */
 .admin-users .admin-table td:nth-child(1),
 .admin-users .admin-table td:nth-child(2),
