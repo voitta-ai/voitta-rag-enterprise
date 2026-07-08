@@ -874,18 +874,26 @@ function renderUsersTable(users) {
         const tr = document.createElement("tr");
 
         const tdEmail = document.createElement("td");
-        tdEmail.textContent = u.email;
-        // Person-level badges + one chip per company account.
-        tdEmail.appendChild(sourceBadges({
-            is_super_admin: u.is_super_admin,
-            native_allowed: u.native_allowed,
-            company_id: "",
-        }));
+        // Flex wrapper: the email ellipsizes, the badges never get clipped
+        // into empty chips by the cell's fixed width.
+        const idWrap = document.createElement("div");
+        idWrap.className = "admin-user-id";
+        const emailSpan = document.createElement("span");
+        emailSpan.className = "admin-user-email";
+        emailSpan.textContent = u.email;
+        emailSpan.title = u.email;
+        idWrap.appendChild(emailSpan);
+        // Everyone on this tab is native, so a VOITTA NATIVE shield per row
+        // is noise — only SUPERADMIN and company chips carry signal here.
+        if (u.is_super_admin) {
+            idWrap.appendChild(sourceBadges({ is_super_admin: true, company_id: "" }));
+        }
         for (const a of accounts) {
             if (a.company_id) {
-                tdEmail.appendChild(sourceBadges({ company_id: a.company_id, company_name: a.company_name }));
+                idWrap.appendChild(sourceBadges({ company_id: a.company_id, company_name: a.company_name }));
             }
         }
+        tdEmail.appendChild(idWrap);
         tr.appendChild(tdEmail);
 
         const tdName = document.createElement("td");
@@ -932,14 +940,21 @@ function renderUsersTable(users) {
         });
         actions.appendChild(viewBtn);
 
-        // Delete — compact icon button, hidden for super-admins (backend
-        // refuses it anyway).
-        if (!u.is_super_admin) {
-            const delBtn = document.createElement("button");
-            delBtn.className = "admin-icon-btn admin-icon-danger";
-            delBtn.textContent = "🗑";
+        // Delete — compact icon button. Always rendered so every row has
+        // the same cells; disabled (with the reason) where the backend
+        // would refuse anyway: super-admins and your own account.
+        const delBtn = document.createElement("button");
+        delBtn.className = "admin-icon-btn admin-icon-danger";
+        delBtn.textContent = "🗑";
+        delBtn.setAttribute("aria-label", `Delete ${u.email}`);
+        const isSelf = u.email === (meStore.get()?.email || "");
+        if (u.is_super_admin || isSelf) {
+            delBtn.disabled = true;
+            delBtn.title = u.is_super_admin
+                ? "Super-admins (VOITTA_SUPER_ADMINS) can't be deleted."
+                : "You can't delete your own account.";
+        } else {
             delBtn.title = "Delete user";
-            delBtn.setAttribute("aria-label", `Delete ${u.email}`);
             delBtn.addEventListener("click", async () => {
                 const n = accounts.length;
                 if (!confirm(`Delete user ${u.email}?\n\nThis removes ${n > 1 ? `all ${n} of their accounts` : "their account"}, API keys, and folder grants. Folders they own become unowned.`)) return;
@@ -948,8 +963,8 @@ function renderUsersTable(users) {
                 }
                 catch (err) { alert(err.message); }
             });
-            actions.appendChild(delBtn);
         }
+        actions.appendChild(delBtn);
         tdActions.appendChild(actions);
         tr.appendChild(tdActions);
 
