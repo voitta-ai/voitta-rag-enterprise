@@ -12,15 +12,17 @@
 export function sourceBadges(info) {
     const frag = document.createDocumentFragment();
     if (!info) return frag;
-    const add = (text, variant, title) => {
+    const add = (text, variant, title, round = false) => {
         const b = document.createElement("span");
-        b.className = `src-badge src-badge-${variant}`;
+        b.className = `src-badge src-badge-${variant}${round ? " src-badge-round" : ""}`;
         b.textContent = text;
         if (title) b.title = title;
         frag.appendChild(b);
     };
     if (info.is_super_admin) {
-        add("SUPERADMIN", "super", "From VOITTA_SUPER_ADMINS — always admitted, admin re-stamped on every login.");
+        // Compact circle — the spelled-out SUPERADMIN chip ate the email
+        // next to it. The tooltip carries the explanation.
+        add("S", "super", "Super-admin (VOITTA_SUPER_ADMINS) — always admitted, admin re-stamped on every login.", true);
     }
     if (info.company_id) {
         add(info.company_name || "COMPANY", "clerk",

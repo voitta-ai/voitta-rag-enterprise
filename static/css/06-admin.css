@@ -13,7 +13,7 @@
 /* Override .modal-wide's width (min(94vw,720px)) — the admin panel carries
    wide tables (OAuth providers has 7 columns) that need real room. ``width``
    not just ``max-width``, or the 720px cap from .modal-wide wins. */
-.admin-modal { width: min(95vw, 1200px); max-width: none; }
+.admin-modal { width: min(96vw, 1400px); max-width: none; }
 /* A floor on the body height so short tabs (Storage, an empty Groups list)
    don't collapse the dialog to a sliver — the modal keeps a stable, roomy
    footprint across tabs. */
@@ -167,13 +167,13 @@
    Widths sum to 100%; overflow in text columns ellipsizes. */
 .admin-users .admin-table { table-layout: fixed; width: 100%; }
 .admin-users .admin-table th:nth-child(1),
-.admin-users .admin-table td:nth-child(1) { width: 32%; }     /* Email   */
+.admin-users .admin-table td:nth-child(1) { width: 38%; }     /* Email   */
 .admin-users .admin-table th:nth-child(2),
-.admin-users .admin-table td:nth-child(2) { width: 16%; }     /* Name    */
+.admin-users .admin-table td:nth-child(2) { width: 24%; }     /* Name    */
 .admin-users .admin-table th:nth-child(3),
 .admin-users .admin-table td:nth-child(3) { width: 64px; text-align: center; }  /* Admin */
 .admin-users .admin-table th:nth-child(4),
-.admin-users .admin-table td:nth-child(4) { width: 18%; }     /* Groups  */
+.admin-users .admin-table td:nth-child(4) { width: 16%; }     /* Groups  */
 .admin-users .admin-table th:nth-child(5),
 .admin-users .admin-table td:nth-child(5) { width: 200px; }   /* Actions */
 /* Ellipsize the text columns instead of wrapping into the buttons. */
@@ -480,6 +480,14 @@
     vertical-align: middle;
 }
 .src-badge-super  { background: #b45309; color: #fff; }   /* amber-700 */
+/* Circular single-letter badge (super-admin "S") — fixed square + 50%
+   radius; the flex centering keeps the glyph optically centered. */
+.src-badge-round {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 16px; height: 16px; padding: 0;
+    border-radius: 50%;
+    font-weight: 700; letter-spacing: 0;
+}
 .src-badge-native { background: var(--color-accent); color: #fff; }
 .src-badge-clerk  { background: #6c47ff; color: #fff; }   /* Clerk purple */
 
