@@ -1444,24 +1444,17 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
 
         # Imported lazily to avoid a circular import at module load time
         # (auth routes depend on db.models which may not yet be ready).
-        from .api.routes.auth import verify_token
+        from .api.routes.api_keys import identity_for_token
 
         with session_scope() as db:
-            key = verify_token(db, bearer)
-            if key is None:
-                return _unauthorized("Invalid or revoked API key")
-            # Materialise (email, account_id) while the row is still
-            # attached. The id is the ACCOUNT the key was minted under —
-            # that, not the email, drives every visibility filter.
-            from .db.models import User as _User
-
-            user = db.get(_User, key.user_id)
-            identity = (user.email, user.id) if user else None
+            # (email, account_id) — the id is the ACCOUNT the key was
+            # minted under; that, not the email, drives every visibility
+            # filter. None covers both invalid tokens and orphaned keys.
+            identity = identity_for_token(db, bearer)
             db.commit()
 
         if identity is None:
-            # Defensive: orphaned key (user row gone). Treat as 401.
-            return _unauthorized("Token does not map to a known user")
+            return _unauthorized("Invalid or revoked API key")
 
         ctx_token = _current_user.set(identity)
         try:

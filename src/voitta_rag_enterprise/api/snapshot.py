@@ -159,7 +159,7 @@ def build_snapshot(
 
         frames.append({"type": "admin.snapshot", "state": build_admin_state(db)})
     if "keys" in topics and user_id:
-        from .routes.auth import build_keys_state
+        from .routes.api_keys import build_keys_state
 
         frames.append(
             {

@@ -3,6 +3,7 @@
 from fastapi import APIRouter
 
 from .routes.admin import router as admin_router
+from .routes.api_keys import router as api_keys_router
 from .routes.assets import router as assets_router
 from .routes.auth import router as auth_router
 from .routes.files import router as files_router
@@ -20,6 +21,7 @@ api_router = APIRouter()
 # ``current_user``. Order doesn't actually matter for routing in FastAPI,
 # but registering it first reads the right way at the call site.
 api_router.include_router(auth_router)
+api_router.include_router(api_keys_router)  # same /auth prefix — /auth/keys
 api_router.include_router(folders_router)
 api_router.include_router(files_router)
 api_router.include_router(images_router)
