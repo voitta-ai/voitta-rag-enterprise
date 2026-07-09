@@ -168,7 +168,7 @@ def test_callback_exchanges_with_builtin_creds(
 ) -> None:
     import base64
 
-    from voitta_rag_enterprise.api.routes import sync as sync_routes
+    from voitta_rag_enterprise.api.routes.sync import google_drive as sync_routes
 
     exchange = AsyncMock(return_value={"refresh_token": "rt-from-google"})
     monkeypatch.setattr(sync_routes, "gd_exchange_code", exchange)

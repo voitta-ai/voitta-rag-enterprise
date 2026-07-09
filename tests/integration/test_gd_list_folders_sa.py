@@ -133,7 +133,9 @@ def test_endpoint_accepts_sa_only(env: None, tmp_path: Path) -> None:
         with patch.object(google_drive, "list_root_folders", fake_list):
             # The route imports list_root_folders by alias at module load,
             # so patch the route's binding too.
-            from voitta_rag_enterprise.api.routes import sync as sync_route
+            from voitta_rag_enterprise.api.routes.sync import (
+                google_drive as sync_route,
+            )
 
             with patch.object(sync_route, "gd_list_root_folders", fake_list):
                 r = client.get(f"/api/folders/{fid}/sync/google-drive/folders")
@@ -190,7 +192,9 @@ def test_endpoint_surfaces_owner_and_dates(env: None, tmp_path: Path) -> None:
                 "shared_drives": [],
             }
 
-        from voitta_rag_enterprise.api.routes import sync as sync_route
+        from voitta_rag_enterprise.api.routes.sync import (
+            google_drive as sync_route,
+        )
 
         with patch.object(sync_route, "gd_list_root_folders", fake_list):
             r = client.get(f"/api/folders/{fid}/sync/google-drive/folders")
