@@ -214,3 +214,41 @@ def test_pending_embeds_decrement_only_after_both_jobs(env: None, tmp_path: Path
         f = s.get(File, file_id)
         assert f.pending_embeds == 0
         assert f.state == "indexed"
+
+
+def test_stale_round_decrement_is_ignored(env: None, tmp_path: Path) -> None:
+    """The round-token guard: a decrement carrying an OLD embed_round must not
+    touch pending_embeds.
+
+    This is the invariant that prevents permanently-stuck files: when a
+    re-extract supersedes the previous round, in-flight embed jobs from the
+    old round would otherwise double-decrement the new round's counter and
+    corrupt the extracted→indexed transition.
+    """
+    init_db()
+    folder = tmp_path / "src"
+    file_id = _seed_file(folder, "x.png", _png())
+    asyncio.run(run_extract({"file_id": file_id}))
+
+    from voitta_rag_enterprise.services.indexing import _decrement_pending_embeds
+
+    with session_scope() as s:
+        f = s.get(File, file_id)
+        old_round = f.embed_round
+        # Simulate a superseding re-extract: bump the round and reset the
+        # counter as _commit_indexing would.
+        f.embed_round = old_round + 1
+        f.pending_embeds = 2
+        f.state = "extracted"
+
+    # A leftover job from the OLD round reports in — must be a no-op.
+    _decrement_pending_embeds(file_id, round_token=old_round)
+    with session_scope() as s:
+        f = s.get(File, file_id)
+        assert f.pending_embeds == 2
+        assert f.state == "extracted"
+
+    # Current-round decrements still work.
+    _decrement_pending_embeds(file_id, round_token=old_round + 1)
+    with session_scope() as s:
+        assert s.get(File, file_id).pending_embeds == 1
