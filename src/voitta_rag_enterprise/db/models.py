@@ -206,6 +206,12 @@ class FolderSyncSource(Base):
     # Voitta hostname. A small nginx bridge running on the admin's box
     # proxies the callback back to this server.
     gd_use_loopback: Mapped[bool] = mapped_column(default=False)
+    # When True the OAuth client_id/secret come from the deploy's built-in
+    # Desktop-app client (VOITTA_GD_BUILTIN_CLIENT_ID/SECRET — baked into
+    # the desktop build) instead of this row. Desktop/single-user only:
+    # the consent redirect targets 127.0.0.1, which only works when the
+    # browser and server share a machine.
+    gd_use_builtin: Mapped[bool] = mapped_column(default=False)
     # When True, sync downloads only ordinary binary files (PDF, DOCX,
     # images, …) and skips Google-native Docs/Sheets/Slides/Forms. Lets
     # sync run when the project hasn't enabled the Docs/Sheets/Slides/Forms

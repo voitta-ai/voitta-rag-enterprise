@@ -769,9 +769,17 @@
                          lives below and applies to whichever mode is
                          active. -->
                     <div class="seg-tabs" role="tablist">
+                        <!-- Built-in client tab — desktop builds that ship a
+                             Google OAuth client (me.gd_builtin_available).
+                             One click, no GCP setup; sync.js toggles
+                             visibility on modal open. -->
+                        <button type="button" id="sync-gd-tab-builtin" hidden
+                            class="seg-tab" role="tab" aria-selected="false">
+                            Sign in (no setup)
+                        </button>
                         <button type="button" id="sync-gd-tab-oauth"
                             class="seg-tab active" role="tab" aria-selected="true">
-                            Sign in with Google
+                            Your OAuth client
                         </button>
                         <button type="button" id="sync-gd-tab-sa"
                             class="seg-tab" role="tab" aria-selected="false">
@@ -786,6 +794,23 @@
                             class="seg-tab" role="tab" aria-selected="false">
                             This Mac (no setup)
                         </button>
+                    </div>
+
+                    <!-- Built-in client pane — no inputs at all: the OAuth
+                         client is baked into this build, the user just
+                         consents in the browser. -->
+                    <div id="sync-gd-pane-builtin" class="sync-gd-pane" hidden>
+                        <p class="hint">
+                            Connect your Google account with one click — no
+                            Google Cloud setup needed. A browser window opens
+                            for Google's consent screen; Voitta gets
+                            <strong>read-only</strong> access to the Drive
+                            folders you pick below.
+                        </p>
+                        <div class="actions actions-right" style="margin-top:8px;">
+                            <button type="button" id="sync-gd-connect-builtin" class="btn btn-primary btn-sm">Connect Google Drive</button>
+                            <span id="sync-gd-conn-status-builtin" class="hint" style="margin-left:auto;"></span>
+                        </div>
                     </div>
 
                     <!-- OAuth pane -->

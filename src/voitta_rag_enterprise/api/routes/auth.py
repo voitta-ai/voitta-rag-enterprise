@@ -96,6 +96,10 @@ class MeOut(BaseModel):
     # per-folder Share switch — because with one identity there is no one
     # to share with.
     single_user: bool = False
+    # True when the deploy ships a built-in Google Drive OAuth client
+    # (desktop builds) — the sync modal then offers the zero-setup
+    # "Sign in (no setup)" Drive tab. Static per-process.
+    gd_builtin_available: bool = False
     # When the admin has chosen "view as <other>", these surface the
     # effective identity. UI shows a banner + a "Stop impersonating"
     # button. ``acting_as_user_id is None`` means no impersonation in
@@ -180,6 +184,9 @@ def me(
         display_name=eff_row.display_name if eff_row else None,
         is_admin=is_admin,
         single_user=bool(s.single_user),
+        gd_builtin_available=bool(
+            s.single_user and s.gd_builtin_client_id and s.gd_builtin_client_secret
+        ),
         acting_as_user_id=int(acting_id) if acting_id is not None else None,
         acting_as_email=acting_email,
         is_super_admin=is_super_admin(user.email),

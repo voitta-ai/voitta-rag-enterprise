@@ -20,6 +20,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from ...config import get_settings
 from ...db.models import File, Folder, FolderSyncSource
 from ...services import events, job_queue
 from ...services.acl import CurrentUser, is_folder_owner, user_can_see_folder
@@ -35,6 +36,9 @@ from ...services.sync.google_drive import (
 )
 from ...services.sync.google_drive import (
     encode_folders_field as gd_encode_folders,
+)
+from ...services.sync.google_drive import (
+    effective_oauth_client as gd_effective_oauth_client,
 )
 from ...services.sync.google_drive import (
     exchange_code_for_tokens as gd_exchange_code,
@@ -120,6 +124,10 @@ class GoogleDriveSyncIn(BaseModel):
     # Google-native Docs/Sheets/Slides/Forms — so it works even when the
     # project hasn't enabled those Workspace APIs (only Drive is required).
     files_only: bool = False
+    # When True the OAuth creds come from the deploy's built-in
+    # Desktop-app client (desktop/single-user only) — client_id and
+    # client_secret above are then ignored.
+    use_builtin: bool = False
 
 
 class SharePointSite(BaseModel):
@@ -249,6 +257,7 @@ class GoogleDriveSyncOut(BaseModel):
     connected: bool  # true once a refresh_token has been stored
     use_loopback: bool = False
     files_only: bool = False
+    use_builtin: bool = False
 
 
 class GoogleDriveApiStatusOut(BaseModel):
@@ -455,7 +464,9 @@ def _to_out(src: FolderSyncSource) -> SyncSourceOut:
         )
     elif src.source_type == "google_drive":
         gd = GoogleDriveSyncOut(
-            client_id=src.gd_client_id or "",
+            # Built-in rows echo a blank client_id — the SPA doesn't need
+            # the shipped client's identity and mustn't render it.
+            client_id="" if src.gd_use_builtin else (src.gd_client_id or ""),
             folders=[
                 GoogleDriveFolder(**f) for f in gd_coerce_folders(src.gd_folder_id)
             ],
@@ -464,6 +475,7 @@ def _to_out(src: FolderSyncSource) -> SyncSourceOut:
             connected=bool(src.gd_refresh_token),
             use_loopback=bool(src.gd_use_loopback),
             files_only=bool(src.gd_files_only),
+            use_builtin=bool(src.gd_use_builtin),
         )
     elif src.source_type == "nfs":
         root, available, status_str = _nfs_status_snapshot()
@@ -790,7 +802,12 @@ def upsert_sync_source(
             gd_cfg.client_id and (gd_cfg.client_secret or existing_has_secret)
         )
         has_sa = bool(gd_cfg.service_account_json or existing_has_sa)
-        if not has_oauth and not has_sa:
+        if gd_cfg.use_builtin and not _gd_builtin_available():
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "Built-in Google sign-in is not available on this deployment",
+            )
+        if not gd_cfg.use_builtin and not has_oauth and not has_sa:
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST,
                 "Provide either OAuth client_id+client_secret or a service-account JSON",
@@ -829,10 +846,21 @@ def upsert_sync_source(
         # Loopback flag: switching it invalidates any refresh_token that
         # was issued under the other redirect URI (Google scopes refresh
         # tokens to the redirect URI used at consent), so drop it.
+        # Same for the builtin flag: the token was minted by one client
+        # (built-in or user-supplied) and won't refresh under the other.
         prev_loopback = bool(existing and existing.gd_use_loopback)
-        if prev_loopback != bool(gd_cfg.use_loopback):
+        prev_builtin = bool(existing and existing.gd_use_builtin)
+        if gd_cfg.use_builtin:
+            # Builtin flow always uses the request-host redirect URI —
+            # the loopback bridge is a hosted-deploy workaround.
+            gd_cfg.use_loopback = False
+        if (
+            prev_loopback != bool(gd_cfg.use_loopback)
+            or prev_builtin != bool(gd_cfg.use_builtin)
+        ):
             src.gd_refresh_token = None
         src.gd_use_loopback = bool(gd_cfg.use_loopback)
+        src.gd_use_builtin = bool(gd_cfg.use_builtin)
         src.gd_files_only = bool(gd_cfg.files_only)
 
     elif body.source_type in ("sharepoint", "teams"):
@@ -1200,6 +1228,7 @@ def _clear_google_drive_fields(src: FolderSyncSource) -> None:
     src.gd_service_account_json = None
     src.gd_folder_id = None
     src.gd_use_loopback = False
+    src.gd_use_builtin = False
     src.gd_files_only = False
 
 
@@ -1425,6 +1454,29 @@ GD_LOOPBACK_REDIRECT_URI = (
 )
 
 
+def _gd_builtin_available() -> bool:
+    """True when the built-in Drive OAuth client may be used here.
+
+    Requires single-user (desktop) mode — the consent redirect targets
+    this server's own host, reachable at 127.0.0.1 only when browser and
+    server share a machine — plus the baked/env client credentials.
+    """
+    s = get_settings()
+    return bool(
+        s.single_user and s.gd_builtin_client_id and s.gd_builtin_client_secret
+    )
+
+
+def _gd_effective_client(src: FolderSyncSource) -> tuple[str, str]:
+    """Row's effective OAuth (client_id, client_secret), as an HTTP 400
+    when the built-in client is referenced but unavailable (env removed,
+    or a desktop DB imported into a hosted deploy)."""
+    try:
+        return gd_effective_oauth_client(src)
+    except RuntimeError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+
 def _oauth_redirect_uri(request: Request, *, use_loopback: bool = False) -> str:
     """Build the redirect URI the way Google's consent screen will see it.
 
@@ -1470,14 +1522,15 @@ def gd_auth_init(
             status.HTTP_400_BAD_REQUEST,
             "Configure Google Drive (client_id, client_secret) before connecting",
         )
-    if not (src.gd_client_id and src.gd_client_secret):
+    if not src.gd_use_builtin and not (src.gd_client_id and src.gd_client_secret):
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             "Save client_id and client_secret before connecting",
         )
+    client_id, _ = _gd_effective_client(src)
     state = base64.urlsafe_b64encode(str(folder_id).encode()).decode()
     auth_url = gd_get_auth_url(
-        client_id=src.gd_client_id,
+        client_id=client_id,
         redirect_uri=_oauth_redirect_uri(request, use_loopback=bool(src.gd_use_loopback)),
         state=state,
     )
@@ -1531,10 +1584,11 @@ async def gd_list_folders(
             status.HTTP_400_BAD_REQUEST,
             "Connect via OAuth or save a service-account JSON before listing folders",
         )
+    client_id, client_secret = _gd_effective_client(src)
     try:
         data = await gd_list_root_folders(
-            client_id=src.gd_client_id or "",
-            client_secret=src.gd_client_secret or "",
+            client_id=client_id,
+            client_secret=client_secret,
             refresh_token=src.gd_refresh_token or "",
             service_account_json=src.gd_service_account_json or "",
         )
@@ -1558,12 +1612,13 @@ async def gd_browse_folder(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No Google Drive source")
     if not src.gd_refresh_token and not src.gd_service_account_json:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Not connected to Google Drive")
+    client_id, client_secret = _gd_effective_client(src)
     try:
         children = await gd_list_folder_children(
             parent_id=parent_id,
             drive_id=drive_id,
-            client_id=src.gd_client_id or "",
-            client_secret=src.gd_client_secret or "",
+            client_id=client_id,
+            client_secret=client_secret,
             refresh_token=src.gd_refresh_token or "",
             service_account_json=src.gd_service_account_json or "",
         )
@@ -1594,9 +1649,10 @@ async def gd_api_status(
             status.HTTP_400_BAD_REQUEST,
             "Connect via OAuth or save a service-account JSON before testing APIs",
         )
+    client_id, client_secret = _gd_effective_client(src)
     auth = GoogleDriveAuth(
-        client_id=src.gd_client_id or "",
-        client_secret=src.gd_client_secret or "",
+        client_id=client_id,
+        client_secret=client_secret,
         refresh_token=src.gd_refresh_token or "",
         service_account_json=src.gd_service_account_json or "",
     )
@@ -1644,8 +1700,7 @@ async def gd_oauth_callback(
                 status.HTTP_404_NOT_FOUND,
                 "Google Drive source not found for this state",
             )
-        client_id = src.gd_client_id or ""
-        client_secret = src.gd_client_secret or ""
+        client_id, client_secret = _gd_effective_client(src)
         use_loopback = bool(src.gd_use_loopback)
 
     try:

@@ -18,7 +18,7 @@
 
 import { api } from "../api.js";
 import { getSelectedFolderId } from "../flows/selection.js";
-import { folders, syncConfigs, syncSources } from "../store.js";
+import { folders, me, syncConfigs, syncSources } from "../store.js";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -157,7 +157,13 @@ function openSyncModal() {
     $("#sync-gd-files-only").checked = false;
     $("#sync-gd-api-result").hidden = true;
     $("#sync-gd-test-hint").textContent = "";
-    setGdAuthMode("oauth");
+    // Built-in Google client tab: offered only when this deploy ships one
+    // (desktop builds). When it does, it's the zero-setup default for a
+    // fresh form; loadSyncSource overrides from the saved row.
+    const gdBuiltin = !!me.get()?.gd_builtin_available;
+    $("#sync-gd-tab-builtin").hidden = !gdBuiltin;
+    $("#sync-gd-conn-status-builtin").textContent = "Not connected";
+    setGdAuthMode(gdBuiltin ? "builtin" : "oauth");
     setGdConnState({ connected: false, hasClientSecret: false });
     // Jira defaults — loadSyncSource overrides from the row when present.
     $("#sync-jira-base-url").value = "";
@@ -1007,18 +1013,20 @@ function _snapshotSavedGdFolders(folders) {
 // different gotchas (OAuth needs Connect + redirect URI; SA needs
 // folder-shared-with-client_email), so we render exactly one set of
 // fields and persist the mode the user actually used.
-let gdAuthMode = "oauth"; // "oauth" | "sa" | "local"
+let gdAuthMode = "oauth"; // "builtin" | "oauth" | "sa" | "local"
 
 function setGdAuthMode(mode) {
-    gdAuthMode = ["sa", "local"].includes(mode) ? mode : "oauth";
+    gdAuthMode = ["builtin", "sa", "local"].includes(mode) ? mode : "oauth";
+    const builtinTab = $("#sync-gd-tab-builtin");
     const oauthTab = $("#sync-gd-tab-oauth");
     const saTab = $("#sync-gd-tab-sa");
     const localTab = $("#sync-gd-tab-local");
-    for (const [tab, m] of [[oauthTab, "oauth"], [saTab, "sa"], [localTab, "local"]]) {
+    for (const [tab, m] of [[builtinTab, "builtin"], [oauthTab, "oauth"], [saTab, "sa"], [localTab, "local"]]) {
         if (!tab) continue;
         tab.classList.toggle("active", gdAuthMode === m);
         tab.setAttribute("aria-selected", gdAuthMode === m ? "true" : "false");
     }
+    $("#sync-gd-pane-builtin").hidden = gdAuthMode !== "builtin";
     $("#sync-gd-pane-oauth").hidden = gdAuthMode !== "oauth";
     $("#sync-gd-pane-sa").hidden = gdAuthMode !== "sa";
     $("#sync-gd-pane-local").hidden = gdAuthMode !== "local";
@@ -1036,7 +1044,20 @@ function setGdAuthMode(mode) {
     // keep the Pick button visible-but-disabled with a clear hint.
     const pickBtn = $("#sync-gd-pick-folder");
     const idInput = $("#sync-gd-add-folder-id");
-    if (gdAuthMode === "sa") {
+    if (gdAuthMode === "builtin") {
+        // Built-in client: same connected-gated Pick/Test as OAuth, but the
+        // connection state lives on the builtin pane's own status span.
+        const connected = $("#sync-gd-conn-status-builtin").textContent.startsWith("Connected");
+        pickBtn.hidden = false;
+        pickBtn.disabled = !connected;
+        pickBtn.title = connected ? "Pick a Drive folder" : "Connect first";
+        const testBtn = $("#sync-gd-test-apis");
+        testBtn.disabled = !connected;
+        testBtn.title = connected ? "Probe which Workspace APIs are enabled" : "Connect first";
+        idInput.placeholder = "Or paste a folder ID and press Enter";
+        $("#sync-gd-folders-hint").textContent =
+            "Each picked folder syncs into its own subdirectory under this folder.";
+    } else if (gdAuthMode === "sa") {
         // Pick works in SA mode too — the backend mints an SA access token
         // and lists everything shared with the SA's client_email plus any
         // Shared Drives it's a member of. We still need a saved SA JSON
@@ -1110,6 +1131,7 @@ function setGdConnState({ connected, hasClientSecret }) {
     }
 }
 
+$("#sync-gd-tab-builtin").addEventListener("click", () => setGdAuthMode("builtin"));
 $("#sync-gd-tab-oauth").addEventListener("click", () => setGdAuthMode("oauth"));
 $("#sync-gd-tab-sa").addEventListener("click", () => setGdAuthMode("sa"));
 $("#sync-gd-tab-local").addEventListener("click", () => setGdAuthMode("local"));
@@ -1233,15 +1255,22 @@ async function loadSyncSource() {
             $("#sync-gd-files-only").checked = !!gd.files_only;
             $("#sync-gd-api-result").hidden = true;
             updateGdRedirectHint();
-            // Pick the right tab. If the saved config has a service-account
-            // key (and only that), surface SA mode; otherwise default to
-            // OAuth — that's the more common path and the one the redirect-
-            // URI hint is most useful for. Setting the mode AFTER
-            // populating the inputs so setGdConnState reads the right
-            // placeholders.
-            const saOnly = gd.has_service_account && !gd.has_client_secret;
-            setGdAuthMode(saOnly ? "sa" : "oauth");
-            setGdConnState({ connected: gd.connected, hasClientSecret: gd.has_client_secret });
+            // Pick the right tab. Built-in rows land on their own tab
+            // (even when the deploy no longer offers it — the status
+            // then explains why Connect fails). Otherwise: SA when the
+            // saved config has only a service-account key, else OAuth.
+            // Setting the mode AFTER populating the inputs so
+            // setGdConnState reads the right placeholders.
+            $("#sync-gd-conn-status-builtin").textContent =
+                gd.connected ? "Connected ✓" : "Not connected";
+            if (gd.use_builtin) {
+                $("#sync-gd-tab-builtin").hidden = false;
+                setGdAuthMode("builtin");
+            } else {
+                const saOnly = gd.has_service_account && !gd.has_client_secret;
+                setGdAuthMode(saOnly ? "sa" : "oauth");
+                setGdConnState({ connected: gd.connected, hasClientSecret: gd.has_client_secret });
+            }
         } else if (src.source_type === "sharepoint" && src.sharepoint) {
             loadMsForm("sp", src.sharepoint);
             setSpSites(src.sharepoint.sites || []);
@@ -1383,6 +1412,19 @@ function gdFormConfig() {
     // arrive (so "saved" placeholders aren't wiped on every save).
     const useLoopback = !!$("#sync-gd-use-loopback")?.checked;
     const filesOnly = !!$("#sync-gd-files-only")?.checked;
+    if (gdAuthMode === "builtin") {
+        // Built-in client: no user credentials at all; the loopback
+        // bridge doesn't apply (desktop reaches 127.0.0.1 directly).
+        return {
+            client_id: "",
+            client_secret: "",
+            folders: gdFolders,
+            service_account_json: "",
+            use_loopback: false,
+            use_builtin: true,
+            files_only: filesOnly,
+        };
+    }
     if (gdAuthMode === "sa") {
         return {
             client_id: "",
@@ -1390,6 +1432,7 @@ function gdFormConfig() {
             folders: gdFolders,
             service_account_json: $("#sync-gd-sa-json").value,
             use_loopback: useLoopback,
+            use_builtin: false,
             files_only: filesOnly,
         };
     }
@@ -1399,6 +1442,7 @@ function gdFormConfig() {
         folders: gdFolders,
         service_account_json: "",
         use_loopback: useLoopback,
+        use_builtin: false,
         files_only: filesOnly,
     };
 }
@@ -1791,10 +1835,12 @@ $("#sync-gdl-connect").addEventListener("click", async () => {
 // Google Drive: launch the OAuth flow in a popup. The callback closes its
 // own tab and the server publishes folder.gd_connected; we re-load on
 // modal focus to catch the new state without needing a websocket subscription.
-$("#sync-gd-connect").addEventListener("click", async () => {
+// Shared by the user-supplied-client Connect and the built-in-client Connect
+// — the save that precedes gdAuthInit serialises whichever mode is active.
+async function gdConnectFlow() {
     try {
-        // Save first so the server has client_id/client_secret to issue the
-        // auth URL with.
+        // Save first so the server has the auth config to issue the
+        // auth URL with (client creds, or just the use_builtin flag).
         await api.putSync(syncFolderId, syncBody());
         const { auth_url } = await api.gdAuthInit(syncFolderId);
         const popup = window.open(auth_url, "voitta-gd-auth", "width=520,height=640");
@@ -1812,7 +1858,9 @@ $("#sync-gd-connect").addEventListener("click", async () => {
     } catch (err) {
         alert(err.message);
     }
-});
+}
+$("#sync-gd-connect").addEventListener("click", gdConnectFlow);
+$("#sync-gd-connect-builtin").addEventListener("click", gdConnectFlow);
 
 $("#sync-gd-pick-folder").addEventListener("click", async () => {
     try {

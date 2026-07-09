@@ -119,6 +119,15 @@ def init_db() -> None:
             "gd_use_loopback",
             "INTEGER NOT NULL DEFAULT 0",
         )
+        # Built-in Drive OAuth client (desktop): creds come from
+        # VOITTA_GD_BUILTIN_CLIENT_ID/SECRET instead of the row. Default
+        # 0 = row-supplied credentials, the original behaviour.
+        _ensure_column(
+            raw_conn,
+            "folder_sync_sources",
+            "gd_use_builtin",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
         # Files-only Drive sync: skip native Docs/Sheets/Slides/Forms so a
         # project that hasn't enabled those APIs can still sync binary
         # files. Default 0 = export native files too. NULL-safe for

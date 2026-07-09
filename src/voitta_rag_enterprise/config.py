@@ -218,6 +218,14 @@ class Settings(BaseSettings):
     # survive restarts.
     google_auth_client_id: str | None = None
     google_auth_client_secret: str | None = None
+    # Built-in Google Drive OAuth client (NOT the sign-in pair above) —
+    # a Desktop-type GCP client shipped with the desktop app so users can
+    # connect Drive sync without creating their own GCP project. Baked
+    # into the build by desktop/build_app.sh; only honoured in
+    # single-user (desktop) mode, where the consent redirect can reach
+    # this server on 127.0.0.1. Never sent to the SPA.
+    gd_builtin_client_id: str = ""
+    gd_builtin_client_secret: str = ""
     # Clerk (clerk.com) Backend API — server-side directory reads (users,
     # organizations, memberships) against https://api.clerk.com/v1. The
     # secret key comes from Clerk Dashboard → Configure → API Keys

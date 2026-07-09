@@ -298,6 +298,30 @@ class GoogleDriveSyncStats:
 # ---------------------------------------------------------------------------
 
 
+def effective_oauth_client(row) -> tuple[str, str]:
+    """The ``(client_id, client_secret)`` this source actually uses.
+
+    ``gd_use_builtin`` rows get the deploy's built-in Desktop-app client
+    (``VOITTA_GD_BUILTIN_CLIENT_ID/SECRET``, baked into the desktop
+    build) — available only in single-user mode, where the OAuth consent
+    redirect can reach this server on 127.0.0.1. Everything downstream
+    (auth URL, code exchange, token refresh, cache keys) receives the
+    substituted pair, so no other code knows the mode exists.
+    """
+    if getattr(row, "gd_use_builtin", False):
+        from ...config import get_settings
+
+        s = get_settings()
+        if not (
+            s.single_user and s.gd_builtin_client_id and s.gd_builtin_client_secret
+        ):
+            raise RuntimeError(
+                "Built-in Google sign-in is not available on this deployment"
+            )
+        return s.gd_builtin_client_id, s.gd_builtin_client_secret
+    return row.gd_client_id or "", row.gd_client_secret or ""
+
+
 def get_auth_url(client_id: str, redirect_uri: str, state: str) -> str:
     """Build the Google OAuth2 authorization URL."""
     params = {
@@ -565,16 +589,19 @@ class GoogleDriveConnector(SyncConnector):
     source_type = "google_drive"
     supports_progress = True
 
-    # In-process cache: (client_id, refresh_token) → (access_token, expires_at)
+    # In-process cache: (client_id, refresh_token) → (access_token, expires_at).
+    # Built-in-client rows resolve their creds BEFORE GoogleDriveAuth is
+    # built (resolve_config), so client_id here is never blank for OAuth.
     _token_cache: ClassVar[dict[tuple[str, str], tuple[str, float]]] = {}
 
     def resolve_config(self, row) -> dict:
+        client_id, client_secret = effective_oauth_client(row)
         return {
             "drive_folders": coerce_folders_field(row.gd_folder_id),
             "files_only": bool(row.gd_files_only),
             "auth": GoogleDriveAuth(
-                client_id=row.gd_client_id or "",
-                client_secret=row.gd_client_secret or "",
+                client_id=client_id,
+                client_secret=client_secret,
                 refresh_token=row.gd_refresh_token or "",
                 service_account_json=row.gd_service_account_json or "",
             ),

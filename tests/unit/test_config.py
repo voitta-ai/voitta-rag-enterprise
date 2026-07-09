@@ -37,6 +37,21 @@ def test_env_overrides(env: None, monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.dev_user == "alice@example.com"
 
 
+def test_gd_builtin_client_env(env: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    from voitta_rag_enterprise.config import get_settings, reset_settings_cache
+
+    # Defaults: no built-in Drive client shipped.
+    assert get_settings().gd_builtin_client_id == ""
+    assert get_settings().gd_builtin_client_secret == ""
+
+    monkeypatch.setenv("VOITTA_GD_BUILTIN_CLIENT_ID", "cid.apps.googleusercontent.com")
+    monkeypatch.setenv("VOITTA_GD_BUILTIN_CLIENT_SECRET", "GOCSPX-x")
+    reset_settings_cache()
+    s = get_settings()
+    assert s.gd_builtin_client_id == "cid.apps.googleusercontent.com"
+    assert s.gd_builtin_client_secret == "GOCSPX-x"
+
+
 def test_path_resolution_defaults(env: None) -> None:
     from voitta_rag_enterprise.config import get_settings
 

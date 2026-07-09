@@ -198,6 +198,15 @@ def main() -> int:
     root_files = user / _ROOT_FILES_DIRNAME
     root_files.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("VOITTA_SINGLE_USER", "true")
+    # Built-in Drive OAuth client — baked into _gd_oauth.py by
+    # build_app.sh. setdefault keeps developer env overrides winning.
+    try:
+        from ._gd_oauth import CLIENT_ID as _gd_cid, CLIENT_SECRET as _gd_csec
+    except ImportError:
+        _gd_cid = _gd_csec = ""
+    if _gd_cid and _gd_csec:
+        os.environ.setdefault("VOITTA_GD_BUILTIN_CLIENT_ID", _gd_cid)
+        os.environ.setdefault("VOITTA_GD_BUILTIN_CLIENT_SECRET", _gd_csec)
     os.environ.setdefault("VOITTA_DATA_DIR", str(user / "data"))
     os.environ.setdefault("VOITTA_ROOT_PATH", str(root_files))
     os.environ.setdefault("VOITTA_QDRANT_MODE", "managed")
