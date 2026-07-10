@@ -45,6 +45,7 @@ from .services.acl import (
     ROOT_EMAIL,
     get_or_create_user,
     mcp_visible_folder_ids,
+    user_can_see_folder,
     visible_folder_ids,
 )
 from .services.embedding import (
@@ -176,6 +177,28 @@ def _resolved_user_id() -> int | None:
             return get_or_create_user(db, s.dev_user).id
     ctx = _current_user.get()
     return ctx[1] if ctx is not None else None
+
+
+def _require_visible_file(s, file_id: int, user_id: int | None) -> File:
+    """Load a file the caller is allowed to see, or raise ``ValueError``.
+
+    Authorization is folder-scoped: a file is reachable only when its
+    folder is visible to ``user_id`` (owned, ACL-granted, community-shared).
+    This is the single seam EVERY id-taking tool routes through — without
+    it, a bearer caller could read any file/chunk/image/asset in the
+    deployment by enumerating integer ids, exactly the way ``search`` is
+    prevented from leaking across folders.
+
+    ``user_id is None`` is single-user mode (the search-filter no-op): all
+    files visible. The "not found" message is identical whether the row is
+    missing or ACL-hidden, so foreign ids aren't probeable.
+    """
+    f = s.get(File, file_id)
+    if f is None or (
+        user_id is not None and not user_can_see_folder(s, f.folder_id, user_id)
+    ):
+        raise ValueError(f"File {file_id} not found")
+    return f
 
 
 # ---------------------------------------------------------------------------
@@ -585,10 +608,9 @@ def get_file(file_id: int) -> dict:
     If you'd skim it as prose to write a summary, ``get_file`` /
     ``get_chunk_range`` are the right call.
     """
+    user_id = _resolved_user_id()
     with session_scope() as s:
-        f = s.get(File, file_id)
-        if f is None:
-            raise ValueError(f"File {file_id} not found")
+        f = _require_visible_file(s, file_id, user_id)
         info = _file_info(f)
         cas_id = f.file_cas_id
 
@@ -635,10 +657,9 @@ def get_chunk_range(
     end_index = min(end, start_index + 500)
     if end_index <= start_index:
         return []
+    user_id = _resolved_user_id()
     with session_scope() as s:
-        f = s.get(File, file_id)
-        if f is None:
-            raise ValueError(f"File {file_id} not found")
+        f = _require_visible_file(s, file_id, user_id)
         file_cas_id = f.file_cas_id
         rel_path = f.rel_path
         f_source_url = f.source_url
@@ -724,11 +745,15 @@ def get_chunk_images(chunk_id: int) -> list[ImageInfo]:
     Page renders are not linked — fetch them via ``list_page_images`` /
     ``get_page_image`` instead.
     """
+    user_id = _resolved_user_id()
     with session_scope() as s:
         chunk = s.get(Chunk, chunk_id)
         if chunk is None:
             raise ValueError(f"Chunk {chunk_id} not found")
-        file = s.get(File, chunk.file_id)
+        # Folder-scope the chunk via its owning file (cross-file image
+        # refs below resolve to siblings in the SAME folder, so this one
+        # gate covers them too).
+        file = _require_visible_file(s, chunk.file_id, user_id)
         chunk_text = chunk.text or ""
 
         # (1) Intra-file links — the original path. ``score`` carries
@@ -947,10 +972,14 @@ def get_image(image_id: int, max_size: int = 420) -> dict:
     (e.g. 1024) when the detail actually matters. Pass ``0`` to skip
     resizing entirely and get the original bytes/mime.
     """
+    user_id = _resolved_user_id()
     with session_scope() as s:
         img = s.get(Image, image_id)
         if img is None:
             raise ValueError(f"Image {image_id} not found")
+        # Folder-scope via the image's owning file — an image is reachable
+        # only when its file's folder is visible to the caller.
+        _require_visible_file(s, img.file_id, user_id)
         cas_id = img.image_cas_id
         mime = img.mime or "application/octet-stream"
     try:
@@ -988,7 +1017,9 @@ def list_page_images(file_id: int) -> list[PageImageInfo]:
     bytes. Returns ``[]`` for files that produce neither — a vanilla
     markdown file with no image refs, an unindexed file, etc.
     """
+    user_id = _resolved_user_id()
     with session_scope() as s:
+        _require_visible_file(s, file_id, user_id)
         source_url, source_kind = _file_provenance(s, file_id)
         # (1) PDF page-renders path
         rows = list(
@@ -1066,7 +1097,9 @@ def get_page_image(
     indexed before layout capture was added, or for non-PDF files. Set
     ``include_layout=False`` to skip the read + JSON parse.
     """
+    user_id = _resolved_user_id()
     with session_scope() as s:
+        _require_visible_file(s, file_id, user_id)
         img = s.execute(
             select(Image)
             .where(
@@ -1123,10 +1156,9 @@ def get_page_layout(file_id: int, page: int) -> list[dict]:
     ``text`` for text/title blocks, and ``img_path`` for image/table
     blocks. Other fields are passed through as-is.
     """
+    user_id = _resolved_user_id()
     with session_scope() as s:
-        file = s.get(File, file_id)
-        if file is None:
-            raise ValueError(f"File {file_id} not found")
+        file = _require_visible_file(s, file_id, user_id)
         file_cas_id = file.file_cas_id
     if not file_cas_id:
         return []
@@ -1170,10 +1202,9 @@ def get_workbook(file_id: int) -> dict:
 
     from .db.models import Folder
 
+    user_id = _resolved_user_id()
     with session_scope() as s:
-        f = s.get(File, file_id)
-        if f is None:
-            raise ValueError(f"File {file_id} not found")
+        f = _require_visible_file(s, file_id, user_id)
         rel_path = Path(f.rel_path)
         folder = s.get(Folder, f.folder_id)
         if folder is None:
@@ -1208,6 +1239,7 @@ def get_workbook(file_id: int) -> dict:
 @mcp.tool()
 def resolve_url(url: str) -> list[FileInfo]:
     """Reverse-lookup an external URL (set by sync connectors) → matching files."""
+    user_id = _resolved_user_id()
     with session_scope() as s:
         rows = list(
             s.execute(select(File).where(File.source_url == url)).scalars()
@@ -1222,7 +1254,13 @@ def resolve_url(url: str) -> list[FileInfo]:
                     )
                 ).scalars()
             )
-        return [_file_info(f) for f in rows]
+        # Folder-scope the results — a URL match must not reveal files in
+        # folders the caller can't see (id/URL enumeration guard).
+        return [
+            _file_info(f)
+            for f in rows
+            if user_id is None or user_can_see_folder(s, f.folder_id, user_id)
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -1534,10 +1572,9 @@ def list_assets(file_id: int) -> list[dict]:
     from .services import markdown_extract as _md
     from .services import original_file as _orig
 
+    user_id = _resolved_user_id()
     with session_scope() as s:
-        f = s.get(File, file_id)
-        if f is None:
-            raise ValueError(f"File {file_id} not found")
+        f = _require_visible_file(s, file_id, user_id)
         cas_id = f.file_cas_id
         rel_path = f.rel_path
     out: list[dict] = []
@@ -1655,6 +1692,11 @@ def request_asset(
     validated = handler.validate_params(raw_params)
 
     user_id = _resolved_user_id()
+    # Authorize BEFORE minting — the returned URL is HMAC-signed and IS the
+    # credential (the /api/assets endpoint carries no identity auth), so a
+    # caller who can't see the file must never receive a URL for it.
+    with session_scope() as s:
+        _require_visible_file(s, file_id, user_id)
     response = handler.request(
         file_id=file_id,
         slug=slug,

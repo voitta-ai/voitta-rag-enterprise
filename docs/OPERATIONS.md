@@ -628,6 +628,20 @@ and API-key callers (the `deps` seam hands both the same account identity).
 The check is folder-level, mirroring search — a file is reachable exactly
 when its folder is (owned, ACL-granted, community-shared, or single-user).
 
+**The MCP tools carry the identical gate.** The MCP surface shares the
+bearer identity (`_current_user` ContextVar → account id) but has its own
+tool handlers, so it enforces the same rule independently:
+`mcp_server._require_visible_file(s, file_id, user_id)` fronts every
+id-taking tool — `get_file`, `get_chunk_range`, `get_chunk_images`,
+`get_image`, `list_page_images`, `get_page_image`, `get_page_layout`,
+`get_workbook`, `list_assets`, and `request_asset` — while `resolve_url`
+folder-filters its result list. `request_asset` is gated **before** it
+mints the signed `/api/assets/…` URL, because that URL is itself the
+capability (the assets route carries no identity auth — see §11). `user_id`
+is `None` in single-user mode, making the gate a no-op there, exactly like
+the search filter. Net: `search` and every content/asset fetch — REST or
+MCP — resolve content only within the caller's visible folders.
+
 ### Source provenance (owner / dates) — `meta_*`
 
 Synced objects carry provenance the local file doesn't: who owns/created it,
