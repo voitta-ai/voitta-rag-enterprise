@@ -204,9 +204,10 @@ def test_reindex_progress_chunks_size_param(
     not just the start + final one. Confirms the per-chunk progress emit
     actually fires inside the loop."""
     from voitta_rag_enterprise.main import create_app
-    from voitta_rag_enterprise.services import indexing
 
-    monkeypatch.setattr(indexing, "_REINDEX_PROGRESS_CHUNK", 2)
+    monkeypatch.setattr(
+        "voitta_rag_enterprise.services.indexing.reindex._REINDEX_PROGRESS_CHUNK", 2
+    )
 
     app = create_app()
     with TestClient(app) as client:
