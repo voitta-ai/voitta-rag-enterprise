@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from ....db.models import AuthProvider
 from ....services import auth_providers as auth_providers_svc
 from ....services.acl import CurrentUser
-from ...deps import admin_user, current_user, db_session
+from ...deps import current_user, db_session, super_admin_user
 from .base import publish_admin_state, router
 
 logger = logging.getLogger(__name__)
@@ -116,7 +116,7 @@ def list_auth_providers(
 def create_auth_provider(
     body: _AuthProviderCreateIn,
     db: Session = Depends(db_session),
-    me: CurrentUser = Depends(admin_user),
+    me: CurrentUser = Depends(super_admin_user),
 ) -> AuthProviderOut:
     import time
 
@@ -158,7 +158,7 @@ def update_auth_provider(
     provider_id: int,
     body: _AuthProviderPatchIn,
     db: Session = Depends(db_session),
-    me: CurrentUser = Depends(admin_user),
+    me: CurrentUser = Depends(super_admin_user),
 ) -> AuthProviderOut:
     import time
 
@@ -199,7 +199,7 @@ def update_auth_provider(
 def delete_auth_provider(
     provider_id: int,
     db: Session = Depends(db_session),
-    me: CurrentUser = Depends(admin_user),
+    me: CurrentUser = Depends(super_admin_user),
 ) -> None:
     row = db.get(AuthProvider, provider_id)
     if row is None:
@@ -218,7 +218,7 @@ def delete_auth_provider(
 async def check_auth_provider(
     provider_id: int,
     db: Session = Depends(db_session),
-    _: CurrentUser = Depends(admin_user),
+    _: CurrentUser = Depends(super_admin_user),
 ) -> _AuthProviderCheckOut:
     """Probe the provider's token endpoint with the stored credentials.
 

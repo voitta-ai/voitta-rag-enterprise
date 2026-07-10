@@ -10,20 +10,19 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from ....db.database import session_scope
 from ....services import events
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 
 def publish_admin_state() -> None:
-    """Push the full admin state to every admin WS connection.
+    """Signal every admin WS connection that admin state changed.
 
-    Low-volume (admin mutations are rare), so re-sending the whole state on each
-    change keeps the client logic to a single replace with no delta merging.
+    The admin snapshot is now per-viewer (scoped to each admin's
+    administrative domain), so a single broadcast payload can't serve
+    everyone. Instead this emits a payload-less ``admin.invalidated``; the WS
+    pump rebuilds and sends each admin connection its *own* scoped snapshot
+    (see ``api/ws.py``). Admin mutations are rare, so the extra rebuild is
+    cheap. Kept synchronous so every (sync) route handler can call it.
     """
-    from .state import build_admin_state
-
-    with session_scope() as db:
-        state = build_admin_state(db)
-    events.publish("admin", {"type": "admin.snapshot", "state": state})
+    events.publish("admin", {"type": "admin.invalidated"})

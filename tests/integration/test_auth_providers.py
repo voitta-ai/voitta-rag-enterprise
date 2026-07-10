@@ -17,6 +17,21 @@ from fastapi.testclient import TestClient
 from tests.conftest import auth_as
 
 
+@pytest.fixture(autouse=True)
+def _admin_is_super(auth_env: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The auth-provider catalog is a deployment-global resource — its
+    mutations are superadmin-only now. These tests act as ``boss@example.com``;
+    make that a superadmin. (Regular-admin 403 is covered in
+    test_admin_scope_endpoints; non-admin 403 stays covered below.)
+
+    Depends on ``auth_env`` so it runs AFTER that fixture strips ``VOITTA_*``
+    — otherwise the env reset would wipe the super-admin var we just set."""
+    from voitta_rag_enterprise.config import reset_settings_cache
+
+    monkeypatch.setenv("VOITTA_SUPER_ADMINS", "boss@example.com")
+    reset_settings_cache()
+
+
 def _make_admin(app: FastAPI, email: str) -> int:
     from voitta_rag_enterprise.db.database import session_scope
     from voitta_rag_enterprise.db.models import User

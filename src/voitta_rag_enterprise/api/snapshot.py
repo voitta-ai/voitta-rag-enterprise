@@ -18,10 +18,13 @@ handler emits one per subscribed topic, then a final ``{"type": "synced"}``.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+
+if TYPE_CHECKING:
+    from ..services.admin_scope import AdminScope
 
 from ..db.models import File, Folder, FolderSyncSource, Image, Job
 from ..services import folder_active
@@ -140,6 +143,7 @@ def build_snapshot(
     is_admin: bool,
     visible: set[int] | None,
     topics: tuple[str, ...],
+    admin_scope: AdminScope | None = None,
 ) -> list[dict[str, Any]]:
     """Build the ordered list of snapshot frames for ``topics``.
 
@@ -155,9 +159,15 @@ def build_snapshot(
     """
     frames: list[dict[str, Any]] = []
     if "admin" in topics and is_admin:
+        from ..services.admin_scope import AdminScope
         from .routes.admin import build_admin_state
 
-        frames.append({"type": "admin.snapshot", "state": build_admin_state(db)})
+        # Caller resolves scope (async Clerk lookup) before the thread hop;
+        # a missing scope means "no domain" (fail closed), never see-all.
+        scope = admin_scope or AdminScope()
+        frames.append(
+            {"type": "admin.snapshot", "state": build_admin_state(db, scope)}
+        )
     if "keys" in topics and user_id:
         from .routes.api_keys import build_keys_state
 

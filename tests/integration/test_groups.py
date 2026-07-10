@@ -9,6 +9,20 @@ from fastapi.testclient import TestClient
 from tests.conftest import auth_as
 
 
+@pytest.fixture(autouse=True)
+def _admin_is_super(auth_env: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Group CRUD and cross-user management are superadmin-scoped now; the
+    admin these tests act as (``admin@x.com``) must be a superadmin. Regular-
+    admin denial of these routes is covered in test_admin_scope_endpoints.
+
+    Depends on ``auth_env`` so it runs AFTER that fixture strips ``VOITTA_*``
+    — otherwise the env reset would wipe the super-admin var we just set."""
+    from voitta_rag_enterprise.config import reset_settings_cache
+
+    monkeypatch.setenv("VOITTA_SUPER_ADMINS", "admin@x.com")
+    reset_settings_cache()
+
+
 def _make_admin(app: FastAPI, email: str) -> int:
     from voitta_rag_enterprise.db.database import session_scope
     from voitta_rag_enterprise.db.models import User
@@ -133,7 +147,8 @@ def test_cannot_delete_super_admin(
 ) -> None:
     from voitta_rag_enterprise.config import reset_settings_cache
 
-    monkeypatch.setenv("VOITTA_SUPER_ADMINS", "boss@x.com")
+    # admin@x.com must stay super (to reach the delete), boss is the target super.
+    monkeypatch.setenv("VOITTA_SUPER_ADMINS", "admin@x.com,boss@x.com")
     reset_settings_cache()
     _make_admin(app, "admin@x.com")
     boss = _mk_user("boss@x.com")

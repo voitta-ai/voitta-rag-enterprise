@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 from ....services import indexing_caps
 from ....services.acl import CurrentUser
-from ...deps import admin_user
+from ...deps import admin_user, super_admin_user
 from .base import publish_admin_state, router
 
 logger = logging.getLogger(__name__)
@@ -46,7 +46,7 @@ def get_indexing_caps(_: CurrentUser = Depends(admin_user)) -> IndexingCapsOut:
 @router.patch("/indexing-caps", response_model=IndexingCapsOut)
 def update_indexing_caps(
     body: dict[str, int],
-    me: CurrentUser = Depends(admin_user),
+    me: CurrentUser = Depends(super_admin_user),
 ) -> IndexingCapsOut:
     """Merge ``body`` (partial) into the persisted override and re-cache.
 

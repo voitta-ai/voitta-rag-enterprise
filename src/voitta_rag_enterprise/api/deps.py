@@ -20,6 +20,7 @@ from ..services.acl import (
     resolve_user_email,
     stamp_person_admin,
 )
+from ..services.admin_scope import AdminScope
 
 
 def _cu(u: User) -> CurrentUser:
@@ -290,3 +291,37 @@ def admin_user(
             status_code=status.HTTP_403_FORBIDDEN, detail="Admin only"
         )
     return me
+
+
+def super_admin_user(
+    me: CurrentUser = Depends(real_user),
+) -> CurrentUser:
+    """Guard for deployment-global admin mutations (allowlist, providers,
+    caps, settings, groups, user creation).
+
+    Regular admins may *view* these but only superadmins may change them —
+    they're deployment-wide, not scoped to any one org. Chains off
+    ``real_user`` (super implies admin, so no separate person-level check).
+    """
+    from ..services.admin_store import is_super_admin
+
+    if not is_super_admin(me.email):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Super-admin only",
+        )
+    return me
+
+
+async def admin_scope(
+    me: CurrentUser = Depends(admin_user),
+    db: Session = Depends(db_session),
+) -> AdminScope:
+    """Resolve the caller's administrative domain for domain-scoped routes.
+
+    Keeps the async Clerk directory lookup inside a dependency so handlers
+    stay simple. Depends on ``admin_user`` so non-admins never reach here.
+    """
+    from ..services.admin_scope import resolve_admin_scope
+
+    return await resolve_admin_scope(db, me.email)

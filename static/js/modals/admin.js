@@ -93,6 +93,63 @@ function renderAdminFromState(state) {
     renderStorageSettings(state.settings);
     renderDirectorySettings(state.settings);
     applyDirectoryModes(state.settings);
+    // MUST run last: the renderers above (re)create/enable their controls,
+    // so permission gating overrides whatever they set.
+    applyAdminPermissions(state);
+}
+
+// Deployment-global tabs: read-only for a regular admin (superadmin-only to
+// mutate). The Users tab is NOT here — its list is already server-scoped to
+// the admin's domain and its per-row controls stay usable; only the
+// create-user button (a global action) is gated separately below.
+const READONLY_PANES = [
+    "admin-tab-pane-access",   // allowlist + directory toggles + Clerk key
+    "admin-tab-pane-groups",
+    "admin-tab-pane-oauth",
+    "admin-tab-pane-caps",
+    "admin-tab-pane-storage",
+];
+
+// Mirror the server's authorization on the client: a regular admin sees the
+// global-settings tabs but can't change them (the routes 403), so disable the
+// controls instead of surfacing dead buttons. Security is enforced
+// server-side; this is UX.
+function applyAdminPermissions(state) {
+    const perms = state.permissions || {};
+    const ro = !!state.read_only;
+    for (const id of READONLY_PANES) {
+        const pane = document.getElementById(id);
+        if (!pane) continue;
+        pane.classList.toggle("admin-pane-readonly", ro);
+        for (const el of pane.querySelectorAll("input, button, select, textarea")) {
+            el.disabled = ro;
+        }
+    }
+    // Creating users writes the native allowlist and isn't org-bound → super-only.
+    const addBtn = $("#admin-user-add-btn");
+    if (addBtn) addBtn.hidden = !perms.is_super;
+    renderReadOnlyBanner(ro, perms);
+}
+
+function renderReadOnlyBanner(ro, perms) {
+    const body = document.querySelector(".admin-body");
+    if (!body) return;
+    let banner = document.getElementById("admin-readonly-banner");
+    if (!ro) {
+        if (banner) banner.remove();
+        return;
+    }
+    if (!banner) {
+        banner = document.createElement("div");
+        banner.id = "admin-readonly-banner";
+        banner.className = "hint admin-readonly-banner";
+        body.insertBefore(banner, body.firstChild);
+    }
+    const base = "Read-only view — you manage users in your organization(s); "
+        + "deployment-wide settings are superadmin-only.";
+    banner.textContent = perms.clerk_degraded
+        ? base + " (Organization membership is temporarily unavailable, so some users may be hidden.)"
+        : base;
 }
 
 // Render the current store value. Mutations no longer refetch — the server

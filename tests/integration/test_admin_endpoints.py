@@ -29,6 +29,19 @@ def _make_admin(app: FastAPI, email: str) -> int:
     return uid
 
 
+def _make_super_admin(app: FastAPI, email: str, monkeypatch: pytest.MonkeyPatch) -> int:
+    """A superadmin: is_admin + listed in VOITTA_SUPER_ADMINS.
+
+    Deployment-global mutations (allowlist, caps, provider catalog, user
+    pre-creation, groups) are superadmin-only now — a plain admin gets 403 —
+    so tests that exercise those need this."""
+    from voitta_rag_enterprise.config import reset_settings_cache
+
+    monkeypatch.setenv("VOITTA_SUPER_ADMINS", email)
+    reset_settings_cache()
+    return _make_admin(app, email)
+
+
 def test_non_admin_gets_403(app: FastAPI) -> None:
     auth_as(app, "regular@x.com")
     with TestClient(app) as c:
@@ -46,8 +59,10 @@ def test_non_admin_gets_403(app: FastAPI) -> None:
             assert resp.status_code == 403, f"{method} {path} → {resp.status_code}"
 
 
-def test_admin_can_manage_allowlist(app: FastAPI) -> None:
-    _make_admin(app, "boss@example.com")
+def test_admin_can_manage_allowlist(
+    app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _make_super_admin(app, "boss@example.com", monkeypatch)
     with TestClient(app) as c:
         # Initially empty
         out = c.get("/api/admin/allowlist").json()
@@ -78,13 +93,15 @@ def test_admin_can_manage_allowlist(app: FastAPI) -> None:
         assert "customer.com" not in out["domains"]
 
 
-def test_admin_can_promote_demote_users(app: FastAPI) -> None:
+def test_admin_can_promote_demote_users(
+    app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Toggling is_admin via PATCH /api/admin/users/{id}."""
     from voitta_rag_enterprise.db.database import session_scope
     from voitta_rag_enterprise.db.models import User
     from voitta_rag_enterprise.services.acl import get_or_create_user
 
-    _make_admin(app, "boss@example.com")
+    _make_super_admin(app, "boss@example.com", monkeypatch)
     with session_scope() as s:
         target = get_or_create_user(s, "alice@example.com")
         s.commit()
@@ -105,7 +122,9 @@ def test_admin_can_promote_demote_users(app: FastAPI) -> None:
         assert s.get(User, target_id).is_admin is False
 
 
-def test_admin_can_pre_create_user_with_admin_flag(app: FastAPI) -> None:
+def test_admin_can_pre_create_user_with_admin_flag(
+    app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The whole point of POST /api/admin/users: grant admin status to
     a teammate before they've ever signed in. Without this, the Users
     table only showed users with at least one prior login, leaving no
@@ -114,7 +133,7 @@ def test_admin_can_pre_create_user_with_admin_flag(app: FastAPI) -> None:
     from voitta_rag_enterprise.db.models import User
     from voitta_rag_enterprise.services import admin_store
 
-    _make_admin(app, "boss@example.com")
+    _make_super_admin(app, "boss@example.com", monkeypatch)
     with TestClient(app) as c:
         out = c.post(
             "/api/admin/users",
@@ -130,13 +149,15 @@ def test_admin_can_pre_create_user_with_admin_flag(app: FastAPI) -> None:
     assert "newhire@customer.com" in admin_store.list_allowed_users()
 
 
-def test_pre_create_user_without_signin_grant(app: FastAPI) -> None:
+def test_pre_create_user_without_signin_grant(
+    app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """grant_signin=False creates the row but does NOT touch the allowlist —
     rare path, but exists for cases where the admin wants the User row
     to exist (e.g. for ACL grants) without admitting the email."""
     from voitta_rag_enterprise.services import admin_store
 
-    _make_admin(app, "boss@example.com")
+    _make_super_admin(app, "boss@example.com", monkeypatch)
     with TestClient(app) as c:
         c.post(
             "/api/admin/users",
@@ -159,10 +180,12 @@ def test_super_admin_flag_surfaced_in_user_listing(
         assert boss["is_super_admin"] is True
 
 
-def test_admin_can_read_and_patch_indexing_caps(app: FastAPI) -> None:
+def test_admin_can_read_and_patch_indexing_caps(
+    app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Sanity-check the indexing-caps endpoints end-to-end: GET returns
     values + defaults + bounds, PATCH applies a clamped update."""
-    _make_admin(app, "boss@example.com")
+    _make_super_admin(app, "boss@example.com", monkeypatch)
     with TestClient(app) as c:
         out = c.get("/api/admin/indexing-caps").json()
         assert "values" in out and "defaults" in out and "bounds" in out

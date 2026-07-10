@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from ....db.models import AuthProvider, User
 from ....services import admin_store, indexing_caps
+from ....services.admin_scope import AdminScope, filter_users_for_scope
 from .allowlist import AllowlistOut
 from .auth_providers import _to_out
 from .caps import IndexingCapsOut
@@ -29,11 +30,16 @@ from .users import _user_out
 # ---------------------------------------------------------------------------
 
 
-def build_admin_state(db: Session) -> dict:
-    """Full admin-console state, mirroring the admin GET endpoints.
+def build_admin_state(db: Session, scope: AdminScope) -> dict:
+    """Full admin-console state for one viewer, mirroring the admin GET
+    endpoints. The shape matches what the SPA's admin modal renders so one
+    builder feeds both the connect snapshot and the on-mutation push.
 
-    The shape matches what the SPA's admin modal renders so one builder feeds
-    both the connect snapshot and the on-mutation push.
+    ``scope`` is the viewer's resolved administrative domain. The ``users``
+    list is filtered to it; the deployment-global sections (allowlist,
+    groups, providers, caps, settings) are always included — a regular admin
+    may *view* them — but ``read_only``/``permissions`` tell the client to
+    disable every mutating control for a non-superadmin.
     """
     from ....config import get_settings
     from ....services import groups as groups_svc
@@ -44,8 +50,16 @@ def build_admin_state(db: Session) -> dict:
     users = db.execute(
         select(User).order_by(User.email, User.company_id)
     ).scalars().all()
+    users = filter_users_for_scope(scope, users)
     providers = db.execute(select(AuthProvider).order_by(AuthProvider.id)).scalars().all()
     return {
+        "read_only": not scope.is_super,
+        "permissions": {
+            "is_super": scope.is_super,
+            "is_native_admin": scope.is_native_admin,
+            "admin_org_ids": sorted(scope.admin_org_ids),
+            "clerk_degraded": scope.clerk_degraded,
+        },
         "allowlist": AllowlistOut(
             domains=admin_store.list_allowed_domains(),
             users=admin_store.list_allowed_users(),

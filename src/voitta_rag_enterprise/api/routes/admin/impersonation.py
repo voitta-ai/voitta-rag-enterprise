@@ -11,7 +11,8 @@ from sqlalchemy.orm import Session
 from ....db.models import User
 from ....services import admin_store
 from ....services.acl import CurrentUser
-from ...deps import admin_user, db_session
+from ....services.admin_scope import AdminScope, user_in_scope
+from ...deps import admin_scope, admin_user, db_session
 from .base import publish_admin_state, router
 
 logger = logging.getLogger(__name__)
@@ -28,16 +29,19 @@ class ImpersonateOut(BaseModel):
 
 
 @router.post("/impersonate/{user_id}", response_model=ImpersonateOut)
-def start_impersonate(
+async def start_impersonate(
     user_id: int,
     request: Request,
     db: Session = Depends(db_session),
     me: CurrentUser = Depends(admin_user),
+    scope: AdminScope = Depends(admin_scope),
 ) -> ImpersonateOut:
     from ....services.acl import default_account_for_email, offered_accounts_for_email
 
     target = db.get(User, user_id)
-    if target is None:
+    # Domain-scoped: a regular admin can only impersonate users within their
+    # administrative domain (out-of-domain → 404, existence-hiding).
+    if target is None or not user_in_scope(scope, target):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
     if target.id == me.id:
         # Pretending to be yourself is a no-op; clear instead so the UI

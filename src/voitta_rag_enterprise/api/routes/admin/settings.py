@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 from ....services import admin_store
 from ....services.acl import CurrentUser
-from ...deps import admin_user
+from ...deps import admin_user, super_admin_user
 from .base import publish_admin_state, router
 
 logger = logging.getLogger(__name__)
@@ -97,7 +97,7 @@ def get_admin_settings(_: CurrentUser = Depends(admin_user)) -> AdminSettingsOut
 @router.patch("/settings", response_model=AdminSettingsOut)
 def update_admin_settings(
     body: _AdminSettingsPatchIn,
-    me: CurrentUser = Depends(admin_user),
+    me: CurrentUser = Depends(super_admin_user),
 ) -> AdminSettingsOut:
     """Update one or more typed admin settings.
 
@@ -159,7 +159,7 @@ def update_admin_settings(
 
 @router.get("/clerk/directory")
 async def get_clerk_directory(
-    _: CurrentUser = Depends(admin_user),
+    me: CurrentUser = Depends(admin_user),
 ) -> dict:
     """Users + organizations + memberships from Clerk, UI-ready.
 
@@ -167,8 +167,14 @@ async def get_clerk_directory(
     low-traffic and staleness would be more confusing than the
     ~1 s round-trip. 400 when Clerk mode is off or no key is set;
     502 when Clerk itself rejects us.
+
+    Scoped: a superadmin sees the whole directory; a regular admin sees only
+    the orgs they administer (role=admin) and those orgs' members — mirroring
+    the users-list scoping so the Clerk tab can't leak other orgs.
     """
     from ....services import clerk as clerk_svc
+    from ....services.admin_scope import admin_orgs_from_directory
+    from ....services.admin_store import is_super_admin
 
     if not admin_store.get_clerk_enabled():
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Clerk mode is not enabled.")
@@ -176,6 +182,25 @@ async def get_clerk_directory(
     if not key:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "No Clerk secret key configured.")
     try:
-        return await clerk_svc.fetch_directory(key)
+        directory = await clerk_svc.fetch_directory(key)
     except clerk_svc.ClerkError as e:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e)) from e
+
+    if is_super_admin(me.email):
+        return directory
+
+    # Regular admin: restrict to the orgs they administer (reuse the same
+    # pure derivation the scope resolver uses — no second Clerk sweep).
+    admin_org_ids, _names = admin_orgs_from_directory(directory, me.email)
+    orgs = [o for o in directory.get("organizations", []) if o.get("id") in admin_org_ids]
+    visible_emails = {
+        (m.get("email") or "").strip().lower()
+        for o in orgs
+        for m in o.get("members", [])
+    }
+    users = [
+        u
+        for u in directory.get("users", [])
+        if (u.get("email") or "").strip().lower() in visible_emails
+    ]
+    return {"users": users, "organizations": orgs}

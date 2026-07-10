@@ -9,7 +9,7 @@ from pydantic import BaseModel, EmailStr
 
 from ....services import admin_store
 from ....services.acl import CurrentUser
-from ...deps import admin_user
+from ...deps import admin_user, super_admin_user
 from .base import publish_admin_state, router
 
 logger = logging.getLogger(__name__)
@@ -50,7 +50,7 @@ def get_allowlist(_: CurrentUser = Depends(admin_user)) -> AllowlistOut:
 @router.post("/allowlist/domains", response_model=AllowlistOut)
 def add_domain(
     body: _DomainIn,
-    me: CurrentUser = Depends(admin_user),
+    me: CurrentUser = Depends(super_admin_user),
 ) -> AllowlistOut:
     try:
         admin_store.add_allowed_domain(body.domain)
@@ -65,7 +65,7 @@ def add_domain(
 @router.delete("/allowlist/domains/{domain}", response_model=AllowlistOut)
 def remove_domain(
     domain: str,
-    me: CurrentUser = Depends(admin_user),
+    me: CurrentUser = Depends(super_admin_user),
 ) -> AllowlistOut:
     admin_store.remove_allowed_domain(domain)
     logger.info("admin: %s removed domain %s", me.email, domain)
@@ -77,7 +77,7 @@ def remove_domain(
 @router.post("/allowlist/users", response_model=AllowlistOut)
 def add_email(
     body: _EmailIn,
-    me: CurrentUser = Depends(admin_user),
+    me: CurrentUser = Depends(super_admin_user),
 ) -> AllowlistOut:
     try:
         admin_store.add_allowed_user(str(body.email))
@@ -92,7 +92,7 @@ def add_email(
 @router.delete("/allowlist/users/{email}", response_model=AllowlistOut)
 def remove_email(
     email: str,
-    me: CurrentUser = Depends(admin_user),
+    me: CurrentUser = Depends(super_admin_user),
 ) -> AllowlistOut:
     admin_store.remove_allowed_user(email)
     logger.info("admin: %s removed allowed user %s", me.email, email)
@@ -104,7 +104,7 @@ def remove_email(
 @router.post("/blocklist", response_model=AllowlistOut)
 def add_block(
     body: _EmailIn,
-    me: CurrentUser = Depends(admin_user),
+    me: CurrentUser = Depends(super_admin_user),
 ) -> AllowlistOut:
     try:
         admin_store.add_blocked_user(str(body.email))
@@ -119,7 +119,7 @@ def add_block(
 @router.delete("/blocklist/{email}", response_model=AllowlistOut)
 def remove_block(
     email: str,
-    me: CurrentUser = Depends(admin_user),
+    me: CurrentUser = Depends(super_admin_user),
 ) -> AllowlistOut:
     admin_store.remove_blocked_user(email)
     logger.info("admin: %s unblocked %s", me.email, email)

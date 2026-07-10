@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from ....db.models import User
 from ....services.acl import CurrentUser
-from ...deps import admin_user, db_session
+from ...deps import admin_user, db_session, super_admin_user
 from .base import publish_admin_state, router
 
 logger = logging.getLogger(__name__)
@@ -57,7 +57,7 @@ def list_groups(
 def create_group(
     body: _GroupCreateIn,
     db: Session = Depends(db_session),
-    me: CurrentUser = Depends(admin_user),
+    me: CurrentUser = Depends(super_admin_user),
 ) -> GroupOut:
     from ....db.models import Group
 
@@ -82,7 +82,7 @@ def update_group(
     group_id: int,
     body: _GroupPatchIn,
     db: Session = Depends(db_session),
-    me: CurrentUser = Depends(admin_user),
+    me: CurrentUser = Depends(super_admin_user),
 ) -> GroupOut:
     from ....db.models import Group
     from ....services import groups as groups_svc
@@ -114,7 +114,7 @@ def update_group(
 def delete_group(
     group_id: int,
     db: Session = Depends(db_session),
-    me: CurrentUser = Depends(admin_user),
+    me: CurrentUser = Depends(super_admin_user),
 ) -> None:
     from ....db.models import Group
 
@@ -133,7 +133,7 @@ def add_group_member(
     group_id: int,
     body: _MemberIn,
     db: Session = Depends(db_session),
-    me: CurrentUser = Depends(admin_user),
+    me: CurrentUser = Depends(super_admin_user),
 ) -> None:
     from ....db.models import Group
     from ....services import groups as groups_svc
@@ -154,7 +154,7 @@ def remove_group_member(
     group_id: int,
     user_id: int,
     db: Session = Depends(db_session),
-    me: CurrentUser = Depends(admin_user),
+    me: CurrentUser = Depends(super_admin_user),
 ) -> None:
     from ....services import groups as groups_svc
 

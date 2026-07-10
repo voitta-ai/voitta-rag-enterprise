@@ -12,7 +12,12 @@ from sqlalchemy.orm import Session
 from ....db.models import User
 from ....services import admin_store
 from ....services.acl import CurrentUser
-from ...deps import admin_user, db_session
+from ....services.admin_scope import (
+    AdminScope,
+    filter_users_for_scope,
+    user_in_scope,
+)
+from ...deps import admin_scope, admin_user, db_session, super_admin_user
 from .base import publish_admin_state, router
 
 logger = logging.getLogger(__name__)
@@ -86,9 +91,12 @@ class _CreateUserIn(BaseModel):
 def create_user(
     body: _CreateUserIn,
     db: Session = Depends(db_session),
-    me: CurrentUser = Depends(admin_user),
+    me: CurrentUser = Depends(super_admin_user),
 ) -> AdminUserOut:
     """Pre-create a User row and (optionally) mark them admin + allowlist.
+
+    Super-admin only: ``grant_signin`` writes the native allowlist and the
+    row isn't bound to any org, so this is a deployment-global action.
 
     Why this exists: the Users table only ever showed users who had
     signed in at least once, so an admin couldn't pre-grant admin
@@ -98,7 +106,6 @@ def create_user(
     teammate can actually sign in. The admin flag is then just one
     PATCH away — or set in this same call via ``is_admin=True``.
     """
-    from ....config import get_settings
     from ....services.acl import get_or_create_user
 
     email = str(body.email).strip().lower()
@@ -120,12 +127,14 @@ def create_user(
 
 
 @router.get("/users", response_model=list[AdminUserOut])
-def list_users(
+async def list_users(
     db: Session = Depends(db_session),
-    _: CurrentUser = Depends(admin_user),
+    scope: AdminScope = Depends(admin_scope),
 ) -> list[AdminUserOut]:
-    """Every User row that has ever signed in. Used by the admin UI for
-    both the admin-flag toggle and the impersonation dropdown."""
+    """User rows within the caller's administrative domain. Superadmins see
+    every account; a regular admin sees only members of the orgs they
+    administer (plus native users if they're a native admin). Feeds both the
+    admin-flag toggle and the impersonation dropdown."""
     from ....services import groups as groups_svc
 
     supers = _super_set()
@@ -133,17 +142,19 @@ def list_users(
     rows = db.execute(
         select(User).order_by(User.email, User.company_id)
     ).scalars().all()
+    rows = filter_users_for_scope(scope, rows)
     return [
         _user_out(u, groups=by_user.get(u.id, []), supers=supers) for u in rows
     ]
 
 
 @router.patch("/users/{user_id}", response_model=AdminUserOut)
-def update_user(
+async def update_user(
     user_id: int,
     body: _AdminFlagIn,
     db: Session = Depends(db_session),
     me: CurrentUser = Depends(admin_user),
+    scope: AdminScope = Depends(admin_scope),
 ) -> AdminUserOut:
     """Update a user: admin flag, display name, and/or group membership.
 
@@ -151,11 +162,17 @@ def update_user(
     demoted — their flag re-stamps on every sign-in, so a flip here silently
     sticks but won't survive their next login; we let the call succeed and let
     the admin see ``is_super_admin`` in the response rather than 409.
+
+    Domain-scoped: a regular admin may only touch users in their
+    administrative domain; an out-of-domain (or missing) id is 404 so foreign
+    accounts aren't probeable. Note the admin-flag/display-name change is
+    person-level (``stamp_person_admin`` flips every account row of the
+    email) — authorization is on the *targeted* row being in-domain.
     """
     from ....services import groups as groups_svc
 
     target = db.get(User, user_id)
-    if target is None:
+    if target is None or not user_in_scope(scope, target):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
     if body.is_admin is not None:
         # Person-level: the flag applies to every account of this email.
@@ -177,17 +194,19 @@ def update_user(
 
 
 @router.delete("/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_user(
+async def delete_user(
     user_id: int,
     db: Session = Depends(db_session),
     me: CurrentUser = Depends(admin_user),
+    scope: AdminScope = Depends(admin_scope),
 ) -> None:
     """Delete a user. Memberships / api_keys / folder_acl cascade; owned
     folders' ``owner_id`` is set null per schema. Guards: can't delete a
     super-admin (they'd just be re-created on next sign-in, and it reads as a
-    footgun) nor yourself (lock-out protection)."""
+    footgun) nor yourself (lock-out protection); a regular admin may only
+    delete users within their administrative domain (out-of-domain → 404)."""
     target = db.get(User, user_id)
-    if target is None:
+    if target is None or not user_in_scope(scope, target):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
     if target.id == me.id:
         raise HTTPException(

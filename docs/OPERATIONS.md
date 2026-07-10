@@ -897,11 +897,51 @@ Two things to keep separate here:
   their backing store on each use.
 - **Client propagation** — **WS-pushed**, not pull-based. After a mutation,
   the `api/routes/admin/` package calls `publish_admin_state()`
-  (`admin/base.py`), which rebuilds the full admin state and emits an
-  `admin.snapshot` on the **admin-only** `admin` topic.
+  (`admin/base.py`), which signals every admin connection to rebuild its own
+  **scoped** `admin.snapshot` on the **admin-only** `admin` topic.
   The admin modal renders from the `adminState` store — no GET on open, no
   refetch after mutation — so a change in one admin's tab shows up live in
   another's.
+
+### Administrative domain (who an admin can see)
+
+Admin power is **scoped**, not all-or-nothing
+([services/admin_scope.py](../src/voitta_rag_enterprise/services/admin_scope.py)):
+
+- **Superadmin** (`VOITTA_SUPER_ADMINS`): the deployment operator — full
+  read + write over every user and every global setting.
+- **Regular admin** (`User.is_admin`, not super): their *administrative
+  domain* is the Clerk orgs where they hold role `admin` (same org-role
+  signal company keys use) **plus** the native community if they're
+  native-allowed. `resolve_admin_scope(db, email)` resolves this into an
+  `AdminScope`, deriving org-admin membership from a Clerk directory sweep
+  (cached ~45 s; fails **closed** to an empty org domain if Clerk is
+  unreachable, flagged `clerk_degraded` so the UI can explain the emptiness).
+
+That scope drives two things:
+
+1. **Users list** — `build_admin_state` and `GET /api/admin/users` filter to
+   `filter_users_for_scope`: a regular admin sees only members of their orgs
+   (by `User.company_id`) and native users (if a native admin), never other
+   orgs' or unrelated native users. `PATCH`/`DELETE /users/{id}` and
+   `POST /impersonate/{id}` enforce `user_in_scope` and return **404** for an
+   out-of-domain id (existence-hiding, like the file/folder ACL in §6). The
+   Clerk-directory view (`GET /admin/clerk/directory`) is filtered the same way.
+2. **Global-settings mutations are superadmin-only.** Allowlist, super-admin
+   list, OAuth/auth-providers, indexing caps, NFS root, Clerk key, directory
+   toggles, groups, and user pre-creation all swap the `admin_user` gate for
+   `super_admin_user` (403 for a regular admin); the matching GETs stay
+   `admin_user`, so a regular admin **views** these read-only. The scoped
+   `admin.snapshot` carries `read_only` + a `permissions` block; the admin
+   modal ([modals/admin.js](../static/js/modals/admin.js)) disables the
+   global-settings tabs and hides the create-user button accordingly (UX only
+   — the routes enforce it server-side).
+
+Because the snapshot is now per-viewer, the on-mutation push is a
+payload-less `admin.invalidated` signal: the WS pump
+([api/ws.py](../src/voitta_rag_enterprise/api/ws.py)) rebuilds each admin
+connection's own scoped snapshot rather than broadcasting one shared payload
+(which would leak every org to every admin).
 
 ```mermaid
 flowchart TB

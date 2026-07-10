@@ -34,8 +34,10 @@ from starlette.websockets import WebSocketState
 
 from ..config import get_settings
 from ..db.database import get_session_factory
+from ..db.models import User
 from ..services import events
 from ..services.acl import visible_folder_ids
+from ..services.admin_scope import AdminScope, resolve_admin_scope
 from .deps import resolve_ws_user
 from .snapshot import build_snapshot
 
@@ -167,8 +169,13 @@ async def _send_snapshot(
     topics: tuple[str, ...],
 ) -> None:
     """Build and send the full state snapshot, then a ``synced`` sentinel."""
+    # Resolve the admin domain BEFORE the thread hop — it involves an async
+    # Clerk lookup and the sync snapshot builder must not do I/O.
+    admin_scope = (
+        await _admin_scope_for(user_id) if (is_admin and "admin" in topics) else None
+    )
     frames = await asyncio.to_thread(
-        _build_snapshot_frames, user_id, is_admin, visible, topics
+        _build_snapshot_frames, user_id, is_admin, visible, topics, admin_scope
     )
     for frame in frames:
         await ws.send_text(json.dumps(frame))
@@ -180,6 +187,7 @@ def _build_snapshot_frames(
     is_admin: bool,
     visible: set[int] | None,
     topics: tuple[str, ...],
+    admin_scope: AdminScope | None = None,
 ) -> list[dict]:
     factory = get_session_factory()
     db = factory()
@@ -190,7 +198,51 @@ def _build_snapshot_frames(
             is_admin=is_admin,
             visible=visible,
             topics=topics,
+            admin_scope=admin_scope,
         )
+    finally:
+        db.close()
+
+
+async def _admin_scope_for(user_id: int | None) -> AdminScope:
+    """Resolve a connection's administrative domain (fail closed to empty).
+
+    Subscriptions carry ``user_id`` but not email, so we look the email up
+    here. A missing user row yields an empty ``AdminScope`` — never see-all.
+    """
+    if user_id is None:
+        return AdminScope()
+    factory = get_session_factory()
+    db = factory()
+    try:
+        row = db.get(User, user_id)
+        if row is None:
+            return AdminScope()
+        # resolve_admin_scope may await Clerk (cached ~45s); holding this
+        # short-lived session across the await is fine on this rare path.
+        return await resolve_admin_scope(db, row.email)
+    finally:
+        db.close()
+
+
+async def _send_admin_frame(ws: WebSocket, sub: events.Subscription) -> None:
+    """Rebuild and send this connection's OWN scoped admin snapshot.
+
+    Called when an ``admin.invalidated`` signal arrives: each admin
+    connection re-resolves its domain and gets a snapshot scoped to it, so a
+    mutation never leaks another admin's out-of-domain view."""
+    scope = await _admin_scope_for(sub.user_id)
+    frame = await asyncio.to_thread(_build_admin_frame, scope)
+    await ws.send_text(json.dumps(frame))
+
+
+def _build_admin_frame(scope: AdminScope) -> dict:
+    from .routes.admin import build_admin_state
+
+    factory = get_session_factory()
+    db = factory()
+    try:
+        return {"type": "admin.snapshot", "state": build_admin_state(db, scope)}
     finally:
         db.close()
 
@@ -264,16 +316,27 @@ async def _pump(ws: WebSocket, sub: events.Subscription) -> None:
         # admin/keys planes is applied regardless of folder visibility.
         allowed = None if sub.visible is None else sub.visible | (before or set())
         events_out = [e for e in drained if _deliverable(e, sub, allowed)]
-        if not events_out:
-            continue
-        payload = (
-            events_out[0]
-            if len(events_out) == 1
-            else {"type": "batch", "events": events_out}
+        # ``admin.invalidated`` is a rebuild SIGNAL, not a forwardable frame:
+        # each admin connection answers it by re-sending its own scoped
+        # ``admin.snapshot``. Collapse any number of signals in this drain
+        # into one rebuild.
+        needs_admin_refresh = (
+            sub.is_admin
+            and "admin" in sub.topics
+            and any(e.get("type") == "admin.invalidated" for e in events_out)
         )
+        events_out = [e for e in events_out if e.get("type") != "admin.invalidated"]
         try:
-            # send_text + json.dumps so we control framing and avoid
-            # starlette's default helper which dumps every event.
-            await ws.send_text(json.dumps(payload))
+            if events_out:
+                payload = (
+                    events_out[0]
+                    if len(events_out) == 1
+                    else {"type": "batch", "events": events_out}
+                )
+                # send_text + json.dumps so we control framing and avoid
+                # starlette's default helper which dumps every event.
+                await ws.send_text(json.dumps(payload))
+            if needs_admin_refresh:
+                await _send_admin_frame(ws, sub)
         except (WebSocketDisconnect, RuntimeError):
             return
