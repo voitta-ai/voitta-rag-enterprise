@@ -10,6 +10,7 @@ Skipped when node isn't installed (CI images without a JS toolchain).
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -63,3 +64,53 @@ def test_boot_imports_every_modal_and_preview_plugin() -> None:
         assert f"plugins/{plugin.name}" in boot, (
             f"boot.js does not import preview plugin {plugin.name}"
         )
+
+
+# The 8 server source_types the sync modal must handle. A connector that
+# forgets registerSource(), or a connector module index.js forgets to
+# import, silently drops its tab from the modal — node --check can't see it.
+SYNC_SOURCE_TYPES = {
+    "github",
+    "google_drive",
+    "google_drive_local",
+    "nfs",
+    "sharepoint",
+    "teams",
+    "jira",
+    "confluence",
+}
+
+
+def test_sync_registry_covers_every_source_type() -> None:
+    sync_dir = STATIC_JS / "modals" / "sync"
+    if not sync_dir.is_dir():
+        return  # package not present (pre-refactor tree)
+
+    # Every registered type across the connector modules, scraped from the
+    # `type: "..."` field of each registerSource({...}) call.
+    registered: set[str] = set()
+    for mod in sync_dir.glob("*.js"):
+        txt = mod.read_text()
+        for m in re.finditer(r'type:\s*["\'](\w+)["\']', txt):
+            registered.add(m.group(1))
+
+    missing = SYNC_SOURCE_TYPES - registered
+    assert not missing, f"sync connectors don't register: {sorted(missing)}"
+
+    # Every connector module must be reachable from index.js (else its
+    # registerSource never runs at import time).
+    index = (sync_dir / "index.js").read_text()
+    connectors = {
+        "github", "google_drive", "google_local", "nfs",
+        "microsoft", "jira", "confluence",
+    }
+    for name in connectors:
+        assert f"./{name}.js" in index, f"index.js does not import {name}.js"
+
+
+def test_sync_package_has_no_stale_global_hook() -> None:
+    """The __voittaMsAfterSave global was removed by the split; a
+    reintroduction means someone re-created the forward-reference hack
+    instead of using a handler's afterSave()."""
+    for js in _non_vendor_js():
+        assert "__voittaMs" not in js.read_text(), f"{js} references removed global"
