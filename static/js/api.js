@@ -200,6 +200,10 @@ export const api = {
     listKeys: () => req("GET", "/api/auth/keys"),
     createKey: (name) => req("POST", "/api/auth/keys", { name }),
     deleteKey: (id) => req("DELETE", `/api/auth/keys/${id}`),
+    // Company keys — 403 for non-admins; the settings modal hides the section.
+    listCompanyKeys: () => req("GET", "/api/auth/company-keys"),
+    createCompanyKey: (name) => req("POST", "/api/auth/company-keys", { name }),
+    deleteCompanyKey: (id) => req("DELETE", `/api/auth/company-keys/${id}`),
     recentJobs: () => req("GET", "/api/jobs/recent?limit=50"),
     retryJob: (id) => req("POST", `/api/jobs/${id}/retry`),
     retryAllFailed: () => req("POST", "/api/jobs/retry-failed"),

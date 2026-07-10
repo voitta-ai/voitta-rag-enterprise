@@ -1412,6 +1412,55 @@
                     <tbody id="keys-tbody"></tbody>
                 </table>
                 <p id="keys-empty" class="hint" hidden>No keys yet. Create one above.</p>
+
+                <!-- Company API keys — rendered only for admins of the active
+                     account's scope (native admins, Clerk org admins). -->
+                <div id="company-keys-section" hidden>
+                    <h4 id="company-keys-title" style="margin-top:20px;">Company API keys</h4>
+                    <p class="hint">
+                        A company key grants programmatic access for <strong>any member</strong> of this scope.
+                        Clients must pair it with a user email — an <code>X-Voitta-User-Email</code> header,
+                        or the email appended to the token as <code>cvk_…:user@example.com</code>.
+                        Shown <strong>once at creation</strong>.
+                    </p>
+
+                    <div class="branches-row" style="margin:8px 0 12px;">
+                        <input type="text" id="company-key-name" placeholder="What's this key for? e.g. ci-agents" maxlength="80" style="flex:1;">
+                        <button type="button" id="company-key-create" class="btn btn-primary btn-sm">Create company key</button>
+                    </div>
+
+                    <div id="company-key-reveal" hidden style="border:1px solid #ffd479;background:#fff7e0;color:#5a3a00;padding:10px 12px;border-radius:4px;margin-bottom:12px;">
+                        <p style="margin:0 0 6px;font-weight:600;">Copy this token now — you won't see it again.</p>
+                        <code id="company-key-reveal-token" style="display:block;word-break:break-all;background:#fff;border:1px solid #ffd479;border-radius:4px;padding:6px 8px;font-size:12px;"></code>
+                        <div class="actions actions-right" style="margin-top:8px;">
+                            <button type="button" id="company-key-reveal-copy" class="btn btn-secondary btn-sm">Copy token</button>
+                            <button type="button" id="company-key-reveal-dismiss" class="btn btn-secondary btn-sm">I've saved it</button>
+                        </div>
+
+                        <details style="margin-top:10px;">
+                            <summary style="cursor:pointer;font-weight:600;">Use it from Claude / Claude Desktop</summary>
+                            <p class="hint" style="margin:8px 0 4px;">Paste this into <code>claude_desktop_config.json</code> (swap in each user's email):</p>
+                            <pre id="company-key-reveal-claude" style="background:#fff;border:1px solid #ffd479;border-radius:4px;padding:8px;font-size:11px;overflow-x:auto;white-space:pre;margin:0;"></pre>
+                            <p class="hint" style="margin:8px 0 4px;">Or with the Claude Code CLI:</p>
+                            <pre id="company-key-reveal-cli" style="background:#fff;border:1px solid #ffd479;border-radius:4px;padding:8px;font-size:11px;overflow-x:auto;white-space:pre;margin:0;"></pre>
+                        </details>
+                    </div>
+
+                    <table id="company-keys-table" style="width:100%;border-collapse:collapse;font-size:13px;">
+                        <thead>
+                            <tr style="text-align:left;border-bottom:1px solid var(--border, #ddd);">
+                                <th style="padding:6px 8px;">Name</th>
+                                <th style="padding:6px 8px;">Prefix</th>
+                                <th style="padding:6px 8px;">Created by</th>
+                                <th style="padding:6px 8px;">Created</th>
+                                <th style="padding:6px 8px;">Last used</th>
+                                <th style="padding:6px 8px;"></th>
+                            </tr>
+                        </thead>
+                        <tbody id="company-keys-tbody"></tbody>
+                    </table>
+                    <p id="company-keys-empty" class="hint" hidden>No company keys yet. Create one above.</p>
+                </div>
             </div>
         </div>
     </div>

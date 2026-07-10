@@ -54,7 +54,7 @@ flowchart TB
             SCAN["scanner.py<br/>(startup reconcile)"]
             JQ["job_queue.py<br/>SQLite queue + dedup"]
             WORK["worker.py<br/>async pool (size=1)"]
-            IDX["indexing.py<br/>extract→chunk→embed"]
+            IDX["services/indexing/<br/>extract→chunk→embed"]
         end
 
         subgraph svc["Services"]
@@ -149,7 +149,8 @@ flowchart TB
 ## 2. File ingestion pipeline
 
 The full lifecycle from a filesystem change to a searchable file. The watcher
-debounces, enqueues an `extract` job, the worker claims it, and `indexing.py`
+debounces, enqueues an `extract` job, the worker claims it, and the
+`services/indexing/` package (`extract.py` + `embed.py` + `accounting.py`)
 runs every stage under `_EXTRACT_LOCK`. Text and image embeds run **inline**
 within the same extract job (not as separate queued jobs).
 
@@ -187,7 +188,7 @@ sequenceDiagram
         IX->>CAS: write text.md, image blobs, page renders, layout JSON
         IX->>C: chunk(markdown) → ChunkInfo[]
         IX->>IX: commit_indexing (txn):<br/>replace chunks/images, CAS refcounts,<br/>ChunkImageLink within nearby radius
-        Note over IX: File → extracted; pending_embeds = (1 if chunks) + n_images
+        Note over IX: File → extracted · pending_embeds = (1 if chunks) + n_images
         IX->>E: embed text (dense e5 + sparse BM25) [gpu_lock]
         IX->>QD: replace_chunks_for_file (batches of 256)
         IX->>E: embed each image (SigLIP-2) [gpu_lock]
@@ -200,7 +201,7 @@ sequenceDiagram
     WK->>EV: publish job.finished + folder.stats_changed
 ```
 
-### Pipeline stages inside `indexing.py`
+### Pipeline stages inside `services/indexing/`
 
 Most stages are wrapped in a `_stage()` context manager for timing/logging
 (the unchanged-short-circuit check is an early return, not a wrapped stage):
@@ -334,7 +335,7 @@ flowchart LR
     Sc -->|extract| ENQ
     Rx -->|reindex_folder| ENQ
     Sy -->|sync| ENQ
-    Gc -->|sync (auto-sync, hourly)| ENQ
+    Gc -->|"sync (auto-sync, hourly)"| ENQ
 
     ENQ{{"enqueue()"}}
     ENQ -->|dedup_key in-flight?| DEDUP{existing<br/>queued/running?}
@@ -507,7 +508,7 @@ flowchart TB
 | `folders` | `folder.upserted`, `folder.stats_changed`, `folder.sync_source_changed`, `folder.active_changed` | folder · `folder_id` |
 | `folders` | `folder.added`, `folder.removed`, `folder.sync_progress`, `folder.reindex_progress`, `folder.sync_config_changed`, `folder.gd_connected`, `folder.ms_connected` | folder · discrete |
 | `admin` | `admin.snapshot` (full admin-console state: allowlist, users+groups, auth-providers, caps, settings) | admin-only · discrete |
-| `keys` | `keys.snapshot` (a user's API keys) | per-user · discrete |
+| `keys` | `keys.snapshot` (a user's **personal** API keys — company keys are HTTP-fetched on modal open, not WS-pushed) | per-user · discrete |
 | `stats` | (reserved) | — |
 
 Snapshot frames sent on connect: `{type:"snapshot", topic, items}` for
@@ -528,11 +529,12 @@ tick.
 > payload, `config: null` = deleted) is the **only** thing that keeps the
 > cache fresh. Therefore **every route that creates or mutates a
 > `folder_sync_sources` row must publish it** via
-> `_publish_sync_config_changed` in
-> [routes/sync.py](../src/voitta_rag_enterprise/api/routes/sync.py) — the PUT
-> upsert, the Drive-local connect (`gdl_connect`), and the clear-error route
-> all do. A route that skips the publish leaves the dialog rendering a stale
-> (possibly empty) config until a full page reload.
+> `publish_sync_config_changed` in
+> [routes/sync/base.py](../src/voitta_rag_enterprise/api/routes/sync/base.py) —
+> the PUT upsert / delete / clear-error routes (`sync/core.py`) and the
+> Drive-local connect (`sync/google_local.py`) all do. A route that skips the
+> publish leaves the dialog rendering a stale (possibly empty) config until a
+> full page reload.
 
 ### Folder stats — one snapshot, optionally subtree-scoped
 
@@ -639,7 +641,7 @@ connector stamps each file's normalized meta into `.voitta_sources.json`;
 `scanner.scan_folder` loads it onto `File.source_meta` (and `run_sync` triggers
 that rescan so it lands without waiting for a restart).
 
-**Flat payload fields** (`indexing._build_meta_payload` →
+**Flat payload fields** (`indexing/embed.py:_build_meta_payload` →
 `source_meta.payload_fields`), all optional — **absent values are omitted, not
 null**:
 
@@ -687,13 +689,15 @@ in Clerk can't fork accounts — identity is the id). Everything downstream —
 `folders.owner_id`, `folder_acl`, `folder_user_settings`, `api_keys`,
 `user_groups` — hangs off `users.id`, so **all of it is account-scoped for
 free**: Ivan-as-Agnitio and Ivan-as-Demo are strangers unless a folder is
-explicitly granted or community-shared.
+explicitly granted or community-shared. (Company `cvk_` API keys are the one
+deliberate exception: they hang off a company scope, not an account — see
+*API keys* below.)
 
 **Sharing is community-scoped, never global** (`folders.shared = 1`): a
 company account shares into its Clerk company; a natively-allowed Personal
 account shares into the `"native"` community (allowlist users/domains +
 super-admins); accounts with no community can't share and see no community
-shares (`services/acl.py:account_community`). An unowned shared folder
+shares (`services/acl/community.py:account_community`). An unowned shared folder
 (owner deleted) falls back to native visibility. Explicit `folder_acl`
 grants are unaffected and are fanned out to all accounts of the grantee's
 email at grant time.
@@ -701,9 +705,9 @@ email at grant time.
 Two person-level exceptions, both keyed by email across all account rows:
 
 - **Admin** (`is_admin`) — checked with "any row of this email has the flag"
-  and stamped onto every row on change (`services/acl.py:person_is_admin` /
-  `stamp_person_admin`). A per-account admin flag would be confusing and
-  provide no real isolation.
+  and stamped onto every row on change
+  (`services/acl/accounts.py:person_is_admin` / `stamp_person_admin`). A
+  per-account admin flag would be confusing and provide no real isolation.
 - **Sharing** — `POST /folders/{id}/grant` (and revoke) expands the target
   account id to **all accounts of that email** (snapshot semantics: accounts
   created by later logins don't inherit past grants).
@@ -732,7 +736,7 @@ native rules). Every account-holder gets a Personal row as a stable anchor,
 but it is **offered** (dropdown, account switch, default landing) only to
 natively-allowed emails — Clerk-only users operate exclusively in their
 company accounts, and their Personal anchor is unreachable even by direct
-API call (`services/acl.py:offered_accounts_for_email`).
+API call (`services/acl/accounts.py:offered_accounts_for_email`).
 
 Admission via Clerk pulls the directory **live during the callback** — never
 from a cache. If Clerk is unreachable, only the native rules apply
@@ -761,9 +765,49 @@ forged id falls back to Personal rather than crossing identities).
   only; 404 otherwise). The SPA's company dropdown (next to the user pill,
   hidden for single-account users) calls this and hard-reloads so every
   store re-keys.
-- **MCP**: `BearerAuthMiddleware` resolves the API key to
-  `(email, account_id)` — the account the key was minted under **is** the
-  key's scope; multi-account users hold one key per account.
+- **MCP**: `BearerAuthMiddleware` resolves the bearer token to
+  `(email, account_id)`, dispatching on the token prefix — personal `vk_`
+  keys via `identity_for_token`, company `cvk_` keys via
+  `resolve_company_identity` (see below).
+
+### API keys: personal (`vk_`) and company (`cvk_`)
+
+Two key kinds share the hashing scheme (SHA-256 at rest, plaintext shown
+once at creation, short prefix for display) but differ in what a token
+means ([routes/api_keys.py](../src/voitta_rag_enterprise/api/routes/api_keys.py) /
+[routes/company_keys.py](../src/voitta_rag_enterprise/api/routes/company_keys.py)):
+
+| | Personal `vk_…` | Company `cvk_…` |
+|---|---|---|
+| Identity | the key **is** the identity — one key per account, minted while that account was active | key + **user email** pair; the key selects the company scope, the email selects the person |
+| Who mints | any user (Settings modal) | admins only, always for the **active account's scope**: native admins / super-admins for whichever of their accounts is active; Clerk **org admins** for their own org |
+| Scope | the account the key was minted under | one company: a Clerk org (`org_…`) or the native space (`company_id=''`) |
+| Email check | none at request time | **every request**: native space → sign-in allowlist rules; Clerk org → live membership (5-min TTL cache); block-list always trumps |
+| Provisioning | account must exist | (email, company) account row is **JIT-provisioned** — members never have to sign in first |
+| Revocation | cuts off one client | cuts off **every** client in the company using that token |
+
+Company-key wire contract (either form; the header wins when both present):
+
+```
+Authorization: Bearer cvk_…
+X-Voitta-User-Email: alice@example.com
+        — or —
+Authorization: Bearer cvk_…:alice@example.com
+```
+
+Clerk fail-safe semantics: if Clerk is unreachable (or the toggle is off),
+an org-scoped key keeps working for emails that already have an
+(email, org) account row — a past login or a past successful membership
+check — and rejects unknown emails. The org-admin **management** gate is
+stricter: it fails **closed** (403) when Clerk can't answer, since minting
+is rarer and higher-stakes than reading. Membership lookups go through
+`services/clerk.py:fetch_org_members` — a per-org `{email: role}` map
+cached for 5 minutes, keyed by (secret-key hash, org id) so key rotation
+can't serve stale members.
+
+Either way the resolved identity is the same `(email, account_id)` tuple,
+so folder ACLs, search scoping, and MCP tools downstream are key-kind
+agnostic.
 
 ### Provenance badges
 
@@ -804,8 +848,9 @@ Two things to keep separate here:
   (`is_email_allowed`, `get_caps`, `get_nfs_root`, the `admin_user` dep) re-read
   their backing store on each use.
 - **Client propagation** — **WS-pushed**, not pull-based. After a mutation,
-  `routes/admin.py` calls `publish_admin_state()`, which rebuilds the full
-  admin state and emits an `admin.snapshot` on the **admin-only** `admin` topic.
+  the `api/routes/admin/` package calls `publish_admin_state()`
+  (`admin/base.py`), which rebuilds the full admin state and emits an
+  `admin.snapshot` on the **admin-only** `admin` topic.
   The admin modal renders from the `adminState` store — no GET on open, no
   refetch after mutation — so a change in one admin's tab shows up live in
   another's.
@@ -816,15 +861,15 @@ flowchart TB
         SUB["renders from adminState store<br/>(WS admin.snapshot) — no HTTP on open"]
     end
 
-    subgraph routes["routes/admin.py — mutations gated by admin_user (403 else)"]
-        R1["allowlist domains/users/blocklist"]
-        R2["users CRUD: create · PATCH (admin/name/groups) · DELETE<br/>(admin flag is person-level: all account rows of the email)"]
-        R3["auth-providers CRUD + /check"]
-        R4["indexing-caps GET/PATCH"]
-        R5["settings GET/PATCH<br/>(nfs_root · native/Clerk directory toggles · clerk key)"]
-        R6["groups CRUD + members<br/>(services/groups.py)"]
-        R7["clerk/directory GET<br/>(live proxy, uncached)"]
-        PUB["publish_admin_state()<br/>→ admin.snapshot (admin topic)"]
+    subgraph routes["api/routes/admin/* — mutations gated by admin_user (403 else)"]
+        R1["allowlist.py: domains/users/blocklist"]
+        R2["users.py: create · PATCH (admin/name/groups) · DELETE<br/>(admin flag is person-level: all account rows of the email)"]
+        R3["auth_providers.py: CRUD + /check"]
+        R4["caps.py: indexing-caps GET/PATCH"]
+        R5["settings.py: GET/PATCH<br/>(nfs_root · native/Clerk directory toggles · clerk key)"]
+        R6["groups.py: CRUD + members<br/>(services/groups.py)"]
+        R7["settings.py: clerk/directory GET<br/>(live proxy, uncached)"]
+        PUB["base.py: publish_admin_state()<br/>→ admin.snapshot (admin topic)"]
     end
 
     subgraph store["Persistence (services/admin_store.py + others)"]
@@ -866,6 +911,7 @@ flowchart TB
 | NFS root | `settings.json` | `get_nfs_root()` | re-probed on every browse/sync call |
 | Indexing caps | `indexing_caps.json` | `get_caps()` — **always re-reads disk** | every call (no cache) |
 | API keys (per-user, *not* admin) | SQLite `api_keys` | per-user, on demand | re-fetched on demand |
+| Company API keys (admin-minted, company-scoped) | SQLite `company_api_keys` | verified on **every** MCP request: token hash + user-email scope check (Clerk membership TTL-cached 5 min) | key delete is immediate; Clerk membership changes within the cache TTL |
 
 ### Propagation properties
 
@@ -877,12 +923,17 @@ flowchart TB
   mutation). No pull-on-open, no post-mutation refetch. A focus-guard skips the
   re-render while the admin is editing an input so a concurrent push can't
   clobber in-progress typing.
-- **API keys, likewise.** `modals/settings.js` renders from the `keysState`
-  store (per-user `keys.snapshot`), pushed after each create/delete.
+- **API keys, likewise.** `modals/settings.js` renders personal keys from the
+  `keysState` store (per-user `keys.snapshot`), pushed after each
+  create/delete. The **company-keys** section in the same modal is the one
+  exception to "no pull": it HTTP-fetches `GET /auth/company-keys` on open —
+  the server's 403 for non-admins is what hides the section, so no role
+  logic ships to the client.
 - **Atomic writes.** Text/JSON files are written to `.tmp` then `os.replace()`d.
 - **Admin vs per-user settings are distinct UIs and WS planes.**
   `modals/admin.js` (admin-only `admin` topic) edits deployment-wide settings;
-  `modals/settings.js` (per-user `keys` topic) edits only that user's API keys.
+  `modals/settings.js` (per-user `keys` topic) edits that user's personal API
+  keys — plus, for scope admins, the active company's `cvk_` keys (§7).
 
 ### Sequence: an admin changes an indexing cap
 
@@ -890,7 +941,7 @@ flowchart TB
 sequenceDiagram
     autonumber
     participant A as Admin (browser)
-    participant API as routes/admin.py
+    participant API as routes/admin/caps.py
     participant CAPS as indexing_caps.json
     participant WS as other admin tabs
     participant WK as worker (next extract)
@@ -949,10 +1000,10 @@ flowchart TB
     end
 
     subgraph syncpicker["Sync modal reuses the catalog (any authenticated user)"]
-        SM["sync.js: refreshGdProviderPicker()"]
+        SM["modals/sync/google_drive.js:<br/>refreshGdProviderPicker()"]
         SM -->|GET /api/admin/auth-providers<br/>current_user gate, read-only| AP
         SM -->|filter google + enabled| PICK["populate select dropdown<br/>pre-fill client_id/secret"]
-        SM2["refreshMsProviderPickers()"]
+        SM2["modals/sync/microsoft.js:<br/>refreshMsProviderPickers()"]
         SM2 -->|filter microsoft + enabled| PICK
     end
 ```
@@ -964,7 +1015,8 @@ flowchart TB
   are set. (Login currently reads `.env` directly, not the `auth_providers`
   table — only `google_enabled` is exposed, so Microsoft/GitHub rows are
   stored but not wired to login.)
-- **Sync picker:** `sync.js` calls `GET /api/admin/auth-providers` (readable by
+- **Sync picker:** the sync modal (`modals/sync/google_drive.js` /
+  `microsoft.js`) calls `GET /api/admin/auth-providers` (readable by
   any signed-in user) and filters for `enabled` rows of the relevant provider.
   The matching rows populate the picker for **every** user; selecting one
   pre-fills the credentials into the per-folder form. Manual entry remains
@@ -976,7 +1028,7 @@ flowchart TB
 sequenceDiagram
     autonumber
     participant Admin
-    participant API as routes/admin.py
+    participant API as routes/admin/auth_providers.py
     participant DB as auth_providers
     participant Probe as provider token endpoint
     participant User as Folder owner (sync modal)
@@ -989,7 +1041,7 @@ sequenceDiagram
     Probe-->>API: invalid_grant ⇒ creds OK · invalid_client ⇒ bad creds
     API-->>Admin: status badge
 
-    User->>API: GET /api/admin/auth-providers (from sync.js)
+    User->>API: GET /api/admin/auth-providers (from the sync modal)
     Note over API: current_user gate (read-only) — any signed-in user
     API-->>User: [enabled google rows incl. client_secret]
     Note over User: picker pre-fills client_id/secret<br/>into the per-folder sync form
@@ -1009,7 +1061,7 @@ modal it can close.
 sequenceDiagram
     autonumber
     participant U as User (sync modal popup)
-    participant API as routes/sync.py
+    participant API as routes/sync/*
     participant DB as folder_sync_sources
     participant G as Google / Microsoft
     participant EV as events → SPA
@@ -1020,7 +1072,7 @@ sequenceDiagram
     U->>G: open consent (scopes: drive.readonly, documents.readonly, …)
     G-->>U: redirect to callback w/ code + state
     U->>API: GET /api/sync/oauth/google/callback?code&state
-    API->>DB: decode state → folder; read creds
+    API->>DB: decode state → folder · read creds
     API->>G: exchange code → tokens
     G-->>API: refresh_token
     API->>DB: store gd_refresh_token
@@ -1053,7 +1105,14 @@ credential fields.
 | GitHub | `github` | SSH key · PAT · none | `gh_token` / `gh_pat` (per folder) | ✗ |
 | SharePoint | `sharepoint` | OAuth · app-secret · app-cert | `ms_refresh_token` (OAuth) | ✓ |
 | Teams | `teams` | OAuth · app-secret · app-cert | `ms_refresh_token` (OAuth) | ✓ |
+| Confluence | `confluence` | Cloud (email + API token, Basic) · Server/DC (PAT) | `cf_token` (per folder) | ✓ |
+| Jira | `jira` | Cloud (email + API token, Basic) · Server/DC (PAT) | `jira_token` (per folder) | ✓ |
 | NFS | `nfs` | none (path under admin `nfs_root`) | — | ✓ |
+
+(That's the full set of **8 source types**; a unit test —
+`tests/unit/test_sync_registry.py` — pins the registry to exactly this
+list. Confluence/Jira scope by selected spaces/projects or a CQL/JQL query,
+with an optional `*_updated_since` incremental cutoff.)
 
 ### Google Drive local (`google_drive_local`) — index-in-place, no credentials
 
@@ -1096,13 +1155,13 @@ dispatch path.
 ```mermaid
 flowchart TB
     RS["indexing.run_sync"] -->|"get_connector(type)"| REG["SyncRegistry.get()"]
-    REG --> C1["GitHubConnector"] & C2["GoogleDriveConnector"] & C2L["CloudLocalConnector"] & C3["NfsConnector"] & C4["SharePointConnector"] & C5["TeamsConnector"]
+    REG --> C1["GitHubConnector"] & C2["GoogleDriveConnector"] & C2L["CloudLocalConnector"] & C3["NfsConnector"] & C4["SharePointConnector"] & C5["TeamsConnector"] & C6["ConfluenceConnector"] & C7["JiraConnector"]
     subgraph contract["SyncConnector ABC"]
         M1["source_type · supports_progress"]
         M2["resolve_config(row) → sync kwargs"]
         M3["async sync(folder_root, **cfg) → stats"]
     end
-    C1 & C2 & C2L & C3 & C4 & C5 -.implement.-> contract
+    C1 & C2 & C2L & C3 & C4 & C5 & C6 & C7 -.implement.-> contract
     RS -->|"if supports_progress: cfg['progress_cb']"| PROG["WS folder.sync_progress"]
 ```
 
@@ -1209,6 +1268,16 @@ erDiagram
         string error
         json result
     }
+    company_api_keys {
+        int id PK
+        string company_id "'' = native space, else Clerk org id"
+        string company_name "display-only snapshot"
+        string name
+        string prefix
+        string key_hash UK "sha256 of the cvk_ token"
+        string created_by "minting admin's email"
+        int last_used_at
+    }
     auth_providers {
         int id PK
         string provider
@@ -1224,6 +1293,8 @@ erDiagram
         string gd_refresh_token
         string ms_refresh_token
         string gh_pat
+        string jira_token
+        string cf_token
         json gd_folder_id
         string gdl_account
         json gdl_paths
@@ -1232,6 +1303,11 @@ erDiagram
         string sync_status
     }
 ```
+
+`company_api_keys` deliberately has **no FK to `users`** — a company key
+belongs to a *scope* (`company_id`), not an account. The paired user email
+is resolved (and its account row JIT-provisioned) at request time, so
+deleting or adding members never touches key rows (§7).
 
 ### CAS layout on disk
 

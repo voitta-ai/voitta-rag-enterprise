@@ -1445,16 +1445,35 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         # Imported lazily to avoid a circular import at module load time
         # (auth routes depend on db.models which may not yet be ready).
         from .api.routes.api_keys import identity_for_token
+        from .api.routes.company_keys import (
+            USER_EMAIL_HEADER,
+            is_company_bearer,
+            resolve_company_identity,
+        )
 
-        with session_scope() as db:
-            # (email, account_id) — the id is the ACCOUNT the key was
-            # minted under; that, not the email, drives every visibility
-            # filter. None covers both invalid tokens and orphaned keys.
-            identity = identity_for_token(db, bearer)
-            db.commit()
+        if is_company_bearer(bearer):
+            # Company key (cvk_…) + user email — either the dedicated
+            # header or embedded as "cvk_…:email". Resolves through the
+            # key's company scope (Clerk membership / native allowlist)
+            # and JIT-provisions the account row.
+            identity = await resolve_company_identity(
+                bearer, request.headers.get(USER_EMAIL_HEADER)
+            )
+            if identity is None:
+                return _unauthorized(
+                    "Invalid company API key or user email (send "
+                    "X-Voitta-User-Email or append ':email' to the token)"
+                )
+        else:
+            with session_scope() as db:
+                # (email, account_id) — the id is the ACCOUNT the key was
+                # minted under; that, not the email, drives every visibility
+                # filter. None covers both invalid tokens and orphaned keys.
+                identity = identity_for_token(db, bearer)
+                db.commit()
 
-        if identity is None:
-            return _unauthorized("Invalid or revoked API key")
+            if identity is None:
+                return _unauthorized("Invalid or revoked API key")
 
         ctx_token = _current_user.set(identity)
         try:

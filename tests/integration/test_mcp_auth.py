@@ -110,6 +110,98 @@ def test_mcp_accepts_valid_bearer_and_bumps_last_used(env: None) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Company keys (cvk_… + user email) through the same middleware
+# ---------------------------------------------------------------------------
+
+
+def _mint_company_key_row() -> str:
+    """Persist a native-space company key directly; return the token."""
+    import time as _time
+
+    from voitta_rag_enterprise.api.routes.company_keys import mint_company_token
+    from voitta_rag_enterprise.db.database import session_scope
+    from voitta_rag_enterprise.db.models import CompanyApiKey
+
+    token, prefix, key_hash = mint_company_token()
+    with session_scope() as s:
+        s.add(
+            CompanyApiKey(
+                company_id="",
+                name="mcp-test",
+                prefix=prefix,
+                key_hash=key_hash,
+                created_by="admin@x",
+                created_at=int(_time.time()),
+            )
+        )
+    return token
+
+
+def test_mcp_company_key_with_email_header(env: None) -> None:
+    from voitta_rag_enterprise.services import admin_store
+
+    with TestClient(_unified_app()) as client:
+        admin_store.add_allowed_user("alice@x")
+        token = _mint_company_key_row()
+        r = client.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "id": 1, "method": "ping"},
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-Voitta-User-Email": "alice@x",
+                "Accept": "application/json, text/event-stream",
+            },
+        )
+        assert r.status_code != 401, r.text
+
+
+def test_mcp_company_key_with_embedded_email(env: None) -> None:
+    from voitta_rag_enterprise.services import admin_store
+
+    with TestClient(_unified_app()) as client:
+        admin_store.add_allowed_user("alice@x")
+        token = _mint_company_key_row()
+        r = client.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "id": 1, "method": "ping"},
+            headers={
+                "Authorization": f"Bearer {token}:alice@x",
+                "Accept": "application/json, text/event-stream",
+            },
+        )
+        assert r.status_code != 401, r.text
+
+
+def test_mcp_company_key_without_email_is_401(env: None) -> None:
+    with TestClient(_unified_app()) as client:
+        token = _mint_company_key_row()
+        r = client.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "id": 1, "method": "ping"},
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/json, text/event-stream",
+            },
+        )
+        assert r.status_code == 401
+
+
+def test_mcp_company_key_unadmitted_email_is_401(env: None) -> None:
+    with TestClient(_unified_app()) as client:
+        token = _mint_company_key_row()
+        r = client.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "id": 1, "method": "ping"},
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-Voitta-User-Email": "stranger@x",
+                "Accept": "application/json, text/event-stream",
+            },
+        )
+        assert r.status_code == 401
+
+
+# ---------------------------------------------------------------------------
 # Bypass modes
 # ---------------------------------------------------------------------------
 

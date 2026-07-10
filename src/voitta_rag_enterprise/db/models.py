@@ -325,6 +325,28 @@ class ApiKey(Base):
     last_used_at: Mapped[int | None] = mapped_column(default=None)
 
 
+class CompanyApiKey(Base):
+    """Company-scoped API key (``cvk_…``).
+
+    ``company_id`` is a Clerk org id ('org_…') or '' for the native
+    deployment space. Unlike personal keys, the key alone is not an
+    identity — requests must pair it with a user email, verified against
+    the scope at request time (see api/routes/company_keys.py).
+    """
+
+    __tablename__ = "company_api_keys"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[str] = mapped_column(default="")
+    company_name: Mapped[str] = mapped_column(default="")
+    name: Mapped[str]
+    prefix: Mapped[str]
+    key_hash: Mapped[str]
+    created_by: Mapped[str] = mapped_column(default="")
+    created_at: Mapped[int] = mapped_column(default=_now_s)
+    last_used_at: Mapped[int | None] = mapped_column(default=None)
+
+
 class AuthProvider(Base):
     """Admin-managed list of OAuth provider credentials.
 

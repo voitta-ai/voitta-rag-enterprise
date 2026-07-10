@@ -217,6 +217,24 @@ CREATE TABLE IF NOT EXISTS api_keys (
 );
 CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id);
 
+-- Company API keys ("cvk_…"). One key grants access for a whole company
+-- scope: a Clerk org (company_id='org_…') or the native deployment space
+-- (company_id=''). A request must pair the key with a user email; the
+-- email is verified against the scope (Clerk membership / native
+-- allowlist) at request time and JIT-provisions the account row.
+CREATE TABLE IF NOT EXISTS company_api_keys (
+    id             INTEGER PRIMARY KEY,
+    company_id     TEXT NOT NULL DEFAULT '',            -- Clerk org id, '' = native space
+    company_name   TEXT NOT NULL DEFAULT '',            -- display-only snapshot
+    name           TEXT NOT NULL,                       -- admin-facing label
+    prefix         TEXT NOT NULL,                       -- first chars of the token, e.g. "cvk_abc12"
+    key_hash       TEXT NOT NULL UNIQUE,                -- sha256 hex of the full token
+    created_by     TEXT NOT NULL DEFAULT '',            -- email of the minting admin
+    created_at     INTEGER NOT NULL,
+    last_used_at   INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_company_api_keys_company ON company_api_keys(company_id);
+
 CREATE TABLE IF NOT EXISTS jobs (
     id            INTEGER PRIMARY KEY,
     kind          TEXT NOT NULL,

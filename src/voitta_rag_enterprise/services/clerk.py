@@ -19,7 +19,9 @@ default UA passes, but we set an explicit one so this never regresses.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+import time
 
 import httpx
 
@@ -177,3 +179,59 @@ async def fetch_directory(secret_key: str) -> dict:
     users.sort(key=lambda u: u["email"])
     organizations.sort(key=lambda o: o["name"].lower())
     return {"users": users, "organizations": organizations}
+
+
+# ---------------------------------------------------------------------------
+# Single-org membership lookup with a short TTL cache.
+#
+# Company-API-key auth needs "is <email> a member (or admin) of <org>?" on
+# the request path, and the settings UI needs the caller's own role — both
+# would otherwise hit Clerk per request. One fetch per org per TTL window
+# keeps Clerk load bounded while still reflecting membership changes within
+# minutes. The cache key includes the secret key's hash so rotating the key
+# can't serve members fetched with the old credential.
+# ---------------------------------------------------------------------------
+
+ORG_MEMBERS_TTL_S = 300
+
+# (key_hash, org_id) -> (fetched_at_monotonic, {email: role})
+_org_members_cache: dict[tuple[str, str], tuple[float, dict[str, str]]] = {}
+
+
+async def fetch_org_members(secret_key: str, org_id: str) -> dict[str, str]:
+    """Return ``{email: role}`` for one org, cached for ORG_MEMBERS_TTL_S.
+
+    Roles come back with Clerk's "org:" prefix stripped ("admin",
+    "member"). Raises :class:`ClerkError` on auth/transport problems —
+    callers decide whether to fail open (existing account) or closed.
+    """
+    cache_key = (hashlib.sha256(secret_key.encode()).hexdigest()[:16], org_id)
+    hit = _org_members_cache.get(cache_key)
+    if hit is not None and (time.monotonic() - hit[0]) < ORG_MEMBERS_TTL_S:
+        return hit[1]
+
+    base = get_settings().clerk_api_base.rstrip("/")
+    try:
+        async with httpx.AsyncClient(base_url=base, timeout=_TIMEOUT) as client:
+            rows = await _get_paginated(
+                client, f"/organizations/{org_id}/memberships", secret_key
+            )
+    except ClerkError:
+        raise
+    except httpx.HTTPError as e:
+        raise ClerkError(f"Clerk request failed: {e}") from e
+
+    members: dict[str, str] = {}
+    for m in rows:
+        pud = m.get("public_user_data") or {}
+        email = (pud.get("identifier") or "").strip().lower()
+        if not email:
+            continue
+        members[email] = (m.get("role") or "").removeprefix("org:")
+    _org_members_cache[cache_key] = (time.monotonic(), members)
+    return members
+
+
+def clear_org_members_cache() -> None:
+    """Drop the membership cache (tests; admin key rotation UX)."""
+    _org_members_cache.clear()
