@@ -31,7 +31,7 @@ import { ensureAuthenticated } from "./modals/login.js";
 import { setRootInfo } from "./modals/new-folder.js";
 import { setRenameRootInfo } from "./modals/rename-folder.js";  // self-wires #rename-* modal
 import "./modals/settings.js";  // self-wires user-pill click + Settings modal
-import "./modals/sync.js";  // self-wires #btn-sync + sync modal + GD picker
+import "./modals/sync/index.js";  // self-wires #btn-sync + sync modal + GD picker
 import "./flows/upload.js";  // self-wires Upload button + file input
 import { updateToolbarState } from "./flows/toolbar.js";
 import { activeFolders, connStatus, files, folders, folderStats, jobs, reindexProgress, syncProgress, syncSources } from "./store.js";
