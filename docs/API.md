@@ -115,8 +115,13 @@ curl -X DELETE -H "$AUTH" $BASE/folders/42/files/1337
 
 ## Notes
 
-- All errors are JSON `{detail: …}`; 401 = bad/missing credential, 403 =
-  authenticated but not allowed (wrong owner, cookie-only route).
+- All errors are JSON `{detail: …}`. 401 = bad/missing credential. 403 =
+  authenticated but not allowed (a cookie-only route, or an owner-only
+  mutation on a folder you can see but don't own). **404** = the resource
+  either doesn't exist *or* isn't visible to you — folders, files, and
+  images you have no access to return 404, not 403, so their ids aren't
+  probeable. Reading any file/image is gated by its folder's visibility
+  (owned, granted, community-shared, or single-user).
 - A `vk_` key acts as the exact account it was minted under (mint while
   the right company account is active). A `cvk_` key acts as the given
   email **within the key's company scope**; members who never signed in

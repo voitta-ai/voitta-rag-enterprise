@@ -615,6 +615,19 @@ single-user mode the filter is skipped entirely (`None`).
 > rests on the folder-id intersection above. (`search_chunks` / `search_images`
 > accept an optional `allowed_user_id`, but the REST endpoint doesn't pass it.)
 
+**Same gate on content-by-id routes.** Search scopes by folder set; the
+file- and image-content routes scope by the *individual* row's folder.
+Every `/api/files/{id}` handler (metadata, `/text`, `/raw`, `/images`,
+`/page-images`, `/layout`, `/email`, `/stl`) runs through
+`files._require_visible_file`, and `/api/images/{id}` resolves the image's
+owning file — both call `user_can_see_folder(db, folder_id, user.id)` and
+return **404** (never 403, so foreign ids aren't probeable) when the
+folder isn't visible. This is what stops id-enumeration from reading
+another account's content, and it applies identically to session-cookie
+and API-key callers (the `deps` seam hands both the same account identity).
+The check is folder-level, mirroring search — a file is reachable exactly
+when its folder is (owned, ACL-granted, community-shared, or single-user).
+
 ### Source provenance (owner / dates) — `meta_*`
 
 Synced objects carry provenance the local file doesn't: who owns/created it,

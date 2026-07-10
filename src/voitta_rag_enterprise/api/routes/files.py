@@ -12,10 +12,30 @@ from sqlalchemy.orm import Session
 
 from ...cas import store as cas_store
 from ...db.models import Chunk, File, Folder, Image
-from ...services.acl import CurrentUser
+from ...services.acl import CurrentUser, user_can_see_folder
 from ..deps import current_user, db_session
 
 router = APIRouter(prefix="/files", tags=["files"])
+
+
+def _require_visible_file(db: Session, file_id: int, user: CurrentUser) -> File:
+    """Load a file the caller is allowed to see, or 404.
+
+    Authorization is folder-scoped: a file is reachable only when its
+    folder is visible to ``user`` (owned, ACL-granted, community-shared,
+    or single-user). This is the single seam every ``/files/{id}`` handler
+    routes through — WITHOUT it, any authenticated principal could read or
+    download any file in the deployment by enumerating integer ids
+    (the folder-level routes enforce this; the file-level ones must too).
+
+    404 (never 403) for both missing and not-visible so the existence of
+    another account's file is not probeable — same rationale as
+    ``folders._require_owner``.
+    """
+    file = db.get(File, file_id)
+    if file is None or not user_can_see_folder(db, file.folder_id, user.id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
+    return file
 
 
 class FileDetail(BaseModel):
@@ -65,9 +85,7 @@ def get_file(
     db: Session = Depends(db_session),
     user: CurrentUser = Depends(current_user),
 ) -> FileDetail:
-    file = db.get(File, file_id)
-    if file is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
+    file = _require_visible_file(db, file_id, user)
     return _to_file_detail(file)
 
 
@@ -77,9 +95,7 @@ def get_file_text(
     db: Session = Depends(db_session),
     user: CurrentUser = Depends(current_user),
 ) -> str:
-    file = db.get(File, file_id)
-    if file is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
+    file = _require_visible_file(db, file_id, user)
     if not file.file_cas_id:
         raise HTTPException(status.HTTP_409_CONFLICT, "File not yet extracted")
     try:
@@ -94,9 +110,7 @@ def download_file(
     db: Session = Depends(db_session),
     user: CurrentUser = Depends(current_user),
 ) -> FileResponse:
-    file = db.get(File, file_id)
-    if file is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
+    file = _require_visible_file(db, file_id, user)
     folder = db.get(Folder, file.folder_id)
     if folder is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Folder not found")
@@ -112,9 +126,7 @@ def get_file_page_images(
     db: Session = Depends(db_session),
     user: CurrentUser = Depends(current_user),
 ) -> list[FileImage]:
-    file = db.get(File, file_id)
-    if file is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
+    _require_visible_file(db, file_id, user)
     rows = (
         db.execute(
             select(Image)
@@ -170,9 +182,7 @@ def get_file_email(
     from email import policy
     from email.utils import getaddresses
 
-    file = db.get(File, file_id)
-    if file is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
+    file = _require_visible_file(db, file_id, user)
     if Path(file.rel_path).suffix.lower() != ".eml":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Not an .eml file")
     folder = db.get(Folder, file.folder_id)
@@ -257,9 +267,7 @@ def get_file_stl(
     user: CurrentUser = Depends(current_user),
 ) -> Response:
     """Convert a STEP/IGES/FCStd file to binary STL for the 3D preview."""
-    file = db.get(File, file_id)
-    if file is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
+    file = _require_visible_file(db, file_id, user)
     ext = Path(file.rel_path).suffix.lower()
     if ext not in _CAD_EXTS:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Cannot convert {ext!r} to STL")
@@ -400,9 +408,7 @@ def get_file_images(
     db: Session = Depends(db_session),
     user: CurrentUser = Depends(current_user),
 ) -> list[FileImage]:
-    file = db.get(File, file_id)
-    if file is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
+    _require_visible_file(db, file_id, user)
     # SPA renders these inline next to their anchor chunk; page renders
     # have no anchor and would just clutter the carousel. Page renders are
     # served separately via the MCP list_page_images / get_page_image tools.
@@ -456,9 +462,7 @@ def get_file_layout(
 ) -> list[LayoutBlock]:
     import json
 
-    file = db.get(File, file_id)
-    if file is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
+    file = _require_visible_file(db, file_id, user)
     if not file.file_cas_id:
         raise HTTPException(status.HTTP_409_CONFLICT, "File not yet extracted")
     try:
