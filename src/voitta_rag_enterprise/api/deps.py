@@ -31,6 +31,99 @@ def _cu(u: User) -> CurrentUser:
     )
 
 
+# ---------------------------------------------------------------------------
+# Bearer-token auth for /api — the same vk_ / cvk_ API keys that authenticate
+# /mcp also authenticate the REST surface, so programmatic clients use the
+# exact routes the SPA uses. Only Voitta-shaped tokens are handled here; any
+# other Authorization header (e.g. injected by a reverse proxy) falls through
+# to the session-cookie chain untouched.
+# ---------------------------------------------------------------------------
+
+_VOITTA_KEY_PREFIXES = ("vk_", "cvk_")
+
+# Session-cookie-only surface: identity/impersonation/key management. An API
+# key must not mint or delete keys, switch accounts, or reach the admin
+# console. GET /api/auth/me stays reachable as a "whoami" so clients can
+# verify a key and see which account it resolves to.
+_COOKIE_ONLY_PREFIXES = ("/api/admin", "/api/auth")
+_BEARER_EXCEPTIONS = {("GET", "/api/auth/me"), ("HEAD", "/api/auth/me")}
+
+
+def _extract_bearer(request: Request) -> str | None:
+    """RFC 6750 bearer extraction (mirrors mcp_server, not imported from it
+    — pulling in mcp_server here would drag the whole MCP stack into every
+    REST request's import path)."""
+    raw = request.headers.get("authorization")
+    if not raw:
+        return None
+    parts = raw.split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+    return parts[1].strip() or None
+
+
+async def _bearer_user(request: Request, db: Session, bearer: str) -> CurrentUser:
+    """Resolve a vk_/cvk_ bearer to the account it encodes, or raise.
+
+    401 = bad credential (unknown/revoked key, missing or unadmitted email
+    for cvk_). 403 = good credential on a cookie-only path. The key IS the
+    account selector: ``_resolve_account`` (session account switching) and
+    super-admin stamping are deliberately bypassed.
+    """
+    # Lazy imports — both route modules import this module at top level.
+    from .routes.api_keys import identity_for_token
+    from .routes.company_keys import (
+        USER_EMAIL_HEADER,
+        is_company_bearer,
+        resolve_company_identity,
+    )
+
+    if is_company_bearer(bearer):
+        identity = await resolve_company_identity(
+            bearer, request.headers.get(USER_EMAIL_HEADER)
+        )
+        if identity is None:
+            raise HTTPException(
+                status.HTTP_401_UNAUTHORIZED,
+                "Invalid company API key or user email (send "
+                "X-Voitta-User-Email or append ':email' to the token)",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+    else:
+        identity = identity_for_token(db, bearer)
+        db.commit()  # persist the last_used_at bump
+        if identity is None:
+            raise HTTPException(
+                status.HTTP_401_UNAUTHORIZED,
+                "Invalid or revoked API key",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+    path = request.url.path
+    if path.startswith(_COOKIE_ONLY_PREFIXES) and (
+        request.method,
+        path,
+    ) not in _BEARER_EXCEPTIONS:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "This endpoint is session-cookie only; API keys cannot access "
+            "auth/admin management.",
+        )
+
+    _email, account_id = identity
+    # Fresh read AFTER resolve — a cvk_ JIT-provisioned account row commits
+    # inside resolve_company_identity's own session.
+    row = db.get(User, account_id)
+    if row is None:
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED,
+            "Invalid or revoked API key",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    request.state.auth_method = "bearer"
+    return _cu(row)
+
+
 def _resolve_account(
     db: Session, email: str, session: Mapping[str, Any] | None
 ) -> User:
@@ -62,7 +155,7 @@ def db_session() -> Iterator[Session]:
         s.close()
 
 
-def real_user(
+async def real_user(
     request: Request,
     db: Session = Depends(db_session),
 ) -> CurrentUser:
@@ -71,12 +164,22 @@ def real_user(
     Used by admin endpoints — only the *real* user's admin flag may grant
     access; an impersonated user does not inherit privileges.
 
+    A Voitta bearer token (vk_/cvk_), when present, wins over everything —
+    including the dev/single-user env shortcuts. That deliberately differs
+    from MCP's BearerAuthMiddleware (which skips bearer entirely in those
+    modes): on the REST surface an explicit credential should never be
+    silently ignored in favour of an env fallback.
+
     As a side-effect, every super-admin sign-in (including the
     ``VOITTA_DEV_USER`` shortcut) re-stamps ``is_admin=True``. The OAuth
     callback does the same, but for dev/single-user mode this is the
     only place the stamp can land — there is no callback in those flows.
     """
     from ..services.admin_store import is_super_admin
+
+    bearer = _extract_bearer(request)
+    if bearer and bearer.startswith(_VOITTA_KEY_PREFIXES):
+        return await _bearer_user(request, db, bearer)
 
     sess = request.session if hasattr(request, "session") else None
     session_email = sess.get("user_email") if sess else None
@@ -88,7 +191,7 @@ def real_user(
     return _cu(u)
 
 
-def current_user(
+async def current_user(
     request: Request,
     db: Session = Depends(db_session),
 ) -> CurrentUser:
@@ -100,7 +203,12 @@ def current_user(
     that user's permissions transparently. Admin checks always go
     through ``real_user``, never this.
     """
-    me = real_user(request, db)
+    me = await real_user(request, db)
+    # Bearer identity is never remapped: a browser session's lingering
+    # impersonation state must not apply to an API-key request that
+    # happens to carry the same cookie.
+    if getattr(request.state, "auth_method", None) == "bearer":
+        return me
     sess = request.session if hasattr(request, "session") else None
     target_id = sess.get("acting_as_user_id") if sess else None
     if target_id is None:

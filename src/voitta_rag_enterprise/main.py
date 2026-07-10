@@ -107,6 +107,53 @@ def _seed_auth_providers() -> None:
         )
 
 
+def _install_openapi_security(app: FastAPI) -> None:
+    """Declare the API-key auth contract in the OpenAPI schema.
+
+    Replaces ``app.openapi`` with a wrapper that injects the two security
+    schemes (bearer key + the cvk_ companion email header) and marks every
+    operation as bearer-securable. Keeps FastAPI's memoization: the schema
+    is built once and cached on ``app.openapi_schema``.
+    """
+    base_openapi = app.openapi
+
+    def openapi_with_security() -> dict:
+        if app.openapi_schema:
+            return app.openapi_schema
+        schema = base_openapi()
+        components = schema.setdefault("components", {})
+        components.setdefault("securitySchemes", {}).update(
+            {
+                "ApiKeyBearer": {
+                    "type": "http",
+                    "scheme": "bearer",
+                    "description": (
+                        "Personal (`vk_…`) or company (`cvk_…`) API key. "
+                        "Company keys must be paired with a user email — "
+                        "send the `X-Voitta-User-Email` header or append "
+                        "it to the token as `cvk_…:user@example.com`. "
+                        "`/api/admin/*` and `/api/auth/*` (except "
+                        "`GET /api/auth/me`) are session-cookie only."
+                    ),
+                },
+                "UserEmailHeader": {
+                    "type": "apiKey",
+                    "in": "header",
+                    "name": "X-Voitta-User-Email",
+                    "description": (
+                        "The acting user's email — required with company "
+                        "(`cvk_…`) keys unless embedded in the token."
+                    ),
+                },
+            }
+        )
+        schema["security"] = [{"ApiKeyBearer": []}]
+        app.openapi_schema = schema
+        return schema
+
+    app.openapi = openapi_with_security  # type: ignore[method-assign]
+
+
 def create_app() -> FastAPI:
     """Build the unified web + MCP app.
 
@@ -401,7 +448,18 @@ def create_app() -> FastAPI:
                 events.uninstall_loop()
                 logger.info("Voitta RAG Enterprise stopped")
 
-    app = FastAPI(title="Voitta RAG Enterprise", version="0.1.0", lifespan=lifespan)
+    # Root /docs, /redoc, /openapi.json are disabled — they'd expose the full
+    # API schema unauthenticated. The authed equivalents live at /api/docs
+    # and /api/openapi.json (api/routes/docs.py, session or API key).
+    app = FastAPI(
+        title="Voitta RAG Enterprise",
+        version="0.1.0",
+        lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
+    _install_openapi_security(app)
 
     # Signed session cookie — used by the Google login flow to persist the
     # authenticated email across requests. Kept to ``/`` so both REST routes

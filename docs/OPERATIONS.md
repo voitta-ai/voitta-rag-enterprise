@@ -809,6 +809,27 @@ Either way the resolved identity is the same `(email, account_id)` tuple,
 so folder ACLs, search scoping, and MCP tools downstream are key-kind
 agnostic.
 
+**REST access.** The same keys authenticate the REST surface — every
+`/api/*` route the SPA uses (folders, upload, files, sync config/triggers,
+search, jobs, users, images) accepts `Authorization: Bearer vk_…/cvk_…`
+with identical semantics to MCP (`api/deps.py:_bearer_user`, branched at
+the top of `real_user` so the UI and API can never diverge). Exclusions:
+identity-requiring routes under `/api/admin/*` and `/api/auth/*` are
+session-cookie only (403 with a valid key) — except `GET /api/auth/me`,
+which works as a bearer "whoami". The dep-less auth routes (config,
+login/callback, logout) never consult keys: the guard lives inside the
+bearer branch, so it only fires where an identity is resolved.
+Precedence rules: a `vk_`/`cvk_` bearer wins over the dev/single-user env
+shortcuts (explicit credential beats env fallback — deliberately unlike
+MCP's middleware, which bypasses bearer in those modes); a non-Voitta
+`Authorization` header (e.g. proxy-injected) falls through to the cookie
+chain; bearer identity is never remapped by a cookie session's lingering
+impersonation or account-switch state. Interactive docs: `/api/docs`
+(Swagger UI) + `/api/openapi.json`, gated by the same auth — the root
+FastAPI `/docs`, `/redoc`, `/openapi.json` are disabled because they'd
+serve the schema unauthenticated. Quickstart with curl examples:
+[API.md](API.md).
+
 ### Provenance badges
 
 Rendered from `/me` (top bar) and per row in Admin → Users

@@ -7,6 +7,7 @@ from .routes.api_keys import router as api_keys_router
 from .routes.assets import router as assets_router
 from .routes.auth import router as auth_router
 from .routes.company_keys import router as company_keys_router
+from .routes.docs import router as docs_router
 from .routes.files import router as files_router
 from .routes.folders import router as folders_router
 from .routes.images import router as images_router
@@ -34,5 +35,6 @@ api_router.include_router(sync_oauth_router)
 api_router.include_router(users_router)
 api_router.include_router(admin_router)
 api_router.include_router(assets_router)
+api_router.include_router(docs_router)  # /api/docs + /api/openapi.json (authed)
 
 __all__ = ["api_router", "ws_router"]
