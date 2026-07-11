@@ -1317,7 +1317,7 @@ def delete_file(
         sidecar.unlink(missing_ok=True)
 
     # Enqueue the wipe + row deletion via the normal worker path.
-    job_queue.enqueue("delete_file", {"file_id": file_id})
+    job_queue.enqueue(db, "delete_file", {"file_id": file_id})
 
 
 @router.delete("/{folder_id}/dirs", status_code=status.HTTP_204_NO_CONTENT)
@@ -1362,7 +1362,7 @@ def delete_subdir(
         )
     ).scalars().all()
     for f in files:
-        job_queue.enqueue("delete_file", {"file_id": f.id})
+        job_queue.enqueue(db, "delete_file", {"file_id": f.id})
 
     # Also handle files directly in the dir (no deeper nesting).
     exact = db.execute(
@@ -1372,7 +1372,7 @@ def delete_subdir(
         )
     ).scalars().first()
     if exact:
-        job_queue.enqueue("delete_file", {"file_id": exact.id})
+        job_queue.enqueue(db, "delete_file", {"file_id": exact.id})
 
 
 @router.get("/{folder_id}/dirs")
