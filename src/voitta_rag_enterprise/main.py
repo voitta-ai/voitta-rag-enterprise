@@ -400,6 +400,17 @@ def create_app() -> FastAPI:
                 app.state.scheduler_task = asyncio.create_task(
                     auto_sync_scheduler.run_forever()
                 )
+
+                # Debounced folder-stats flusher: coalesces the per-file
+                # stats recompute during bulk indexing into one publish per
+                # folder per tick (see services/folder_stats.py). Only runs in
+                # full (non-disable_background) mode; otherwise mark-dirty
+                # publishes synchronously.
+                from .services.folder_stats import run_stats_flusher
+
+                app.state.stats_flusher_task = asyncio.create_task(
+                    run_stats_flusher()
+                )
                 app.state.startup_status = {"phase": "ready", "ready": True}
                 logger.info("background startup complete — indexer ready")
             except Exception:
@@ -432,6 +443,10 @@ def create_app() -> FastAPI:
                     # the loop body raised right before cancel).
                     with contextlib.suppress(asyncio.CancelledError, Exception):
                         await app.state.scheduler_task
+                if hasattr(app.state, "stats_flusher_task"):
+                    app.state.stats_flusher_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await app.state.stats_flusher_task
                 if hasattr(app.state, "workers"):
                     await app.state.workers.stop()
                 if hasattr(app.state, "watcher"):

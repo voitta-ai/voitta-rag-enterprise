@@ -11,18 +11,39 @@ This module is the pure-data computation; it's framework-agnostic so we
 can call it from the REST handler (with HTTPException-aware permission
 checks) AND from the indexer's commit hooks (no auth context, just a
 folder id).
+
+Performance model (why the debounce + cheap-compute exist)
+----------------------------------------------------------
+Indexing a folder fires ``publish_file_upserted`` per file, which used to
+recompute whole-folder stats **synchronously, per file** — O(N^2) for a
+folder, and heavy enough (ORM hydration of every row + ``IN (all ids)``
+aggregates + a Qdrant point count) to pin the GIL and starve the single
+indexer worker. Two mechanisms fix that:
+
+* ``compute_folder_stats`` reads lightweight column tuples and aggregates
+  chunks/images via JOINs (no giant ``IN`` list, no ORM hydration), and
+  can skip the Qdrant health count (``include_health=False``).
+* The hot path calls ``mark_folder_stats_dirty`` instead of computing
+  inline; a background flusher (``run_stats_flusher``) coalesces a burst
+  into at most one compute+publish per folder per interval. When no
+  flusher is running (tests, ``VOITTA_DISABLE_BACKGROUND``) mark-dirty
+  falls back to a synchronous publish so behaviour is unchanged there.
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
+import threading
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from ..db.database import session_scope
 from ..db.models import Chunk, File, Folder, Image
 from . import events
-from .file_classify import bucket_label
+from .file_classify import bucket_label_for
 from .reconcile import folder_health
 
 logger = logging.getLogger(__name__)
@@ -30,104 +51,133 @@ logger = logging.getLogger(__name__)
 _IN_PROGRESS_STATES = ("extracted", "embedding")
 
 
+def _file_filter(folder_id: int, rel_prefix: str | None):
+    """Shared WHERE for the row read AND the JOIN aggregates, so both scope
+    to exactly the same file set.
+
+    ``rel_prefix`` uses a ``LIKE`` with the ``%``/``_``/``\\`` metacharacters
+    escaped, so a subdir literally containing ``_`` (common in filenames)
+    can't over-match — mirrors the old ``rel_path.startswith(prefix + '/')``.
+    """
+    conds = [File.folder_id == folder_id, File.state != "deleted"]
+    if rel_prefix:
+        esc = (
+            rel_prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
+        conds.append(File.rel_path.like(esc + "/%", escape="\\"))
+    return conds
+
+
 def compute_folder_stats(
-    session: Session, folder: Folder, rel_prefix: str | None = None
+    session: Session,
+    folder: Folder,
+    rel_prefix: str | None = None,
+    *,
+    include_health: bool = True,
 ) -> dict:
     """Return the same dict shape the REST endpoint ships.
 
     With ``rel_prefix`` set, every count (files, by_extension, chunks,
-    images, bytes) is scoped to files under that subdirectory — the same
-    ``rel_path.startswith(prefix + "/")`` boundary the SPA's subtree view
-    uses. ``index_health`` stays folder-level either way: Qdrant point
-    counts are tracked per folder, not per subtree.
+    images, bytes) is scoped to files under that subdirectory. ``index_health``
+    stays folder-level either way: Qdrant point counts are tracked per folder,
+    not per subtree.
 
-    The shape is plain JSON-able primitives so a caller can publish the
-    return value as a WebSocket event without a Pydantic round-trip.
+    ``include_health=False`` omits the ``index_health`` key entirely (and the
+    Qdrant point count it needs) — used by the live WS push, where the health
+    badge is a slow diagnostic served on-demand by the REST endpoint instead.
+    The frontend guards the key's absence. The shape is plain JSON-able
+    primitives so a caller can publish it as a WebSocket event with no
+    Pydantic round-trip.
     """
     folder_id = folder.id
-    files = list(
-        session.execute(
-            select(File).where(File.folder_id == folder_id, File.state != "deleted")
-        ).scalars()
-    )
-    if rel_prefix:
-        files = [f for f in files if f.rel_path.startswith(rel_prefix + "/")]
-    files_total = len(files)
-    files_indexed = sum(1 for f in files if f.state == "indexed")
-    files_error = sum(1 for f in files if f.state == "error")
-    files_unsupported = sum(1 for f in files if f.state == "unsupported")
-    files_in_progress = sum(1 for f in files if f.state in _IN_PROGRESS_STATES)
-    files_pending = sum(1 for f in files if f.state == "pending")
-    # Cloud placeholders parked by the extract worker (Drive file with no
-    # local bytes) — a subset of unsupported, surfaced separately so the UI
-    # can say "N cloud-only (waiting for Google Drive)" instead of lumping
-    # them in with genuinely unparseable files.
-    files_cloud_only = sum(
-        1
-        for f in files
-        if f.state == "unsupported" and (f.error or "").startswith("cloud-only")
-    )
-    bytes_total = sum(f.size_bytes or 0 for f in files)
-    file_ids = [f.id for f in files]
+    where = _file_filter(folder_id, rel_prefix)
 
-    chunks_by_file: dict[int, int] = {}
-    if file_ids:
-        chunks_by_file = dict(
-            session.execute(
-                select(Chunk.file_id, func.count(Chunk.id))
-                .where(Chunk.file_id.in_(file_ids))
-                .group_by(Chunk.file_id)
-            ).all()
-        )
+    # Lightweight column tuples — NOT full ORM objects. Avoids hydrating every
+    # row through the identity map (the dominant cost at 12k+ files).
+    rows = session.execute(
+        select(
+            File.id,
+            File.state,
+            File.source_url,
+            File.rel_path,
+            File.size_bytes,
+            File.error,
+        ).where(*where)
+    ).all()
 
+    files_total = len(rows)
+    files_indexed = files_error = files_unsupported = 0
+    files_in_progress = files_pending = files_cloud_only = 0
+    bytes_total = 0
     by_extension: dict[str, dict[str, int]] = {}
-    for f in files:
-        ext = bucket_label(f)
+
+    for r in rows:
+        state = r.state
+        bytes_total += r.size_bytes or 0
+        if state == "indexed":
+            files_indexed += 1
+        elif state == "error":
+            files_error += 1
+        elif state == "unsupported":
+            files_unsupported += 1
+            # Cloud placeholders parked by the extract worker (Drive file with
+            # no local bytes) — a subset of unsupported, surfaced separately.
+            if (r.error or "").startswith("cloud-only"):
+                files_cloud_only += 1
+        elif state in _IN_PROGRESS_STATES:
+            files_in_progress += 1
+        else:
+            files_pending += 1
+
+        ext = bucket_label_for(r.source_url, r.rel_path)
         es = by_extension.setdefault(
             ext,
             {
-                "files": 0,
-                "indexed": 0,
-                "error": 0,
-                "unsupported": 0,
-                "pending": 0,
-                "in_progress": 0,
-                "chunks": 0,
+                "files": 0, "indexed": 0, "error": 0, "unsupported": 0,
+                "pending": 0, "in_progress": 0, "chunks": 0,
             },
         )
         es["files"] += 1
-        if f.state == "indexed":
+        if state == "indexed":
             es["indexed"] += 1
-        elif f.state == "error":
+        elif state == "error":
             es["error"] += 1
-        elif f.state == "unsupported":
+        elif state == "unsupported":
             es["unsupported"] += 1
-        elif f.state in _IN_PROGRESS_STATES:
+        elif state in _IN_PROGRESS_STATES:
             es["in_progress"] += 1
         else:
             es["pending"] += 1
-        es["chunks"] += chunks_by_file.get(f.id, 0)
 
+    # Per-file chunk counts via JOIN (covering index on chunks(file_id)) —
+    # no ``IN (all file ids)`` list. Attribute each file's chunks to its ext.
+    chunks_by_file: dict[int, int] = dict(
+        session.execute(
+            select(Chunk.file_id, func.count(Chunk.id))
+            .join(File, Chunk.file_id == File.id)
+            .where(*where)
+            .group_by(Chunk.file_id)
+        ).all()
+    )
+    # by_extension chunk totals need the per-file→ext mapping; rebuild the
+    # ext lookup once (cheap: same rows, already in memory).
+    ext_of_file = {r.id: bucket_label_for(r.source_url, r.rel_path) for r in rows}
+    for fid, n in chunks_by_file.items():
+        ext = ext_of_file.get(fid)
+        if ext is not None:
+            by_extension[ext]["chunks"] += n
     chunks_total = sum(chunks_by_file.values())
-    images_total = (
-        session.execute(
-            select(func.count(Image.id)).where(Image.file_id.in_(file_ids))
-        ).scalar_one()
-        if file_ids
-        else 0
-    )
-    images_unique = (
-        session.execute(
-            select(func.count(func.distinct(Image.image_cas_id))).where(
-                Image.file_id.in_(file_ids)
-            )
-        ).scalar_one()
-        if file_ids
-        else 0
-    )
-    health = folder_health(session, folder)
 
-    return {
+    images_total = session.execute(
+        select(func.count(Image.id)).join(File, Image.file_id == File.id).where(*where)
+    ).scalar_one()
+    images_unique = session.execute(
+        select(func.count(func.distinct(Image.image_cas_id)))
+        .join(File, Image.file_id == File.id)
+        .where(*where)
+    ).scalar_one()
+
+    out = {
         "folder_id": folder_id,
         "files_total": files_total,
         "files_indexed": files_indexed,
@@ -142,29 +192,109 @@ def compute_folder_stats(
         "images_unique": int(images_unique),
         "bytes_total": int(bytes_total),
         "by_extension": by_extension,
-        "index_health": {
+    }
+    if include_health:
+        health = folder_health(session, folder)
+        out["index_health"] = {
             "status": health.status,
             "qdrant_chunk_points": int(health.qdrant_chunk_points),
-        },
-    }
+        }
+    return out
 
 
-def publish_folder_stats(session: Session, folder_id: int) -> None:
+def publish_folder_stats(
+    session: Session, folder_id: int, *, include_health: bool = False
+) -> None:
     """Compute + emit ``folder.stats_changed`` for the given folder.
 
-    No-op if the folder row is gone. Errors don't propagate — the
-    publisher is called from the indexer's hot path (``commit_indexing``,
-    ``wipe_file_data``, ``_decrement_pending_embeds``) and a metrics
-    glitch must not break the actual indexing pipeline.
+    No-op if the folder row is gone. Errors don't propagate — the publisher
+    is called from indexer paths and a metrics glitch must not break the
+    pipeline. ``include_health`` defaults False: live pushes carry
+    SQLite-only counts (no per-publish Qdrant probe); the health badge is
+    served by the on-demand REST endpoint (``include_health=True``).
     """
     try:
         folder = session.get(Folder, folder_id)
         if folder is None:
             return
-        stats = compute_folder_stats(session, folder)
+        stats = compute_folder_stats(session, folder, include_health=include_health)
         events.publish(
             "folders",
             {"type": "folder.stats_changed", "folder_id": folder_id, "stats": stats},
         )
     except Exception:
         logger.exception("publish_folder_stats failed for folder=%s", folder_id)
+
+
+# ---------------------------------------------------------------------------
+# Debounced stats publishing.
+#
+# The per-file hot path marks a folder dirty (cheap, thread-safe) instead of
+# computing inline; ``run_stats_flusher`` coalesces a burst into one
+# compute+publish per folder per interval. Without a running flusher (tests /
+# VOITTA_DISABLE_BACKGROUND) mark-dirty publishes synchronously, so behaviour
+# is identical there.
+# ---------------------------------------------------------------------------
+
+_dirty_folders: set[int] = set()
+_dirty_lock = threading.Lock()
+_flusher_running = False
+
+
+def mark_folder_stats_dirty(folder_id: int) -> None:
+    """Request a (debounced) stats publish for ``folder_id``.
+
+    Thread-safe; called from the indexer worker thread. When the background
+    flusher isn't running, publishes synchronously as a fallback."""
+    if _flusher_running:
+        with _dirty_lock:
+            _dirty_folders.add(folder_id)
+        return
+    # Fallback: no flusher (tests / background disabled) — publish now so the
+    # snapshot still lands. Own session; reads committed state.
+    with session_scope() as s:
+        publish_folder_stats(s, folder_id)
+
+
+def _drain_dirty() -> list[int]:
+    with _dirty_lock:
+        if not _dirty_folders:
+            return []
+        drained = list(_dirty_folders)
+        _dirty_folders.clear()
+    return drained
+
+
+def _compute_and_publish(folder_id: int) -> None:
+    with session_scope() as s:
+        publish_folder_stats(s, folder_id)
+
+
+async def run_stats_flusher(interval: float = 1.5) -> None:
+    """Background loop: every ``interval`` seconds, publish stats for every
+    folder marked dirty since the last tick.
+
+    Trailing-edge: the final post-burst state is always published (the folder
+    stays dirty until a tick drains it). The DB work runs in a thread so the
+    event loop never blocks. Runs until cancelled (lifespan shutdown)."""
+    global _flusher_running
+    _flusher_running = True
+    logger.info("stats flusher started (interval=%.1fs)", interval)
+    try:
+        while True:
+            await asyncio.sleep(interval)
+            for folder_id in _drain_dirty():
+                try:
+                    await asyncio.to_thread(_compute_and_publish, folder_id)
+                except Exception:
+                    logger.exception(
+                        "stats flusher: publish failed for folder=%s", folder_id
+                    )
+    except asyncio.CancelledError:
+        # Final drain so counts aren't left stale at shutdown.
+        for folder_id in _drain_dirty():
+            with contextlib.suppress(Exception):
+                _compute_and_publish(folder_id)
+        raise
+    finally:
+        _flusher_running = False

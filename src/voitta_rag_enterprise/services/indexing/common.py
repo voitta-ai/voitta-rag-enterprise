@@ -117,7 +117,7 @@ def publish_file_upserted(file_id: int) -> None:
     folder_id, so a 200-file extract burst produces one delivered
     stats event per folder, not 200.
     """
-    from ..folder_stats import publish_folder_stats
+    from ..folder_stats import mark_folder_stats_dirty
 
     with session_scope() as s:
         file = s.get(File, file_id)
@@ -130,7 +130,12 @@ def publish_file_upserted(file_id: int) -> None:
                 "file": file_event_payload(file),
             },
         )
-        publish_folder_stats(s, file.folder_id)
+        folder_id = file.folder_id
+    # Stats are debounced OFF the per-file hot path: a big extract used to
+    # recompute whole-folder stats synchronously per file (O(N^2), GIL-bound).
+    # mark-dirty coalesces the burst into one publish per folder per flush
+    # tick (falls back to a synchronous publish when no flusher runs).
+    mark_folder_stats_dirty(folder_id)
 
 
 def file_event_payload(file: File, *, image_count: int | None = None) -> dict:

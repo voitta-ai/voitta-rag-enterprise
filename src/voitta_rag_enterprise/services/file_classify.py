@@ -82,6 +82,20 @@ def source_kind(file: File) -> str:
     return _EXTENSION_KIND.get(ext, "other")
 
 
+def bucket_label_for(source_url: str | None, rel_path: str) -> str:
+    """``bucket_label`` on raw fields, not a ``File`` object.
+
+    Lets hot-path callers (folder stats over thousands of rows) compute the
+    label from lightweight ``(source_url, rel_path)`` column tuples without
+    hydrating full ORM ``File`` objects.
+    """
+    if source_url:
+        for prefix, _kind, label in _WORKSPACE_BUCKETS:
+            if source_url.startswith(prefix):
+                return label
+    return _ext_lower(rel_path) or "(no ext)"
+
+
 def bucket_label(file: File) -> str:
     """Return the display label for the sidebar's by-extension table.
 
@@ -89,8 +103,4 @@ def bucket_label(file: File) -> str:
     gets the lowercased extension (or ``"(no ext)"`` for extensionless
     files, preserving the historic format of the by-extension map).
     """
-    if file.source_url:
-        for prefix, _kind, label in _WORKSPACE_BUCKETS:
-            if file.source_url.startswith(prefix):
-                return label
-    return _ext_lower(file.rel_path) or "(no ext)"
+    return bucket_label_for(file.source_url, file.rel_path)

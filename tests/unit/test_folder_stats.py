@@ -11,15 +11,19 @@ Two responsibilities:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 
 import pytest
 
 from voitta_rag_enterprise.db.database import init_db, session_scope
 from voitta_rag_enterprise.db.models import Chunk, File, Folder, Image
 from voitta_rag_enterprise.services import events
+from voitta_rag_enterprise.services import folder_stats as fs_mod
 from voitta_rag_enterprise.services.folder_stats import (
     compute_folder_stats,
+    mark_folder_stats_dirty,
     publish_folder_stats,
+    run_stats_flusher,
 )
 
 
@@ -393,3 +397,124 @@ def test_compute_cloud_only_respects_scope(env: None) -> None:
         out = compute_folder_stats(s, folder, rel_prefix="sub")
 
     assert out["files_cloud_only"] == 1
+
+
+# ---------------------------------------------------------------------------
+# include_health (Tier-1 #3): live pushes carry SQLite-only stats
+# ---------------------------------------------------------------------------
+
+
+def test_include_health_toggle(env: None) -> None:
+    fid = _seed()
+    _add_file(fid, "a.md", state="indexed", chunks=1)
+    with session_scope() as s:
+        folder = s.get(Folder, fid)
+        full = compute_folder_stats(s, folder, include_health=True)
+        lite = compute_folder_stats(s, folder, include_health=False)
+    # REST/default path carries the health block…
+    assert "index_health" in full
+    assert set(full["index_health"]) == {"status", "qdrant_chunk_points"}
+    # …the live-push path omits it (no per-publish Qdrant count).
+    assert "index_health" not in lite
+    # Everything else is identical.
+    assert {k: v for k, v in full.items() if k != "index_health"} == lite
+
+
+@pytest.mark.asyncio
+async def test_publish_defaults_to_no_health(env: None) -> None:
+    """publish_folder_stats now defaults include_health=False — the live WS
+    push must not carry index_health (nor fire a Qdrant count)."""
+    fid = _seed()
+    _add_file(fid, "a.md", state="indexed", chunks=1)
+    events.install_loop(asyncio.get_running_loop())
+    try:
+        async with events.subscribe(["folders"]) as sub:
+            with session_scope() as s:
+                publish_folder_stats(s, fid)
+            await sub.wait(timeout=1.0)
+            (event,) = sub.drain()
+            assert "index_health" not in event["stats"]
+    finally:
+        events.uninstall_loop()
+
+
+# ---------------------------------------------------------------------------
+# Cross-folder isolation — the JOIN aggregates must never count another
+# folder's chunks/images (the blast radius the old IN(ids) approach and the
+# new JOIN both must respect).
+# ---------------------------------------------------------------------------
+
+
+def test_cross_folder_isolation(env: None) -> None:
+    a = _seed("/tmp/a", "a")
+    b = _seed("/tmp/b", "b")
+    _add_file(a, "a1.md", state="indexed", chunks=3, images=2)
+    _add_file(b, "b1.md", state="indexed", chunks=5, images=1)
+    _add_file(b, "b2.md", state="indexed", chunks=7, images=4)
+    with session_scope() as s:
+        sa = compute_folder_stats(s, s.get(Folder, a))
+        sb = compute_folder_stats(s, s.get(Folder, b))
+    assert sa["chunks_total"] == 3 and sa["images_total"] == 2 and sa["files_total"] == 1
+    assert sb["chunks_total"] == 12 and sb["images_total"] == 5 and sb["files_total"] == 2
+
+
+def test_rel_prefix_underscore_not_overmatched(env: None) -> None:
+    """A subdir literally containing '_' must not LIKE-match arbitrary chars
+    (regression guard for the escape in _file_filter)."""
+    fid = _seed()
+    _add_file(fid, "a_b/in.md", state="indexed", chunks=2)
+    _add_file(fid, "aXb/out.md", state="indexed", chunks=9)  # would match 'a_b/%' unescaped
+    with session_scope() as s:
+        out = compute_folder_stats(s, s.get(Folder, fid), rel_prefix="a_b")
+    assert out["files_total"] == 1 and out["chunks_total"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Debounce (Tier-1 #1): mark-dirty fallback + flusher coalescing
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_mark_dirty_falls_back_to_sync_publish(env: None) -> None:
+    """With no flusher running, mark_folder_stats_dirty publishes now."""
+    assert fs_mod._flusher_running is False
+    fid = _seed()
+    _add_file(fid, "a.md", state="indexed", chunks=1)
+    events.install_loop(asyncio.get_running_loop())
+    try:
+        async with events.subscribe(["folders"]) as sub:
+            mark_folder_stats_dirty(fid)  # no session arg — opens its own
+            await sub.wait(timeout=1.0)
+            (event,) = sub.drain()
+            assert event["type"] == "folder.stats_changed"
+            assert event["stats"]["chunks_total"] == 1
+    finally:
+        events.uninstall_loop()
+
+
+@pytest.mark.asyncio
+async def test_flusher_coalesces_burst_to_one_publish(env: None) -> None:
+    """N marks for the same folder within a tick → exactly one publish."""
+    fid = _seed()
+    _add_file(fid, "a.md", state="indexed", chunks=1)
+    events.install_loop(asyncio.get_running_loop())
+    task = asyncio.create_task(run_stats_flusher(interval=0.1))
+    try:
+        # Let the flusher flip _flusher_running=True.
+        await asyncio.sleep(0.02)
+        assert fs_mod._flusher_running is True
+        async with events.subscribe(["folders"]) as sub:
+            for _ in range(20):
+                mark_folder_stats_dirty(fid)  # coalesces into one dirty entry
+            await sub.wait(timeout=1.0)
+            await asyncio.sleep(0.15)  # allow the tick + any trailing
+            events_out = sub.drain()
+            stats_events = [e for e in events_out if e["type"] == "folder.stats_changed"]
+            assert len(stats_events) == 1
+            assert stats_events[0]["folder_id"] == fid
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        events.uninstall_loop()
+        assert fs_mod._flusher_running is False
