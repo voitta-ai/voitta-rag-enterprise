@@ -110,6 +110,9 @@ def compute_folder_stats(
     files_in_progress = files_pending = files_cloud_only = 0
     bytes_total = 0
     by_extension: dict[str, dict[str, int]] = {}
+    # file id → its bucket label, built in the single pass below and reused for
+    # per-file chunk attribution (compute the label once per file, not twice).
+    ext_of_file: dict[int, str] = {}
 
     for r in rows:
         state = r.state
@@ -130,6 +133,7 @@ def compute_folder_stats(
             files_pending += 1
 
         ext = bucket_label_for(r.source_url, r.rel_path)
+        ext_of_file[r.id] = ext
         es = by_extension.setdefault(
             ext,
             {
@@ -150,7 +154,8 @@ def compute_folder_stats(
             es["pending"] += 1
 
     # Per-file chunk counts via JOIN (covering index on chunks(file_id)) —
-    # no ``IN (all file ids)`` list. Attribute each file's chunks to its ext.
+    # no ``IN (all file ids)`` list. Attribute each file's chunks to its ext
+    # via the label already computed in the pass above.
     chunks_by_file: dict[int, int] = dict(
         session.execute(
             select(Chunk.file_id, func.count(Chunk.id))
@@ -159,9 +164,6 @@ def compute_folder_stats(
             .group_by(Chunk.file_id)
         ).all()
     )
-    # by_extension chunk totals need the per-file→ext mapping; rebuild the
-    # ext lookup once (cheap: same rows, already in memory).
-    ext_of_file = {r.id: bucket_label_for(r.source_url, r.rel_path) for r in rows}
     for fid, n in chunks_by_file.items():
         ext = ext_of_file.get(fid)
         if ext is not None:

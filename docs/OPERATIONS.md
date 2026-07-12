@@ -505,7 +505,7 @@ flowchart TB
 | `files` | `file.deleted` (enriched with `folder_id`) | folder · discrete |
 | `jobs` | `job.started`, `job.finished` (enriched with `folder_id`) | folder · `job_id` |
 | `jobs` | `job.progress` (transient sub-progress: `phase` + optional `done`/`total`) | folder · `job_id` |
-| `folders` | `folder.upserted`, `folder.stats_changed`, `folder.sync_source_changed`, `folder.active_changed` | folder · `folder_id` |
+| `folders` | `folder.upserted`, `folder.stats_changed` (compute debounced ≤1/tick per folder; carries no `index_health`), `folder.sync_source_changed`, `folder.active_changed` | folder · `folder_id` |
 | `folders` | `folder.added`, `folder.removed`, `folder.sync_progress`, `folder.reindex_progress`, `folder.sync_config_changed`, `folder.gd_connected`, `folder.ms_connected` | folder · discrete |
 | `admin` | `admin.snapshot` (full admin-console state: allowlist, users+groups, auth-providers, caps, settings) | admin-only · discrete |
 | `keys` | `keys.snapshot` (a user's **personal** API keys — company keys are HTTP-fetched on modal open, not WS-pushed) | per-user · discrete |
@@ -521,7 +521,9 @@ so the client applies one shape whether it's the baseline or a delta.
 *coalesced* entry is evicted (the newest snapshot is always preserved). Under
 heavy indexing, tens of thousands of `file.upserted` events collapse to one
 final state per file id, and the pump emits one `send_text` per scheduling
-tick.
+tick. (`folder.stats_changed` is throttled a step earlier still — its
+*computation* is debounced to ≤1/tick per folder before it's ever published;
+see §Folder stats.)
 
 > **Sync config contract:** the heavy, secret-masked per-folder connector
 > config is *not* in the global snapshot. The sync modal caches it per folder
@@ -552,6 +554,41 @@ so the panel can never contradict itself.
   `folderId` or `"folderId:relDir"`). A stats push stores the folder-level
   payload and drops that folder's scoped keys; if a subtree is selected the
   panel refetches the scoped snapshot, throttled to ~1 per 750 ms per key.
+
+**Compute is debounced OFF the per-file hot path.** Recomputing whole-folder
+stats once per indexed file is O(N²) per folder — heavy enough (at 12k+ files)
+to saturate the GIL and starve the single indexer worker while the GPU sat at
+0%. Two mechanisms keep it cheap:
+
+- **Debounce.** The indexer hot path (`publish_file_upserted`) calls
+  `mark_folder_stats_dirty(folder_id)` — a thread-safe set-add, no compute.
+  A background `run_stats_flusher` (started in the lifespan next to the
+  auto-sync scheduler) drains the dirty set every ~1.5 s and publishes **at
+  most one** compute per folder per tick, trailing-edge so the final
+  post-burst state always lands. When no flusher runs (tests,
+  `VOITTA_DISABLE_BACKGROUND`), `mark_folder_stats_dirty` falls back to a
+  synchronous publish, so behaviour there is unchanged. This is a stronger
+  guarantee than the events layer's *delivery* coalescing (§Topics): the
+  expensive *computation* now runs ≤ once per tick, not once per file.
+- **Cheap compute.** `compute_folder_stats` reads lightweight column tuples
+  (no ORM hydration of every row) and aggregates chunks/images via **JOINs**
+  on `File` — not a giant `IN (all file ids)` list. The `folder_id` / `file_id`
+  filters ride the `UNIQUE(folder_id, rel_path)` / `UNIQUE(file_id, chunk_index)`
+  autoindexes (verified via `EXPLAIN QUERY PLAN`; the chunks JOIN is covering),
+  so no extra index is needed.
+- **`index_health` is on-demand only.** The live push omits it
+  (`include_health=False`) — it needs a Qdrant point count, and firing that per
+  publish is what made the count ~⅓ of all Qdrant traffic and contends with the
+  indexer's own upserts on the single Qdrant worker. The REST endpoint computes
+  it (`include_health=True`) so the "⚠ Reindex needed" badge is accurate on
+  folder-select; the frontend guards its absence, and a mid-indexing
+  `out_of_sync` (SQLite-indexed but embeds not yet in Qdrant) is transient
+  anyway, so hiding it live avoids a false alarm.
+
+`publish_folder_stats(session, folder_id)` (used directly by the single-file
+`delete` and the once-per-folder `reindex` paths, which aren't the O(N²) hot
+path) is the immediate, synchronous version; it too defaults
+`include_health=False`.
 
 ### Tree pill: syncing → indexing → indexed
 

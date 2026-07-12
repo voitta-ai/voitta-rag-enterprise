@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
 import io
 import time
@@ -136,8 +135,9 @@ def test_source_meta_reaches_chunk_and_image_payloads(env: None, tmp_path: Path)
     meta_modified_ts actually matches (proves the payload index works)."""
     import json
 
-    from voitta_rag_enterprise.services import vector_store as vs
     from qdrant_client.http import models as qm
+
+    from voitta_rag_enterprise.services import vector_store as vs
 
     init_db()
     meta = json.dumps({
@@ -410,3 +410,32 @@ def test_extract_parks_dataless_cloud_stub(
         assert f.state == "unsupported"
         assert "cloud-only" in (f.error or "")
         assert f.file_cas_id is None  # the content was never read
+
+
+async def test_extract_publishes_debounced_folder_stats(env: None, tmp_path: Path) -> None:
+    """The extract hot path publishes ``folder.stats_changed`` through the new
+    mark-dirty wiring (fallback = synchronous, since no flusher runs in tests),
+    carrying the cheap-compute counts and NO ``index_health`` (live pushes are
+    SQLite-only). Guards the common.py hot-path change end-to-end."""
+    from voitta_rag_enterprise.services import events
+
+    init_db()
+    file_id = _seed_file(
+        tmp_path / "src", "doc.md", "hello world\n\n" + ("paragraph " * 200)
+    )
+    events.install_loop(asyncio.get_running_loop())
+    try:
+        async with events.subscribe(["folders"]) as sub:
+            await _extract(file_id)
+            await sub.wait(timeout=2.0)
+            stats_events = [
+                e for e in sub.drain() if e["type"] == "folder.stats_changed"
+            ]
+            assert stats_events, "extract did not publish folder.stats_changed"
+            s = stats_events[-1]["stats"]
+            assert s["files_indexed"] == 1
+            assert s["chunks_total"] >= 1
+            # Live push omits the Qdrant-backed health block (on-demand only).
+            assert "index_health" not in s
+    finally:
+        events.uninstall_loop()
