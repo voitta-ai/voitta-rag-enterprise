@@ -243,3 +243,61 @@ def test_reindex_progress_chunks_size_param(
     wipe_dones = [e["done"] for e in wipe_events]
     assert wipe_dones == sorted(wipe_dones)
     assert wipe_events[-1]["done"] == 5
+
+
+# ---------------------------------------------------------------------------
+# State-scoped reindex ("reindex light")
+# ---------------------------------------------------------------------------
+
+
+def test_reindex_states_filter_targets_only_matching_files(
+    env: None, tmp_path: Path
+) -> None:
+    """POST /reindex with states=['error','unsupported'] schedules only the
+    failed/skipped rows: they flip to pending immediately, while indexed
+    rows keep their state (and their chunks — nothing is wiped for them)."""
+    from voitta_rag_enterprise.main import create_app
+
+    app = create_app()
+    with TestClient(app) as client:
+        fid = _setup_folder(tmp_path, app, client, n_files=4)
+        # Park two files as if they had failed / been skipped.
+        with session_scope() as s:
+            rows = (
+                s.execute(
+                    select(File).where(File.folder_id == fid).order_by(File.id)
+                ).scalars().all()
+            )
+            rows[0].state = "error"
+            rows[0].error = "extract crashed: boom"
+            rows[1].state = "unsupported"
+            parked_ids = {rows[0].id, rows[1].id}
+            indexed_ids = {rows[2].id, rows[3].id}
+            s.commit()
+
+        r = client.post(
+            f"/api/folders/{fid}/reindex",
+            json={"states": ["error", "unsupported"]},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["scheduled"] == 2
+
+        with session_scope() as s:
+            rows = (
+                s.execute(select(File).where(File.folder_id == fid)).scalars().all()
+            )
+            by_id = {f.id: f for f in rows}
+        # Targeted rows flipped to pending (error cleared) by the endpoint.
+        for pid in parked_ids:
+            assert by_id[pid].state == "pending"
+            assert by_id[pid].error is None
+        # Untargeted rows untouched.
+        for iid in indexed_ids:
+            assert by_id[iid].state == "indexed"
+
+        # Bogus state names are rejected up front.
+        r = client.post(f"/api/folders/{fid}/reindex", json={"states": ["bogus"]})
+        assert r.status_code == 400
+        # And deleted rows can't be targeted through this door.
+        r = client.post(f"/api/folders/{fid}/reindex", json={"states": ["deleted"]})
+        assert r.status_code == 400

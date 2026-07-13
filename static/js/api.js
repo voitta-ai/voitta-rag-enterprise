@@ -148,8 +148,11 @@ export const api = {
     },
     mkdir: (folderId, path) =>
         req("POST", `/api/folders/${folderId}/mkdir`, { path }),
-    reindexFolder: (folderId, relDir = "") =>
-        req("POST", `/api/folders/${folderId}/reindex`, { rel_dir: relDir || null }),
+    // states: null = full reindex; array (e.g. ["error","unsupported"]) =
+    // only files currently in those states ("reindex light").
+    reindexFolder: (folderId, relDir = "", states = null) =>
+        req("POST", `/api/folders/${folderId}/reindex`,
+            { rel_dir: relDir || null, states }),
     getSync: (folderId) => req("GET", `/api/folders/${folderId}/sync`),
     putSync: (folderId, body) => req("PUT", `/api/folders/${folderId}/sync`, body),
     deleteSync: (folderId) => req("DELETE", `/api/folders/${folderId}/sync`),

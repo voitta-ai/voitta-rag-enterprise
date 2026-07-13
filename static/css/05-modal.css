@@ -174,6 +174,25 @@
 .gd-tree-sub { font-size: 11px; color: var(--color-text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .gd-tree-children { /* indent handled via padding-left on .gd-tree-row */ }
 
+/* A label that IS the row (<label class="check-row">) gets the same
+   normal-case treatment as labels nested inside one, and keeps the
+   checkbox on the first text line when the caption wraps. */
+.modal-body label.check-row {
+    text-transform: none;
+    color: var(--color-text-primary);
+    font-size: 13px;
+    font-weight: 400;
+    letter-spacing: 0;
+    align-items: flex-start;
+    flex-wrap: nowrap;
+    gap: var(--sm);
+    cursor: pointer;
+}
+.modal-body label.check-row input[type="checkbox"] {
+    margin: 2px 0 0;
+    flex: none;
+}
+
 .modal-body .radio-row label,
 .modal-body .check-row label,
 .modal-body .branches-row label {

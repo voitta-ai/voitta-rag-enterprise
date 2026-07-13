@@ -1540,6 +1540,39 @@
         </div>
     </div>
 
+    <!-- Modal: reindex scope chooser. Counts + title are filled by
+         toolbar.js from the files store on open. Default scope is the
+         cheap one (errored + skipped) — a full re-parse must be an
+         explicit opt-in, not the accidental default. -->
+    <div id="reindex-backdrop" class="modal-backdrop" hidden>
+        <div class="modal">
+            <div class="modal-header">
+                <h3>Reindex</h3>
+                <button id="reindex-close" class="btn-text">×</button>
+            </div>
+            <div class="modal-body">
+                <p id="reindex-where" class="hint" style="margin-top:0;"></p>
+                <label class="check-row">
+                    <input type="checkbox" id="reindex-scope-error" checked>
+                    <span>Errored — <span id="reindex-count-error">0</span> file(s) that failed to parse or embed</span>
+                </label>
+                <label class="check-row">
+                    <input type="checkbox" id="reindex-scope-unsupported" checked>
+                    <span>Skipped — <span id="reindex-count-unsupported">0</span> file(s) parked as unsupported (no parser, size cap, cloud-only)</span>
+                </label>
+                <label class="check-row">
+                    <input type="checkbox" id="reindex-scope-healthy">
+                    <span>Indexed &amp; in progress — <span id="reindex-count-healthy">0</span> file(s); re-parses the healthy corpus from scratch (slow)</span>
+                </label>
+                <p class="hint" id="reindex-scope-hint"></p>
+                <div class="actions actions-right">
+                    <button id="reindex-cancel" class="btn btn-secondary">Cancel</button>
+                    <button id="reindex-start" class="btn btn-primary">Reindex</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Modal: Google Drive folder picker (multi-select) -->
     <div id="gd-pick-backdrop" class="modal-backdrop" hidden>
         <div class="modal modal-wide">

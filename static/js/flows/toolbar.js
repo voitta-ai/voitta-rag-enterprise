@@ -119,34 +119,106 @@ $("#modal-backdrop").addEventListener("click", (e) => {
 
 $("#btn-new-subfolder").addEventListener("click", createSubfolder);
 
-$("#btn-reindex").addEventListener("click", async () => {
+// ---------------------------------------------------------------------------
+// Reindex scope chooser — opened by the Reindex button. Three checkboxes
+// map onto the endpoint's ``states`` filter: errored / skipped map 1:1,
+// "healthy" covers everything else non-deleted. All three checked = a
+// full reindex (states=null). Default is errored+skipped: the common case
+// after a parser fix is retrying failures, not re-parsing the corpus.
+// ---------------------------------------------------------------------------
+
+const _HEALTHY_STATES = ["indexed", "pending", "extracted", "embedding"];
+
+function _reindexSubtreeFiles() {
+    const folderId = getSelectedFolderId();
+    const relDir = getSelectedRelDir();
+    const all = files.get().filter(
+        (x) => x.folder_id === folderId && x.state !== "deleted",
+    );
+    return relDir ? all.filter((f) => f.rel_path.startsWith(`${relDir}/`)) : all;
+}
+
+function _reindexCounts() {
+    const counts = { error: 0, unsupported: 0, healthy: 0 };
+    for (const f of _reindexSubtreeFiles()) {
+        if (f.state === "error") counts.error += 1;
+        else if (f.state === "unsupported") counts.unsupported += 1;
+        else counts.healthy += 1;
+    }
+    return counts;
+}
+
+// The states array the current checkbox combination selects, or null for
+// a full reindex, or [] when nothing is checked.
+function _reindexSelectedStates() {
+    const states = [];
+    if ($("#reindex-scope-error").checked) states.push("error");
+    if ($("#reindex-scope-unsupported").checked) states.push("unsupported");
+    const healthy = $("#reindex-scope-healthy").checked;
+    if (healthy) states.push(..._HEALTHY_STATES);
+    if (states.length === 2 + _HEALTHY_STATES.length) return null; // everything
+    return states;
+}
+
+function _refreshReindexModal() {
+    const counts = _reindexCounts();
+    $("#reindex-count-error").textContent = String(counts.error);
+    $("#reindex-count-unsupported").textContent = String(counts.unsupported);
+    $("#reindex-count-healthy").textContent = String(counts.healthy);
+    const selected =
+        (counts.error && $("#reindex-scope-error").checked ? counts.error : 0) +
+        (counts.unsupported && $("#reindex-scope-unsupported").checked ? counts.unsupported : 0) +
+        (counts.healthy && $("#reindex-scope-healthy").checked ? counts.healthy : 0);
+    const startBtn = $("#reindex-start");
+    startBtn.disabled = selected === 0;
+    startBtn.textContent = selected ? `Reindex ${selected} file(s)` : "Reindex";
+    $("#reindex-scope-hint").textContent = $("#reindex-scope-healthy").checked
+        ? "Selected files are re-parsed and re-embedded from scratch; existing "
+          + "chunks stay searchable until replaced. Re-parsing the healthy "
+          + "corpus can take a long time."
+        : "Only failed/skipped files are retried — the healthy corpus is untouched. "
+          + "Files that are genuinely unsupported will simply park as skipped again.";
+}
+
+$("#btn-reindex").addEventListener("click", () => {
     if (!getSelectedFolderId()) return;
     const folder = folders.get().find((f) => f.id === getSelectedFolderId());
     if (!folder) return;
-    const allFolderFiles = files.get().filter(
-        (x) => x.folder_id === folder.id && x.state !== "deleted",
-    );
-    const subtreeFiles = getSelectedRelDir()
-        ? allFolderFiles.filter((f) => f.rel_path.startsWith(`${getSelectedRelDir()}/`))
-        : allFolderFiles;
-    if (subtreeFiles.length === 0) {
+    if (_reindexSubtreeFiles().length === 0) {
         alert("No files to reindex in this subtree.");
         return;
     }
     const where = getSelectedRelDir()
         ? `${folder.display_name}/${getSelectedRelDir()}`
         : folder.display_name;
-    const ok = confirm(
-        `Hard re-index ${subtreeFiles.length} file(s) under "${where}"?\n\n` +
-        `Every file in this subtree will be re-parsed and re-embedded ` +
-        `from scratch — this can take a while and will keep workers busy.\n\n` +
-        `Existing chunks and image embeddings remain available until the ` +
-        `new ones are committed.`,
-    );
-    if (!ok) return;
+    $("#reindex-where").textContent = `Scope: ${where}`;
+    // Reset to the cheap default on every open.
+    $("#reindex-scope-error").checked = true;
+    $("#reindex-scope-unsupported").checked = true;
+    $("#reindex-scope-healthy").checked = false;
+    _refreshReindexModal();
+    $("#reindex-backdrop").hidden = false;
+});
+
+function closeReindexModal() {
+    $("#reindex-backdrop").hidden = true;
+}
+
+for (const id of ["#reindex-scope-error", "#reindex-scope-unsupported", "#reindex-scope-healthy"]) {
+    $(id).addEventListener("change", _refreshReindexModal);
+}
+$("#reindex-close").addEventListener("click", closeReindexModal);
+$("#reindex-cancel").addEventListener("click", closeReindexModal);
+$("#reindex-backdrop").addEventListener("click", (e) => {
+    if (e.target.id === "reindex-backdrop") closeReindexModal();
+});
+$("#reindex-start").addEventListener("click", async () => {
+    const states = _reindexSelectedStates();
+    if (Array.isArray(states) && states.length === 0) return;
+    closeReindexModal();
     try {
-        const r = await api.reindexFolder(getSelectedFolderId(), getSelectedRelDir());
-        if (r.scheduled === 0) alert("No files were scheduled.");
+        const r = await api.reindexFolder(getSelectedFolderId(), getSelectedRelDir(), states);
+        if (r.scheduled === 0) alert("No files matched the selected scope.");
     } catch (err) {
         alert(err.message);
     }

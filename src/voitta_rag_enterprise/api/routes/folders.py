@@ -1042,6 +1042,13 @@ def list_folders(
     ]
 
 
+# States a reindex may target. ``deleted`` is deliberately absent — those
+# rows are tombstones owned by the delete pipeline.
+_REINDEXABLE_STATES = frozenset(
+    {"error", "unsupported", "pending", "extracted", "embedding", "indexed"}
+)
+
+
 class ReindexIn(BaseModel):
     rel_dir: str | None = Field(
         default=None,
@@ -1049,6 +1056,15 @@ class ReindexIn(BaseModel):
             "Optional path prefix relative to the folder root. None or empty "
             "string reindexes the entire folder; otherwise reindex applies "
             "recursively to every file under that subdirectory."
+        ),
+    )
+    states: list[str] | None = Field(
+        default=None,
+        description=(
+            "Optional file-state filter: only files currently in one of "
+            "these states are reindexed ('reindex light' — e.g. "
+            "['error', 'unsupported'] retries failures without re-parsing "
+            "the healthy corpus). None reindexes every non-deleted file."
         ),
     )
 
@@ -1092,7 +1108,18 @@ def reindex_folder(
             status.HTTP_400_BAD_REQUEST, f"Invalid rel_dir: {body.rel_dir!r}"
         )
 
+    states = sorted(set(body.states)) if body.states else None
+    if states is not None:
+        bad = [s for s in states if s not in _REINDEXABLE_STATES]
+        if bad:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"Invalid states: {bad!r} (allowed: {sorted(_REINDEXABLE_STATES)})",
+            )
+
     q = select(File.id).where(File.folder_id == folder_id, File.state != "deleted")
+    if states is not None:
+        q = q.where(File.state.in_(states))
     if rel_dir:
         like_prefix = (
             rel_dir.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
@@ -1131,11 +1158,15 @@ def reindex_folder(
         )
         db.flush()
 
+    # The state filter is part of the dedup key: a full reindex clicked
+    # while a retry-failed job is still queued must not coalesce into the
+    # smaller job (it would silently never run).
+    scope = "+".join(states) if states is not None else "all"
     job_id = job_queue.enqueue(
         db,
         "reindex_folder",
         {"folder_id": folder_id, "rel_dir": rel_dir, "file_ids": file_ids},
-        dedup_key=f"reindex:{folder_id}:{rel_dir}",
+        dedup_key=f"reindex:{folder_id}:{rel_dir}:{scope}",
         priority=100,  # ahead of routine extracts so wipe runs ASAP
     )
 

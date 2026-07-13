@@ -360,7 +360,7 @@ flowchart LR
 | `embed_image` | `{image_id, round}` | inline (within extract) | `run_embed_image` |
 | `delete_file` | `{file_id}` | watcher (on delete), scanner (vanished rows) | `run_delete_file` |
 | `sync` | `{folder_id}` | REST `/folders/{id}/sync`, auto-sync scheduler | `run_sync` |
-| `reindex_folder` | `{folder_id, file_ids}` | REST `/folders/{id}/reindex` | `run_reindex_folder` |
+| `reindex_folder` | `{folder_id, file_ids}` | REST `/folders/{id}/reindex` (optional `rel_dir` subtree scope + `states` filter — e.g. `["error","unsupported"]` retries only failed/skipped files without re-parsing the healthy corpus; the SPA's Reindex dialog defaults to that scope) | `run_reindex_folder` |
 
 > **`gc_cas` is reserved, not wired.** The worker registers a `gc_cas` kind but
 > it's a **no-op** and nothing enqueues it. CAS blobs *are* refcounted
