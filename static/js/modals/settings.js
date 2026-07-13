@@ -1,9 +1,11 @@
 // User settings modal — personal API keys + (admins only) company keys.
 //
-// Each key is shown once at creation; the modal renders a copy
-// affordance + ready-made Claude / Claude CLI snippets so the user
-// can wire up MCP without hand-assembling URLs. Subsequent renders
-// only show the prefix — there's no recover-the-token path.
+// Each key is shown once at creation; the reveal banner renders the token
+// and ready-made Claude / Claude CLI snippets, each with its own copy
+// button, so the user can wire up MCP without hand-assembling URLs.
+// Standing "how to connect" blocks show the same snippets with a
+// placeholder token for keys created earlier (tokens are unrecoverable —
+// subsequent renders only show the prefix).
 //
 // The company-keys section is scoped to the ACTIVE account's company
 // (or the native space for Personal). Visibility is decided server-side:
@@ -23,10 +25,46 @@ export function openSettings() {
     $("#company-keys-section").hidden = true;
     $("#company-key-reveal").hidden = true;
     $("#company-key-name").value = "";
+    renderMcpHowto();
     // Render from the live store; the WS delivers the user's keys on connect
     // and re-pushes after every create/delete. No HTTP fetch on open.
     renderKeys(keysState.get());
     loadCompanyKeys();
+}
+
+// ----- MCP connection snippets -----
+
+const MCP_SERVER_NAME = "voitta-rag-enterprise";
+
+// Claude Desktop JSON + Claude Code CLI for a token. Company keys also
+// carry the member's email (X-Voitta-User-Email); personal keys don't —
+// pass email only for the company variants.
+function mcpSnippets(token, email) {
+    const url = `${window.location.origin}/mcp`;
+    const headers = { Authorization: `Bearer ${token}` };
+    if (email != null) headers["X-Voitta-User-Email"] = email;
+    const json = JSON.stringify(
+        { mcpServers: { [MCP_SERVER_NAME]: { type: "http", url, headers } } },
+        null, 2);
+    let cli = `claude mcp add --transport http ${MCP_SERVER_NAME} ${url} \\\n  --header "Authorization: Bearer ${token}"`;
+    if (email != null) cli += ` \\\n  --header "X-Voitta-User-Email: ${email}"`;
+    return { json, cli };
+}
+
+// Standing "how to connect" blocks: the same snippets with a placeholder
+// token, so setup instructions are on the page even when no key was just
+// created (tokens are unrecoverable after creation).
+function renderMcpHowto() {
+    const url = `${window.location.origin}/mcp`;
+    for (const el of document.querySelectorAll("#settings-backdrop .mcp-endpoint")) {
+        el.textContent = url;
+    }
+    const personal = mcpSnippets("<YOUR_API_KEY>");
+    $("#mcp-howto-json").textContent = personal.json;
+    $("#mcp-howto-cli").textContent = personal.cli;
+    const company = mcpSnippets("<YOUR_COMPANY_KEY>", me.get()?.email || "user@example.com");
+    $("#mcp-howto-company-json").textContent = company.json;
+    $("#mcp-howto-company-cli").textContent = company.cli;
 }
 
 export function closeSettings() {
@@ -166,49 +204,45 @@ $("#key-create").addEventListener("click", async () => {
         return;
     }
     $("#key-name").value = "";
+    // Reveal the token + copy-paste snippets pinned to the current origin so
+    // the user can wire up Claude / Claude Desktop without assembling URLs.
     $("#key-reveal-token").textContent = created.token;
-    // Build copy-paste snippets pinned to the current origin so the user can
-    // wire up Claude / Claude Desktop without assembling URLs by hand.
-    const mcpUrl = `${window.location.origin}/mcp`;
-    const claudeDesktop = JSON.stringify({
-        mcpServers: {
-            "voitta-rag-enterprise": {
-                type: "http",
-                url: mcpUrl,
-                headers: { Authorization: `Bearer ${created.token}` },
-            },
-        },
-    }, null, 2);
-    const cli = `claude mcp add --transport http voitta-rag-enterprise ${mcpUrl} \\\n  --header "Authorization: Bearer ${created.token}"`;
-    $("#key-reveal-claude").textContent = claudeDesktop;
-    $("#key-reveal-cli").textContent = cli;
+    const snip = mcpSnippets(created.token);
+    $("#key-reveal-claude").textContent = snip.json;
+    $("#key-reveal-cli").textContent = snip.cli;
     $("#key-reveal").hidden = false;
     // No refetch — the keys.snapshot push re-renders the table via the store.
 });
 
-$("#key-reveal-copy").addEventListener("click", async () => {
-    const tok = $("#key-reveal-token").textContent;
+// One handler for every copy button: data-copy points at the element whose
+// textContent gets copied. Clipboard API can be blocked (insecure context,
+// permissions) — fall back to selecting the text for a keyboard copy.
+async function copySnippet(btn) {
+    const src = document.querySelector(btn.dataset.copy);
+    if (!src) return;
     try {
-        await navigator.clipboard.writeText(tok);
-        const btn = $("#key-reveal-copy");
+        await navigator.clipboard.writeText(src.textContent);
         const prev = btn.textContent;
         btn.textContent = "Copied!";
         setTimeout(() => { btn.textContent = prev; }, 1200);
     } catch {
-        // Clipboard API can be blocked (insecure context, permissions). Fall
-        // back to selecting the token so the user can copy with the keyboard.
-        const node = $("#key-reveal-token");
         const range = document.createRange();
-        range.selectNodeContents(node);
+        range.selectNodeContents(src);
         const sel = window.getSelection();
         sel.removeAllRanges();
         sel.addRange(range);
     }
-});
+}
+for (const btn of document.querySelectorAll("#settings-backdrop .copy-snippet")) {
+    btn.addEventListener("click", () => copySnippet(btn));
+}
 
 $("#key-reveal-dismiss").addEventListener("click", () => {
     $("#key-reveal").hidden = true;
-    $("#key-reveal-token").textContent = "";
+    // The snippets embed the token — clear them along with it.
+    for (const sel of ["#key-reveal-token", "#key-reveal-claude", "#key-reveal-cli"]) {
+        $(sel).textContent = "";
+    }
 });
 
 // ----- Company key create / reveal wiring -----
@@ -227,46 +261,16 @@ $("#company-key-create").addEventListener("click", async () => {
     $("#company-key-reveal-token").textContent = created.token;
     // Snippets show the company-key contract: the shared token PLUS the
     // per-user email header. Use the admin's own email as the example.
-    const mcpUrl = `${window.location.origin}/mcp`;
-    const email = me.get()?.email || "user@example.com";
-    const claudeDesktop = JSON.stringify({
-        mcpServers: {
-            "voitta-rag-enterprise": {
-                type: "http",
-                url: mcpUrl,
-                headers: {
-                    Authorization: `Bearer ${created.token}`,
-                    "X-Voitta-User-Email": email,
-                },
-            },
-        },
-    }, null, 2);
-    const cli = `claude mcp add --transport http voitta-rag-enterprise ${mcpUrl} \\\n  --header "Authorization: Bearer ${created.token}" \\\n  --header "X-Voitta-User-Email: ${email}"`;
-    $("#company-key-reveal-claude").textContent = claudeDesktop;
-    $("#company-key-reveal-cli").textContent = cli;
+    const snip = mcpSnippets(created.token, me.get()?.email || "user@example.com");
+    $("#company-key-reveal-claude").textContent = snip.json;
+    $("#company-key-reveal-cli").textContent = snip.cli;
     $("#company-key-reveal").hidden = false;
     loadCompanyKeys();
 });
 
-$("#company-key-reveal-copy").addEventListener("click", async () => {
-    const tok = $("#company-key-reveal-token").textContent;
-    try {
-        await navigator.clipboard.writeText(tok);
-        const btn = $("#company-key-reveal-copy");
-        const prev = btn.textContent;
-        btn.textContent = "Copied!";
-        setTimeout(() => { btn.textContent = prev; }, 1200);
-    } catch {
-        const node = $("#company-key-reveal-token");
-        const range = document.createRange();
-        range.selectNodeContents(node);
-        const sel = window.getSelection();
-        sel.removeAllRanges();
-        sel.addRange(range);
-    }
-});
-
 $("#company-key-reveal-dismiss").addEventListener("click", () => {
     $("#company-key-reveal").hidden = true;
-    $("#company-key-reveal-token").textContent = "";
+    for (const sel of ["#company-key-reveal-token", "#company-key-reveal-claude", "#company-key-reveal-cli"]) {
+        $(sel).textContent = "";
+    }
 });

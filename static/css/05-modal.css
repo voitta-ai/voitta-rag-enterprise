@@ -209,6 +209,40 @@
     letter-spacing: 0.03em;
 }
 
+/* ----- Settings modal: API keys / MCP connection snippets ----- */
+.mcp-howto { margin: 4px 0 14px; font-size: 13px; }
+.mcp-howto > summary {
+    cursor: pointer;
+    font-weight: 600;
+    color: var(--color-text-primary);
+    user-select: none;
+}
+.mcp-howto-body { padding: 8px 0 0 2px; }
+/* Caption + copy button on one line above each snippet. */
+.snippet-head {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: var(--sm); margin: 10px 0 4px;
+    font-size: 13px; font-weight: 600;
+}
+.mcp-snippet, .reveal-snippet {
+    margin: 0;
+    padding: 8px;
+    border-radius: var(--radius-md);
+    font-size: 11px;
+    overflow-x: auto;
+    white-space: pre;
+}
+.mcp-snippet {
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border-light);
+}
+/* Inside the amber "copy it now" reveal banner — match its palette. */
+.reveal-snippet {
+    background: #fff;
+    border: 1px solid #ffd479;
+    color: #5a3a00;
+}
+
 .agpl-footer {
     padding: var(--md);
     text-align: center;

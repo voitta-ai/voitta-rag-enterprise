@@ -182,25 +182,29 @@
                         </header>
                         <div class="admin-editor-body">
                             <div class="admin-form-col">
-                                <label class="admin-field">Email
-                                    <input id="admin-ue-email" type="email" placeholder="user@customer.com" />
-                                    <span class="admin-field-hint" id="admin-ue-email-hint" hidden>Immutable once created.</span>
-                                </label>
-                                <label class="admin-field">Display name
-                                    <input id="admin-ue-name" type="text" placeholder="Jane Doe" />
-                                </label>
-                                <div class="admin-field">
-                                    <span>Role</span>
-                                    <label class="admin-inline-check">
-                                        <input id="admin-ue-admin" type="checkbox" /> Administrator
-                                    </label>
-                                    <label class="admin-inline-check" id="admin-ue-signin-row">
-                                        <input id="admin-ue-signin" type="checkbox" checked /> Allow sign-in (add to allowlist)
-                                    </label>
-                                </div>
-                                <div class="admin-field">
-                                    <span>Groups</span>
-                                    <div id="admin-ue-groups"></div>
+                                <div class="admin-form-table">
+                                    <label class="admin-form-label" for="admin-ue-email">Email</label>
+                                    <div class="admin-form-control">
+                                        <input id="admin-ue-email" type="email" placeholder="user@customer.com" />
+                                        <span class="admin-field-hint" id="admin-ue-email-hint" hidden>Immutable once created.</span>
+                                    </div>
+                                    <label class="admin-form-label" for="admin-ue-name">Display name</label>
+                                    <div class="admin-form-control">
+                                        <input id="admin-ue-name" type="text" placeholder="Jane Doe" />
+                                    </div>
+                                    <span class="admin-form-label">Role</span>
+                                    <div class="admin-form-control">
+                                        <label class="admin-check-row">
+                                            <input id="admin-ue-admin" type="checkbox" /> Administrator
+                                        </label>
+                                        <label class="admin-check-row" id="admin-ue-signin-row">
+                                            <input id="admin-ue-signin" type="checkbox" checked /> Allow sign-in (add to allowlist)
+                                        </label>
+                                    </div>
+                                    <span class="admin-form-label">Groups</span>
+                                    <div class="admin-form-control">
+                                        <div id="admin-ue-groups"></div>
+                                    </div>
                                 </div>
                                 <div id="admin-ue-error" class="admin-editor-error" hidden></div>
                             </div>
@@ -236,12 +240,16 @@
                         </header>
                         <div class="admin-editor-body">
                             <div class="admin-form-col">
-                                <label class="admin-field">Name
-                                    <input id="admin-ge-name" type="text" placeholder="e.g. Engineering" />
-                                </label>
-                                <label class="admin-field">Description
-                                    <input id="admin-ge-desc" type="text" placeholder="(optional)" />
-                                </label>
+                                <div class="admin-form-table">
+                                    <label class="admin-form-label" for="admin-ge-name">Name</label>
+                                    <div class="admin-form-control">
+                                        <input id="admin-ge-name" type="text" placeholder="e.g. Engineering" />
+                                    </div>
+                                    <label class="admin-form-label" for="admin-ge-desc">Description</label>
+                                    <div class="admin-form-control">
+                                        <input id="admin-ge-desc" type="text" placeholder="(optional)" />
+                                    </div>
+                                </div>
                                 <div class="admin-field" id="admin-ge-members-block">
                                     <span>Add member</span>
                                     <div id="admin-ge-addmember"></div>
@@ -1376,6 +1384,34 @@
                     Each key is shown <strong>once at creation</strong> — copy it then; you cannot retrieve it later.
                 </p>
 
+                <!-- Standing MCP how-to: always available, placeholder token.
+                     Snippets are filled by settings.js from the current origin. -->
+                <details id="mcp-howto" class="mcp-howto">
+                    <summary>How to connect Claude to this server (MCP)</summary>
+                    <div class="mcp-howto-body">
+                        <p class="hint">
+                            This server exposes an MCP endpoint at <code class="mcp-endpoint"></code>.
+                            Create an API key below, then register the server with your Claude client,
+                            replacing <code>&lt;YOUR_API_KEY&gt;</code> with the key.
+                        </p>
+                        <div class="snippet-head">
+                            <span>Claude Desktop / Claude Code — JSON</span>
+                            <button type="button" class="btn btn-secondary btn-sm copy-snippet" data-copy="#mcp-howto-json">Copy JSON</button>
+                        </div>
+                        <p class="hint" style="margin:0 0 4px;">
+                            Add the <code>mcpServers</code> entry to <code>claude_desktop_config.json</code>
+                            (Claude Desktop → Settings → Developer → Edit Config) or to a project's
+                            <code>.mcp.json</code> for Claude Code:
+                        </p>
+                        <pre id="mcp-howto-json" class="mcp-snippet"></pre>
+                        <div class="snippet-head">
+                            <span>Claude Code CLI — one command</span>
+                            <button type="button" class="btn btn-secondary btn-sm copy-snippet" data-copy="#mcp-howto-cli">Copy command</button>
+                        </div>
+                        <pre id="mcp-howto-cli" class="mcp-snippet"></pre>
+                    </div>
+                </details>
+
                 <div class="branches-row" style="margin:8px 0 12px;">
                     <input type="text" id="key-name" placeholder="What's this key for? e.g. macbook-mcp" maxlength="80" style="flex:1;">
                     <button type="button" id="key-create" class="btn btn-primary btn-sm">Create key</button>
@@ -1386,17 +1422,23 @@
                     <p style="margin:0 0 6px;font-weight:600;">Copy this token now — you won't see it again.</p>
                     <code id="key-reveal-token" style="display:block;word-break:break-all;background:#fff;border:1px solid #ffd479;border-radius:4px;padding:6px 8px;font-size:12px;"></code>
                     <div class="actions actions-right" style="margin-top:8px;">
-                        <button type="button" id="key-reveal-copy" class="btn btn-secondary btn-sm">Copy token</button>
+                        <button type="button" id="key-reveal-copy" class="btn btn-secondary btn-sm copy-snippet" data-copy="#key-reveal-token">Copy token</button>
                         <button type="button" id="key-reveal-dismiss" class="btn btn-secondary btn-sm">I've saved it</button>
                     </div>
 
-                    <details style="margin-top:10px;">
-                        <summary style="cursor:pointer;font-weight:600;">Use it from Claude / Claude Desktop</summary>
-                        <p class="hint" style="margin:8px 0 4px;">Paste this into your <code>claude_desktop_config.json</code>:</p>
-                        <pre id="key-reveal-claude" style="background:#fff;border:1px solid #ffd479;border-radius:4px;padding:8px;font-size:11px;overflow-x:auto;white-space:pre;margin:0;"></pre>
-                        <p class="hint" style="margin:8px 0 4px;">Or with the Claude Code CLI:</p>
-                        <pre id="key-reveal-cli" style="background:#fff;border:1px solid #ffd479;border-radius:4px;padding:8px;font-size:11px;overflow-x:auto;white-space:pre;margin:0;"></pre>
-                    </details>
+                    <div class="snippet-head">
+                        <span>Ready-to-paste Claude config (this key filled in)</span>
+                        <button type="button" class="btn btn-secondary btn-sm copy-snippet" data-copy="#key-reveal-claude">Copy JSON</button>
+                    </div>
+                    <p class="hint" style="margin:0 0 4px;">
+                        For <code>claude_desktop_config.json</code> (Claude Desktop) or <code>.mcp.json</code> (Claude Code):
+                    </p>
+                    <pre id="key-reveal-claude" class="reveal-snippet"></pre>
+                    <div class="snippet-head">
+                        <span>Or via the Claude Code CLI</span>
+                        <button type="button" class="btn btn-secondary btn-sm copy-snippet" data-copy="#key-reveal-cli">Copy command</button>
+                    </div>
+                    <pre id="key-reveal-cli" class="reveal-snippet"></pre>
                 </div>
 
                 <table id="keys-table" style="width:100%;border-collapse:collapse;font-size:13px;">
@@ -1424,6 +1466,33 @@
                         Shown <strong>once at creation</strong>.
                     </p>
 
+                    <details id="mcp-howto-company" class="mcp-howto">
+                        <summary>How to connect Claude with a company key (MCP)</summary>
+                        <div class="mcp-howto-body">
+                            <p class="hint">
+                                Same MCP endpoint (<code class="mcp-endpoint"></code>), but a company key must be
+                                paired with the member's email via the <code>X-Voitta-User-Email</code> header —
+                                swap in each user's own address. Replace <code>&lt;YOUR_COMPANY_KEY&gt;</code>
+                                with a key created below.
+                            </p>
+                            <div class="snippet-head">
+                                <span>Claude Desktop / Claude Code — JSON</span>
+                                <button type="button" class="btn btn-secondary btn-sm copy-snippet" data-copy="#mcp-howto-company-json">Copy JSON</button>
+                            </div>
+                            <p class="hint" style="margin:0 0 4px;">
+                                Add the <code>mcpServers</code> entry to <code>claude_desktop_config.json</code>
+                                (Claude Desktop → Settings → Developer → Edit Config) or to a project's
+                                <code>.mcp.json</code> for Claude Code:
+                            </p>
+                            <pre id="mcp-howto-company-json" class="mcp-snippet"></pre>
+                            <div class="snippet-head">
+                                <span>Claude Code CLI — one command</span>
+                                <button type="button" class="btn btn-secondary btn-sm copy-snippet" data-copy="#mcp-howto-company-cli">Copy command</button>
+                            </div>
+                            <pre id="mcp-howto-company-cli" class="mcp-snippet"></pre>
+                        </div>
+                    </details>
+
                     <div class="branches-row" style="margin:8px 0 12px;">
                         <input type="text" id="company-key-name" placeholder="What's this key for? e.g. ci-agents" maxlength="80" style="flex:1;">
                         <button type="button" id="company-key-create" class="btn btn-primary btn-sm">Create company key</button>
@@ -1433,17 +1502,23 @@
                         <p style="margin:0 0 6px;font-weight:600;">Copy this token now — you won't see it again.</p>
                         <code id="company-key-reveal-token" style="display:block;word-break:break-all;background:#fff;border:1px solid #ffd479;border-radius:4px;padding:6px 8px;font-size:12px;"></code>
                         <div class="actions actions-right" style="margin-top:8px;">
-                            <button type="button" id="company-key-reveal-copy" class="btn btn-secondary btn-sm">Copy token</button>
+                            <button type="button" id="company-key-reveal-copy" class="btn btn-secondary btn-sm copy-snippet" data-copy="#company-key-reveal-token">Copy token</button>
                             <button type="button" id="company-key-reveal-dismiss" class="btn btn-secondary btn-sm">I've saved it</button>
                         </div>
 
-                        <details style="margin-top:10px;">
-                            <summary style="cursor:pointer;font-weight:600;">Use it from Claude / Claude Desktop</summary>
-                            <p class="hint" style="margin:8px 0 4px;">Paste this into <code>claude_desktop_config.json</code> (swap in each user's email):</p>
-                            <pre id="company-key-reveal-claude" style="background:#fff;border:1px solid #ffd479;border-radius:4px;padding:8px;font-size:11px;overflow-x:auto;white-space:pre;margin:0;"></pre>
-                            <p class="hint" style="margin:8px 0 4px;">Or with the Claude Code CLI:</p>
-                            <pre id="company-key-reveal-cli" style="background:#fff;border:1px solid #ffd479;border-radius:4px;padding:8px;font-size:11px;overflow-x:auto;white-space:pre;margin:0;"></pre>
-                        </details>
+                        <div class="snippet-head">
+                            <span>Ready-to-paste Claude config (swap in each user's email)</span>
+                            <button type="button" class="btn btn-secondary btn-sm copy-snippet" data-copy="#company-key-reveal-claude">Copy JSON</button>
+                        </div>
+                        <p class="hint" style="margin:0 0 4px;">
+                            For <code>claude_desktop_config.json</code> (Claude Desktop) or <code>.mcp.json</code> (Claude Code):
+                        </p>
+                        <pre id="company-key-reveal-claude" class="reveal-snippet"></pre>
+                        <div class="snippet-head">
+                            <span>Or via the Claude Code CLI</span>
+                            <button type="button" class="btn btn-secondary btn-sm copy-snippet" data-copy="#company-key-reveal-cli">Copy command</button>
+                        </div>
+                        <pre id="company-key-reveal-cli" class="reveal-snippet"></pre>
                     </div>
 
                     <table id="company-keys-table" style="width:100%;border-collapse:collapse;font-size:13px;">
