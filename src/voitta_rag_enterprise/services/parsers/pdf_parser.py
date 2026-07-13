@@ -30,6 +30,7 @@ import io
 import json
 import logging
 import mimetypes
+import os
 import re
 import subprocess
 import sys
@@ -568,6 +569,21 @@ class _MineruDaemon:
     def _spawn(self) -> None:
         # Use the same Python that's running the parent so the subprocess
         # picks up our installed venv (MinerU and torch live there).
+        env = {**os.environ}
+        if sys.platform == "darwin":
+            # MinerU batches ALL of a bucket's pages into one inference
+            # window (default 100/64 pages) — every page's layout/OCR/
+            # table/formula tensors resident at once. On CUDA that's
+            # throttled by batch_ratio, but the vram probe has no MPS
+            # branch, so on Apple Silicon a figure-dense 17-page PDF blows
+            # past available memory and jetsam SIGKILLs the worker (rc=-9,
+            # previously surfaced as a bogus "exceeded 600s"). Page-at-a-
+            # time keeps peak memory flat; output is identical. The knob
+            # was renamed across the versions our `mineru[pipeline]>=2.0`
+            # pin admits — set both; each version ignores the foreign one.
+            # setdefault: an operator's explicit env override still wins.
+            env.setdefault("MINERU_MIN_BATCH_INFERENCE_SIZE", "1")   # 2.x
+            env.setdefault("MINERU_PROCESSING_WINDOW_SIZE", "1")     # 3.x
         self._proc = subprocess.Popen(
             [sys.executable, "-m", "voitta_rag_enterprise.services.parsers._mineru_subprocess"],
             stdin=subprocess.PIPE,
@@ -575,6 +591,7 @@ class _MineruDaemon:
             stderr=subprocess.PIPE,
             bufsize=1,  # line-buffered — we round-trip one JSON line per request
             text=True,
+            env=env,
         )
         # MinerU's progress bars and torch CUDA messages go to stderr. Drain
         # the pipe on a background thread so a chatty parse doesn't fill the
@@ -658,9 +675,11 @@ class _MineruDaemon:
             # below with an empty string — that's how the timeout is
             # delivered to the calling thread.
             done = threading.Event()
+            timed_out = threading.Event()
 
             def _watchdog() -> None:
                 if not done.wait(timeout_s):
+                    timed_out.set()
                     self._kill(f"watchdog: no response in {timeout_s}s")
 
             wt = threading.Thread(target=_watchdog, daemon=True, name="mineru-watchdog")
@@ -672,12 +691,24 @@ class _MineruDaemon:
                 done.set()
 
             if not resp_line:
-                # Either watchdog killed it or the process crashed on its own.
-                # Treat both as a timeout from the caller's perspective —
-                # they get a TimeoutError, the file is parked as 'error' in
-                # the indexer, and the queue moves on.
-                raise TimeoutError(
-                    f"MinerU parse exceeded {timeout_s}s on {bucket_path.name}"
+                # Empty read = the pipe closed. Two distinct causes, and the
+                # stored file.error must not conflate them (a 34s OOM kill
+                # logged as "exceeded 600s" sent diagnosis down the wrong
+                # path): the watchdog killed it (real timeout), or the
+                # process died on its own — rc=-9 is the OS killing it under
+                # memory pressure.
+                if timed_out.is_set():
+                    raise TimeoutError(
+                        f"MinerU parse exceeded {timeout_s}s on {bucket_path.name}"
+                    )
+                rc = self._proc.poll()
+                raise RuntimeError(
+                    f"MinerU worker died mid-parse (rc={rc}) on {bucket_path.name}"
+                    + (
+                        " — SIGKILL, likely the OS reclaiming memory (OOM)"
+                        if rc == -9
+                        else ""
+                    )
                 )
 
             try:
