@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from sqlalchemy import select
+from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
 
 from ..db.models import File, Folder
@@ -224,6 +225,17 @@ def scan_folder(
     touched_ids: list[int] = []
     vanished_ids: list[int] = []
 
+    # One SELECT for the whole folder instead of one per walked file (the
+    # per-file lookup + its autoflush dominated startup at ~30k files), and
+    # it doubles as the vanish sweep's row source. Includes 'deleted' rows —
+    # the resurrect path below needs them.
+    by_rel: dict[str, File] = {
+        f.rel_path: f
+        for f in session.execute(
+            select(File).where(File.folder_id == folder.id)
+        ).scalars()
+    }
+
     _walk_iter = (
         p for sroot in scan_roots for p in sroot.rglob("*")
     )
@@ -231,6 +243,10 @@ def scan_folder(
         if not path.is_file():
             continue
         rel = path.relative_to(root).as_posix()
+        # Overlapping scan_roots (nested google_drive_local selections) can
+        # yield the same file twice — the second pass must not double-insert.
+        if rel in seen:
+            continue
         if path.name == SIDECAR_FILENAME or ignore.matches(rel):
             continue
         try:
@@ -250,9 +266,7 @@ def scan_folder(
             json.dumps(entry.meta) if (entry and entry.meta) else None
         )
 
-        existing = session.execute(
-            select(File).where(File.folder_id == folder.id, File.rel_path == rel)
-        ).scalar_one_or_none()
+        existing = by_rel.get(rel)
 
         if existing is None:
             new_file = File(
@@ -279,9 +293,14 @@ def scan_folder(
                 or existing.size_bytes != stat.st_size
                 or existing.state == "deleted"
             )
-            existing.last_seen_at = now
-            existing.size_bytes = stat.st_size
-            existing.mtime_ns = stat.st_mtime_ns
+            # Assign only on change: an unconditional write dirties every row
+            # in the folder and turns a no-change scan into ~N UPDATEs.
+            # last_seen_at is refreshed in one bulk statement after the
+            # vanish sweep instead of per row here.
+            if existing.size_bytes != stat.st_size:
+                existing.size_bytes = stat.st_size
+            if existing.mtime_ns != stat.st_mtime_ns:
+                existing.mtime_ns = stat.st_mtime_ns
             if existing.source_url != url:
                 existing.source_url = url
             if existing.tab != tab:
@@ -301,15 +320,8 @@ def scan_folder(
             updated += 1
 
     vanished = 0
-    rows = (
-        session.execute(
-            select(File).where(File.folder_id == folder.id, File.state != "deleted")
-        )
-        .scalars()
-        .all()
-    )
-    for f in rows:
-        if f.rel_path in seen:
+    for f in by_rel.values():
+        if f.state == "deleted" or f.rel_path in seen:
             continue
         # Not seen by the walk — but that alone isn't proof it's gone: a file
         # can land while the walk is running (upload burst, git sync), with
@@ -324,6 +336,21 @@ def scan_folder(
         )
         vanished += 1
         vanished_ids.append(f.id)
+
+    # Forensic freshness for pre-existing rows in one statement (new inserts
+    # already carry it). Every row still non-deleted at this point was either
+    # walked or re-stat-confirmed present, so a folder-wide stamp is exact.
+    # Flush first so the raw UPDATE can't be reordered ahead of the ORM's
+    # pending state changes (e.g. a just-resurrected row must not stay
+    # 'deleted' in SQL while this statement runs).
+    session.flush()
+    session.execute(
+        sa_text(
+            "UPDATE files SET last_seen_at = :now "
+            "WHERE folder_id = :fid AND state != 'deleted'"
+        ),
+        {"now": now, "fid": folder.id},
+    )
 
     return ScanResult(
         added=added,
