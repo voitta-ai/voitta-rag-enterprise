@@ -31,7 +31,9 @@ dependencies = [
     # brings torch + torchvision + transformers, which the pp_doclayout model
     # needs (without it PDF parsing dies on "No module named 'torchvision'").
     "mineru[pipeline]>=2.0",
-    "cairosvg>=2.7",
+    # SVG rasterization rides PyMuPDF (MuPDF statically linked). Do NOT
+    # reintroduce cairosvg — it dlopen()s a system libcairo the packaged
+    # desktop app doesn't ship, which broke every .svg on end-user Macs.
     "openpyxl>=3.1",
     # ``xlrd`` reads the legacy .xls (BIFF) binary format. SharePoint
     # tenants still carry plenty of these — old data dumps, exports

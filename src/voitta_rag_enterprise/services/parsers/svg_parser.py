@@ -1,9 +1,16 @@
 """SVG → PNG → image embedding.
 
 SigLIP can't ingest SVG (it expects raster); without this parser SVG files
-land in the ``unsupported`` state. We rasterize via ``cairosvg`` and feed the
+land in the ``unsupported`` state. We rasterize via PyMuPDF and feed the
 resulting PNG into the standard image flow as if the file had been a PNG to
 start with.
+
+Why PyMuPDF and not cairosvg: cairosvg dlopen()s the native libcairo at
+import time. The packaged desktop app bundles no libcairo and macOS ships
+none, so on end-user machines the import blew up (OSError, not ImportError —
+it sailed past the old import guard) and EVERY .svg parked as ``error``.
+PyMuPDF is already a direct dependency with MuPDF statically linked — no
+external native library to forget.
 
 Storage choice — we keep the **rasterized** PNG bytes in CAS, not the
 original SVG source. The /api/images endpoint serves whatever is in CAS, so
@@ -17,18 +24,15 @@ for no embedding benefit, since SigLIP downscales to 224 internally).
 
 from __future__ import annotations
 
-import io
 import logging
 from pathlib import Path
 from typing import ClassVar
-
-from PIL import Image as PILImage
 
 from .base import BaseParser, ExtractedImage, ParserResult
 
 logger = logging.getLogger(__name__)
 
-_RASTER_WIDTH = 512  # px; aspect ratio preserved by cairosvg
+_RASTER_WIDTH = 512  # px; aspect ratio preserved via the zoom matrix
 
 
 class SvgParser(BaseParser):
@@ -41,24 +45,28 @@ class SvgParser(BaseParser):
             return ParserResult.failure(f"svg read failed: {e}")
 
         try:
-            import cairosvg
-        except ImportError as e:
-            return ParserResult.failure(f"cairosvg not installed: {e}")
+            import pymupdf
+        except (ImportError, OSError) as e:
+            # OSError included deliberately: a rasterizer whose native
+            # payload can't load must degrade to a clean per-file failure,
+            # not crash the pipeline (learned from cairosvg/libcairo).
+            return ParserResult.failure(f"svg rasterizer unavailable: {e}")
 
+        # Callers hold _EXTRACT_LOCK, which also serialises PyMuPDF use in
+        # the PDF parser — no new concurrency surface here.
         try:
-            png_bytes = cairosvg.svg2png(
-                bytestring=svg_bytes, output_width=_RASTER_WIDTH
-            )
+            with pymupdf.open(stream=svg_bytes, filetype="svg") as doc:
+                page = doc[0]
+                if page.rect.width <= 0:
+                    return ParserResult.failure("svg has no width")
+                zoom = _RASTER_WIDTH / page.rect.width
+                pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom))
+                png_bytes = pix.tobytes("png")
+                width, height = pix.width, pix.height
         except Exception as e:
             return ParserResult.failure(f"svg rasterize failed: {e}")
         if not png_bytes:
             return ParserResult.failure("svg rasterizer produced no output")
-
-        try:
-            with PILImage.open(io.BytesIO(png_bytes)) as img:
-                width, height = img.size
-        except Exception as e:
-            return ParserResult.failure(f"png decode after rasterize failed: {e}")
 
         return ParserResult(
             content="",
@@ -74,7 +82,7 @@ class SvgParser(BaseParser):
             ],
             metadata={
                 "source_format": "svg",
-                "rasterizer": "cairosvg",
+                "rasterizer": "pymupdf",
                 "raster_width": _RASTER_WIDTH,
             },
         )

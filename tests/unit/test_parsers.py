@@ -212,9 +212,8 @@ def test_default_registry_is_cached() -> None:
 
 
 def test_svg_parser_rasterizes_to_png(tmp_path: Path) -> None:
-    pytest = __import__("pytest")
-    cairosvg = pytest.importorskip("cairosvg")
-    del cairosvg  # only used to gate the test
+    # PyMuPDF is a direct dependency (the PDF parser needs it too), so no
+    # importorskip gate — if it's missing, failing loudly here is correct.
     from voitta_rag_enterprise.services.parsers.svg_parser import SvgParser
 
     p = tmp_path / "shape.svg"
@@ -229,8 +228,8 @@ def test_svg_parser_rasterizes_to_png(tmp_path: Path) -> None:
     assert len(r.images) == 1
     img = r.images[0]
     assert img.mime == "image/png"
-    # cairosvg honours output_width=512 with aspect-preserved height; for a
-    # square source that's 512x512.
+    # The zoom matrix scales output_width to 512 with aspect preserved; for
+    # a square source that's 512x512.
     assert img.width and img.width >= 256
     assert img.height and img.height >= 256
     # Sanity: output really is a PNG.
