@@ -236,6 +236,90 @@ def test_switching_to_inline_clears_reference(
 
 
 # ---------------------------------------------------------------------------
+# Import (promote) inline folder credentials into the registry
+# ---------------------------------------------------------------------------
+
+
+def _put_inline_sync(client: TestClient, folder_id: int) -> None:
+    r = client.put(
+        f"/api/folders/{folder_id}/sync",
+        json={
+            "source_type": "google_drive",
+            "google_drive": {
+                "client_id": "inline-cid.apps.googleusercontent.com",
+                "client_secret": "inline-secret",
+            },
+        },
+    )
+    assert r.status_code == 200, r.text
+
+
+def test_import_from_folder_carries_consent_and_repoints(
+    app: FastAPI, client: TestClient
+) -> None:
+    from voitta_rag_enterprise.db.database import session_scope
+    from voitta_rag_enterprise.db.models import FolderSyncSource
+
+    auth_as(app, "a@corp.com")
+    folder_id = _mk_folder(client)
+    _put_inline_sync(client, folder_id)
+
+    # Simulate a prior consent stored inline (pre-registry state).
+    with session_scope() as s:
+        src = s.get(FolderSyncSource, folder_id)
+        assert src is not None
+        src.gd_refresh_token = "rt-legacy"
+
+    r = client.post(f"/api/sync/credentials/import-from-folder/{folder_id}")
+    assert r.status_code == 200, r.text
+    cred = r.json()
+    assert cred["kind"] == "google_oauth_client"
+    assert cred["client_id"] == "inline-cid.apps.googleusercontent.com"
+    assert cred["has_client_secret"] is True
+    assert cred["connected"] is True  # consent carried over
+    assert cred["in_use_by"] == 1  # owner import re-points the folder
+
+    # Folder now references the credential; inline fields are cleared.
+    with session_scope() as s:
+        src = s.get(FolderSyncSource, folder_id)
+        assert src is not None
+        assert src.gd_credential_id == cred["id"]
+        assert src.gd_client_id is None
+        assert src.gd_refresh_token is None
+
+    # Envelope still reports connected — resolved through the credential.
+    gd = client.get(f"/api/folders/{folder_id}/sync").json()["google_drive"]
+    assert gd["credential_id"] == cred["id"]
+    assert gd["connected"] is True
+
+
+def test_import_rejects_folder_without_inline_creds(
+    app: FastAPI, client: TestClient
+) -> None:
+    auth_as(app, "a@corp.com")
+    folder_id = _mk_folder(client)
+    r = client.post(f"/api/sync/credentials/import-from-folder/{folder_id}")
+    assert r.status_code == 400
+
+    # Already-promoted folders can't be imported twice.
+    _put_inline_sync(client, folder_id)
+    first = client.post(f"/api/sync/credentials/import-from-folder/{folder_id}")
+    assert first.status_code == 200
+    again = client.post(f"/api/sync/credentials/import-from-folder/{folder_id}")
+    assert again.status_code == 400
+
+
+def test_import_invisible_folder_404s(app: FastAPI, client: TestClient) -> None:
+    auth_as(app, "a@corp.com")
+    folder_id = _mk_folder(client, "private-a")
+    _put_inline_sync(client, folder_id)
+
+    auth_as(app, "b@other.com")
+    r = client.post(f"/api/sync/credentials/import-from-folder/{folder_id}")
+    assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
 # resolve_gd_auth — the seam the pickers and the sync connector read through
 # ---------------------------------------------------------------------------
 

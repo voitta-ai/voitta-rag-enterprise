@@ -192,6 +192,88 @@ def delete_credential(
 
 
 @oauth_router.post(
+    "/credentials/import-from-folder/{folder_id}",
+    response_model=SyncCredentialOut,
+)
+def import_credential_from_folder(
+    folder_id: int,
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(current_user),
+) -> SyncCredentialOut:
+    """Promote a folder's INLINE Google credential into the shared registry.
+
+    Pre-registry folders carry their client/secret/refresh-token inline on
+    the sync-source row; this copies them server-side (secrets never cross
+    the wire) — including the refresh token, so an existing consent carries
+    over and no new popup is needed.
+
+    Access is read-level (the folder must be visible to the caller): the
+    copy only touches company-shared state, and this is how a credential
+    configured by a colleague becomes reusable org-wide. Re-pointing the
+    source folder at the new credential additionally requires ownership —
+    non-owners get the copy while the folder keeps its inline fields.
+    """
+    from ....db.models import Folder
+    from ....services.acl import is_folder_owner, user_can_see_folder
+
+    folder = db.get(Folder, folder_id)
+    if folder is None or not user_can_see_folder(db, folder_id, user.id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Folder not found")
+
+    src = db.get(FolderSyncSource, folder_id)
+    if src is None or src.source_type != "google_drive":
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "The folder has no Google Drive sync source"
+        )
+    if src.gd_credential_id is not None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "This folder already uses a shared credential",
+        )
+    if getattr(src, "gd_use_builtin", False):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "The built-in desktop client cannot be promoted to a shared credential",
+        )
+    has_oauth = bool(src.gd_client_id and src.gd_client_secret)
+    has_sa = bool(src.gd_service_account_json)
+    if not has_oauth and not has_sa:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "The folder has no inline credentials to import",
+        )
+
+    now = int(time.time())
+    cred = SyncCredential(
+        company_id=user.company_id,
+        kind="google_oauth_client" if has_oauth else "google_service_account",
+        label=folder.display_name or folder.path.rsplit("/", 1)[-1],
+        client_id=src.gd_client_id or "",
+        client_secret=src.gd_client_secret or "",
+        service_account_json=src.gd_service_account_json or "",
+        refresh_token=src.gd_refresh_token or "",
+        created_by=user.email,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(cred)
+    db.flush()  # need cred.id for the re-point below
+
+    if is_folder_owner(db, folder_id, user.id):
+        # Owner import: the credential becomes the single source of truth —
+        # re-point the folder and clear the now-duplicated inline fields.
+        src.gd_credential_id = cred.id
+        src.gd_client_id = None
+        src.gd_client_secret = None
+        src.gd_refresh_token = None
+        src.gd_service_account_json = None
+
+    db.commit()
+    db.refresh(cred)
+    return _to_out(db, cred)
+
+
+@oauth_router.post(
     "/credentials/{cred_id}/google/auth", response_model=CredAuthInitOut
 )
 def credential_auth_init(

@@ -122,6 +122,7 @@ EXPECTED_ROUTES = [
     "POST /api/jobs/{job_id}/retry",
     "POST /api/search",
     "POST /api/sync/credentials",
+    "POST /api/sync/credentials/import-from-folder/{folder_id}",
     "POST /api/sync/credentials/{cred_id}/google/auth",
     "POST /api/sync/local/connect",
     "POST /api/users",
