@@ -184,6 +184,7 @@ CREATE TABLE IF NOT EXISTS folder_sync_sources (
     gd_use_loopback           INTEGER NOT NULL DEFAULT 0,    -- 1 = OAuth redirect via http://localhost:53682 (admin runs a local nginx bridge that proxies the callback back to this server)
     gd_use_builtin            INTEGER NOT NULL DEFAULT 0,    -- 1 = OAuth creds from VOITTA_GD_BUILTIN_CLIENT_ID/SECRET (desktop built-in client), not this row
     gd_files_only             INTEGER NOT NULL DEFAULT 0,    -- 1 = sync binary files only, skip native Docs/Sheets/Slides/Forms (only the Drive API is then required)
+    gd_credential_id          INTEGER REFERENCES sync_credentials(id) ON DELETE SET NULL,  -- shared company credential; when set, inline gd_* auth fields are ignored
     -- NFS (admin-defined root path + user-chosen subpath underneath).
     -- The connector mirrors files from ``<admin nfs_root>/<nfs_subpath>``
     -- into the folder's filesystem storage, same lifecycle as Drive.
@@ -201,6 +202,30 @@ CREATE TABLE IF NOT EXISTS folder_sync_sources (
     created_at         INTEGER NOT NULL,
     updated_at         INTEGER NOT NULL
 );
+
+-- Company-scoped reusable sync credentials ("configure the Google client
+-- once per org"). A folder_sync_sources row can reference one via
+-- gd_credential_id instead of carrying inline gd_* credentials. The OAuth
+-- refresh_token lives HERE for oauth-client credentials, so one consent
+-- serves every folder that references the credential. No per-credential
+-- ACL: visibility is the company (company_id = Clerk org id, '' = native
+-- deployment space) — deliberate, mirrors company_api_keys.
+CREATE TABLE IF NOT EXISTS sync_credentials (
+    id                    INTEGER PRIMARY KEY,
+    company_id            TEXT NOT NULL DEFAULT '',
+    kind                  TEXT NOT NULL,                -- 'google_oauth_client' | 'google_service_account'
+    label                 TEXT NOT NULL DEFAULT '',
+    client_id             TEXT NOT NULL DEFAULT '',     -- oauth-client kind
+    client_secret         TEXT NOT NULL DEFAULT '',     -- oauth-client kind
+    service_account_json  TEXT NOT NULL DEFAULT '',     -- service-account kind
+    refresh_token         TEXT NOT NULL DEFAULT '',     -- set by the OAuth callback, not create
+    connected_email       TEXT NOT NULL DEFAULT '',     -- who granted consent (display only, best-effort)
+    created_by            TEXT NOT NULL DEFAULT '',     -- acting user email
+    created_at            INTEGER NOT NULL,
+    updated_at            INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sync_credentials_company
+    ON sync_credentials(company_id, kind);
 
 -- Personal API keys minted from the Settings panel. The token's plaintext
 -- is shown to the user exactly once at creation; only the SHA-256 hash is

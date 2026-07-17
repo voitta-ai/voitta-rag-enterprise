@@ -23,6 +23,7 @@ Importing ``core`` pulls in every source module, which registers its
 handler and attaches its routes as a side effect.
 """
 
+from . import credentials as _credentials  # noqa: F401 — attaches /sync/credentials routes
 from .base import oauth_router, router
 from .core import SyncSourceIn, SyncSourceOut, _to_out, to_out
 

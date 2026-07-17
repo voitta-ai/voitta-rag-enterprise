@@ -119,6 +119,7 @@ def apply_config(
     body: SyncSourceIn,
     existing: FolderSyncSource | None,
     folder_id: int,
+    **_: object,  # db/user context used only by credential-aware connectors
 ) -> FolderSyncSource:
     cfg = body.nfs
     if cfg is None:

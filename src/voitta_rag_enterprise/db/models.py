@@ -218,6 +218,11 @@ class FolderSyncSource(Base):
     # APIs (only the Drive API is then required). Default 0 = export
     # native files too (the all-or-nothing preflight applies).
     gd_files_only: Mapped[bool] = mapped_column(default=False)
+    # Shared company credential (sync_credentials.id). When set, the inline
+    # gd_client_id/secret/refresh_token/service_account_json above are
+    # ignored — auth resolves from the credential, including the refresh
+    # token, so one consent serves every folder referencing it.
+    gd_credential_id: Mapped[int | None] = mapped_column(default=None)
     # Microsoft (shared by ``sharepoint`` and ``teams`` source types).
     # ``ms_auth_method`` is one of: "oauth" (delegated, refresh-token),
     # "app_secret" (client-credentials with a client_secret), "app_cert"
@@ -323,6 +328,34 @@ class ApiKey(Base):
     key_hash: Mapped[str]
     created_at: Mapped[int] = mapped_column(default=_now_s)
     last_used_at: Mapped[int | None] = mapped_column(default=None)
+
+
+class SyncCredential(Base):
+    """Company-scoped reusable sync credential.
+
+    ``kind`` decides which fields matter: ``google_oauth_client`` uses
+    ``client_id``/``client_secret`` (+ ``refresh_token`` once consent has
+    been granted — stored HERE so one consent serves every folder that
+    references the credential); ``google_service_account`` uses
+    ``service_account_json``. Deliberately no per-credential ACL: every
+    member of ``company_id`` can list and use it (mirrors company_api_keys;
+    external gateways like Agnitio gate management on their side).
+    """
+
+    __tablename__ = "sync_credentials"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[str] = mapped_column(default="")
+    kind: Mapped[str]
+    label: Mapped[str] = mapped_column(default="")
+    client_id: Mapped[str] = mapped_column(default="")
+    client_secret: Mapped[str] = mapped_column(default="")
+    service_account_json: Mapped[str] = mapped_column(default="")
+    refresh_token: Mapped[str] = mapped_column(default="")
+    connected_email: Mapped[str] = mapped_column(default="")
+    created_by: Mapped[str] = mapped_column(default="")
+    created_at: Mapped[int] = mapped_column(default=_now_s)
+    updated_at: Mapped[int] = mapped_column(default=_now_s)
 
 
 class CompanyApiKey(Base):

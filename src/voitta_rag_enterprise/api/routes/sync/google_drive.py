@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 from typing import TYPE_CHECKING
 
@@ -22,12 +23,13 @@ from ....db.models import FolderSyncSource
 from ....services import events
 from ....services.acl import CurrentUser
 from ....services.sync.google_drive import (
+    GdAuthFields,
     GoogleDriveAuth,
     GoogleDriveConnector,
     GoogleWorkspaceAccessError,
     coerce_folders_field,
-    effective_oauth_client,
     encode_folders_field,
+    resolve_gd_auth,
 )
 from ....services.sync.google_drive import (
     exchange_code_for_tokens as gd_exchange_code,
@@ -61,6 +63,11 @@ class GoogleDriveFolder(BaseModel):
 class GoogleDriveSyncIn(BaseModel):
     """Payload for ``PUT /folders/{id}/sync`` when ``source_type == 'google_drive'``."""
 
+    # Shared company credential (sync_credentials.id). When set, all inline
+    # auth fields below are ignored — the credential supplies the client
+    # pair / service account AND the refresh token (one consent for every
+    # folder referencing it).
+    credential_id: int | None = None
     client_id: str = ""
     client_secret: str = ""
     folders: list[GoogleDriveFolder] = Field(default_factory=list)
@@ -80,6 +87,7 @@ class GoogleDriveSyncIn(BaseModel):
 
 
 class GoogleDriveSyncOut(BaseModel):
+    credential_id: int | None = None
     client_id: str
     folders: list[GoogleDriveFolder]
     has_client_secret: bool
@@ -118,9 +126,32 @@ def clear_fields(src: FolderSyncSource) -> None:
     src.gd_use_loopback = False
     src.gd_use_builtin = False
     src.gd_files_only = False
+    src.gd_credential_id = None
 
 
 def build_out(src: FolderSyncSource) -> GoogleDriveSyncOut:
+    # Credential-referencing rows report the RESOLVED auth state (has the
+    # shared credential got a secret / SA / consent?) so clients gate the
+    # picker and "connected" pill correctly without a second fetch. A
+    # dangling reference degrades to all-False rather than failing the GET.
+    if src.gd_credential_id is not None:
+        try:
+            resolved = resolve_gd_auth(src)
+        except RuntimeError:
+            resolved = None
+        return GoogleDriveSyncOut(
+            credential_id=src.gd_credential_id,
+            client_id=resolved.client_id if resolved else "",
+            folders=[
+                GoogleDriveFolder(**f) for f in coerce_folders_field(src.gd_folder_id)
+            ],
+            has_client_secret=bool(resolved and resolved.client_secret),
+            has_service_account=bool(resolved and resolved.service_account_json),
+            connected=bool(resolved and resolved.connected),
+            use_loopback=False,
+            files_only=bool(src.gd_files_only),
+            use_builtin=False,
+        )
     return GoogleDriveSyncOut(
         # Built-in rows echo a blank client_id — the SPA doesn't need
         # the shipped client's identity and mustn't render it.
@@ -150,14 +181,19 @@ def builtin_available() -> bool:
     )
 
 
-def _effective_client(src: FolderSyncSource) -> tuple[str, str]:
-    """Row's effective OAuth (client_id, client_secret), as an HTTP 400
-    when the built-in client is referenced but unavailable (env removed,
-    or a desktop DB imported into a hosted deploy)."""
+def _resolved_auth(src: FolderSyncSource) -> GdAuthFields:
+    """Row's fully resolved Google auth (inline, builtin, or shared
+    credential), as an HTTP 400 when resolution fails (builtin client
+    unavailable, or a dangling credential reference)."""
     try:
-        return effective_oauth_client(src)
+        return resolve_gd_auth(src)
     except RuntimeError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+
+def _effective_client(src: FolderSyncSource) -> tuple[str, str]:
+    auth = _resolved_auth(src)
+    return auth.client_id, auth.client_secret
 
 
 def apply_config(
@@ -165,6 +201,9 @@ def apply_config(
     body: SyncSourceIn,
     existing: FolderSyncSource | None,
     folder_id: int,
+    db: Session | None = None,
+    user: CurrentUser | None = None,
+    **_: object,
 ) -> FolderSyncSource:
     cfg = body.google_drive
     if cfg is None:
@@ -172,6 +211,38 @@ def apply_config(
             status.HTTP_400_BAD_REQUEST,
             "Missing 'google_drive' config for source_type='google_drive'",
         )
+    # Shared-credential mode: the referenced company credential supplies
+    # ALL auth (client pair or SA, plus the refresh token), so inline
+    # fields and the builtin/loopback modes don't apply. Validated inside
+    # the caller's company boundary — a credential id from another org 404s.
+    if cfg.credential_id is not None:
+        from .credentials import get_company_credential
+
+        if db is None or user is None:  # pragma: no cover — core always passes
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "Credential references require an authenticated save",
+            )
+        get_company_credential(db, user, cfg.credential_id)
+        src = existing or FolderSyncSource(
+            folder_id=folder_id, source_type="google_drive"
+        )
+        if existing is not None and existing.source_type != "google_drive":
+            registry.clear_other_sources(src, "google_drive")
+        src.source_type = "google_drive"
+        if src.gd_credential_id != cfg.credential_id:
+            # The inline refresh token (if any) was minted under a different
+            # client — it can't refresh under the credential's client.
+            src.gd_refresh_token = None
+        src.gd_credential_id = cfg.credential_id
+        src.gd_use_builtin = False
+        src.gd_use_loopback = False
+        src.gd_folder_id = encode_folders_field(
+            [{"id": f.id, "name": f.name} for f in cfg.folders]
+        )
+        src.gd_files_only = bool(cfg.files_only)
+        return src
+
     # ``has_client_secret`` is true when only the public client_id was
     # re-sent for an existing row (the secret stays masked client-side
     # and is only re-posted when the user types a new one). Same idea
@@ -203,6 +274,12 @@ def apply_config(
         registry.clear_other_sources(src, "google_drive")
         # New source type → drop any stored refresh_token, it belongs to
         # whatever client we were using before.
+        src.gd_refresh_token = None
+    if src.gd_credential_id is not None:
+        # Switching shared-credential → inline: the credential's consent
+        # stays on the credential; any inline token predating the switch
+        # belonged to a different client and can't refresh under this one.
+        src.gd_credential_id = None
         src.gd_refresh_token = None
     src.source_type = "google_drive"
     src.gd_client_id = cfg.client_id.strip() or None
@@ -305,6 +382,15 @@ def gd_auth_init(
             status.HTTP_400_BAD_REQUEST,
             "Configure Google Drive (client_id, client_secret) before connecting",
         )
+    if src.gd_credential_id is not None:
+        # Consent belongs to the shared credential (one consent serves every
+        # folder referencing it) — folder-level connect would store the token
+        # in the wrong place.
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "This folder uses a shared company credential — connect Google "
+            "on the credential itself, not on the folder.",
+        )
     if not src.gd_use_builtin and not (src.gd_client_id and src.gd_client_secret):
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
@@ -360,20 +446,18 @@ async def gd_list_folders(
     src = db.get(FolderSyncSource, folder_id)
     if src is None or src.source_type != "google_drive":
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No Google Drive source")
-    has_oauth = bool(src.gd_refresh_token)
-    has_sa = bool(src.gd_service_account_json)
-    if not has_oauth and not has_sa:
+    auth = _resolved_auth(src)
+    if not auth.refresh_token and not auth.service_account_json:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             "Connect via OAuth or save a service-account JSON before listing folders",
         )
-    client_id, client_secret = _effective_client(src)
     try:
         data = await gd_list_root_folders(
-            client_id=client_id,
-            client_secret=client_secret,
-            refresh_token=src.gd_refresh_token or "",
-            service_account_json=src.gd_service_account_json or "",
+            client_id=auth.client_id,
+            client_secret=auth.client_secret,
+            refresh_token=auth.refresh_token,
+            service_account_json=auth.service_account_json,
         )
     except Exception as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
@@ -393,17 +477,17 @@ async def gd_browse_folder(
     src = db.get(FolderSyncSource, folder_id)
     if src is None or src.source_type != "google_drive":
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No Google Drive source")
-    if not src.gd_refresh_token and not src.gd_service_account_json:
+    auth = _resolved_auth(src)
+    if not auth.refresh_token and not auth.service_account_json:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Not connected to Google Drive")
-    client_id, client_secret = _effective_client(src)
     try:
         children = await gd_list_folder_children(
             parent_id=parent_id,
             drive_id=drive_id,
-            client_id=client_id,
-            client_secret=client_secret,
-            refresh_token=src.gd_refresh_token or "",
-            service_account_json=src.gd_service_account_json or "",
+            client_id=auth.client_id,
+            client_secret=auth.client_secret,
+            refresh_token=auth.refresh_token,
+            service_account_json=auth.service_account_json,
         )
     except Exception as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
@@ -427,17 +511,17 @@ async def gd_api_status(
     src = db.get(FolderSyncSource, folder_id)
     if src is None or src.source_type != "google_drive":
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No Google Drive source")
-    if not src.gd_refresh_token and not src.gd_service_account_json:
+    resolved = _resolved_auth(src)
+    if not resolved.refresh_token and not resolved.service_account_json:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             "Connect via OAuth or save a service-account JSON before testing APIs",
         )
-    client_id, client_secret = _effective_client(src)
     auth = GoogleDriveAuth(
-        client_id=client_id,
-        client_secret=client_secret,
-        refresh_token=src.gd_refresh_token or "",
-        service_account_json=src.gd_service_account_json or "",
+        client_id=resolved.client_id,
+        client_secret=resolved.client_secret,
+        refresh_token=resolved.refresh_token,
+        service_account_json=resolved.service_account_json,
     )
     try:
         st = await asyncio.to_thread(GoogleDriveConnector().probe_apis, auth)
@@ -468,8 +552,25 @@ async def gd_oauth_callback(
 ) -> HTMLResponse:
     """Finishes the Google OAuth dance: exchange code → store refresh_token."""
     try:
-        folder_id = int(base64.urlsafe_b64decode(state.encode()).decode())
+        decoded = base64.urlsafe_b64decode(state.encode()).decode()
     except Exception as e:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "Invalid state parameter"
+        ) from e
+
+    # Credential-level consent ("cred:<id>" state) stores the refresh token
+    # on the shared company credential; the plain-int state is the original
+    # folder-level flow. Both share this callback URL — one GCP registration.
+    from .credentials import CRED_STATE_PREFIX
+
+    if decoded.startswith(CRED_STATE_PREFIX):
+        return await _credential_oauth_callback(
+            request, code, decoded[len(CRED_STATE_PREFIX):]
+        )
+
+    try:
+        folder_id = int(decoded)
+    except ValueError as e:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST, "Invalid state parameter"
         ) from e
@@ -521,6 +622,88 @@ async def gd_oauth_callback(
     )
 
     # The popup self-closes; the opening tab listens on the events stream.
+    return HTMLResponse(
+        "<html><body><script>window.close()</script>"
+        "<p>Google Drive connected. You can close this tab.</p></body></html>"
+    )
+
+
+async def _credential_oauth_callback(
+    request: Request, code: str, raw_id: str
+) -> HTMLResponse:
+    """Finish a credential-level consent: exchange the code with the
+    credential's own client and store the refresh token ON the credential.
+
+    Unauthenticated by nature (Google redirects the bare browser here), the
+    same trust model as the folder flow: the state ties the code to one
+    credential row, and the exchange only succeeds against that row's
+    client_secret. ``connected_email`` is best-effort from the id_token —
+    display only, blank when Google returns none.
+    """
+    from ....db.database import session_scope
+    from ....db.models import SyncCredential
+
+    try:
+        cred_id = int(raw_id)
+    except ValueError as e:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "Invalid state parameter"
+        ) from e
+
+    with session_scope() as s:
+        cred = s.get(SyncCredential, cred_id)
+        if cred is None or cred.kind != "google_oauth_client":
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                "Credential not found for this state",
+            )
+        client_id, client_secret = cred.client_id, cred.client_secret
+
+    try:
+        tokens = await gd_exchange_code(
+            client_id=client_id,
+            client_secret=client_secret,
+            code=code,
+            redirect_uri=_oauth_redirect_uri(request),
+        )
+    except Exception as e:
+        logger.exception("Google OAuth callback failed for credential %s", cred_id)
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
+
+    refresh_token = tokens.get("refresh_token")
+    if not refresh_token:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Google did not return a refresh_token. Revoke the app's access "
+            "in your Google Account and try again.",
+        )
+
+    connected_email = ""
+    id_token = tokens.get("id_token")
+    if isinstance(id_token, str) and id_token.count(".") == 2:
+        try:
+            payload = id_token.split(".")[1]
+            payload += "=" * (-len(payload) % 4)
+            claims = json.loads(base64.urlsafe_b64decode(payload))
+            connected_email = str(claims.get("email") or "")
+        except Exception:  # noqa: BLE001 — display-only, never fail consent
+            connected_email = ""
+
+    import time as _time
+
+    with session_scope() as s:
+        cred = s.get(SyncCredential, cred_id)
+        if cred is not None:
+            cred.refresh_token = refresh_token
+            if connected_email:
+                cred.connected_email = connected_email
+            cred.updated_at = int(_time.time())
+
+    events.publish(
+        "folders",
+        {"type": "sync_credential.connected", "credential_id": cred_id},
+    )
+
     return HTMLResponse(
         "<html><body><script>window.close()</script>"
         "<p>Google Drive connected. You can close this tab.</p></body></html>"

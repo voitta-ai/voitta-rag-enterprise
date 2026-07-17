@@ -96,6 +96,7 @@ def apply_config(
     body: SyncSourceIn,
     existing: FolderSyncSource | None,
     folder_id: int,
+    **_: object,  # db/user context used only by credential-aware connectors
 ) -> FolderSyncSource:
     """Apply a ``confluence`` payload to a (new or existing) row.
 

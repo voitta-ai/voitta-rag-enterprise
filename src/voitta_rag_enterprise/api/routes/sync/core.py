@@ -140,7 +140,11 @@ def upsert_sync_source(
             status.HTTP_400_BAD_REQUEST,
             f"Unsupported source_type: {body.source_type!r}",
         )
-    src = handler.apply(body=body, existing=existing, folder_id=folder_id)
+    # db/user context lets credential-aware connectors (google_drive) validate
+    # a referenced company credential; the others swallow it via **_.
+    src = handler.apply(
+        body=body, existing=existing, folder_id=folder_id, db=db, user=user
+    )
 
     # Auto-sync settings apply regardless of source type.
     src.auto_sync_enabled = bool(body.auto_sync_enabled)

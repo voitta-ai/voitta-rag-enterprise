@@ -298,15 +298,38 @@ class GoogleDriveSyncStats:
 # ---------------------------------------------------------------------------
 
 
-def effective_oauth_client(row) -> tuple[str, str]:
-    """The ``(client_id, client_secret)`` this source actually uses.
+@dataclass(frozen=True)
+class GdAuthFields:
+    """Resolved Google Drive auth material for one sync source row.
 
-    ``gd_use_builtin`` rows get the deploy's built-in Desktop-app client
-    (``VOITTA_GD_BUILTIN_CLIENT_ID/SECRET``, baked into the desktop
-    build) — available only in single-user mode, where the OAuth consent
-    redirect can reach this server on 127.0.0.1. Everything downstream
-    (auth URL, code exchange, token refresh, cache keys) receives the
-    substituted pair, so no other code knows the mode exists.
+    The single seam every consumer (route pickers, API probe, the sync
+    connector) reads auth through, so a row that references a shared
+    company credential (``gd_credential_id``) behaves identically to a
+    row with inline fields everywhere at once.
+    """
+
+    client_id: str = ""
+    client_secret: str = ""
+    refresh_token: str = ""
+    service_account_json: str = ""
+
+    @property
+    def connected(self) -> bool:
+        return bool(self.refresh_token)
+
+
+def resolve_gd_auth(row) -> GdAuthFields:
+    """Resolve a sync-source row's effective Google auth fields.
+
+    Precedence: built-in desktop client → shared company credential
+    (``gd_credential_id`` — the credential supplies EVERYTHING, including
+    the refresh token, and the row's inline fields are ignored) → the
+    row's own inline gd_* columns. A dangling credential reference (row
+    deleted underneath) raises RuntimeError rather than silently falling
+    back to stale inline fields — callers surface it as an HTTP 400.
+
+    Opens its own short DB session for the credential lookup, so it is
+    callable from route handlers and the background sync runner alike.
     """
     if getattr(row, "gd_use_builtin", False):
         from ...config import get_settings
@@ -318,8 +341,47 @@ def effective_oauth_client(row) -> tuple[str, str]:
             raise RuntimeError(
                 "Built-in Google sign-in is not available on this deployment"
             )
-        return s.gd_builtin_client_id, s.gd_builtin_client_secret
-    return row.gd_client_id or "", row.gd_client_secret or ""
+        return GdAuthFields(
+            client_id=s.gd_builtin_client_id,
+            client_secret=s.gd_builtin_client_secret,
+            refresh_token=row.gd_refresh_token or "",
+        )
+
+    cred_id = getattr(row, "gd_credential_id", None)
+    if cred_id is not None:
+        from ...db.database import session_scope
+        from ...db.models import SyncCredential
+
+        with session_scope() as s:
+            cred = s.get(SyncCredential, int(cred_id))
+            if cred is None:
+                raise RuntimeError(
+                    "The shared credential this folder references no longer "
+                    "exists. Pick another one in the sync settings."
+                )
+            return GdAuthFields(
+                client_id=cred.client_id or "",
+                client_secret=cred.client_secret or "",
+                refresh_token=cred.refresh_token or "",
+                service_account_json=cred.service_account_json or "",
+            )
+
+    return GdAuthFields(
+        client_id=row.gd_client_id or "",
+        client_secret=row.gd_client_secret or "",
+        refresh_token=row.gd_refresh_token or "",
+        service_account_json=row.gd_service_account_json or "",
+    )
+
+
+def effective_oauth_client(row) -> tuple[str, str]:
+    """The ``(client_id, client_secret)`` this source actually uses.
+
+    Kept as the historical two-field view of :func:`resolve_gd_auth` —
+    see there for the builtin/credential/inline precedence.
+    """
+    auth = resolve_gd_auth(row)
+    return auth.client_id, auth.client_secret
 
 
 def get_auth_url(client_id: str, redirect_uri: str, state: str) -> str:
@@ -595,15 +657,15 @@ class GoogleDriveConnector(SyncConnector):
     _token_cache: ClassVar[dict[tuple[str, str], tuple[str, float]]] = {}
 
     def resolve_config(self, row) -> dict:
-        client_id, client_secret = effective_oauth_client(row)
+        resolved = resolve_gd_auth(row)
         return {
             "drive_folders": coerce_folders_field(row.gd_folder_id),
             "files_only": bool(row.gd_files_only),
             "auth": GoogleDriveAuth(
-                client_id=client_id,
-                client_secret=client_secret,
-                refresh_token=row.gd_refresh_token or "",
-                service_account_json=row.gd_service_account_json or "",
+                client_id=resolved.client_id,
+                client_secret=resolved.client_secret,
+                refresh_token=resolved.refresh_token,
+                service_account_json=resolved.service_account_json,
             ),
         }
 

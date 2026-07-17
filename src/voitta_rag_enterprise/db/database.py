@@ -194,6 +194,12 @@ def init_db() -> None:
             ("jira_updated_since", "TEXT"),
         ):
             _ensure_column(raw_conn, "folder_sync_sources", col, decl)
+        # Shared company sync credential reference. Plain INTEGER here (no FK
+        # clause — SQLite ADD COLUMN can't enforce it retroactively and the
+        # delete route refuses to remove referenced credentials anyway);
+        # fresh DBs get the REFERENCES from schema.sql. NULL = inline auth,
+        # the original behaviour.
+        _ensure_column(raw_conn, "folder_sync_sources", "gd_credential_id", "INTEGER")
         # Confluence — same Cloud/Server auth split as Jira, plus the per-folder
         # space selection (JSON array of {key,name}), an "all spaces" flag, and
         # an optional CQL filter. NULL/0 defaults keep existing rows untouched.
