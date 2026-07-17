@@ -244,10 +244,18 @@ def import_credential_from_folder(
         )
 
     now = int(time.time())
+    # Label says what the thing IS (a credential) and where it came from —
+    # naming it after the folder alone makes the credential picker read
+    # like a folder picker.
+    origin = folder.display_name or folder.path.rsplit("/", 1)[-1]
     cred = SyncCredential(
         company_id=user.company_id,
         kind="google_oauth_client" if has_oauth else "google_service_account",
-        label=folder.display_name or folder.path.rsplit("/", 1)[-1],
+        label=(
+            f"Google client (from “{origin}”)"
+            if has_oauth
+            else f"Service account (from “{origin}”)"
+        ),
         client_id=src.gd_client_id or "",
         client_secret=src.gd_client_secret or "",
         service_account_json=src.gd_service_account_json or "",
