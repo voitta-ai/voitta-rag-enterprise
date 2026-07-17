@@ -13,6 +13,18 @@ external gateways like Agnitio enforce their own admin gate before
 proxying). Secrets never round-trip: list responses mask them to has_*
 booleans, and the consent flow reuses the same Google callback URL as
 folder-level OAuth, so no new GCP registration is needed.
+
+BEARER POLICY (hardening): OAuth-client credentials are session-only.
+An authorized OAuth credential is a standing consent to a real person's
+entire Drive; exposing it through the ``cvk_``/``vk_`` bearer surface
+would let any external gateway (and any of its users) sync that person's
+files. So for bearer-authenticated requests, OAuth-kind credentials do
+not exist: they are filtered from listings, cannot be created, imported,
+referenced, deleted, or sent through the consent flow — 404s, never
+403s, so the API doesn't advertise what it's hiding. Service accounts
+remain fully manageable over bearer: their visibility is an explicit
+share-with-the-bot allowlist, which is the model external gateways
+should use.
 """
 
 from __future__ import annotations
@@ -39,6 +51,19 @@ from .base import external_redirect_uri, oauth_router
 CRED_STATE_PREFIX = "cred:"
 
 KINDS = ("google_oauth_client", "google_service_account")
+
+SA_KIND = "google_service_account"
+
+
+def is_bearer_request(request: Request) -> bool:
+    """True when the caller authenticated with a vk_/cvk_ API key (set by
+    deps._bearer_user). Session-cookie callers (Voitta's own SPA) are not."""
+    return getattr(request.state, "auth_method", None) == "bearer"
+
+
+def credential_visible(request: Request, cred: SyncCredential) -> bool:
+    """The bearer surface only sees service accounts — see module docstring."""
+    return not is_bearer_request(request) or cred.kind == SA_KIND
 
 
 class SyncCredentialOut(BaseModel):
@@ -107,6 +132,7 @@ def get_company_credential(
 
 @oauth_router.get("/credentials", response_model=list[SyncCredentialOut])
 def list_credentials(
+    request: Request,
     db: Session = Depends(db_session),
     user: CurrentUser = Depends(current_user),
 ) -> list[SyncCredentialOut]:
@@ -119,15 +145,22 @@ def list_credentials(
         .scalars()
         .all()
     )
-    return [_to_out(db, c) for c in rows]
+    return [_to_out(db, c) for c in rows if credential_visible(request, c)]
 
 
 @oauth_router.post("/credentials", response_model=SyncCredentialOut)
 def create_credential(
     body: SyncCredentialIn,
+    request: Request,
     db: Session = Depends(db_session),
     user: CurrentUser = Depends(current_user),
 ) -> SyncCredentialOut:
+    if is_bearer_request(request) and body.kind != SA_KIND:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "OAuth-client credentials can only be managed from the Voitta "
+            "console; the API surface accepts service accounts only.",
+        )
     if body.kind == "google_oauth_client":
         if not (body.client_id.strip() and body.client_secret.strip()):
             raise HTTPException(
@@ -176,10 +209,13 @@ def create_credential(
 @oauth_router.delete("/credentials/{cred_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_credential(
     cred_id: int,
+    request: Request,
     db: Session = Depends(db_session),
     user: CurrentUser = Depends(current_user),
 ) -> None:
     cred = get_company_credential(db, user, cred_id)
+    if not credential_visible(request, cred):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Credential not found")
     refs = _ref_count(db, cred.id)
     if refs:
         raise HTTPException(
@@ -197,6 +233,7 @@ def delete_credential(
 )
 def import_credential_from_folder(
     folder_id: int,
+    request: Request,
     db: Session = Depends(db_session),
     user: CurrentUser = Depends(current_user),
 ) -> SyncCredentialOut:
@@ -241,6 +278,14 @@ def import_credential_from_folder(
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             "The folder has no inline credentials to import",
+        )
+    if is_bearer_request(request) and has_oauth:
+        # Importing an OAuth credential would carry a person's Drive consent
+        # into the registry — session-only, like every other OAuth operation.
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Only service-account credentials can be imported through the "
+            "API; OAuth clients are managed from the Voitta console.",
         )
 
     now = int(time.time())
@@ -297,6 +342,9 @@ def credential_auth_init(
     refresh token on the credential instead of a folder row.
     """
     cred = get_company_credential(db, user, cred_id)
+    if not credential_visible(request, cred):
+        # Bearer callers never see OAuth credentials — same 404 as the list.
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Credential not found")
     if cred.kind != "google_oauth_client":
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,

@@ -6,12 +6,34 @@ from __future__ import annotations
 
 import json
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from tests.conftest import auth_as
 
 SA_JSON = json.dumps({"type": "service_account", "client_email": "sa@p.iam"})
+
+
+def auth_as_bearer(app: FastAPI, email: str, company_id: str = "") -> int:
+    """Simulate a vk_/cvk_ bearer caller: same identity resolution as
+    auth_as, but stamps request.state.auth_method = 'bearer' the way
+    deps._bearer_user does — which is all the visibility policy keys on."""
+    from voitta_rag_enterprise.api.deps import current_user, real_user
+    from voitta_rag_enterprise.db.database import session_scope
+    from voitta_rag_enterprise.services.acl import CurrentUser, get_or_create_user
+
+    with session_scope() as s:
+        user = get_or_create_user(s, email)
+        s.commit()
+        uid, mail = user.id, user.email
+
+    def fake(request: Request) -> CurrentUser:
+        request.state.auth_method = "bearer"
+        return CurrentUser(id=uid, email=mail, company_id=company_id)
+
+    app.dependency_overrides[current_user] = fake
+    app.dependency_overrides[real_user] = fake
+    return uid
 
 
 def auth_as_company(app: FastAPI, email: str, company_id: str) -> int:
@@ -233,6 +255,132 @@ def test_switching_to_inline_clears_reference(
     assert out["google_drive"]["credential_id"] is None
     assert out["google_drive"]["client_id"] == "inline-cid"
     assert client.get("/api/sync/credentials").json()[0]["in_use_by"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Bearer-surface hardening: OAuth credentials do not exist for API callers
+# ---------------------------------------------------------------------------
+
+
+def test_bearer_list_hides_oauth_credentials(
+    app: FastAPI, client: TestClient
+) -> None:
+    auth_as(app, "a@corp.com")
+    _mk_oauth(client)
+    sa = client.post(
+        "/api/sync/credentials",
+        json={"kind": "google_service_account", "service_account_json": SA_JSON},
+    ).json()
+
+    auth_as_bearer(app, "a@corp.com")
+    listed = client.get("/api/sync/credentials").json()
+    assert [c["id"] for c in listed] == [sa["id"]]
+    assert all(c["kind"] == "google_service_account" for c in listed)
+
+
+def test_bearer_cannot_create_oauth_but_can_create_sa(
+    app: FastAPI, client: TestClient
+) -> None:
+    auth_as_bearer(app, "a@corp.com")
+    denied = client.post(
+        "/api/sync/credentials",
+        json={
+            "kind": "google_oauth_client",
+            "client_id": "cid",
+            "client_secret": "sec",
+        },
+    )
+    assert denied.status_code == 403
+
+    ok = client.post(
+        "/api/sync/credentials",
+        json={"kind": "google_service_account", "service_account_json": SA_JSON},
+    )
+    assert ok.status_code == 200
+
+
+def test_bearer_cannot_touch_oauth_credential(
+    app: FastAPI, client: TestClient
+) -> None:
+    auth_as(app, "a@corp.com")
+    cred = _mk_oauth(client)
+
+    auth_as_bearer(app, "a@corp.com")
+    assert client.delete(f"/api/sync/credentials/{cred['id']}").status_code == 404
+    assert (
+        client.post(f"/api/sync/credentials/{cred['id']}/google/auth").status_code
+        == 404
+    )
+
+
+def test_bearer_cannot_reference_oauth_credential_in_sync(
+    app: FastAPI, client: TestClient
+) -> None:
+    auth_as(app, "a@corp.com")
+    oauth_cred = _mk_oauth(client)
+    sa_cred = client.post(
+        "/api/sync/credentials",
+        json={"kind": "google_service_account", "service_account_json": SA_JSON},
+    ).json()
+
+    auth_as_bearer(app, "a@corp.com")
+    folder_id = _mk_folder(client, "bearer-folder")
+    denied = client.put(
+        f"/api/folders/{folder_id}/sync",
+        json={
+            "source_type": "google_drive",
+            "google_drive": {"credential_id": oauth_cred["id"]},
+        },
+    )
+    assert denied.status_code == 404
+
+    ok = client.put(
+        f"/api/folders/{folder_id}/sync",
+        json={
+            "source_type": "google_drive",
+            "google_drive": {"credential_id": sa_cred["id"]},
+        },
+    )
+    assert ok.status_code == 200
+    assert ok.json()["google_drive"]["credential_id"] == sa_cred["id"]
+
+
+def test_bearer_folder_oauth_init_blocked(app: FastAPI, client: TestClient) -> None:
+    auth_as_bearer(app, "a@corp.com")
+    folder_id = _mk_folder(client, "bearer-oauth-folder")
+    client.put(
+        f"/api/folders/{folder_id}/sync",
+        json={
+            "source_type": "google_drive",
+            "google_drive": {"client_id": "cid", "client_secret": "sec"},
+        },
+    )
+    r = client.post(f"/api/folders/{folder_id}/sync/google-drive/auth")
+    assert r.status_code == 403
+
+
+def test_bearer_import_blocked_for_oauth_allowed_for_sa(
+    app: FastAPI, client: TestClient
+) -> None:
+    auth_as_bearer(app, "a@corp.com")
+    oauth_folder = _mk_folder(client, "legacy-oauth")
+    _put_inline_sync(client, oauth_folder)
+    denied = client.post(
+        f"/api/sync/credentials/import-from-folder/{oauth_folder}"
+    )
+    assert denied.status_code == 403
+
+    sa_folder = _mk_folder(client, "legacy-sa")
+    client.put(
+        f"/api/folders/{sa_folder}/sync",
+        json={
+            "source_type": "google_drive",
+            "google_drive": {"service_account_json": SA_JSON},
+        },
+    )
+    ok = client.post(f"/api/sync/credentials/import-from-folder/{sa_folder}")
+    assert ok.status_code == 200
+    assert ok.json()["kind"] == "google_service_account"
 
 
 # ---------------------------------------------------------------------------

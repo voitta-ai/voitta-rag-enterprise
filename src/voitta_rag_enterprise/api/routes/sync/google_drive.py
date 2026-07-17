@@ -203,6 +203,7 @@ def apply_config(
     folder_id: int,
     db: Session | None = None,
     user: CurrentUser | None = None,
+    request: Request | None = None,
     **_: object,
 ) -> FolderSyncSource:
     cfg = body.google_drive
@@ -214,16 +215,22 @@ def apply_config(
     # Shared-credential mode: the referenced company credential supplies
     # ALL auth (client pair or SA, plus the refresh token), so inline
     # fields and the builtin/loopback modes don't apply. Validated inside
-    # the caller's company boundary — a credential id from another org 404s.
+    # the caller's company boundary — a credential id from another org 404s,
+    # and bearer callers can only reference service accounts (an OAuth
+    # credential is a person's Drive consent; invisible to the API surface).
     if cfg.credential_id is not None:
-        from .credentials import get_company_credential
+        from .credentials import credential_visible, get_company_credential
 
         if db is None or user is None:  # pragma: no cover — core always passes
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST,
                 "Credential references require an authenticated save",
             )
-        get_company_credential(db, user, cfg.credential_id)
+        cred = get_company_credential(db, user, cfg.credential_id)
+        if request is not None and not credential_visible(request, cred):
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, "Credential not found"
+            )
         src = existing or FolderSyncSource(
             folder_id=folder_id, source_type="google_drive"
         )
@@ -375,6 +382,16 @@ def gd_auth_init(
     ``state`` carries the folder id so the callback (which is folder-agnostic
     in its URL) can find the right row.
     """
+    from .credentials import is_bearer_request
+
+    if is_bearer_request(request):
+        # A folder-level consent stores a person's Drive grant inline —
+        # OAuth flows are session-only; API callers use service accounts.
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "OAuth consent is managed from the Voitta console; the API "
+            "surface uses service-account credentials only.",
+        )
     check_owner(folder_id, db, user)
     src = db.get(FolderSyncSource, folder_id)
     if src is None or src.source_type != "google_drive":

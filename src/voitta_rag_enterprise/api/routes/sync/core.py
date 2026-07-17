@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -115,6 +115,7 @@ def get_sync_source(
 def upsert_sync_source(
     folder_id: int,
     body: SyncSourceIn,
+    request: Request,
     db: Session = Depends(db_session),
     user: CurrentUser = Depends(current_user),
 ) -> SyncSourceOut:
@@ -140,10 +141,16 @@ def upsert_sync_source(
             status.HTTP_400_BAD_REQUEST,
             f"Unsupported source_type: {body.source_type!r}",
         )
-    # db/user context lets credential-aware connectors (google_drive) validate
-    # a referenced company credential; the others swallow it via **_.
+    # db/user/request context lets credential-aware connectors (google_drive)
+    # validate a referenced company credential — including the bearer-surface
+    # visibility rule; the others swallow the extras via **_.
     src = handler.apply(
-        body=body, existing=existing, folder_id=folder_id, db=db, user=user
+        body=body,
+        existing=existing,
+        folder_id=folder_id,
+        db=db,
+        user=user,
+        request=request,
     )
 
     # Auto-sync settings apply regardless of source type.
