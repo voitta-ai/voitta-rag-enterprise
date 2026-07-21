@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Literal
 
 from fastapi import Depends, HTTPException, status
@@ -24,6 +25,8 @@ from .base import check_owner, router
 
 if TYPE_CHECKING:
     from .core import SyncSourceIn
+
+logger = logging.getLogger(__name__)
 
 
 class GithubSyncIn(BaseModel):
@@ -153,15 +156,24 @@ def list_branches(
 ) -> BranchListOut:
     """Helper for the UI's branch dropdown — runs ``git ls-remote --heads``.
 
-    Auth is taken from the request body (the user is mid-form and the row
-    might not have been saved yet).
+    Auth comes from the request body, but **falls back to the saved
+    credentials** when a field is blank. This matters when editing an
+    already-configured source: the SSH key / PAT are stored (in
+    ``gh_token`` / ``gh_pat``) and never sent back to the browser, so the
+    form shows an empty "(key saved — paste to replace)" field. Without the
+    fallback, hitting "Load branches" would send an empty key and silently
+    drop to the server's own ssh identity — which for a private repo yields a
+    misleading "Permission denied (publickey)" instead of using the saved key
+    the actual sync uses. See ``_sync_sync`` which already reads ``gh_token``.
     """
     check_owner(folder_id, db, user)
+    saved = db.get(FolderSyncSource, folder_id)
+    saved_gh = saved if (saved and saved.source_type == "github") else None
     auth = GitAuth(
-        method=body.auth_method or "",
-        ssh_key=body.ssh_key,
-        username=body.username,
-        pat=body.pat,
+        method=body.auth_method or (saved_gh.gh_auth_method if saved_gh else "") or "",
+        ssh_key=body.ssh_key or (saved_gh.gh_token if saved_gh else "") or "",
+        username=body.username or (saved_gh.gh_username if saved_gh else "") or "",
+        pat=body.pat or (saved_gh.gh_pat if saved_gh else "") or "",
     )
 
     def _touch(state: str) -> None:
@@ -175,6 +187,12 @@ def list_branches(
         with git_touch_scope(_touch):
             branches = list_remote_branches(body.repo.strip(), auth)
     except Exception as e:
+        # Log the real git/ssh stderr — the HTTP layer only ever surfaced a
+        # generic 400, which left failures like the above undiagnosable.
+        logger.warning(
+            "branch list failed folder=%s repo=%s method=%s: %s",
+            folder_id, body.repo.strip(), auth.method, e,
+        )
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST, f"git ls-remote failed: {e}"
         ) from e
