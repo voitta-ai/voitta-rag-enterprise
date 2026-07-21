@@ -4,13 +4,23 @@ extract pipeline picks them up.
 
 Disk layout under the folder root:
 
+    .git-repo/                              # ONE bare mirror for the repo —
+                                            #   excluded from indexing
     branches/<safe-branch>/                 # working files (HEAD of branch)
-    branches/<safe-branch>/.git-repo/       # full clone — excluded from indexing
     commits/<sha-short>-<safe-subject>.md   # extended mode: per-commit history,
                                             #   one md per unique commit across
                                             #   all selected branches
 
 Branch names with ``/`` (``feature/x``) become ``feature--x`` on disk.
+
+One mirror, one network touch
+-----------------------------
+All selected branches share a single bare mirror at ``.git-repo`` and are
+fetched in **one** ``git fetch`` (one refspec per branch, or ``refs/heads/*``
+for all-branches). Each branch's working tree is then materialised locally via
+``git archive`` — no network. So a sync makes exactly one network git call,
+i.e. at most one hardware-key tap, regardless of branch count (older layouts
+kept a separate clone per branch and tapped once per branch).
 
 Concurrency
 -----------
@@ -37,10 +47,12 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -58,16 +70,38 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # YubiKey / hardware-key touch hints
 #
-# When an SSH git op (agent mode) blocks on a hardware-key touch, the key just
-# blinks with no on-screen cue. A caller can open a ``git_touch_scope(cb)``
-# around its git work; if any network git call then runs longer than
-# ``_TOUCH_HINT_DELAY_S`` (almost certainly because it's waiting for a tap),
-# ``cb("wait")`` fires so the UI can show "touch your YubiKey", and ``cb("done")``
-# fires when it finishes. The delay suppresses spurious prompts for fast auth
-# that needed no touch (cached/no-touch keys complete in well under a second).
-# The cb is carried in a ContextVar so no connector signatures change.
+# When an SSH git op blocks on a hardware-key touch, the key just blinks with no
+# on-screen cue. A caller opens a ``git_touch_scope(cb)`` around its git work;
+# ``cb("wait")`` fires when a tap is genuinely pending so the UI can show "touch
+# your YubiKey", and ``cb("done")`` clears it. The cb is carried in a ContextVar
+# so no connector signatures change.
+#
+# The hint is armed ONLY when a hardware key is actually loaded in the agent
+# (``_agent_hardware_key_loaded``). On a machine with no security key — or when
+# the credential is already cached and the op just happens to be slow — nothing
+# ever shows. That is the fix for the two long-standing false positives: a
+# "touch your YubiKey" banner on hosts that have none, and a re-prompt on hosts
+# where we already authed.
+#
+# Two triggers, both gated on that check (see ``_TouchNotifier``):
+#   * precise — an ``SSH_ASKPASS`` hook fires the instant OpenSSH asks for the
+#     tap, so the banner tracks the real event, not elapsed time;
+#   * fallback — a short timer for OpenSSH < 8.4, which ignores the askpass
+#     force flag.
 # ---------------------------------------------------------------------------
 _TOUCH_HINT_DELAY_S = 1.5
+
+# ``ssh-add -l`` markers for a key that can require a physical tap: FIDO/security
+# keys print an ``-SK`` type suffix; PIV / PKCS#11 (YubiKey PIV, OpenSC) show up
+# by provider/card in the comment. Best-effort — this only gates a UI hint.
+_HW_KEY_RE = re.compile(
+    r"-sk\)|cardno:|yubikey|pkcs11|opensc|\bpiv\b|hardware|security key",
+    re.IGNORECASE,
+)
+_HW_CACHE_TTL_S = 30.0
+_hw_key_cache: dict[str, tuple[float, bool]] = {}
+_hw_key_cache_lock = threading.Lock()
+
 _git_touch_cb: ContextVar[Callable[[str], None] | None] = ContextVar(
     "git_touch_cb", default=None
 )
@@ -83,38 +117,169 @@ def git_touch_scope(cb: Callable[[str], None]) -> Iterator[None]:
         _git_touch_cb.reset(token)
 
 
-class _TouchHint:
-    """Fire ``cb('wait')`` if the wrapped op outlives the delay, ``cb('done')``
-    on exit — but only if 'wait' fired. Timer runs off-thread; cb must be
-    thread-safe (events.publish is)."""
+def _agent_hardware_key_loaded(sock: str | None) -> bool:
+    """True iff the ssh-agent at ``sock`` has a hardware/FIDO key loaded — the
+    only situation where a git op can block on a physical tap.
 
-    def __init__(self, cb: Callable[[str], None] | None) -> None:
-        self._cb = cb
+    Cached briefly (keys get plugged/unplugged mid-session). Best-effort: any
+    probe failure returns False, so we simply show no hint rather than a wrong
+    one. This is the gate that stops the "touch your YubiKey" banner from
+    appearing on machines that have no security key at all.
+    """
+    if not sock:
+        return False
+    now = time.monotonic()
+    with _hw_key_cache_lock:
+        hit = _hw_key_cache.get(sock)
+        if hit is not None and now - hit[0] < _HW_CACHE_TTL_S:
+            return hit[1]
+    result = False
+    try:
+        r = subprocess.run(
+            ["ssh-add", "-l"],
+            env={**os.environ, "SSH_AUTH_SOCK": sock},
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        # rc 0 = keys listed; rc 1 = agent reachable but empty; rc 2 = no agent.
+        if r.returncode == 0:
+            result = _HW_KEY_RE.search(r.stdout) is not None
+    except (OSError, subprocess.SubprocessError):
+        result = False
+    with _hw_key_cache_lock:
+        _hw_key_cache[sock] = (now, result)
+    return result
+
+
+_ssh_askpass_cap: bool | None = None
+_ssh_cap_lock = threading.Lock()
+
+
+def _ssh_supports_askpass_require() -> bool:
+    """True if the local OpenSSH honors ``SSH_ASKPASS_REQUIRE=force`` (>= 8.4).
+
+    On such versions the askpass hook fires exactly when a tap is pending, so
+    the timed fallback is not just unnecessary but harmful — it would re-raise
+    the old false positive on a slow-but-already-cached op. Probed once.
+    """
+    global _ssh_askpass_cap
+    with _ssh_cap_lock:
+        if _ssh_askpass_cap is not None:
+            return _ssh_askpass_cap
+    cap = False
+    try:
+        r = subprocess.run(
+            ["ssh", "-V"], capture_output=True, text=True, timeout=5
+        )
+        m = re.search(r"OpenSSH_(\d+)\.(\d+)", (r.stderr or "") + (r.stdout or ""))
+        if m:
+            cap = (int(m.group(1)), int(m.group(2))) >= (8, 4)
+    except (OSError, subprocess.SubprocessError):
+        cap = False
+    with _ssh_cap_lock:
+        _ssh_askpass_cap = cap
+    return cap
+
+
+class _TouchNotifier:
+    """Show the hardware-key touch hint precisely, with a timed fallback.
+
+    Fires ``cb('wait')`` at most once, and ``cb('done')`` on exit iff 'wait'
+    fired. Two independent triggers, both live only when ``armed`` (a hardware
+    key is loaded):
+
+    * **askpass hook (precise).** We point ``SSH_ASKPASS`` at a throwaway
+      script and force its use. OpenSSH runs it the instant it needs
+      user-presence confirmation — i.e. exactly when the key is waiting for a
+      tap — so the hint tracks the real event, never a slow-but-untouched
+      network op. The script only drops a sentinel file we watch; the physical
+      tap (not the script's output) satisfies presence.
+
+    * **timed fallback.** OpenSSH < 8.4 ignores ``SSH_ASKPASS_REQUIRE``, so the
+      hook never runs there. A short timer covers that — but, being gated on
+      ``armed``, still never fires on a machine without a security key.
+
+    The timer runs off-thread; ``cb`` must be thread-safe (events.publish is).
+    """
+
+    def __init__(
+        self,
+        cb: Callable[[str], None] | None,
+        *,
+        armed: bool,
+        env: dict[str, str],
+    ) -> None:
+        self._cb = cb if armed else None
+        self._env = env
         self._timer: threading.Timer | None = None
+        self._watcher: threading.Thread | None = None
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
         self._fired = False
+        self._cleanup: list[str] = []
 
-    def __enter__(self) -> "_TouchHint":
-        if self._cb is not None:
+    def __enter__(self) -> _TouchNotifier:
+        if self._cb is None:
+            return self
+        # Precise trigger: an askpass script that drops a sentinel we watch.
+        askpass_ok = False
+        try:
+            sentinel = tempfile.NamedTemporaryFile(suffix=".touch", delete=False)
+            sentinel.close()
+            os.unlink(sentinel.name)  # the script (re)creates it when invoked
+            script = tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False)
+            script.write(f"#!/bin/sh\n: > {shlex.quote(sentinel.name)}\nexit 0\n")
+            script.close()
+            os.chmod(script.name, stat.S_IRWXU)
+            self._cleanup += [script.name, sentinel.name]
+            self._env["SSH_ASKPASS"] = script.name
+            self._env["SSH_ASKPASS_REQUIRE"] = "force"
+            self._watcher = threading.Thread(
+                target=self._watch, args=(sentinel.name,), daemon=True
+            )
+            self._watcher.start()
+            askpass_ok = True
+        except OSError:
+            logger.debug("touch-hint askpass setup failed", exc_info=True)
+        # Timed fallback — ONLY when the precise hook can't be trusted (setup
+        # failed, or an OpenSSH too old to honor SSH_ASKPASS_REQUIRE). On a
+        # modern ssh the hook is authoritative, so we skip the timer to avoid
+        # re-introducing the slow-op false positive.
+        if not (askpass_ok and _ssh_supports_askpass_require()):
             self._timer = threading.Timer(_TOUCH_HINT_DELAY_S, self._fire)
             self._timer.daemon = True
             self._timer.start()
         return self
 
+    def _watch(self, sentinel: str) -> None:
+        while not self._stop.wait(0.05):
+            if os.path.exists(sentinel):
+                self._fire()
+                return
+
     def _fire(self) -> None:
-        self._fired = True
+        with self._lock:
+            if self._fired or self._cb is None:
+                return
+            self._fired = True
         try:
-            self._cb("wait")  # type: ignore[misc]
-        except Exception:  # noqa: BLE001 — a UI hint must never break a sync
+            self._cb("wait")
+        except Exception:  # a UI hint must never break a sync
             logger.debug("touch-hint 'wait' callback failed", exc_info=True)
 
     def __exit__(self, *exc: object) -> None:
+        self._stop.set()
         if self._timer is not None:
             self._timer.cancel()
         if self._fired and self._cb is not None:
             try:
                 self._cb("done")
-            except Exception:  # noqa: BLE001
+            except Exception:  # a UI hint must never break a sync
                 logger.debug("touch-hint 'done' callback failed", exc_info=True)
+        for path in self._cleanup:
+            with contextlib.suppress(OSError):
+                os.unlink(path)
 
 # One process-wide lock around every git call. Cheap (we just hold it for the
 # duration of a clone/pull) and saves us from worrying about concurrent .git
@@ -424,12 +589,24 @@ def _run_git(
 ) -> tuple[int, str, str]:
     """Run a single git command synchronously under the global lock."""
     env, cleanup = _git_env(auth)
-    # Arm a touch hint only when a hardware-key touch is actually possible —
-    # SSH agent/key auth. Token/HTTPS never prompts for a tap.
+    # Arm a touch hint only when a hardware-key tap is genuinely possible:
+    # SSH agent/key auth (token/HTTPS never taps) AND a hardware key is actually
+    # loaded in the resolved agent. The second check is what stops a bogus
+    # "touch your YubiKey" banner on hosts with no security key, or on a slow
+    # network op where the credential is already cached.
     touch_cb = _git_touch_cb.get()
-    armed = touch_cb if (auth and auth.method in ("agent", "ssh")) else None
+    # The agent (and thus a possible tap) is used only for method "agent", or
+    # "ssh" with no pasted key — a pasted key goes through ``-i … IdentitiesOnly``
+    # and never touches the agent. Mirror that branch in ``_git_env`` exactly.
+    agent_mode = bool(auth) and (
+        auth.method == "agent"
+        or (auth.method == "ssh" and not auth.ssh_key.strip())
+    )
+    armed = bool(touch_cb) and agent_mode and _agent_hardware_key_loaded(
+        env.get("SSH_AUTH_SOCK")
+    )
     try:
-        with _GIT_LOCK, _TouchHint(armed):
+        with _GIT_LOCK, _TouchNotifier(touch_cb, armed=armed, env=env):
             proc = subprocess.run(
                 ["git", *args],
                 cwd=cwd,
@@ -472,88 +649,86 @@ def list_remote_branches(repo_url: str, auth: GitAuth | None) -> list[str]:
     return branches
 
 
-def _resolve_branches(
-    repo_url: str,
-    requested: list[str] | None,
-    all_branches: bool,
-    auth: GitAuth | None,
-) -> list[str]:
-    if all_branches:
-        branches = list_remote_branches(repo_url, auth)
-        if not branches:
-            raise RuntimeError("remote has no branches")
-        return branches
-    if not requested:
-        raise ValueError("at least one branch must be selected")
-    return list(requested)
+def _ensure_mirror(mirror_dir: Path, repo_url: str, auth: GitAuth | None) -> None:
+    """Create (or refresh the remote URL of) the single bare mirror for the repo.
 
-
-def _sync_one_branch(
-    *,
-    repo_url: str,
-    branch: str,
-    branch_root: Path,
-    subfolder: str,
-    auth: GitAuth | None,
-) -> None:
-    """Clone or fetch+reset the given branch into ``branch_root/.git-repo``,
-    then mirror the (optional) subfolder into ``branch_root``.
-
-    Files are copied with ``shutil.copy2`` so unchanged files keep their mtime
-    and the SHA short-circuit in ``_run_extract_sync`` skips them. Files that
-    are no longer present in the repo are deleted from ``branch_root`` so the
-    watcher fires deletion events.
+    Bare because we never check anything out here — branch trees are exported
+    with ``git archive`` (below). Local ``init`` / ``remote`` ops never touch
+    the network, so they never trigger a hardware-key tap.
     """
-    repo_dir = branch_root / ".git-repo"
+    if (mirror_dir / "HEAD").exists():
+        # Keep origin's URL current (a rotated PAT / edited repo URL).
+        _run_git(
+            ["-C", str(mirror_dir), "remote", "set-url", "origin",
+             _maybe_token_url(repo_url, auth)]
+        )
+        return
+    if mirror_dir.exists():
+        shutil.rmtree(mirror_dir)
+    mirror_dir.mkdir(parents=True, exist_ok=True)
+    rc, _, err = _run_git(["init", "--bare", "-q", str(mirror_dir)])
+    if rc != 0:
+        raise RuntimeError(f"git init failed: {err.strip()}")
+    rc, _, err = _run_git(
+        ["-C", str(mirror_dir), "remote", "add", "origin",
+         _maybe_token_url(repo_url, auth)]
+    )
+    if rc != 0:
+        raise RuntimeError(f"git remote add failed: {err.strip()}")
+
+
+def _fetch_refs(
+    mirror_dir: Path, refspecs: list[str], auth: GitAuth | None
+) -> tuple[int, str, str]:
+    """Run the ONE network fetch of a sync — the only op that can tap the key."""
+    return _run_git(
+        ["-C", str(mirror_dir), "fetch", "--prune", "origin", *refspecs],
+        auth=auth,
+        timeout=600,
+    )
+
+
+def _ref_exists(mirror_dir: Path, branch: str) -> bool:
+    rc, _, _ = _run_git(
+        ["-C", str(mirror_dir), "rev-parse", "--verify", "--quiet",
+         f"refs/remotes/origin/{branch}"]
+    )
+    return rc == 0
+
+
+def _local_branches(mirror_dir: Path) -> list[str]:
+    """Branches present in the mirror after an all-branches fetch, main/master
+    first — read from local refs, no network."""
+    _, out, _ = _run_git(
+        ["-C", str(mirror_dir), "for-each-ref", "--format=%(refname)",
+         "refs/remotes/origin"]
+    )
+    prefix = "refs/remotes/origin/"
+    branches = [
+        line[len(prefix):]
+        for line in out.splitlines()
+        if line.startswith(prefix) and line[len(prefix):] not in ("", "HEAD")
+    ]
+
+    def key(b: str) -> tuple[int, str]:
+        if b == "main":
+            return (0, b)
+        if b == "master":
+            return (1, b)
+        return (2, b)
+
+    branches.sort(key=key)
+    return branches
+
+
+def _mirror_tree(source_dir: Path, branch_root: Path) -> None:
+    """Copy ``source_dir`` onto ``branch_root``, deleting files that are no
+    longer present. ``shutil.copy2`` preserves mtime so the SHA short-circuit
+    in ``_run_extract_sync`` skips unchanged files; deletions make the watcher
+    fire delete events. Dot-prefixed paths are ignored on both sides.
+    """
     branch_root.mkdir(parents=True, exist_ok=True)
-    auth_url = _maybe_token_url(repo_url, auth)
 
-    if (repo_dir / ".git").exists():
-        rc, _, err = _run_git(
-            ["remote", "set-branches", "origin", branch],
-            cwd=str(repo_dir),
-            auth=auth,
-        )
-        if rc != 0:
-            raise RuntimeError(f"git remote set-branches failed: {err.strip()}")
-        rc, _, err = _run_git(
-            ["fetch", "--prune", "origin"], cwd=str(repo_dir), auth=auth
-        )
-        if rc != 0:
-            raise RuntimeError(f"git fetch failed: {err.strip()}")
-        rc, _, err = _run_git(
-            ["reset", "--hard", f"origin/{branch}"],
-            cwd=str(repo_dir),
-            auth=auth,
-        )
-        if rc != 0:
-            raise RuntimeError(f"git reset failed: {err.strip()}")
-        _run_git(["clean", "-fdx"], cwd=str(repo_dir), auth=auth)
-    else:
-        if repo_dir.exists():
-            shutil.rmtree(repo_dir)
-        rc, _, err = _run_git(
-            [
-                "clone",
-                "--single-branch",
-                "--branch",
-                branch,
-                auth_url,
-                str(repo_dir),
-            ],
-            auth=auth,
-        )
-        if rc != 0:
-            raise RuntimeError(f"git clone failed: {_clean_git_stderr(err)}")
-
-    source_dir = repo_dir / subfolder if subfolder else repo_dir
-    if not source_dir.exists():
-        raise FileNotFoundError(
-            f"subfolder {subfolder!r} not found in {branch} of {repo_url}"
-        )
-
-    # Build the set of files we expect to exist in branch_root after sync
-    # (excluding anything under .git-repo or hidden).
     remote_paths: set[str] = set()
     for src_file in source_dir.rglob("*"):
         if src_file.is_dir() or src_file.is_symlink():
@@ -578,33 +753,67 @@ def _sync_one_branch(
         dst_file.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src_file, dst_file)
 
-    # Delete files that no longer belong to this branch (skip .git-repo).
+    # Delete files that no longer belong to this branch (skip dot-paths — e.g.
+    # a stray .git-repo left by an older layout is not ours to prune here).
     for f in branch_root.rglob("*"):
-        if not f.is_file() or f.name.startswith("."):
+        if not f.is_file():
             continue
-        try:
-            f.relative_to(repo_dir)
-            continue  # under .git-repo — keep
-        except ValueError:
-            pass
-        rel = str(f.relative_to(branch_root))
-        if rel not in remote_paths:
+        rel = f.relative_to(branch_root)
+        if any(p.startswith(".") for p in rel.parts):
+            continue
+        if str(rel) not in remote_paths:
             try:
                 f.unlink()
             except OSError as e:
                 logger.warning("could not unlink stale file %s: %s", f, e)
 
-    # Tidy empty dirs (excluding .git-repo).
+    # Tidy empty dirs (skip dot-dirs).
     for d in sorted(branch_root.rglob("*"), reverse=True):
-        if not d.is_dir() or d == repo_dir:
+        if not d.is_dir():
             continue
-        try:
-            d.relative_to(repo_dir)
+        rel = d.relative_to(branch_root)
+        if any(p.startswith(".") for p in rel.parts):
             continue
-        except ValueError:
-            pass
         with contextlib.suppress(OSError):
             d.rmdir()
+
+
+def _materialize_branch(
+    mirror_dir: Path, branch: str, branch_root: Path, subfolder: str
+) -> None:
+    """Export a branch's (optionally sub-folder-scoped) tree from the local
+    mirror into ``branch_root`` — via ``git archive``, so no network, no tap.
+    """
+    # Migration: drop a per-branch clone left by the pre-mirror layout.
+    old_repo = branch_root / ".git-repo"
+    if old_repo.exists():
+        shutil.rmtree(old_repo, ignore_errors=True)
+
+    ref = f"refs/remotes/origin/{branch}"
+    with tempfile.TemporaryDirectory(prefix="git-archive-") as td:
+        tar_path = Path(td) / "tree.tar"
+        args = ["-C", str(mirror_dir), "archive", "--format=tar",
+                "-o", str(tar_path), ref]
+        if subfolder:
+            args += ["--", subfolder]
+        rc, _, err = _run_git(args)
+        if rc != 0:
+            raise RuntimeError(f"git archive failed for {branch}: {err.strip()}")
+
+        extract_dir = Path(td) / "tree"
+        extract_dir.mkdir()
+        with tarfile.open(tar_path) as tf:
+            # ``data`` filter (3.12+) blocks path traversal / unsafe members.
+            tf.extractall(extract_dir, filter="data")
+
+        # git archive stores full repo-relative paths, so a sub-folder export
+        # still lands under ``extract_dir/<subfolder>``.
+        source_dir = extract_dir / subfolder if subfolder else extract_dir
+        if not source_dir.exists():
+            raise FileNotFoundError(
+                f"subfolder {subfolder!r} not found in {branch}"
+            )
+        _mirror_tree(source_dir, branch_root)
 
 
 def _dump_commits(
@@ -809,7 +1018,43 @@ class GitHubConnector(SyncConnector):
         folder_root = folder_root.expanduser().resolve()
         folder_root.mkdir(parents=True, exist_ok=True)
 
-        selected = _resolve_branches(repo_url, branches, all_branches, auth)
+        # One bare mirror for the whole repo, fetched in a single network call
+        # below — so a sync taps the hardware key at most once, not once per
+        # branch. ``.git-repo`` reuses the existing indexing ignore rule.
+        mirror_dir = folder_root / ".git-repo"
+        _ensure_mirror(mirror_dir, repo_url, auth)
+
+        if all_branches:
+            rc, _, err = _fetch_refs(
+                mirror_dir, ["+refs/heads/*:refs/remotes/origin/*"], auth
+            )
+            if rc != 0:
+                raise RuntimeError(f"git fetch failed: {_clean_git_stderr(err)}")
+            selected = _local_branches(mirror_dir)
+            if not selected:
+                raise RuntimeError("remote has no branches")
+        else:
+            if not branches:
+                raise ValueError("at least one branch must be selected")
+            selected = list(branches)
+            refspecs = [
+                f"+refs/heads/{b}:refs/remotes/origin/{b}" for b in selected
+            ]
+            rc, _, err = _fetch_refs(mirror_dir, refspecs, auth)
+            if rc != 0:
+                # A single combined fetch fails wholesale if any one branch is
+                # gone from the remote. Fall back to per-branch fetches so the
+                # good branches still sync — this costs one tap per branch, but
+                # only on the (rare) error path; the healthy case stays one tap.
+                logger.warning(
+                    "combined fetch failed (%s); retrying per-branch",
+                    _clean_git_stderr(err)[:200],
+                )
+                for b in selected:
+                    _fetch_refs(
+                        mirror_dir, [f"+refs/heads/{b}:refs/remotes/origin/{b}"], auth
+                    )
+
         logger.info(
             "git sync: %s branches=%s extended=%s",
             repo_url,
@@ -824,7 +1069,7 @@ class GitHubConnector(SyncConnector):
 
         seen_commit_paths: set[Path] = set()
         # Tracks whether every selected branch successfully produced its
-        # commit dump. If any branch's clone or git-log fails, we skip the
+        # commit dump. If any branch's materialize or git-log fails, we skip the
         # commits-dir cleanup so we don't delete files that branch was
         # supposed to keep alive.
         all_commit_dumps_clean = True
@@ -833,15 +1078,17 @@ class GitHubConnector(SyncConnector):
         for branch in selected:
             safe = _safe_name(branch)
             branch_root = branches_dir / safe
+            if not _ref_exists(mirror_dir, branch):
+                # Selected but absent on the remote (e.g. deleted since, or the
+                # per-branch fallback fetch above couldn't get it).
+                msg = f"{branch}: not found on remote"
+                logger.warning("branch sync skipped: %s", msg)
+                stats.errors.append(msg)
+                all_commit_dumps_clean = False
+                continue
             try:
                 t0 = time.perf_counter()
-                _sync_one_branch(
-                    repo_url=repo_url,
-                    branch=branch,
-                    branch_root=branch_root,
-                    subfolder=subfolder,
-                    auth=auth,
-                )
+                _materialize_branch(mirror_dir, branch, branch_root, subfolder)
                 stats.branches_synced += 1
                 logger.info(
                     "branch synced: %s in %.1fs",
@@ -858,7 +1105,7 @@ class GitHubConnector(SyncConnector):
             if extended:
                 try:
                     n = _dump_commits(
-                        repo_dir=branch_root / ".git-repo",
+                        repo_dir=mirror_dir,
                         branch=branch,
                         commits_dir=commits_dir,
                         seen_paths=seen_commit_paths,
