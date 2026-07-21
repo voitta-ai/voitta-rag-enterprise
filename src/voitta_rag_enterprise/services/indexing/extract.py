@@ -20,6 +20,7 @@ from ...db.database import session_scope
 from ...db.models import Chunk, ChunkImageLink, File, Folder, Image
 from ...logging_config import bind_context
 from ..chunking import ChunkInfo, anchor_chunk_for_position, get_default_chunking_registry
+from ..parsers.base import UnsupportedDocumentError
 from ..parsers.registry import get_default_registry
 from .common import (
     _EXTRACT_LOCK,
@@ -279,6 +280,13 @@ def _extract_resolved(file_id: int, abs_path: Path) -> None:
     try:
         with _stage("parse"):
             result = parser.parse(abs_path)
+    except UnsupportedDocumentError as e:
+        # Well-formed but unindexable (e.g. password-protected PDF). Park it
+        # in ``unsupported`` with the reason rather than counting it as an
+        # error; reindex retries if the situation changes.
+        logger.info("%s unsupported: %s", parser.__class__.__name__, e.reason)
+        _mark_state(file_id, state="unsupported", error=e.reason)
+        return
     except Exception:
         _mark_error(file_id, _format_exception(f"{parser.__class__.__name__}.parse raised"))
         return

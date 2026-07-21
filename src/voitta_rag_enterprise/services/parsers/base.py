@@ -15,6 +15,19 @@ if TYPE_CHECKING:
     from ..asset_handlers import AssetSpec
 
 
+class UnsupportedDocumentError(Exception):
+    """Raised by a parser when a file is well-formed but cannot be indexed
+    for a reason that is not an indexer failure — e.g. a password-protected
+    PDF we have no password for. The extractor parks these in the
+    ``unsupported`` state (with ``reason`` as the stored message) rather than
+    ``error``, so they don't pollute the error counters. Reindex will retry.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 @dataclass
 class ExtractedImage:
     bytes: bytes

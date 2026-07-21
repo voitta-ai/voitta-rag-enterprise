@@ -46,13 +46,28 @@ import fitz  # PyMuPDF — used only to count/split pages, not to extract text.
 from ...config import get_settings
 from ..indexing_caps import get_caps
 from ..gpu_lock import gpu_lock
-from .base import BaseParser, ExtractedImage, ParserResult, RenderedPage
+from .base import (
+    BaseParser,
+    ExtractedImage,
+    ParserResult,
+    RenderedPage,
+    UnsupportedDocumentError,
+)
 
 logger = logging.getLogger(__name__)
 
 _MINERU_GPU_LOGGED = False
 
 _IMG_REF_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
+
+# PDFium's message when a PDF needs a password we don't have. Matched against
+# both the MinerU error ``detail`` and the subprocess traceback so we catch it
+# regardless of which layer surfaces it.
+_ENCRYPTED_PDF_RE = re.compile(r"incorrect password|password required", re.IGNORECASE)
+
+
+def _is_encrypted_pdf_error(text: str | None) -> bool:
+    return bool(text) and _ENCRYPTED_PDF_RE.search(text) is not None
 
 
 @dataclass
@@ -722,6 +737,14 @@ class _MineruDaemon:
             if resp.get("status") != "ok":
                 detail = resp.get("detail") or "unknown error"
                 tb = resp.get("traceback") or ""
+                # A password-protected PDF is not an indexer failure — PDFium
+                # rejects it with an "Incorrect password error" because we
+                # have no password to supply. Surface it as unsupported so it
+                # parks cleanly instead of counting as an error.
+                if _is_encrypted_pdf_error(detail) or _is_encrypted_pdf_error(tb):
+                    raise UnsupportedDocumentError(
+                        "password-protected PDF — cannot decrypt without a password"
+                    )
                 if tb:
                     logger.error("MinerU subprocess error:\n%s", tb)
                 # repr() of an OSError DROPS the filename argument, so
