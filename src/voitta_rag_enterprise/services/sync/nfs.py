@@ -63,6 +63,15 @@ class NfsSyncStats:
     bytes_copied: int = 0
     errors: list[str] = field(default_factory=list)
 
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "files_copied": self.files_copied,
+            "files_unchanged": self.files_unchanged,
+            "files_removed": self.files_removed,
+            "bytes_copied": self.bytes_copied,
+            "errors": self.errors,
+        }
+
 
 # ---------------------------------------------------------------------------
 # Path-safety helpers
