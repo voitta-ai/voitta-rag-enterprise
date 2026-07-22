@@ -28,7 +28,12 @@ import logging
 from pathlib import Path
 from typing import ClassVar
 
-from .base import BaseParser, ExtractedImage, ParserResult
+from .base import (
+    BaseParser,
+    ExtractedImage,
+    ParserResult,
+    UnsupportedDocumentError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +49,11 @@ class SvgParser(BaseParser):
         except OSError as e:
             return ParserResult.failure(f"svg read failed: {e}")
 
+        # An empty .svg is a committed placeholder, not an indexer failure —
+        # park it as unsupported (same reasoning as the empty-image case).
+        if not svg_bytes.strip():
+            raise UnsupportedDocumentError("empty svg file")
+
         try:
             import pymupdf
         except (ImportError, OSError) as e:
@@ -58,11 +68,23 @@ class SvgParser(BaseParser):
             with pymupdf.open(stream=svg_bytes, filetype="svg") as doc:
                 page = doc[0]
                 if page.rect.width <= 0:
-                    return ParserResult.failure("svg has no width")
+                    # A zero-dimension SVG (e.g. PrusaSlicer commits a
+                    # ``<svg width="0" height="0" viewBox="0 0 0 0"/>``
+                    # placeholder) has nothing to rasterize. Deterministic —
+                    # fails identically every run — so park it as unsupported
+                    # rather than counting it as an error.
+                    raise UnsupportedDocumentError(
+                        "svg has no renderable content (zero width)"
+                    )
                 zoom = _RASTER_WIDTH / page.rect.width
                 pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom))
                 png_bytes = pix.tobytes("png")
                 width, height = pix.width, pix.height
+        except UnsupportedDocumentError:
+            # Deterministic "nothing to render" — let it propagate so the
+            # extractor parks the file as unsupported, not error. Must precede
+            # the broad handler below, which would otherwise swallow it.
+            raise
         except Exception as e:
             return ParserResult.failure(f"svg rasterize failed: {e}")
         if not png_bytes:
