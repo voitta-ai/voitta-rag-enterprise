@@ -51,6 +51,15 @@ class Settings(BaseSettings):
     qdrant_mode: Literal["embedded", "standalone", "managed"] = "embedded"
     qdrant_url: str | None = None
     qdrant_path: Path | None = None
+    # Per-request timeout (seconds) for the HTTP Qdrant client. The client's
+    # own default is 5s, which is too aggressive for our ``wait=True`` upsert
+    # barrier: under sustained bulk embedding, a single batch's synchronous
+    # apply+index ack can briefly exceed 5s and raise httpcore.ReadTimeout,
+    # failing an otherwise-fine file (observed on a 395-chunk .md while its
+    # siblings with more chunks succeeded). 60s absorbs those load spikes
+    # without masking a genuinely wedged Qdrant. Applies to standalone/managed
+    # (HTTP) modes; the embedded backend is in-process and ignores it.
+    qdrant_timeout_s: float = 60.0
     # managed-mode knobs (ignored unless qdrant_mode="managed").
     # ``qdrant_binary`` is a path or a name resolved on PATH (default
     # "qdrant"). The subprocess binds localhost only; storage defaults to

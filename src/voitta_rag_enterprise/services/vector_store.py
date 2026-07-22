@@ -86,7 +86,9 @@ def get_client() -> QdrantClient:
             if _client is None:
                 settings = get_settings()
                 if settings.qdrant_mode == "standalone":
-                    _client = QdrantClient(url=settings.qdrant_url)
+                    _client = QdrantClient(
+                        url=settings.qdrant_url, timeout=settings.qdrant_timeout_s
+                    )
                 elif settings.qdrant_mode == "managed":
                     # Spawn (or reuse) the native Qdrant subprocess and connect
                     # over HTTP. start_managed_qdrant() raises on any failure —
@@ -105,7 +107,9 @@ def get_client() -> QdrantClient:
                             "ignore", message=".*[Aa]pi key.*insecure.*"
                         )
                         _client = QdrantClient(
-                            url=url, api_key=managed_qdrant_api_key()
+                            url=url,
+                            api_key=managed_qdrant_api_key(),
+                            timeout=settings.qdrant_timeout_s,
                         )
                 else:
                     path = settings.resolved_qdrant_path()
