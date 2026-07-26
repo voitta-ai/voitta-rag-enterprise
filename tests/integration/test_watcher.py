@@ -371,6 +371,109 @@ def test_health_reports_watcher_flag(client) -> None:
     assert h["watcher"] is False
 
 
+def _card_jobs() -> list[Job]:
+    with session_scope() as s:
+        return list(
+            s.execute(
+                select(Job).where(Job.kind == "rebuild_folder_cards")
+            ).scalars().all()
+        )
+
+
+def test_new_subdir_file_triggers_card_rebuild(env: None, tmp_path: Path) -> None:
+    """A file landing in a subdirectory via the WATCHER (rsync/scp/NFS-style
+    drop — no upload endpoint involved) must refresh the folder's search
+    cards, or the new subdir's name stays unsearchable until next restart."""
+    init_db()
+    root = tmp_path / "src"
+    root.mkdir()
+    folder_id = _make_folder(root)
+
+    mgr = WatcherManager(debounce_s=0.05)
+    with session_scope() as s:
+        mgr.watch(s.get(Folder, folder_id), max_file_bytes=10**9, ignore=IgnoreMatcher([]))
+    mgr.start()
+    try:
+        (root / "reports" ).mkdir()
+        (root / "reports" / "q3.txt").write_text("numbers")
+        jobs = _wait_until(lambda: _card_jobs() or None, timeout=4.0)
+    finally:
+        mgr.stop()
+
+    assert jobs is not None and len(jobs) == 1
+    assert jobs[0].dedup_key == f"folder_cards:{folder_id}"
+
+    # A MODIFY of the same (now-known) file must not enqueue another
+    # rebuild — only new rows in subdirs do.
+    mgr2 = WatcherManager(debounce_s=0.05)
+    with session_scope() as s:
+        mgr2.watch(s.get(Folder, folder_id), max_file_bytes=10**9, ignore=IgnoreMatcher([]))
+    mgr2.start()
+    try:
+        (root / "reports" / "q3.txt").write_text("updated numbers")
+        _wait_until(lambda: len(_extract_jobs()) >= 1 or None, timeout=3.0)
+        time.sleep(0.3)  # grace for any (wrong) extra card job
+    finally:
+        mgr2.stop()
+    assert len(_card_jobs()) == 1  # still just the original
+
+
+def test_root_level_file_does_not_trigger_card_rebuild(
+    env: None, tmp_path: Path
+) -> None:
+    """A file at the folder root changes no subdir set — no rebuild job."""
+    init_db()
+    root = tmp_path / "src"
+    root.mkdir()
+    folder_id = _make_folder(root)
+
+    mgr = WatcherManager(debounce_s=0.05)
+    with session_scope() as s:
+        mgr.watch(s.get(Folder, folder_id), max_file_bytes=10**9, ignore=IgnoreMatcher([]))
+    mgr.start()
+    try:
+        (root / "plain.txt").write_text("top-level")
+        jobs = _wait_until(lambda: _extract_jobs() or None, timeout=3.0)
+        time.sleep(0.3)
+    finally:
+        mgr.stop()
+    assert jobs is not None
+    assert _card_jobs() == []
+
+
+def test_subdir_file_delete_triggers_card_rebuild(env: None, tmp_path: Path) -> None:
+    """Deleting a subdir's file via the watcher refreshes cards too, so an
+    emptied subdirectory sheds its card."""
+    init_db()
+    root = tmp_path / "src"
+    root.mkdir()
+    folder_id = _make_folder(root)
+    sub = root / "archive"
+    sub.mkdir()
+    target = sub / "old.txt"
+    target.write_text("bytes")
+    with session_scope() as s:
+        s.add(
+            File(
+                folder_id=folder_id,
+                rel_path="archive/old.txt",
+                last_seen_at=int(time.time()),
+                state="indexed",
+            )
+        )
+
+    mgr = WatcherManager(debounce_s=0.05)
+    with session_scope() as s:
+        mgr.watch(s.get(Folder, folder_id), max_file_bytes=10**9, ignore=IgnoreMatcher([]))
+    mgr.start()
+    try:
+        target.unlink()
+        jobs = _wait_until(lambda: _card_jobs() or None, timeout=4.0)
+    finally:
+        mgr.stop()
+    assert jobs is not None and len(jobs) == 1
+
+
 def test_oversize_file_is_skipped(env: None, tmp_path: Path) -> None:
     init_db()
     root = tmp_path / "src"

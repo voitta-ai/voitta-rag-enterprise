@@ -147,6 +147,7 @@ class _FolderHandler(FileSystemEventHandler):
                 select(File).where(File.folder_id == self.folder_id, File.rel_path == rel)
             ).scalar_one_or_none()
             now = int(time.time())
+            is_new_row = file is None or file.state == "deleted"
             if file is None:
                 file = File(
                     folder_id=self.folder_id,
@@ -168,6 +169,15 @@ class _FolderHandler(FileSystemEventHandler):
             job_queue.enqueue(
                 s, "extract", {"file_id": file.id}, dedup_key=f"extract:{file.id}"
             )
+            # A NEW file inside a subdirectory may have brought that
+            # subdirectory into existence — refresh the folder's search
+            # cards so its name is findable without waiting for a restart.
+            # This is the only card trigger for files that land on disk
+            # outside the upload/sync endpoints (rsync, scp, NFS drops).
+            # Deduped per folder and a no-op diff when the subdir set is
+            # unchanged, so bulk drops cost one-ish rebuild, not thousands.
+            if is_new_row and "/" in rel:
+                self._enqueue_card_rebuild(s)
         # Outside the session: tell the SPA the row exists *now*, in
         # ``state='pending'``. Without this the file stays invisible to
         # the UI until the worker finishes extracting and emits its own
@@ -196,6 +206,15 @@ class _FolderHandler(FileSystemEventHandler):
             job_queue.enqueue(
                 s, "delete_file", {"file_id": file.id}, dedup_key=f"delete:{file.id}"
             )
+            # Mirror of the upsert-side trigger: losing a subdirectory's
+            # last file should drop that subdirectory's card.
+            if "/" in rel:
+                self._enqueue_card_rebuild(s)
+
+    def _enqueue_card_rebuild(self, session) -> None:
+        from .indexing.folder_cards import enqueue_rebuild
+
+        enqueue_rebuild(session, self.folder_id)
 
 
 class _RootDispatcher(FileSystemEventHandler):
