@@ -122,6 +122,80 @@ def test_description_included_in_card_text(env, tmp_path: Path) -> None:
     assert set(cards) == {"", "hr", "legal"}
 
 
+def test_clearing_description_removes_it_from_card(env, tmp_path: Path) -> None:
+    """Save → rebuild → clear → rebuild: the term must drop out of the card."""
+    init_db()
+    fid = _seed_folder(tmp_path, "Sandbox", ["a/x.md"])
+    with session_scope() as s:
+        s.add(FolderDirMeta(folder_id=fid, subpath="", description="walrus taxonomy"))
+    folder_cards.rebuild_cards_for_folder(fid)
+    texts = {p["subpath"]: p["text"] for p in vs.list_folder_cards(fid)}
+    assert "walrus taxonomy" in texts[""]
+
+    with session_scope() as s:
+        s.delete(s.get(FolderDirMeta, (fid, "")))
+    assert folder_cards.rebuild_cards_for_folder(fid)["changed"] is True
+    texts = {p["subpath"]: p["text"] for p in vs.list_folder_cards(fid)}
+    assert "walrus taxonomy" not in texts[""]
+    assert set(texts) == {"", "a"}  # card itself remains, minus the description
+
+
+def test_card_cap_breadth_first_and_described_exempt(
+    env, tmp_path: Path, monkeypatch
+) -> None:
+    """Deep trees truncate breadth-first at the cap; described subpaths are
+    always carded even past it."""
+    init_db()
+    monkeypatch.setattr(folder_cards, "_MAX_CARDS_PER_FOLDER", 3)
+    fid = _seed_folder(
+        tmp_path,
+        "Deep",
+        [
+            "a/x.md",
+            "b/x.md",
+            "c/x.md",
+            "d/x.md",  # 4 shallow dirs > cap of 3
+            "a/very/deep/nest/x.md",  # depth loses to breadth
+        ],
+    )
+    with session_scope() as s:
+        s.add(
+            FolderDirMeta(
+                folder_id=fid, subpath="a/very/deep/nest", description="keep me"
+            )
+        )
+    folder_cards.rebuild_cards_for_folder(fid)
+    subpaths = _card_subpaths(fid)
+    # Root always carded; a/b/c are the breadth-first winners; d and the
+    # intermediate deep dirs fell to the cap; the described deep path is
+    # exempt from truncation.
+    assert subpaths == {"", "a", "b", "c", "a/very/deep/nest"}
+
+
+def test_enqueue_rebuild_all_covers_every_folder_once(env, tmp_path: Path) -> None:
+    """Startup reconciliation: one deduped rebuild job per folder."""
+    init_db()
+    fids = {
+        _seed_folder(tmp_path, "R1", ["a/x.md"]),
+        _seed_folder(tmp_path, "R2", []),
+    }
+    assert folder_cards.enqueue_rebuild_all() == 2
+    folder_cards.enqueue_rebuild_all()  # second call must coalesce, not double
+    from voitta_rag_enterprise.db.models import Job
+
+    with session_scope() as s:
+        jobs = [
+            j
+            for j in s.execute(select(Job)).scalars()
+            if j.kind == "rebuild_folder_cards" and j.state == "queued"
+        ]
+        import json as _json
+
+        targeted = {int(_json.loads(j.payload)["folder_id"]) for j in jobs}
+    assert len(jobs) == 2
+    assert targeted == fids
+
+
 def test_orphan_chunk_sweep_spares_cards(env, tmp_path: Path) -> None:
     init_db()
     fid = _seed_folder(tmp_path, "Kept", ["sub/a.md"])
