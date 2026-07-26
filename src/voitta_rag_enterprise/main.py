@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -155,9 +156,28 @@ def _recovery_sync(set_phase):
     except Exception:  # pragma: no cover — never fail boot for this
         logger.exception("index-health check failed at startup")
 
-    watcher = from_settings_for_all_folders()
-    watcher.start()
-    install_default(watcher)
+    # Live file watching. Non-fatal like every other step: an OS-level
+    # failure (e.g. the kernel's inotify instance limit) must not stop the
+    # workers/scheduler from starting — but it's the ONE degradation that
+    # can't stay quiet, because uploads rely on the watcher to create their
+    # File rows. The returned ``None`` flows into /api/health as
+    # ``watcher: false`` and the SPA shows a persistent warning.
+    set_phase("starting file watcher")
+    watcher = None
+    try:
+        watcher = from_settings_for_all_folders()
+        watcher.start()
+        install_default(watcher)
+    except Exception:
+        logger.exception(
+            "file watcher failed to start — continuing WITHOUT live file "
+            "watching (uploads and on-disk changes index on next restart)"
+        )
+        if watcher is not None:
+            # Safe after a failed start() — stop() is unconditional.
+            with contextlib.suppress(Exception):
+                watcher.stop()
+        watcher = None
 
     # Scan AFTER the watcher is live so a file landing mid-scan is caught
     # by the watcher instead of falling into the old walked-past-already
@@ -440,14 +460,24 @@ def create_app() -> FastAPI:
                 app.state.stats_flusher_task = asyncio.create_task(
                     run_stats_flusher()
                 )
-                app.state.startup_status = {"phase": "ready", "ready": True}
+                # ``watcher: false`` = degraded mode: serving + indexing
+                # work, but on-disk changes (incl. uploads) won't be seen
+                # until the next restart's scan. The SPA surfaces this.
+                app.state.startup_status = {
+                    "phase": "ready",
+                    "ready": True,
+                    "watcher": watcher is not None,
+                }
                 logger.info("background startup complete — indexer ready")
             except Exception:
                 logger.exception("background startup failed")
                 app.state.startup_status = {"phase": "error", "ready": False}
 
         if settings.disable_background:
-            app.state.startup_status = {"phase": "ready", "ready": True}
+            # Tests / tooling: no watcher runs in this mode by design.
+            app.state.startup_status = {
+                "phase": "ready", "ready": True, "watcher": False
+            }
         else:
             app.state.bg_startup_task = asyncio.create_task(_finish_startup())
 
@@ -478,10 +508,13 @@ def create_app() -> FastAPI:
                         await app.state.stats_flusher_task
                 if hasattr(app.state, "workers"):
                     await app.state.workers.stop()
+                # ``watcher`` may be None when it failed to start (degraded
+                # mode) — uninstall the default either way.
+                if getattr(app.state, "watcher", None) is not None:
+                    app.state.watcher.stop()
                 if hasattr(app.state, "watcher"):
                     from .services.watcher import uninstall_default
 
-                    app.state.watcher.stop()
                     uninstall_default()
                 # Tear down the managed Qdrant sidecar as part of the normal
                 # shutdown path — atexit stays only as a backstop for exits
@@ -532,7 +565,7 @@ def create_app() -> FastAPI:
         of the current step while starting. The SPA shows a 'starting up'
         banner until ready."""
         status = getattr(app.state, "startup_status", None) or {
-            "phase": "ready", "ready": True
+            "phase": "ready", "ready": True, "watcher": True
         }
         return status
 

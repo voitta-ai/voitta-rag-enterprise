@@ -188,6 +188,189 @@ def test_post_folder_registers_with_running_watcher(
     assert jobs is not None and len(jobs) >= 1
 
 
+def test_managed_folders_share_one_root_watch(env: None, tmp_path: Path) -> None:
+    """Folders under VOITTA_ROOT_PATH route through ONE shared watch.
+
+    Regression for the inotify-instance exhaustion: 50 folders used to
+    mean 50 kernel instances (one emitter per scheduled watch); a second
+    app instance on the same box then died with EMFILE at boot.
+    """
+    init_db()
+    a = tmp_path / "folder_a"
+    b = tmp_path / "folder_b"
+    a.mkdir()
+    b.mkdir()
+    id_a, id_b = _make_folder(a), _make_folder(b)
+
+    mgr = WatcherManager(debounce_s=0.1)
+    with session_scope() as s:
+        mgr.watch(s.get(Folder, id_a), max_file_bytes=10**9, ignore=IgnoreMatcher([]))
+        mgr.watch(s.get(Folder, id_b), max_file_bytes=10**9, ignore=IgnoreMatcher([]))
+
+    # Both managed → zero individual watches, one shared root watch.
+    assert mgr._watches == {}
+    assert set(mgr._managed_dirname) == {id_a, id_b}
+    assert mgr._root_watch is not None
+    # Exactly one scheduled emitter on the observer.
+    assert len(mgr._observer._watches) == 1
+
+    mgr.start()
+    try:
+        (a / "one.txt").write_text("in a")
+        (b / "two.txt").write_text("in b")
+        rows = _wait_until(
+            lambda: (
+                r
+                if len(
+                    r := [
+                        (f.folder_id, f.rel_path)
+                        for f in _all_files()
+                    ]
+                )
+                == 2
+                else None
+            ),
+            timeout=4.0,
+        )
+        # Unwatch A while running: pure map removal — the observer keeps
+        # its single root watch (no emitter churn).
+        mgr.unwatch(id_a)
+        assert id_a not in mgr._managed_dirname
+        assert len(mgr._observer._watches) == 1
+    finally:
+        mgr.stop()
+
+    assert rows is not None and set(rows) == {(id_a, "one.txt"), (id_b, "two.txt")}
+
+
+def _all_files() -> list[File]:
+    with session_scope() as s:
+        return list(s.execute(select(File)).scalars().all())
+
+
+def test_folder_outside_root_gets_individual_watch(
+    env: None, tmp_path: Path
+) -> None:
+    """Paths not directly under VOITTA_ROOT_PATH keep their own watch
+    (desktop cloud-mounts, legacy external rows)."""
+    init_db()
+    outside = tmp_path / "nested" / "elsewhere"
+    outside.mkdir(parents=True)
+    fid = _make_folder(outside)
+
+    mgr = WatcherManager(debounce_s=0.1)
+    with session_scope() as s:
+        mgr.watch(s.get(Folder, fid), max_file_bytes=10**9, ignore=IgnoreMatcher([]))
+    assert fid in mgr._watches
+    assert fid not in mgr._managed_dirname
+    mgr.unwatch(fid)
+    assert mgr._watches == {}
+
+
+def test_cross_folder_move_routes_to_both_handlers(
+    env: None, tmp_path: Path
+) -> None:
+    """A move between two managed folders marks the source file deleted and
+    upserts the destination — via the single root dispatcher."""
+    import time as _time
+
+    from watchdog.events import FileMovedEvent
+
+    init_db()
+    a = tmp_path / "src_a"
+    b = tmp_path / "dst_b"
+    a.mkdir()
+    b.mkdir()
+    id_a, id_b = _make_folder(a), _make_folder(b)
+    # Pre-register the source file; physically place the destination file
+    # so the upsert half finds real bytes.
+    with session_scope() as s:
+        s.add(
+            File(
+                folder_id=id_a,
+                rel_path="doc.txt",
+                last_seen_at=int(_time.time()),
+                state="indexed",
+            )
+        )
+    (b / "doc.txt").write_text("moved bytes")
+
+    mgr = WatcherManager(debounce_s=0.01)
+    with session_scope() as s:
+        mgr.watch(s.get(Folder, id_a), max_file_bytes=10**9, ignore=IgnoreMatcher([]))
+        mgr.watch(s.get(Folder, id_b), max_file_bytes=10**9, ignore=IgnoreMatcher([]))
+
+    # Drive the dispatcher directly — no observer thread, fully deterministic
+    # across platforms (the routing logic is what's under test).
+    dispatcher = mgr._observer._handlers[mgr._root_watch].copy().pop()
+    dispatcher.dispatch(FileMovedEvent(str(a / "doc.txt"), str(b / "doc.txt")))
+
+    def _settled():
+        rows = {(f.folder_id, f.rel_path): f.state for f in _all_files()}
+        src_deleted = rows.get((id_a, "doc.txt")) == "deleted"
+        dst_present = (id_b, "doc.txt") in rows
+        return (rows if (src_deleted and dst_present) else None)
+
+    rows = _wait_until(_settled, timeout=3.0)
+    mgr.stop()
+    assert rows is not None, f"move not routed: {_all_files()}"
+    assert rows[(id_a, "doc.txt")] == "deleted"
+    assert rows[(id_b, "doc.txt")] == "pending"
+
+
+def test_stop_is_safe_after_failed_start(env: None, tmp_path: Path) -> None:
+    """stop() must clean up even when start() raised mid-way (EMFILE case) —
+    the old flag-gated stop() silently leaked the half-started observer."""
+    init_db()
+    root = tmp_path / "src"
+    root.mkdir()
+    fid = _make_folder(root)
+    mgr = WatcherManager(debounce_s=0.1)
+    with session_scope() as s:
+        mgr.watch(s.get(Folder, fid), max_file_bytes=10**9, ignore=IgnoreMatcher([]))
+
+    def _boom() -> None:
+        raise OSError(24, "inotify instance limit reached")
+
+    mgr._observer.start = _boom  # type: ignore[method-assign]
+    try:
+        mgr.start()
+        raise AssertionError("start() should have raised")
+    except OSError:
+        pass
+    # Must not raise, and must be idempotent.
+    mgr.stop()
+    mgr.stop()
+
+
+def test_recovery_sync_survives_watcher_failure(
+    env: None, monkeypatch, tmp_path: Path
+) -> None:
+    """A watcher that cannot start degrades to watcher=None — the rest of
+    the recovery chain (and therefore workers) still proceeds."""
+    init_db()
+    from voitta_rag_enterprise import main as main_mod
+    from voitta_rag_enterprise.services import watcher as watcher_mod
+
+    def _boom() -> None:
+        raise OSError(24, "inotify instance limit reached")
+
+    monkeypatch.setattr(watcher_mod, "from_settings_for_all_folders", _boom)
+    phases: list[str] = []
+    watcher = main_mod._recovery_sync(phases.append)
+    assert watcher is None
+    # The chain ran to the end — the scan phase comes after the watcher.
+    assert "scanning folders" in phases
+
+
+def test_health_reports_watcher_flag(client) -> None:
+    """/api/health carries ``watcher`` so the SPA can flag degraded mode.
+    disable_background mode (tests) runs no watcher by design → False."""
+    h = client.get("/api/health").json()
+    assert h["ready"] is True
+    assert h["watcher"] is False
+
+
 def test_oversize_file_is_skipped(env: None, tmp_path: Path) -> None:
     init_db()
     root = tmp_path / "src"

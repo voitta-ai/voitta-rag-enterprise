@@ -179,6 +179,10 @@ async function bootstrap() {
 // Poll /api/health until the backend's background startup (model warmup +
 // workers) is ready, showing a banner meanwhile so a multi-minute boot doesn't
 // look like a dead app. Stops once ready (or on error — don't nag forever).
+// On ready, ``watcher: false`` flips the banner into a persistent warning:
+// the app serves and indexes, but live file watching is down (uploads and
+// on-disk changes won't be seen until the next restart) — that degradation
+// must never be silent.
 async function pollStartupReadiness() {
     const banner = $("#startup-banner");
     const text = $("#startup-banner-text");
@@ -186,7 +190,17 @@ async function pollStartupReadiness() {
     for (let i = 0; i < 600; i++) {  // ~20 min ceiling at 2s
         let h;
         try { h = await api.health(); } catch { h = null; }
-        if (!h || h.ready) { banner.hidden = true; return; }
+        if (!h || h.ready) {
+            if (h && h.ready && h.watcher === false) {
+                text.textContent =
+                    "⚠ File watching unavailable — new uploads and on-disk "
+                    + "changes will be indexed on the next restart.";
+                banner.hidden = false;
+            } else {
+                banner.hidden = true;
+            }
+            return;
+        }
         text.textContent = `Starting up — ${h.phase || "loading"}…`;
         banner.hidden = false;
         await new Promise((r) => setTimeout(r, 2000));

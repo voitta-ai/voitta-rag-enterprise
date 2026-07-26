@@ -1,7 +1,19 @@
-"""Filesystem watcher (watchdog) → enqueues extract / delete_file jobs."""
+"""Filesystem watcher (watchdog) → enqueues extract / delete_file jobs.
+
+Watch topology: managed folders (direct children of ``VOITTA_ROOT_PATH``)
+share ONE recursive watch on the root — events are routed to the owning
+folder's handler by their first path segment. This keeps the kernel
+inotify-instance cost at one per process instead of one per folder
+(watchdog creates an inotify instance per scheduled watch; 50 folders
+used to consume 50 of the default ``fs.inotify.max_user_instances=128``,
+and a second app instance on the same box then failed to boot). Folders
+living elsewhere (desktop cloud-mounts, legacy external paths) still get
+an individual watch each.
+"""
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 import time
@@ -186,17 +198,106 @@ class _FolderHandler(FileSystemEventHandler):
             )
 
 
+class _RootDispatcher(FileSystemEventHandler):
+    """Route events from the single root watch to the owning folder's handler.
+
+    ``handlers`` is the manager's live ``dirname → _FolderHandler`` map —
+    shared by reference, so folders added/removed at runtime take effect
+    without touching the observer. A moved event whose src and dest fall in
+    different folders is dispatched to both; each handler's own ``_rel``
+    guard makes it act only on the half inside its folder root.
+    """
+
+    def __init__(self, root: Path, handlers: dict[str, _FolderHandler]) -> None:
+        self._root = root
+        self._handlers = handlers
+
+    def _handler_for(self, path: str) -> _FolderHandler | None:
+        if not path:
+            return None
+        try:
+            rel = Path(path).resolve().relative_to(self._root)
+        except (OSError, ValueError):
+            return None
+        return self._handlers.get(rel.parts[0]) if rel.parts else None
+
+    def dispatch(self, event: FileSystemEvent) -> None:
+        targets = []
+        h = self._handler_for(event.src_path)
+        if h is not None:
+            targets.append(h)
+        dest_h = self._handler_for(getattr(event, "dest_path", ""))
+        if dest_h is not None and dest_h not in targets:
+            targets.append(dest_h)
+        for target in targets:
+            target.dispatch(event)
+
+
 class WatcherManager:
     def __init__(self, debounce_s: float = 0.5) -> None:
         self._observer: BaseObserver = Observer()
         self._debouncer = _Debouncer(debounce_s)
+        # Individual watches for folders OUTSIDE the managed root, keyed by
+        # folder_id. Managed folders never appear here — they route through
+        # the shared root watch below.
         self._watches: dict[int, object] = {}
+        # Shared root watch state. ``_root`` is the resolved
+        # VOITTA_ROOT_PATH (None when unconfigured — then every folder
+        # gets an individual watch, the pre-root-watch behaviour).
+        self._root: Path | None = None
+        root = get_settings().root_path
+        if root is not None:
+            with contextlib.suppress(OSError):
+                self._root = Path(root).expanduser().resolve()
+        self._root_handlers: dict[str, _FolderHandler] = {}
+        self._managed_dirname: dict[int, str] = {}
+        self._root_watch: object | None = None
         self._started = False
 
+    def _is_managed(self, folder_root: Path) -> bool:
+        """True when ``folder_root`` is a real direct child of the root.
+
+        Symlinked children are excluded: a recursive inotify watch does not
+        traverse symlinks, so routing them through the root watch would
+        silently drop their events — they keep an individual watch instead.
+        """
+        if self._root is None:
+            return False
+        try:
+            return (
+                folder_root.parent.resolve() == self._root
+                and not folder_root.is_symlink()
+            )
+        except OSError:
+            return False
+
+    def _ensure_root_watch(self) -> None:
+        if self._root_watch is not None or self._root is None:
+            return
+        # The root may not exist yet on a fresh install (it's created on
+        # first folder creation) — scheduling a watch on a missing dir
+        # raises, so create it the same way create_folder would.
+        self._root.mkdir(parents=True, exist_ok=True)
+        dispatcher = _RootDispatcher(self._root, self._root_handlers)
+        self._root_watch = self._observer.schedule(
+            dispatcher, str(self._root), recursive=True
+        )
+
     def watch(self, folder: Folder, max_file_bytes: int, ignore: IgnoreMatcher) -> None:
-        if folder.id in self._watches:
+        if folder.id in self._managed_dirname or folder.id in self._watches:
             return
         root = Path(folder.path)
+        if self._is_managed(root):
+            # No exists() check: the map entry is inert until the directory
+            # appears, and the root watch (already recursive) picks events
+            # up the moment it does.
+            handler = _FolderHandler(
+                folder.id, root, ignore, max_file_bytes, self._debouncer
+            )
+            self._root_handlers[root.name] = handler
+            self._managed_dirname[folder.id] = root.name
+            self._ensure_root_watch()
+            return
         if not root.exists():
             logger.warning("watcher: folder path missing: %s", folder.path)
             return
@@ -205,6 +306,12 @@ class WatcherManager:
         self._watches[folder.id] = watch
 
     def unwatch(self, folder_id: int) -> None:
+        dirname = self._managed_dirname.pop(folder_id, None)
+        if dirname is not None:
+            # Pure map removal — the shared root watch stays (one instance,
+            # events for the removed subtree now fall through the map).
+            self._root_handlers.pop(dirname, None)
+            return
         watch = self._watches.pop(folder_id, None)
         if watch is not None:
             self._observer.unschedule(watch)
@@ -216,10 +323,19 @@ class WatcherManager:
         self._started = True
 
     def stop(self) -> None:
-        if not self._started:
-            return
-        self._observer.stop()
-        self._observer.join(timeout=5)
+        """Tear down at ANY lifecycle point — including after a failed
+        ``start()``.
+
+        watchdog's ``Observer.start()`` starts the observer thread first and
+        each emitter after, so an OSError mid-way (e.g. the kernel's inotify
+        instance limit) leaves the thread and some emitters alive. Gating
+        this on ``_started`` (which is only set on full success) would leak
+        them — so the teardown is unconditional and idempotent.
+        """
+        with contextlib.suppress(RuntimeError):
+            self._observer.stop()
+            if self._observer.is_alive():
+                self._observer.join(timeout=5)
         self._debouncer.cancel_all()
         self._started = False
 
@@ -256,16 +372,34 @@ def default_manager() -> WatcherManager | None:
 
 
 def watch_folder_in_default(folder: Folder) -> None:
-    """Add a folder to the running watcher (no-op if no manager is installed)."""
+    """Add a folder to the running watcher (no-op if no manager is installed).
+
+    Never raises: ``observer.schedule`` on a live observer starts the
+    emitter immediately, which can hit OS limits (inotify EMFILE) — that
+    must degrade to "folder unwatched until next restart", not fail the
+    folder-create/rename request that triggered it. Managed folders don't
+    take this path's risky branch at all (map insert, no new emitter).
+    """
     mgr = _default_manager
     if mgr is None:
         return
     settings = get_settings()
-    mgr.watch(folder, settings.max_file_bytes, _ignore_from_settings())
+    try:
+        mgr.watch(folder, settings.max_file_bytes, _ignore_from_settings())
+    except Exception:
+        logger.exception(
+            "watcher: could not watch folder %d (%s) — changes in it will be "
+            "picked up on next restart's scan",
+            folder.id,
+            folder.path,
+        )
 
 
 def unwatch_folder_in_default(folder_id: int) -> None:
     mgr = _default_manager
     if mgr is None:
         return
-    mgr.unwatch(folder_id)
+    try:
+        mgr.unwatch(folder_id)
+    except Exception:
+        logger.exception("watcher: could not unwatch folder %d", folder_id)
