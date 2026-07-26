@@ -649,6 +649,12 @@ def _delete_orphans_for_collection(
     ``chunk_id`` — without the kind guard this sweep would delete every
     card on each boot. Their lifecycle is handled by
     ``sweep_orphan_folder_cards`` instead.
+
+    Cost note: the scroll fetches ONLY the ``id_key`` and ``kind`` payload
+    fields. Full payloads (chunk text, layout, meta) made this sweep the
+    dominant startup cost on big corpora — ~2 GB of JSON decoded to read
+    one integer per point on a 1.9M-point collection. The include-list
+    plus a big batch size keeps the whole sweep in the seconds range.
     """
 
     def _do() -> int:
@@ -660,8 +666,8 @@ def _delete_orphans_for_collection(
         while True:
             res, offset = client.scroll(
                 collection,
-                limit=1024,
-                with_payload=True,
+                limit=8192,
+                with_payload=[id_key, "kind"],
                 offset=offset,
             )
             stale_ids = [
@@ -934,8 +940,10 @@ def sweep_orphan_folder_cards(live_folder_ids: set[int]) -> int:
                         )
                     ]
                 ),
-                limit=1024,
-                with_payload=True,
+                limit=8192,
+                # Only the field the liveness check reads — same cost
+                # rationale as _delete_orphans_for_collection.
+                with_payload=["folder_id"],
                 offset=offset,
             )
             stale_ids = [

@@ -40,6 +40,152 @@ def _startup_scan() -> None:
             logger.info("scan %s: +%d ~%d -%d", f.path, r.added, r.updated, r.vanished)
 
 
+def _recovery_sync(set_phase):
+    """The synchronous startup-recovery chain. Returns the started watcher.
+
+    Runs on a worker thread (one ``asyncio.to_thread`` from
+    ``_finish_startup``) because every step is blocking DB/HTTP work —
+    inline on the event loop it starved the server for minutes on large
+    corpora. ``set_phase`` mutates ``app.state.startup_status`` (a plain
+    attribute write, thread-safe) so the UI shows live progress.
+
+    Every step is individually non-fatal: a failed sweep must never
+    prevent the watcher and workers from starting — a half-repaired app
+    that indexes beats a fully-diagnosed one that doesn't.
+    """
+    from .services import folder_active, job_queue
+    from .services.indexing import reconcile_abandoned_extracts
+    from .services.watcher import from_settings_for_all_folders, install_default
+
+    set_phase("reconciling jobs")
+    try:
+        requeued, killed = job_queue.reclaim_abandoned_jobs()
+        if requeued or killed:
+            logger.warning(
+                "abandoned-jobs reconcile: requeued=%d killed=%d", requeued, killed
+            )
+    except Exception:
+        logger.exception("abandoned-jobs reconcile failed at startup")
+
+    # Disk-aware recovery: cross-checks queued jobs and file rows against
+    # the filesystem (cancels delete jobs whose target is on disk,
+    # resurrects wrongly-deleted rows, finishes interrupted deletes, snaps
+    # drifted counters, retries I/O-shaped errors). Must run after
+    # reclaim_abandoned_jobs and before folder_active.init_from_db.
+    set_phase("recovering state")
+    try:
+        from .services.startup_recovery import run_startup_recovery
+
+        run_startup_recovery()
+    except Exception:
+        logger.exception("startup recovery failed")
+
+    # Bootstrap the folder-active tracker *after* the sweeps so the counts
+    # reflect the settled queue. Subsequent enqueue/finish hooks maintain
+    # it incrementally.
+    folder_active.init_from_db()
+    try:
+        extracts_repaired = reconcile_abandoned_extracts()
+        if extracts_repaired:
+            logger.warning(
+                "reset %d file(s) from extracted/embedding -> pending"
+                " (extract job was abandoned)",
+                extracts_repaired,
+            )
+    except Exception:
+        logger.exception("abandoned-extracts reconcile failed at startup")
+
+    # Qdrant orphan-point sweep. Cleans points whose payload id no longer
+    # matches any SQLite row:
+    #   - Images: caused by the pre-fix _commit_indexing path deleting
+    #     Image DB rows but not their Qdrant points.
+    #   - Chunks: shouldn't accumulate (replace_chunks_for_file is atomic),
+    #     but we sweep anyway as defense-in-depth.
+    # Idempotent on subsequent runs.
+    set_phase("sweeping orphan vectors")
+    try:
+        from .db.models import Chunk as _Chunk
+        from .db.models import Image as _Image
+        from .services.vector_store import (
+            delete_orphan_chunk_points,
+            delete_orphan_image_points,
+        )
+
+        with session_scope() as _s:
+            known_image_ids = set(_s.execute(select(_Image.id)).scalars())
+            known_chunk_ids = set(_s.execute(select(_Chunk.id)).scalars())
+        deleted_imgs = delete_orphan_image_points(known_image_ids)
+        if deleted_imgs:
+            logger.warning(
+                "deleted %d orphan image point(s) from Qdrant "
+                "(stale image_id payloads from a pre-fix re-extract)",
+                deleted_imgs,
+            )
+        deleted_chunks = delete_orphan_chunk_points(known_chunk_ids)
+        if deleted_chunks:
+            logger.warning(
+                "deleted %d orphan chunk point(s) from Qdrant "
+                "(stale chunk_id payloads)",
+                deleted_chunks,
+            )
+        # Folder cards have their own sweep (they're exempt from the chunk
+        # sweep above — no chunk_id): drop cards whose folder was deleted
+        # while the process was down.
+        from .services.indexing.folder_cards import sweep_orphan_cards
+
+        deleted_cards = sweep_orphan_cards()
+        if deleted_cards:
+            logger.warning(
+                "deleted %d orphan folder-card point(s) from Qdrant",
+                deleted_cards,
+            )
+    except Exception:  # pragma: no cover — never fail boot for this
+        logger.exception("orphan-point sweep failed at startup")
+
+    # Index health: warn if any folder has files marked indexed in SQLite
+    # but no chunk points in Qdrant (the Qdrant store was wiped or moved).
+    # The user has to Reindex to repopulate; we surface it on startup so
+    # they don't discover it via empty search results an hour later.
+    set_phase("checking index health")
+    try:
+        from .services.reconcile import log_startup_warnings
+
+        with session_scope() as _s:
+            log_startup_warnings(_s)
+    except Exception:  # pragma: no cover — never fail boot for this
+        logger.exception("index-health check failed at startup")
+
+    watcher = from_settings_for_all_folders()
+    watcher.start()
+    install_default(watcher)
+
+    # Scan AFTER the watcher is live so a file landing mid-scan is caught
+    # by the watcher instead of falling into the old walked-past-already
+    # gap (invisible until next restart). Duplicate enqueues from
+    # watcher+scan coalesce via dedup_key. Also after the job sweeps
+    # above, so the scan's enqueues don't dedup against a killed process's
+    # zombie jobs.
+    set_phase("scanning folders")
+    try:
+        _startup_scan()
+    except Exception:
+        logger.exception("startup folder scan failed")
+
+    # Folder-card reconciliation: one deduped rebuild job per folder. The
+    # handler diffs against Qdrant and no-ops when nothing changed, so
+    # this is cheap on a quiet boot but heals cards after offline tree
+    # changes, first deploys of the feature, or a wiped vector store.
+    try:
+        from .services.indexing.folder_cards import enqueue_rebuild_all
+
+        n = enqueue_rebuild_all()
+        logger.info("folder-cards: enqueued rebuild for %d folder(s)", n)
+    except Exception:  # pragma: no cover — never fail boot for this
+        logger.exception("folder-card reconciliation failed at startup")
+
+    return watcher
+
+
 async def _warmup_embedders(settings: object) -> None:
     """Force every real embedder model to load before any worker runs.
 
@@ -162,25 +308,23 @@ def create_app() -> FastAPI:
     lifespan; we compose it with our own.
     """
     from .mcp_server import build_app as build_mcp_app
+
     # Side-effect import: registers the ``cad_projection`` handler with
     # ``asset_handlers``. The MCP ``request_asset`` tool and the
     # ``/api/assets/{token}`` route resolve handlers by asset_type at
     # call time, so this import has to land before the app starts
     # serving. Adding a new on-demand handler (audio waveform, xlsx
     # chart, …) is one more import line here.
-    from .services import cad_render  # noqa: F401
     # Side-effect import: registers ``asset_type="original"``, which
     # exposes the file's source bytes (PDF/DOCX/XLSX/STEP/…) via a
     # signed URL. Available on every indexed file regardless of
     # parser; ``list_assets`` synthesises the menu entry. Bookmarklet-
     # style clients use this to ingest raw bytes into a downstream
     # Python pipeline instead of consuming the markdown extract.
-    from .services import original_file  # noqa: F401
     # Side-effect import: registers ``asset_type="cad_mesh"``, which
     # exports a binary glTF (.glb) of a CAD file for three.js / web
     # viewers. Available on STEP / IGES / FCStd files. ``list_assets``
     # surfaces it conditionally on extension.
-    from .services import cad_mesh  # noqa: F401
     # Side-effect import: registers ``asset_type="md"``, which serves
     # the parser's normalised text.md extract via a signed URL.
     # Available whenever indexing produced a markdown blob — PDF /
@@ -188,7 +332,12 @@ def create_app() -> FastAPI:
     # files synced into the index. Lets the LLM pipe the extract
     # into ``fetch_to_python_storage`` → ``run_compute`` without
     # consuming tool-result context the way ``get_file`` would.
-    from .services import markdown_extract  # noqa: F401
+    from .services import (
+        cad_mesh,  # noqa: F401
+        cad_render,  # noqa: F401
+        markdown_extract,  # noqa: F401
+        original_file,  # noqa: F401
+    )
 
     # Bind the MCP route at /mcp internally; below we splice its routes into
     # the parent FastAPI app rather than mounting, so the URL is exactly /mcp
@@ -229,167 +378,23 @@ def create_app() -> FastAPI:
             app.state.startup_status = {"phase": phase, "ready": False}
 
         async def _finish_startup() -> None:
-            # The heavy tail (Qdrant sweeps, model warmup, worker +
-            # scheduler start) runs AFTER the server starts serving, so the
+            # The heavy tail (recovery + Qdrant sweeps, model warmup, worker
+            # + scheduler start) runs AFTER the server starts serving, so the
             # UI is reachable immediately and can show "starting up" instead
-            # of a dead page for minutes. The warmup->worker order inside is
-            # preserved (two CUDA contexts at once corrupts the heap).
+            # of a dead page for minutes. The whole synchronous recovery
+            # chain runs through ONE asyncio.to_thread call — it is blocking
+            # DB/HTTP work, and executing it inline here would starve the
+            # event loop (on a ~2M-point corpus that meant minutes of the
+            # server not even accepting connections). The warmup->worker
+            # order is preserved (two CUDA contexts at once corrupts the
+            # heap).
             try:
-                from .services import job_queue
                 from .services.indexing import (
                     HANDLERS as INDEXING_HANDLERS,
                 )
-                from .services.indexing import reconcile_abandoned_extracts
-                from .services.watcher import (
-                    from_settings_for_all_folders,
-                    install_default,
-                )
                 from .services.worker import DEFAULT_HANDLERS, WorkerPool
 
-                # Every recovery step below is individually non-fatal: a
-                # failed sweep must never prevent the watcher and workers
-                # from starting — a half-repaired app that indexes beats a
-                # fully-diagnosed one that doesn't.
-                _set_phase("reconciling jobs")
-                try:
-                    requeued, killed = job_queue.reclaim_abandoned_jobs()
-                    if requeued or killed:
-                        logger.warning(
-                            "abandoned-jobs reconcile: requeued=%d killed=%d",
-                            requeued,
-                            killed,
-                        )
-                except Exception:
-                    logger.exception("abandoned-jobs reconcile failed at startup")
-
-                # Disk-aware recovery: cross-checks queued jobs and file rows
-                # against the filesystem (cancels delete jobs whose target is
-                # on disk, resurrects wrongly-deleted rows, finishes
-                # interrupted deletes, snaps drifted counters, retries
-                # I/O-shaped errors). Must run after reclaim_abandoned_jobs
-                # and before folder_active.init_from_db.
-                _set_phase("recovering state")
-                try:
-                    from .services.startup_recovery import run_startup_recovery
-
-                    run_startup_recovery()
-                except Exception:
-                    logger.exception("startup recovery failed")
-
-                # Bootstrap the folder-active tracker *after* the sweeps so
-                # the counts reflect the settled queue. Subsequent
-                # enqueue/finish hooks maintain it incrementally.
-                from .services import folder_active
-
-                folder_active.init_from_db()
-                try:
-                    extracts_repaired = reconcile_abandoned_extracts()
-                    if extracts_repaired:
-                        logger.warning(
-                            "reset %d file(s) from extracted/embedding -> pending"
-                            " (extract job was abandoned)",
-                            extracts_repaired,
-                        )
-                except Exception:
-                    logger.exception("abandoned-extracts reconcile failed at startup")
-
-                # Qdrant orphan-point sweep. Cleans points whose payload id
-                # no longer matches any SQLite row:
-                #   - Images: caused by the pre-fix _commit_indexing path
-                #     deleting Image DB rows but not their Qdrant points.
-                #   - Chunks: shouldn't accumulate (replace_chunks_for_file
-                #     is atomic), but we sweep anyway as defense-in-depth.
-                # Idempotent on subsequent runs.
-                _set_phase("sweeping orphan vectors")
-                try:
-                    from sqlalchemy import select as _select
-
-                    from .db.database import session_scope as _ss
-                    from .db.models import Chunk as _Chunk
-                    from .db.models import Image as _Image
-                    from .services.vector_store import (
-                        delete_orphan_chunk_points,
-                        delete_orphan_image_points,
-                    )
-
-                    with _ss() as _s:
-                        known_image_ids = {
-                            iid for (iid,) in _s.execute(_select(_Image.id)).all()
-                        }
-                        known_chunk_ids = {
-                            cid for (cid,) in _s.execute(_select(_Chunk.id)).all()
-                        }
-                    deleted_imgs = delete_orphan_image_points(known_image_ids)
-                    if deleted_imgs:
-                        logger.warning(
-                            "deleted %d orphan image point(s) from Qdrant "
-                            "(stale image_id payloads from a pre-fix re-extract)",
-                            deleted_imgs,
-                        )
-                    deleted_chunks = delete_orphan_chunk_points(known_chunk_ids)
-                    if deleted_chunks:
-                        logger.warning(
-                            "deleted %d orphan chunk point(s) from Qdrant "
-                            "(stale chunk_id payloads)",
-                            deleted_chunks,
-                        )
-                    # Folder cards have their own sweep (they're exempt from
-                    # the chunk sweep above — no chunk_id): drop cards whose
-                    # folder was deleted while the process was down.
-                    from .services.indexing.folder_cards import sweep_orphan_cards
-
-                    deleted_cards = sweep_orphan_cards()
-                    if deleted_cards:
-                        logger.warning(
-                            "deleted %d orphan folder-card point(s) from Qdrant",
-                            deleted_cards,
-                        )
-                except Exception:  # pragma: no cover — never fail boot for this
-                    logger.exception("orphan-point sweep failed at startup")
-
-                # Index health: warn if any folder has files marked indexed in
-                # SQLite but no chunk points in Qdrant (the Qdrant store was
-                # wiped or moved). The user has to Reindex to repopulate; we
-                # surface it on startup so they don't discover it via empty
-                # search results an hour later.
-                _set_phase("checking index health")
-                try:
-                    from .db.database import session_scope as _ss
-                    from .services.reconcile import log_startup_warnings
-
-                    with _ss() as _s:
-                        log_startup_warnings(_s)
-                except Exception:  # pragma: no cover — never fail boot for this
-                    logger.exception("index-health check failed at startup")
-
-                watcher = from_settings_for_all_folders()
-                watcher.start()
-                install_default(watcher)
-
-                # Scan AFTER the watcher is live so a file landing mid-scan
-                # is caught by the watcher instead of falling into the old
-                # walked-past-already gap (invisible until the next restart).
-                # Duplicate enqueues from watcher+scan coalesce via dedup_key.
-                # Also after the job sweeps above, so the scan's enqueues
-                # don't dedup against a killed process's zombie jobs.
-                _set_phase("scanning folders")
-                try:
-                    await asyncio.to_thread(_startup_scan)
-                except Exception:
-                    logger.exception("startup folder scan failed")
-
-                # Folder-card reconciliation: one deduped rebuild job per
-                # folder. The handler diffs against Qdrant and no-ops when
-                # nothing changed, so this is cheap on a quiet boot but
-                # heals cards after offline tree changes, first deploys of
-                # the feature, or a wiped vector store.
-                try:
-                    from .services.indexing.folder_cards import enqueue_rebuild_all
-
-                    n = await asyncio.to_thread(enqueue_rebuild_all)
-                    logger.info("folder-cards: enqueued rebuild for %d folder(s)", n)
-                except Exception:  # pragma: no cover — never fail boot for this
-                    logger.exception("folder-card reconciliation failed at startup")
+                watcher = await asyncio.to_thread(_recovery_sync, _set_phase)
 
                 handlers = {**DEFAULT_HANDLERS, **INDEXING_HANDLERS}
                 # Pre-warm the embedders before any worker can claim a job.
