@@ -1005,7 +1005,8 @@ def remove_files_from_image_points(file_ids: list[int]) -> int:
 
 @dataclass
 class SearchHit:
-    id: int
+    # int for chunk/image points; str (UUID) for folder-card points.
+    id: int | str
     score: float
     payload: dict[str, Any]
 

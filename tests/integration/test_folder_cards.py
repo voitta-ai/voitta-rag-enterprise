@@ -245,6 +245,40 @@ def test_dir_meta_rest_roundtrip(app, client, tmp_path: Path) -> None:
     assert "rebuild_folder_cards" in kinds
 
 
+def test_rest_search_returns_folder_card(app, client, tmp_path: Path) -> None:
+    """POST /api/search must serialize a folder-card hit (UUID point id).
+
+    Regression: ``Hit.id`` was ``int``-typed, so the first card hit made
+    the endpoint 500 with a pydantic int_parsing error.
+    """
+    from tests.conftest import auth_as
+
+    auth_as(app, "owner@example.com")
+    r = client.post("/api/folders", json={"name": "cardsearch"})
+    assert r.status_code == 201, r.text
+    fid = r.json()["id"]
+    with session_scope() as s:
+        s.add(
+            File(
+                folder_id=fid,
+                rel_path="quarterly/report.md",
+                last_seen_at=int(time.time()),
+                state="indexed",
+            )
+        )
+    folder_cards.rebuild_cards_for_folder(fid)
+
+    r = client.post(
+        "/api/search",
+        json={"query": "cardsearch quarterly", "modes": ["chunks"], "limit": 10},
+    )
+    assert r.status_code == 200, r.text
+    hits = r.json()["chunks"]
+    cards = [h for h in hits if h["payload"].get("kind") == "folder_card"]
+    assert cards, f"no folder_card hit in {[h['payload'].get('kind') for h in hits]}"
+    assert isinstance(cards[0]["id"], str)  # UUID point id survives the model
+
+
 def test_mcp_chunk_from_hit_handles_folder_card(env) -> None:
     from voitta_rag_enterprise.mcp_server import _chunk_from_hit
     from voitta_rag_enterprise.services.vector_store import SearchHit

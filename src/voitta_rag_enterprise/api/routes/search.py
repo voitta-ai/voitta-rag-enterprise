@@ -25,7 +25,9 @@ class SearchIn(BaseModel):
 
 
 class Hit(BaseModel):
-    id: int
+    # int for chunk/image points; str (UUID) for synthetic folder-card
+    # points, whose deterministic ids are uuid5 of (folder_id, subpath).
+    id: int | str
     score: float
     payload: dict[str, Any]
 
