@@ -39,19 +39,13 @@ cadquery-ocp-proxy==7.9.3.1.1
     # via cadquery-ocp
 caio==0.9.25
     # via aiofile
-cairocffi==1.7.1
-    # via cairosvg
-cairosvg==2.9.0
-    # via voitta-rag-enterprise (/Users/roman/DEVEL/voitta-rag-enterprise/pyproject.toml)
 certifi==2026.5.20
     # via
     #   httpcore
     #   httpx
     #   requests
 cffi==2.0.0
-    # via
-    #   cairocffi
-    #   cryptography
+    # via cryptography
 charset-normalizer==3.4.7
     # via
     #   reportlab
@@ -74,14 +68,10 @@ cryptography==48.0.0
     #   google-auth
     #   joserfc
     #   pyjwt
-cssselect2==0.9.0
-    # via cairosvg
 cycler==0.12.1
     # via matplotlib
 cyclopts==4.16.1
     # via fastmcp-slim
-defusedxml==0.7.1
-    # via cairosvg
 distro==1.9.0
     # via openai
 dnspython==2.8.0
@@ -322,7 +312,6 @@ pdftext==0.6.3
 pillow==12.2.0
     # via
     #   voitta-rag-enterprise (/Users/roman/DEVEL/voitta-rag-enterprise/pyproject.toml)
-    #   cairosvg
     #   fastembed
     #   matplotlib
     #   mineru
@@ -502,10 +491,6 @@ sympy==1.14.0
     # via torch
 threadpoolctl==3.6.0
     # via scikit-learn
-tinycss2==1.5.1
-    # via
-    #   cairosvg
-    #   cssselect2
 tokenizers==0.22.2
     # via
     #   fastembed
@@ -595,10 +580,6 @@ watchfiles==1.2.0
     #   uvicorn
 wcwidth==0.8.0
     # via ftfy
-webencodings==0.5.1
-    # via
-    #   cssselect2
-    #   tinycss2
 websockets==16.0
     # via
     #   fastmcp-slim
