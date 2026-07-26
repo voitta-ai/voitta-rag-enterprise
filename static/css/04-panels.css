@@ -253,6 +253,48 @@
     margin: 0 0 var(--md);
 }
 .badge-row { display: flex; gap: 6px; margin-bottom: var(--md); }
+
+/* Folder / subfolder description (searchable, owner-editable). A quiet
+   inset card between the path and the badges: description reads as body
+   copy with an accent rule; the edit control is a small trailing link. */
+#folder-desc-block { margin: 0 0 var(--md); }
+#folder-desc-text {
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--color-text-primary);
+    background: rgba(142, 142, 147, 0.10);
+    border-left: 3px solid var(--color-accent, #3b82f6);
+    border-radius: 0 var(--radius-sm, 6px) var(--radius-sm, 6px) 0;
+    padding: 8px 10px;
+    margin: 0 0 6px;
+}
+#folder-desc-edit {
+    font-size: 11px;
+    padding: 2px 0;
+    background: none;
+    border: none;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+#folder-desc-edit:hover { color: var(--color-text-primary); }
+#folder-desc-editor textarea {
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--color-text-primary);
+    background: rgba(142, 142, 147, 0.10);
+    border: 1px solid rgba(142, 142, 147, 0.35);
+    border-radius: var(--radius-sm, 6px);
+    padding: 8px 10px;
+    margin: 0 0 6px;
+    box-sizing: border-box;
+}
+#folder-desc-editor textarea:focus {
+    outline: none;
+    border-color: var(--color-accent, #3b82f6);
+}
+#folder-desc-editor .badge-row { margin-bottom: 0; }
 .badge {
     background: rgba(142, 142, 147, 0.18);
     color: var(--color-text-secondary);
