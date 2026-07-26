@@ -57,6 +57,7 @@ EXPECTED_ROUTES = [
     "GET /api/folders",
     "GET /api/folders/active-ids",
     "GET /api/folders/root",
+    "GET /api/folders/{folder_id}/dir-meta",
     "GET /api/folders/{folder_id}/dirs",
     "GET /api/folders/{folder_id}/files",
     "GET /api/folders/{folder_id}/stats",
@@ -127,6 +128,7 @@ EXPECTED_ROUTES = [
     "POST /api/sync/local/connect",
     "POST /api/users",
     "POST /mcp",
+    "PUT /api/folders/{folder_id}/dir-meta",
     "PUT /api/folders/{folder_id}/sync",
 ]
 

@@ -20,6 +20,7 @@ def test_indexing_handlers_complete_and_async() -> None:
         "delete_file",
         "sync",
         "reindex_folder",
+        "rebuild_folder_cards",
     }
     for kind, fn in HANDLERS.items():
         assert inspect.iscoroutinefunction(fn), f"{kind} handler must be async"

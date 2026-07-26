@@ -8,6 +8,7 @@ import logging
 import os
 import shutil
 import tempfile
+import time
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -16,9 +17,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ...config import get_settings
-from ...db.models import File, Folder, FolderSyncSource, Image, Job
+from ...db.models import File, Folder, FolderDirMeta, FolderSyncSource, Image, Job
 from ...services import events, job_queue
 from ...services.indexing import file_event_payload, publish_file_upserted
+from ...services.indexing import folder_cards
 from ...services.acl import (
     CurrentUser,
     folder_active_for_user,
@@ -233,10 +235,17 @@ def _folder_has_active_job(db: Session, folder_id: int) -> bool:
     if src is not None and src.sync_status == "syncing":
         return True
 
+    from ...services.folder_active import UNTRACKED_KINDS
+
     inflight = db.execute(
         select(Job).where(Job.state.in_(("queued", "running")))
     ).scalars()
     for j in inflight:
+        # Bookkeeping jobs (folder-card rebuilds) never touch the folder's
+        # absolute path, so a physical rename can't orphan their output —
+        # don't let them block the rename.
+        if j.kind in UNTRACKED_KINDS:
+            continue
         try:
             payload = json.loads(j.payload)
         except (TypeError, ValueError):
@@ -297,6 +306,7 @@ def create_folder(
     db.flush()
     grant_folder(db, folder.id, user.id)
     scan = scan_folder(db, folder)
+    folder_cards.enqueue_rebuild(db, folder.id)
     db.commit()
     watch_folder_in_default(folder)
     out = _to_folder_out(folder, owned=True, active=True)
@@ -419,6 +429,12 @@ async def upload_file(
         rel_base=rel_base,
         rel_path_override=rel_path,
     )
+    if uploaded:
+        # New paths may introduce subdirectories — refresh the folder cards.
+        # The watcher hasn't inserted the File rows yet, but the rebuild job
+        # runs behind the extract queue and no-ops if nothing changed.
+        folder_cards.enqueue_rebuild(db, folder_id)
+        db.commit()
     return UploadBatchOut(
         files=uploaded,
         count=len(uploaded),
@@ -872,6 +888,94 @@ def set_active_endpoint(
     )
 
 
+class DirMetaIn(BaseModel):
+    """Set (or clear) the description of a folder root or subfolder.
+
+    ``subpath=''`` targets the folder itself; otherwise a POSIX rel-dir
+    path inside it. An empty/whitespace description deletes the row.
+    """
+
+    subpath: str = ""
+    description: str = Field(default="", max_length=2000)
+
+
+class DirMetaOut(BaseModel):
+    folder_id: int
+    subpath: str
+    description: str
+    updated_at: int
+
+
+@router.get("/{folder_id}/dir-meta", response_model=list[DirMetaOut])
+def list_dir_meta(
+    folder_id: int,
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(current_user),
+) -> list[DirMetaOut]:
+    """All folder/subfolder descriptions for a folder. Viewer-visible —
+    read access mirrors folder visibility, not ownership."""
+    folder = db.get(Folder, folder_id)
+    if folder is None or not user_can_see_folder(db, folder_id, user.id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Folder not found")
+    rows = db.execute(
+        select(FolderDirMeta)
+        .where(FolderDirMeta.folder_id == folder_id)
+        .order_by(FolderDirMeta.subpath)
+    ).scalars()
+    return [
+        DirMetaOut(
+            folder_id=folder_id,
+            subpath=r.subpath,
+            description=r.description,
+            updated_at=r.updated_at,
+        )
+        for r in rows
+    ]
+
+
+@router.put("/{folder_id}/dir-meta", response_model=DirMetaOut)
+def put_dir_meta(
+    folder_id: int,
+    body: DirMetaIn,
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(current_user),
+) -> DirMetaOut:
+    """Owner-only upsert of a folder/subfolder description.
+
+    The description is embedded into the folder's search cards, so a save
+    enqueues a (deduped, no-op-when-unchanged) card rebuild.
+    """
+    _require_owner(db, folder_id, user)
+
+    subpath = (body.subpath or "").strip().strip("/")
+    if subpath:
+        # Same traversal rules as every other rel-path input.
+        _safe_rel_path(subpath)
+    description = body.description.strip()
+
+    row = db.get(FolderDirMeta, (folder_id, subpath))
+    now = int(time.time())
+    if not description:
+        if row is not None:
+            db.delete(row)
+    elif row is None:
+        row = FolderDirMeta(
+            folder_id=folder_id, subpath=subpath, description=description
+        )
+        db.add(row)
+    else:
+        row.description = description
+
+    folder_cards.enqueue_rebuild(db, folder_id)
+    db.commit()
+    return DirMetaOut(
+        folder_id=folder_id,
+        subpath=subpath,
+        description=description,
+        updated_at=now,
+    )
+
+
 class RenameIn(BaseModel):
     """Rename a managed folder.
 
@@ -975,6 +1079,9 @@ def rename_folder(
         # it tracking the physical name so it doesn't read stale.
         folder.display_name = new_name
 
+    # The display name is part of every folder-card's text — refresh them.
+    # (Idempotent no-op when only the physical dir was renamed.)
+    folder_cards.enqueue_rebuild(db, folder_id)
     db.commit()
     db.refresh(folder)
 
@@ -1308,6 +1415,15 @@ def delete_folder(
 
     db.delete(folder)
     db.commit()
+    # Folder-card points are cheap to drop inline (one filter-delete) and
+    # nothing else would clean them until the next startup sweep. Best-effort:
+    # a Qdrant hiccup here is healed by sweep_orphan_cards on next boot.
+    try:
+        from ...services.vector_store import delete_cards_for_folder
+
+        delete_cards_for_folder(folder_id)
+    except Exception:
+        logger.warning("delete_folder %d: card cleanup failed", folder_id, exc_info=True)
     events.publish("folders", {"type": "folder.removed", "folder_id": folder_id})
 
 
@@ -1347,8 +1463,13 @@ def delete_file(
         sidecar = abs_path.parent / (abs_path.name + ".voitta.meta")
         sidecar.unlink(missing_ok=True)
 
-    # Enqueue the wipe + row deletion via the normal worker path.
+    # Enqueue the wipe + row deletion via the normal worker path, then a
+    # card refresh behind it (FIFO) so a now-empty subdir sheds its card.
+    # Explicit commit: db_session does NOT auto-commit on success, so
+    # without it the enqueued rows would be discarded at session close.
     job_queue.enqueue(db, "delete_file", {"file_id": file_id})
+    folder_cards.enqueue_rebuild(db, folder_id)
+    db.commit()
 
 
 @router.delete("/{folder_id}/dirs", status_code=status.HTTP_204_NO_CONTENT)
@@ -1404,6 +1525,11 @@ def delete_subdir(
     ).scalars().first()
     if exact:
         job_queue.enqueue(db, "delete_file", {"file_id": exact.id})
+
+    # Card refresh behind the delete jobs (FIFO) so the removed subtree's
+    # cards drop. Explicit commit — db_session does not auto-commit.
+    folder_cards.enqueue_rebuild(db, folder_id)
+    db.commit()
 
 
 @router.get("/{folder_id}/dirs")

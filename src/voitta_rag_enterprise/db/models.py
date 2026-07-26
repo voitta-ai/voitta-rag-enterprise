@@ -150,6 +150,23 @@ class FolderAcl(Base):
     )
 
 
+class FolderDirMeta(Base):
+    """Optional description for a folder (``subpath=''``) or a subfolder.
+
+    Embedded into a synthetic ``folder_card`` point in the Qdrant chunks
+    collection so folder names + descriptions participate in hybrid search.
+    """
+
+    __tablename__ = "folder_dir_meta"
+
+    folder_id: Mapped[int] = mapped_column(
+        ForeignKey("folders.id", ondelete="CASCADE"), primary_key=True
+    )
+    subpath: Mapped[str] = mapped_column(primary_key=True, default="")
+    description: Mapped[str] = mapped_column(default="")
+    updated_at: Mapped[int] = mapped_column(default=_now_s, onupdate=_now_s)
+
+
 class FolderUserSettings(Base):
     """Per-user, per-folder MCP-search opt-out. ``active=False`` excludes
     this folder from the user's MCP search queries. Missing row = active.

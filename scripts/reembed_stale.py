@@ -52,7 +52,12 @@ def _scan_for_stale(collection: str, version_keys: list[str], expected: dict[str
         payload = dict(p.payload or {})
         for key in version_keys:
             if expected[key] and payload.get(key) and payload[key] != expected[key]:
-                if collection == vector_store.CHUNKS:
+                if payload.get("kind") == vector_store.FOLDER_CARD_KIND:
+                    # Folder cards carry no file_id — they re-embed via a
+                    # per-folder rebuild_folder_cards job (the rebuilder's
+                    # change detection sees the version bump and re-embeds).
+                    stale.add(("folder_cards", int(payload["folder_id"])))
+                elif collection == vector_store.CHUNKS:
                     stale.add(("file", int(payload["file_id"])))
                 else:
                     stale.add(("image", int(payload["image_id"])))
@@ -84,11 +89,14 @@ def main() -> None:
     )
 
     text_files = {tid for kind, tid in stale_text if kind == "file"}
+    card_folders = {tid for kind, tid in stale_text if kind == "folder_cards"}
     image_ids = {tid for kind, tid in stale_images if kind == "image"}
 
     logger.info(
-        "stale: %d file(s) for embed_text, %d image point(s) for embed_image",
+        "stale: %d file(s) for embed_text, %d folder(s) for card rebuild, "
+        "%d image point(s) for embed_image",
         len(text_files),
+        len(card_folders),
         len(image_ids),
     )
     if args.dry_run:
@@ -98,6 +106,13 @@ def main() -> None:
         for fid in sorted(text_files):
             job_queue.enqueue(
                 s, "embed_text", {"file_id": fid}, dedup_key=f"embed_text:{fid}"
+            )
+        for fid in sorted(card_folders):
+            job_queue.enqueue(
+                s,
+                "rebuild_folder_cards",
+                {"folder_id": fid},
+                dedup_key=f"folder_cards:{fid}",
             )
         for iid in sorted(image_ids):
             job_queue.enqueue(

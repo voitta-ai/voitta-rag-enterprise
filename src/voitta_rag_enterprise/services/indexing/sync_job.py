@@ -38,7 +38,17 @@ async def run_sync(payload: dict) -> dict | None:
         # without this an *unchanged* file's owner/date metadata would never
         # reach the DB (it'd wait for the next process restart's startup scan).
         await asyncio.to_thread(_rescan_after_sync, folder_id)
+        # Sync may have added/removed whole subtrees — refresh the folder
+        # cards. One deduped job per sync; no-ops when the tree is unchanged.
+        await asyncio.to_thread(_enqueue_card_rebuild, folder_id)
         return stats
+
+
+def _enqueue_card_rebuild(folder_id: int) -> None:
+    from .folder_cards import enqueue_rebuild
+
+    with session_scope() as s:
+        enqueue_rebuild(s, folder_id)
 
 
 def _rescan_after_sync(folder_id: int) -> None:

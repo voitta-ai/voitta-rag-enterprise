@@ -232,17 +232,21 @@ def cancel_all(
 
     cancelled = 0
     cancelled_file_ids: list[int] = []
-    # Collect folder_ids so we can drop their active counts after commit.
-    # Resolving *before* the state flip keeps the lookup deterministic
+    # Collect (folder_id, kind) so we can drop their active counts after
+    # commit. Resolving *before* the state flip keeps the lookup deterministic
     # against a parallel claim_one (which would only narrow the result).
-    affected_folders: list[int | None] = []
+    # ``kind`` rides along so UNTRACKED_KINDS (never counted up) don't
+    # decrement a tracked job's count on cancel.
+    affected_folders: list[tuple[int | None, str]] = []
     queued = db.execute(select(Job).where(Job.state == "queued")).scalars().all()
     for job in queued:
         try:
             payload = json.loads(job.payload) if job.payload else {}
         except json.JSONDecodeError:
             payload = {}
-        affected_folders.append(folder_active.folder_id_for_payload(db, payload))
+        affected_folders.append(
+            (folder_active.folder_id_for_payload(db, payload), job.kind)
+        )
         job.state = "done"
         job.error = "cancelled"
         cancelled += 1
@@ -266,8 +270,8 @@ def cancel_all(
     # SPA reading active=False can trust that the underlying row is no
     # longer 'queued'. Events coalesce by folder_id so N drops on the
     # same folder collapse to one delivered event.
-    for fid in affected_folders:
-        folder_active.on_finished(fid)
+    for fid, kind in affected_folders:
+        folder_active.on_finished(fid, kind)
 
     # Publish file.upserted for every file whose state we just flipped to
     # 'error', so the SPA's by-extension counters reflect the cancel
@@ -442,7 +446,7 @@ def cancel_job(
 
     # Drop this folder's active count *after* commit so a SPA that races
     # the active=False event back to the DB will see the cancelled row.
-    folder_active.on_finished(cancel_folder_id)
+    folder_active.on_finished(cancel_folder_id, job_kind)
 
     # Publish job.finished + file.upserted so the SPA flips both rows
     # immediately, without waiting for the next /recent or /files poll.

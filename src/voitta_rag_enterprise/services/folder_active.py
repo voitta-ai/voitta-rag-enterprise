@@ -43,6 +43,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Folder-scoped job kinds that are invisible background bookkeeping, not
+# user-facing indexing work. They don't flip the SPA's "indexing" pill and
+# don't gate folder renames (``_folder_has_active_job``): a card rebuild
+# reads only folder_id + rel_paths, never the absolute path, so a physical
+# rename can't orphan it — and it typically no-ops in milliseconds.
+UNTRACKED_KINDS = frozenset({"rebuild_folder_cards"})
+
 # folder_id -> number of currently-queued-or-running jobs targeting it.
 # Modified under ``_lock``; readers use ``get_active_ids`` / ``is_active``
 # which copy under the lock so callers never see a torn snapshot.
@@ -83,9 +90,13 @@ def folder_id_for_payload(session: "Session", payload: dict | None) -> int | Non
     return None
 
 
-def on_enqueued(folder_id: int | None) -> None:
-    """Bump the count for ``folder_id``; publish ``active=True`` on 0→1."""
-    if folder_id is None:
+def on_enqueued(folder_id: int | None, kind: str | None = None) -> None:
+    """Bump the count for ``folder_id``; publish ``active=True`` on 0→1.
+
+    ``kind`` (when supplied) filters out UNTRACKED_KINDS — bookkeeping
+    jobs that must not light up the folder's "indexing" pill.
+    """
+    if folder_id is None or kind in UNTRACKED_KINDS:
         return
     with _lock:
         was = _counts.get(folder_id, 0)
@@ -95,14 +106,16 @@ def on_enqueued(folder_id: int | None) -> None:
         _publish(folder_id, True)
 
 
-def on_finished(folder_id: int | None) -> None:
+def on_finished(folder_id: int | None, kind: str | None = None) -> None:
     """Decrement the count for ``folder_id``; publish ``active=False`` on 1→0.
 
     Defensive against under-counting (e.g. a finish event landing without
     a paired enqueue after a process restart that missed the bootstrap):
     the count is clamped at 0 and a redundant event is not published.
+    ``kind`` mirrors ``on_enqueued`` — UNTRACKED_KINDS never counted up,
+    so they must not count down either.
     """
-    if folder_id is None:
+    if folder_id is None or kind in UNTRACKED_KINDS:
         return
     with _lock:
         was = _counts.get(folder_id, 0)
@@ -146,12 +159,15 @@ def init_from_db() -> None:
 
     folder_jobs: dict[int, int] = defaultdict(int)
     with session_scope() as session:
-        # Folder-scoped jobs: reindex_folder, sync.
+        # Folder-scoped jobs: reindex_folder, sync. UNTRACKED_KINDS carry a
+        # folder_id too but never count (mirrors on_enqueued/on_finished).
+        untracked = ",".join(f"'{k}'" for k in sorted(UNTRACKED_KINDS))
         rows = session.execute(
             text(
                 "SELECT json_extract(payload, '$.folder_id') AS fid, COUNT(*) "
                 "FROM jobs "
                 "WHERE state IN ('queued','running') "
+                f"  AND kind NOT IN ({untracked}) "
                 "  AND json_extract(payload, '$.folder_id') IS NOT NULL "
                 "GROUP BY fid"
             )

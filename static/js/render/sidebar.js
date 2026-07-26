@@ -222,8 +222,109 @@ export function renderSidebar() {
 
     renderExtTable(s);
 
+    renderDirMeta(folder, relDir);
+
     $("#upload-target-hint").hidden = false;
     $("#upload-target").textContent = getSelectedRelDir() ? `/${getSelectedRelDir()}/` : "/";
+}
+
+// ----- Folder / subfolder description (folder_dir_meta) -----
+//
+// Rendered under the folder name for the selected folder or subdir.
+// Owner-editable; the backend embeds it into the folder's search cards so
+// the text is searchable alongside document content. Lazy per-folder fetch
+// with the same in-flight guard pattern as ensureFolderStats.
+
+const _dirMetaCache = new Map(); // folderId → Map(subpath → description)
+const _dirMetaInFlight = new Set();
+// Non-null while the textarea is open: {folderId, relDir} of the node being
+// edited. Selecting a different node while editing silently discards the
+// draft (the editor would otherwise write A's text onto B).
+let _descEditing = null;
+let _descWired = false;
+
+// ws.js calls this on folder.removed so the cache doesn't grow stale entries.
+export function invalidateDirMeta(folderId) {
+    _dirMetaCache.delete(folderId);
+}
+
+function ensureDirMeta(folderId) {
+    if (_dirMetaCache.has(folderId) || _dirMetaInFlight.has(folderId)) return;
+    _dirMetaInFlight.add(folderId);
+    api.getDirMeta(folderId)
+        .then((rows) => {
+            _dirMetaCache.set(folderId, new Map(rows.map((r) => [r.subpath, r.description])));
+            renderSidebar();
+        })
+        .catch((err) => console.warn("dir-meta load failed", err))
+        .finally(() => _dirMetaInFlight.delete(folderId));
+}
+
+function _wireDescEditor() {
+    if (_descWired) return;
+    _descWired = true;
+    $("#folder-desc-edit").addEventListener("click", () => {
+        const folder = folders.get().find((f) => f.id === getSelectedFolderId());
+        if (!folder) return;
+        const meta = _dirMetaCache.get(folder.id);
+        $("#folder-desc-input").value = meta?.get(getSelectedRelDir() || "") || "";
+        _descEditing = { folderId: folder.id, relDir: getSelectedRelDir() || "" };
+        renderSidebar();
+        $("#folder-desc-input").focus();
+    });
+    $("#folder-desc-cancel").addEventListener("click", () => {
+        _descEditing = null;
+        renderSidebar();
+    });
+    $("#folder-desc-save").addEventListener("click", async () => {
+        const folder = folders.get().find((f) => f.id === getSelectedFolderId());
+        if (!folder) return;
+        const subpath = getSelectedRelDir() || "";
+        const description = $("#folder-desc-input").value.trim();
+        try {
+            await api.putDirMeta(folder.id, subpath, description);
+            const meta = _dirMetaCache.get(folder.id) || new Map();
+            if (description) meta.set(subpath, description);
+            else meta.delete(subpath);
+            _dirMetaCache.set(folder.id, meta);
+            _descEditing = null;
+            renderSidebar();
+        } catch (err) {
+            alert(err.message);
+        }
+    });
+}
+
+function renderDirMeta(folder, relDir) {
+    _wireDescEditor();
+    ensureDirMeta(folder.id);
+
+    const textEl = $("#folder-desc-text");
+    const editBtn = $("#folder-desc-edit");
+    const editor = $("#folder-desc-editor");
+
+    const meta = _dirMetaCache.get(folder.id);
+    const desc = meta?.get(relDir || "") || "";
+
+    // Selecting a different node while editing discards the draft.
+    if (
+        _descEditing
+        && (_descEditing.folderId !== folder.id || _descEditing.relDir !== (relDir || ""))
+    ) {
+        _descEditing = null;
+    }
+    if (_descEditing) {
+        textEl.hidden = true;
+        editBtn.hidden = true;
+        editor.hidden = false;
+        return;
+    }
+    editor.hidden = true;
+    textEl.textContent = desc;
+    textEl.hidden = !desc;
+    // Only the owner can edit; viewers just see the text (if any).
+    editBtn.hidden = !folder.owned;
+    editBtn.textContent = desc ? "Edit description" : "Add description";
 }
 
 // ----- Source provenance (owner / shared-by / date range) -----

@@ -2,6 +2,7 @@
 
 import { activeFolders, adminState, connStatus, folders, files, jobs, keysState, reindexProgress, syncConfigs, syncProgress, syncSources, folderStats } from "./store.js";
 import { invalidateFileArtifacts } from "./render/tree.js";
+import { invalidateDirMeta } from "./render/sidebar.js";
 
 const MAX_BACKOFF_MS = 30_000;
 // ``admin`` and ``keys`` are subscribed by everyone; the server only delivers
@@ -175,6 +176,7 @@ function handleEvent(event) {
                 deleteScopedStatsKeys(next, event.folder_id);
                 return next;
             });
+            invalidateDirMeta(event.folder_id);
             return;
         case "folder.stats_changed":
             // Per-folder snapshot. Backend coalesces by folder_id so a

@@ -528,6 +528,22 @@
                         <div class="sidebar-section" id="folder-detail" hidden>
                             <h3 id="folder-name"></h3>
                             <p id="folder-path" class="path"></p>
+                            <!-- Optional description for the selected folder /
+                                 subfolder. Owner-editable; searchable — it's
+                                 embedded into the folder's search cards. -->
+                            <div id="folder-desc-block">
+                                <p id="folder-desc-text" class="hint" hidden style="white-space:pre-wrap;"></p>
+                                <button id="folder-desc-edit" class="btn btn-xs btn-secondary" type="button" hidden>Add description</button>
+                                <div id="folder-desc-editor" hidden>
+                                    <textarea id="folder-desc-input" rows="3" maxlength="2000"
+                                        placeholder="Describe what lives in this folder — the description is searchable."
+                                        style="width:100%;resize:vertical;"></textarea>
+                                    <div class="badge-row">
+                                        <button id="folder-desc-save" class="btn btn-xs btn-primary" type="button">Save</button>
+                                        <button id="folder-desc-cancel" class="btn btn-xs btn-secondary" type="button">Cancel</button>
+                                    </div>
+                                </div>
+                            </div>
                             <div class="badge-row">
                                 <span id="folder-source-badge" class="badge"></span>
                                 <span id="folder-health-badge" class="badge" hidden style="background:#fbbf24;color:#111;cursor:help;"></span>

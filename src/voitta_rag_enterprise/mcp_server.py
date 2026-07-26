@@ -276,8 +276,19 @@ class FileInfo(BaseModel):
 
 
 class ChunkInfo(BaseModel):
+    # ``"chunk"`` for a document chunk; ``"folder_card"`` for a synthetic
+    # folder/subfolder hit (name + optional description matched the query).
+    # A folder_card has NO file: ``file_id`` is null, ``chunk_id`` is 0 and
+    # ``file_path`` holds the subfolder path inside the folder ('' = the
+    # folder root). Do not call get_file / get_chunk_range on it — instead
+    # scope a follow-up search with folder_ids=[folder_id].
+    kind: str = "chunk"
     chunk_id: int
-    file_id: int
+    # Null only on folder_card hits (see ``kind``); always an int for chunks.
+    file_id: int | None
+    # Owning folder — set on every hit so callers can pivot to
+    # search(folder_ids=[…]) without a lookup.
+    folder_id: int | None = None
     file_path: str
     chunk_index: int
     text: str
@@ -535,6 +546,12 @@ def search(
     limit: int = 20,
 ) -> list[ChunkInfo]:
     """Hybrid (dense + sparse, RRF-fused) search over text chunks.
+
+    Results may include ``kind='folder_card'`` hits: the query matched a
+    folder/subfolder *name or description* rather than document content.
+    A card has no file (``file_id`` is null) — treat it as a pointer and
+    re-run search with ``folder_ids=[hit.folder_id]`` to drill into that
+    folder's documents.
 
     :param query: free-text query
     :param folder_ids: restrict search to these folder ids
@@ -1304,6 +1321,21 @@ def _file_provenance(session, file_id: int | None) -> tuple[str | None, str]:
 
 def _chunk_from_hit(h: SearchHit, session=None) -> ChunkInfo:
     p = h.payload
+    if p.get("kind") == "folder_card":
+        # Synthetic folder/subfolder hit — no file behind it. ``file_path``
+        # carries the subpath inside the folder ('' = root); the card text
+        # already spells out the folder name + description.
+        return ChunkInfo(
+            kind="folder_card",
+            chunk_id=0,
+            file_id=None,
+            folder_id=p.get("folder_id"),
+            file_path=str(p.get("subpath", "")),
+            chunk_index=0,
+            text=str(p.get("text", "")),
+            score=h.score,
+            source_kind="folder",
+        )
     file_id = int(p["file_id"])
     source_url, source_kind = (None, "other")
     if session is not None:
@@ -1311,6 +1343,7 @@ def _chunk_from_hit(h: SearchHit, session=None) -> ChunkInfo:
     return ChunkInfo(
         chunk_id=int(p.get("chunk_id", h.id)),
         file_id=file_id,
+        folder_id=p.get("folder_id"),
         file_path=str(p.get("file_path", "")),
         chunk_index=int(p.get("chunk_index", 0)),
         text=str(p.get("text", "")),

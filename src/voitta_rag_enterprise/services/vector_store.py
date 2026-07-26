@@ -216,6 +216,9 @@ _CHUNK_PAYLOAD_INDEXES: tuple[tuple[str, str], ...] = (
     # folder set (ACL). Both are hot paths, not nice-to-haves.
     ("file_id", "integer"),
     ("folder_id", "integer"),
+    # Discriminator for synthetic folder-card points (see FOLDER_CARD_KIND);
+    # used by the card replace/sweep filters and available to searchers.
+    ("kind", "keyword"),
     ("page", "integer"),
     ("layout_kind", "keyword"),
     ("layout_has_image", "bool"),
@@ -361,6 +364,30 @@ class ChunkPoint:
     # Optional ``meta_*``-prefixed fields from a ``.voitta.meta`` sidecar.
     # Merged flat into the payload so each field is independently filterable.
     meta_payload: dict | None = None
+
+
+# Payload discriminator for synthetic folder-card points living in the
+# ``chunks`` collection. Cards make folder / subfolder names + optional
+# descriptions searchable through the same hybrid (dense+sparse) path as
+# document chunks. They carry NO chunk_id / file_id — every consumer that
+# resolves hits back to files must branch on this kind first, and the
+# chunk orphan sweep must skip them (they have their own folder-scoped
+# sweep, ``sweep_orphan_folder_cards``).
+FOLDER_CARD_KIND = "folder_card"
+
+
+@dataclass
+class FolderCardPoint:
+    point_id: str  # deterministic UUID5 of (folder_id, subpath)
+    folder_id: int
+    subpath: str  # '' = the folder root
+    display_name: str
+    text: str
+    dense: list[float]
+    sparse: SparseVector
+    dense_model_version: str
+    sparse_model_version: str
+    allowed_users: list[int]
 
 
 @dataclass
@@ -617,6 +644,11 @@ def _delete_orphans_for_collection(
     decide whether they tolerate the (vanishingly small) race where a
     just-inserted row's id isn't yet in the set. We use this at
     startup where there's no in-flight writer, so the race is moot.
+
+    Folder-card points live in the chunks collection but have no
+    ``chunk_id`` — without the kind guard this sweep would delete every
+    card on each boot. Their lifecycle is handled by
+    ``sweep_orphan_folder_cards`` instead.
     """
 
     def _do() -> int:
@@ -634,7 +666,8 @@ def _delete_orphans_for_collection(
             )
             stale_ids = [
                 p.id for p in res
-                if (p.payload or {}).get(id_key) not in known_ids
+                if (p.payload or {}).get("kind") != FOLDER_CARD_KIND
+                and (p.payload or {}).get(id_key) not in known_ids
             ]
             if stale_ids:
                 client.delete(
@@ -749,6 +782,10 @@ def delete_chunks_for_folder(folder_id: int) -> None:
     single Qdrant round-trip instead of N (one per file). Folder-scope
     reindex was the slow path that motivated this — N=2000 individual
     filter-deletes took 6 minutes vs ~50 ms here.
+
+    Folder-card points share the collection and the ``folder_id`` payload but
+    are NOT file content — a reindex must leave them alone (nothing on the
+    re-extract path would recreate them), hence the ``must_not`` guard.
     """
 
     def _do() -> None:
@@ -763,12 +800,159 @@ def delete_chunks_for_folder(folder_id: int) -> None:
                         qm.FieldCondition(
                             key="folder_id", match=qm.MatchValue(value=folder_id)
                         )
-                    ]
+                    ],
+                    must_not=[
+                        qm.FieldCondition(
+                            key="kind", match=qm.MatchValue(value=FOLDER_CARD_KIND)
+                        )
+                    ],
                 )
             ),
         )
 
     run_on_qdrant(_do)
+
+
+def _folder_cards_filter(folder_id: int) -> qm.Filter:
+    return qm.Filter(
+        must=[
+            qm.FieldCondition(key="folder_id", match=qm.MatchValue(value=folder_id)),
+            qm.FieldCondition(key="kind", match=qm.MatchValue(value=FOLDER_CARD_KIND)),
+        ]
+    )
+
+
+def list_folder_cards(folder_id: int) -> list[dict[str, Any]]:
+    """Return the payloads of every folder-card point for ``folder_id``.
+
+    Used by the card rebuilder's change detection: compare desired
+    (subpath → text/model-version) against what's stored and skip the
+    embed + upsert when nothing changed. No vectors are fetched — a
+    folder has at most a few hundred cards, so this is one cheap scroll.
+    """
+
+    def _do() -> list[dict[str, Any]]:
+        client = get_client()
+        if not client.collection_exists(CHUNKS):
+            return []
+        res, _ = client.scroll(
+            CHUNKS,
+            scroll_filter=_folder_cards_filter(folder_id),
+            limit=10_000,
+            with_payload=True,
+        )
+        return [dict(p.payload or {}) for p in res]
+
+    return run_on_qdrant(_do)
+
+
+def replace_cards_for_folder(folder_id: int, points: list[FolderCardPoint]) -> None:
+    """Atomic-ish: drop every folder-card point of ``folder_id``, upsert ``points``.
+
+    Mirrors ``replace_chunks_for_file`` — delete-by-filter then batched
+    upsert with the final batch's ``wait=True`` as the durability barrier.
+    """
+
+    def _do() -> None:
+        client = get_client()
+        client.delete(
+            CHUNKS,
+            points_selector=qm.FilterSelector(filter=_folder_cards_filter(folder_id)),
+        )
+        if not points:
+            return
+        structs = [
+            qm.PointStruct(
+                id=p.point_id,
+                vector={
+                    "dense": p.dense,
+                    "sparse": qm.SparseVector(
+                        indices=p.sparse.indices, values=p.sparse.values
+                    ),
+                },
+                payload={
+                    "kind": FOLDER_CARD_KIND,
+                    "folder_id": p.folder_id,
+                    "subpath": p.subpath,
+                    "display_name": p.display_name,
+                    "text": p.text,
+                    "dense_model_version": p.dense_model_version,
+                    "sparse_model_version": p.sparse_model_version,
+                    "allowed_users": p.allowed_users,
+                },
+            )
+            for p in points
+        ]
+        last_start = ((len(structs) - 1) // _UPSERT_BATCH_POINTS) * _UPSERT_BATCH_POINTS
+        for start in range(0, len(structs), _UPSERT_BATCH_POINTS):
+            client.upsert(
+                CHUNKS,
+                points=structs[start : start + _UPSERT_BATCH_POINTS],
+                wait=(start == last_start),
+            )
+
+    run_on_qdrant(_do)
+
+
+def delete_cards_for_folder(folder_id: int) -> None:
+    """Drop every folder-card point of ``folder_id`` (folder deletion)."""
+
+    def _do() -> None:
+        client = get_client()
+        if not client.collection_exists(CHUNKS):
+            return
+        client.delete(
+            CHUNKS,
+            points_selector=qm.FilterSelector(filter=_folder_cards_filter(folder_id)),
+        )
+
+    run_on_qdrant(_do)
+
+
+def sweep_orphan_folder_cards(live_folder_ids: set[int]) -> int:
+    """Delete folder-card points whose ``folder_id`` no longer exists.
+
+    Covers folders deleted while the process was down (the live delete
+    path calls ``delete_cards_for_folder`` directly). Counterpart of the
+    chunk/image orphan sweeps, which deliberately skip card points.
+    Returns the number of deleted points; idempotent.
+    """
+
+    def _do() -> int:
+        client = get_client()
+        if not client.collection_exists(CHUNKS):
+            return 0
+        deleted = 0
+        offset = None
+        while True:
+            res, offset = client.scroll(
+                CHUNKS,
+                scroll_filter=qm.Filter(
+                    must=[
+                        qm.FieldCondition(
+                            key="kind", match=qm.MatchValue(value=FOLDER_CARD_KIND)
+                        )
+                    ]
+                ),
+                limit=1024,
+                with_payload=True,
+                offset=offset,
+            )
+            stale_ids = [
+                p.id
+                for p in res
+                if (p.payload or {}).get("folder_id") not in live_folder_ids
+            ]
+            if stale_ids:
+                client.delete(
+                    CHUNKS, points_selector=qm.PointIdsList(points=stale_ids)
+                )
+                deleted += len(stale_ids)
+            if offset is None:
+                break
+        return deleted
+
+    return run_on_qdrant(_do)
 
 
 def remove_files_from_image_points(file_ids: list[int]) -> int:

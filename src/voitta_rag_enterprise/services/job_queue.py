@@ -69,7 +69,9 @@ def enqueue(
     # high until the next ``folder_active.init_from_db`` sweep. Rollback
     # of an enqueue is rare in this codebase (callers commit immediately)
     # so we accept the rare drift over the complexity of post-commit hooks.
-    folder_active.on_enqueued(folder_active.folder_id_for_payload(session, payload))
+    folder_active.on_enqueued(
+        folder_active.folder_id_for_payload(session, payload), kind
+    )
     return job.id
 
 
@@ -226,7 +228,7 @@ def mark_done(job_id: int, result: dict | None = None) -> None:
         job.finished_at = int(time.time())
         job.result = result_json
         kind = job.kind
-    folder_active.on_finished(folder_id)
+    folder_active.on_finished(folder_id, kind)
     events.publish(
         "jobs",
         {
@@ -256,7 +258,7 @@ def mark_error(job_id: int, error: str) -> None:
         job.error = error
         job.finished_at = int(time.time())
         kind = job.kind
-    folder_active.on_finished(folder_id)
+    folder_active.on_finished(folder_id, kind)
     events.publish(
         "jobs",
         {

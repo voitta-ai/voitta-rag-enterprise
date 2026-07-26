@@ -42,12 +42,16 @@ def test_chunkinfo_emits_every_field_with_defaults() -> None:
         text="def foo(): ...",
     ).model_dump()
     assert set(d.keys()) == {
-        "chunk_id", "file_id", "file_path", "chunk_index", "text",
+        "kind", "chunk_id", "file_id", "folder_id", "file_path",
+        "chunk_index", "text",
         "nearby_image_ids", "score", "page", "pages", "layout",
         "source_url", "source_kind",
     }
     # Defaults: empty list for collections, None for scalars, "other"
-    # for the source_kind classifier when no provenance was passed in.
+    # for the source_kind classifier when no provenance was passed in,
+    # "chunk" for the kind discriminator (folder_card is the other value).
+    assert d["kind"] == "chunk"
+    assert d["folder_id"] is None
     assert d["nearby_image_ids"] == []
     assert d["pages"] == []
     assert d["score"] is None

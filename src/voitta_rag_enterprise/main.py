@@ -333,6 +333,17 @@ def create_app() -> FastAPI:
                             "(stale chunk_id payloads)",
                             deleted_chunks,
                         )
+                    # Folder cards have their own sweep (they're exempt from
+                    # the chunk sweep above — no chunk_id): drop cards whose
+                    # folder was deleted while the process was down.
+                    from .services.indexing.folder_cards import sweep_orphan_cards
+
+                    deleted_cards = sweep_orphan_cards()
+                    if deleted_cards:
+                        logger.warning(
+                            "deleted %d orphan folder-card point(s) from Qdrant",
+                            deleted_cards,
+                        )
                 except Exception:  # pragma: no cover — never fail boot for this
                     logger.exception("orphan-point sweep failed at startup")
 
@@ -366,6 +377,19 @@ def create_app() -> FastAPI:
                     await asyncio.to_thread(_startup_scan)
                 except Exception:
                     logger.exception("startup folder scan failed")
+
+                # Folder-card reconciliation: one deduped rebuild job per
+                # folder. The handler diffs against Qdrant and no-ops when
+                # nothing changed, so this is cheap on a quiet boot but
+                # heals cards after offline tree changes, first deploys of
+                # the feature, or a wiped vector store.
+                try:
+                    from .services.indexing.folder_cards import enqueue_rebuild_all
+
+                    n = await asyncio.to_thread(enqueue_rebuild_all)
+                    logger.info("folder-cards: enqueued rebuild for %d folder(s)", n)
+                except Exception:  # pragma: no cover — never fail boot for this
+                    logger.exception("folder-card reconciliation failed at startup")
 
                 handlers = {**DEFAULT_HANDLERS, **INDEXING_HANDLERS}
                 # Pre-warm the embedders before any worker can claim a job.

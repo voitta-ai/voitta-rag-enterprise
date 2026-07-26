@@ -20,6 +20,7 @@ from .common import (
 from .delete import run_delete_file, wipe_file_data
 from .embed import run_embed_image, run_embed_text
 from .extract import run_extract
+from .folder_cards import run_rebuild_folder_cards
 from .layout import _load_char_to_page, _load_layout_summaries
 from .recovery import reconcile_abandoned_extracts
 from .reindex import run_reindex_folder
@@ -32,6 +33,7 @@ HANDLERS = {
     "delete_file": run_delete_file,
     "sync": run_sync,
     "reindex_folder": run_reindex_folder,
+    "rebuild_folder_cards": run_rebuild_folder_cards,
 }
 
 __all__ = [

@@ -152,6 +152,21 @@ CREATE TABLE IF NOT EXISTS folder_user_settings (
 CREATE INDEX IF NOT EXISTS idx_folder_user_settings_user
     ON folder_user_settings(user_id);
 
+-- Optional per-folder / per-subfolder descriptions. ``subpath = ''`` is the
+-- folder root; otherwise a POSIX rel-dir path inside the folder. Descriptions
+-- are embedded into synthetic "folder card" points in the Qdrant chunks
+-- collection (kind='folder_card') so folder names + descriptions are hit by
+-- the same hybrid search as document chunks. Rows survive their directory
+-- disappearing (the user may re-add files); the card builder always cards
+-- described subpaths.
+CREATE TABLE IF NOT EXISTS folder_dir_meta (
+    folder_id   INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+    subpath     TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    updated_at  INTEGER NOT NULL,
+    PRIMARY KEY (folder_id, subpath)
+);
+
 CREATE TABLE IF NOT EXISTS cas_refs (
     cas_id          TEXT NOT NULL,
     kind            TEXT NOT NULL,           -- 'file' | 'image'
