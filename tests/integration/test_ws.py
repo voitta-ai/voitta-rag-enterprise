@@ -186,3 +186,62 @@ def test_ws_receives_folder_removed_event(client: TestClient, tmp_path: Path) ->
         client.delete(f"/api/folders/{fid}")
         event = ws.receive_json()
         assert event == {"type": "folder.removed", "folder_id": fid}
+
+
+def test_files_snapshot_survives_more_files_than_sqlite_variable_limit(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """Regression: the image-count query bound one SQL variable per FILE id,
+    so past SQLite's 32,766-parameter cap (~32k indexed files) every WS
+    snapshot raised OperationalError('too many SQL variables') and the
+    connection died on connect. Counts must be scoped by folder join, never
+    by a per-file IN list."""
+    import time as _time
+
+    from sqlalchemy import text as _text
+
+    from voitta_rag_enterprise.api.snapshot import _files_snapshot
+    from voitta_rag_enterprise.db.database import session_scope
+    from voitta_rag_enterprise.db.models import Image
+
+    src = tmp_path / "src"
+    src.mkdir()
+    folder_id = client.post("/api/folders", json={"name": src.name}).json()["id"]
+
+    n_files = 33_000  # > 32,766
+    now = int(_time.time())
+    with session_scope() as s:
+        # Raw executemany — ORM inserts of 33k rows are needlessly slow.
+        s.execute(
+            _text(
+                "INSERT INTO files (folder_id, rel_path, added_at, last_seen_at,"
+                " state, pending_embeds, embed_round)"
+                " VALUES (:fid, :rel, :now, :now, 'indexed', 0, 0)"
+            ),
+            [
+                {"fid": folder_id, "rel": f"bulk/f{i:05d}.txt", "now": now}
+                for i in range(n_files)
+            ],
+        )
+        first_id = s.execute(
+            _text("SELECT MIN(id) FROM files WHERE folder_id = :fid"),
+            {"fid": folder_id},
+        ).scalar_one()
+        s.add(
+            Image(
+                file_id=first_id, image_index=0, image_cas_id="cafe" * 16
+            )
+        )
+
+    with session_scope() as s:
+        # Both scopes must survive: folder-filtered and see-everything.
+        items = _files_snapshot(s, {folder_id})
+        assert len(items) == n_files
+        by_id = {i["id"]: i for i in items}
+        assert by_id[first_id]["image_count"] == 1
+        assert _files_snapshot(s, None)  # single-user path, no filter
+
+    # The reindex pre-flip binds the same id list — must also be batched.
+    r = client.post(f"/api/folders/{folder_id}/reindex", json={})
+    assert r.status_code == 200, r.text
+    assert r.json()["scheduled"] == n_files

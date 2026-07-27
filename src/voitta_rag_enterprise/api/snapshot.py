@@ -74,13 +74,17 @@ def _files_snapshot(
     files = db.execute(stmt).scalars().all()
     # One grouped count for the whole snapshot, not one query per file (the
     # payload carries image_count so the tree can gate expandability up front).
-    counts = dict(
-        db.execute(
-            select(Image.file_id, func.count())
-            .where(Image.file_id.in_([f.id for f in files]))
-            .group_by(Image.file_id)
-        ).all()
-    ) if files else {}
+    # Scoped by FOLDER ids via a join — never by per-file id: an IN-list with
+    # one bound parameter per file blows SQLite's 32,766-variable limit the
+    # moment the index crosses ~32k files, killing every WS snapshot.
+    counts: dict[int, int] = {}
+    if files:
+        counts_stmt = select(Image.file_id, func.count()).group_by(Image.file_id)
+        if visible is not None:
+            counts_stmt = counts_stmt.join(File, File.id == Image.file_id).where(
+                File.folder_id.in_(visible)
+            )
+        counts = dict(db.execute(counts_stmt).all())
     return [file_event_payload(f, image_count=counts.get(f.id, 0)) for f in files]
 
 

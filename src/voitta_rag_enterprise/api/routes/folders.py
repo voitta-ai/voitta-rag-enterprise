@@ -1252,17 +1252,22 @@ def reindex_folder(
     if file_ids:
         from sqlalchemy import bindparam, update
 
-        db.execute(
-            update(File)
-            .where(File.id.in_(bindparam("ids", expanding=True)))
-            .values(
-                state="pending",
-                error=None,
-                pending_embeds=0,
-                embed_round=File.embed_round + 1,
-            ),
-            {"ids": file_ids},
-        )
+        # Batched: the expanding IN binds one SQL variable per id, and
+        # SQLite hard-caps a statement at 32,766 — a full reindex of a
+        # bigger folder would otherwise die right here.
+        _FLIP_BATCH = 10_000
+        for start in range(0, len(file_ids), _FLIP_BATCH):
+            db.execute(
+                update(File)
+                .where(File.id.in_(bindparam("ids", expanding=True)))
+                .values(
+                    state="pending",
+                    error=None,
+                    pending_embeds=0,
+                    embed_round=File.embed_round + 1,
+                ),
+                {"ids": file_ids[start : start + _FLIP_BATCH]},
+            )
         db.flush()
 
     # The state filter is part of the dedup key: a full reindex clicked
