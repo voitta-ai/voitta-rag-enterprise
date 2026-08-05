@@ -59,11 +59,14 @@ def _account_id(email: str, company_id: str = "") -> int | None:
 
 
 @pytest.fixture
-def clerk_org(monkeypatch: pytest.MonkeyPatch):
-    """Enable Clerk with a fake membership directory for org_1."""
+def clerk_org(env: None, monkeypatch: pytest.MonkeyPatch):
+    """Enable Clerk (legacy settings shape → migrates to a named
+    "Development" instance) with a fake membership directory for org_1."""
     members = {"alice@x": "admin", "bob@x": "member"}
-    monkeypatch.setattr(admin_store, "get_clerk_enabled", lambda: True)
-    monkeypatch.setattr(admin_store, "get_clerk_secret_key", lambda: "sk_test")
+    clerk_svc.clear_org_members_cache()
+    admin_store.save_settings(
+        {"clerk_enabled": True, "clerk_secret_key": "sk_test_x"}
+    )
 
     async def fake_members(secret_key: str, org_id: str) -> dict[str, str]:
         assert org_id == "org_1"
@@ -229,8 +232,10 @@ async def test_org_key_clerk_outage_falls_back_to_existing_account(
     env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     init_db()
-    monkeypatch.setattr(admin_store, "get_clerk_enabled", lambda: True)
-    monkeypatch.setattr(admin_store, "get_clerk_secret_key", lambda: "sk_test")
+    clerk_svc.clear_org_members_cache()
+    admin_store.save_settings(
+        {"clerk_enabled": True, "clerk_secret_key": "sk_test_x"}
+    )
 
     async def boom(secret_key: str, org_id: str) -> dict[str, str]:
         raise clerk_svc.ClerkError("down")
@@ -410,8 +415,10 @@ def test_clerk_error_in_admin_gate_is_403_not_500(
     from voitta_rag_enterprise.api.deps import current_user, real_user
     from voitta_rag_enterprise.services.acl import CurrentUser
 
-    monkeypatch.setattr(admin_store, "get_clerk_enabled", lambda: True)
-    monkeypatch.setattr(admin_store, "get_clerk_secret_key", lambda: "sk_test")
+    clerk_svc.clear_org_members_cache()
+    admin_store.save_settings(
+        {"clerk_enabled": True, "clerk_secret_key": "sk_test_x"}
+    )
 
     async def boom(secret_key: str, org_id: str) -> dict[str, str]:
         raise clerk_svc.ClerkError("down")

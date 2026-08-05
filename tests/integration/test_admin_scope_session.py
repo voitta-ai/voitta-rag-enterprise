@@ -103,11 +103,13 @@ def clerk_app(
 
     # Google HTTP stub (login callback).
     monkeypatch.setattr(auth_mod.httpx, "AsyncClient", _StubAsyncClient)
-    # Clerk enabled + directory stub (shared by login admission AND
-    # admin_scope resolution — both call clerk_svc.fetch_directory).
+    # Clerk enabled via the LEGACY settings shape (migrates to a named
+    # "Development" instance); directory stub is shared by login admission
+    # AND admin_scope resolution — both call clerk_svc.fetch_directory.
     scope_mod.clear_directory_cache()
-    monkeypatch.setattr(admin_store, "get_clerk_enabled", lambda: True)
-    monkeypatch.setattr(admin_store, "get_clerk_secret_key", lambda: "sk_test")
+    admin_store.save_settings(
+        {"clerk_enabled": True, "clerk_secret_key": "sk_test_x"}
+    )
 
     async def fake_directory(secret_key: str) -> dict:
         return _DIRECTORY
@@ -213,8 +215,11 @@ def test_session_clerk_directory_scoped(clerk_app: FastAPI) -> None:
         out = c.get("/api/admin/clerk/directory")
         assert out.status_code == 200, out.text
         body = out.json()
-        assert {o["id"] for o in body["organizations"]} == {"org_1"}
-        assert "carol@beta.co" not in {u["email"] for u in body["users"]}
+        # Per-instance shape (migrated legacy key = "Development").
+        inst = body["instances"][0]
+        assert inst["name"] == "Development" and inst["ok"] is True
+        assert {o["id"] for o in inst["organizations"]} == {"org_1"}
+        assert "carol@beta.co" not in {u["email"] for u in inst["users"]}
 
 
 # ---------------------------------------------------------------------------
@@ -256,3 +261,149 @@ def test_session_plain_user_gets_403(clerk_app: FastAPI) -> None:
         _login(c, "alice@acme.co")  # org member, never promoted
         assert c.get("/api/admin/users").status_code == 403
         assert c.get("/api/admin/allowlist").status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Named Clerk instances: dual-instance login union + prefixed labels +
+# per-instance fail-soft in the directory proxy.
+# ---------------------------------------------------------------------------
+
+_PROD_DIRECTORY = {
+    "users": [
+        {"id": "pu_oa", "email": "orgadmin@acme.co", "name": "Org Admin",
+         "orgs": [{"id": "org_p1", "name": "Acme"}]},
+        {"id": "pu_pat", "email": "pat@prod.co", "name": "Pat",
+         "orgs": [{"id": "org_p2", "name": "Gamma"}]},
+    ],
+    "organizations": [
+        {"id": "org_p1", "name": "Acme", "members": [
+            {"user_id": "pu_oa", "email": "orgadmin@acme.co", "role": "admin"},
+        ]},
+        {"id": "org_p2", "name": "Gamma", "members": [
+            {"user_id": "pu_pat", "email": "pat@prod.co", "role": "admin"},
+        ]},
+    ],
+}
+
+
+@pytest.fixture
+def two_instances(clerk_app: FastAPI, monkeypatch: pytest.MonkeyPatch):
+    """clerk_app plus a second, Production instance with its own directory.
+
+    fetch_directory dispatches on the secret key — each instance is its own
+    universe, exactly like real Clerk.
+    """
+    scope_mod.clear_directory_cache()
+    clerk_svc.clear_org_members_cache()
+    admin_store.save_clerk_instances([
+        {"name": "Development", "secret_key": "sk_test_x", "enabled": True},
+        {"name": "Production", "secret_key": "sk_live_y", "enabled": True},
+    ])
+
+    async def fake_directory(secret_key: str) -> dict:
+        if secret_key == "sk_live_y":
+            return _PROD_DIRECTORY
+        if secret_key == "sk_test_x":
+            return _DIRECTORY
+        raise clerk_svc.ClerkError("unknown key")
+
+    monkeypatch.setattr(clerk_svc, "fetch_directory", fake_directory)
+    return clerk_app
+
+
+def test_login_unions_instances_with_prefixed_labels(two_instances) -> None:
+    """A user in BOTH instances gets accounts from both, labelled
+    'Instance / Org'. IDs stay the raw org ids."""
+    with TestClient(two_instances) as c:
+        _login(c, "orgadmin@acme.co")
+        me = c.get("/api/auth/me").json()
+        by_company = {
+            a["company_id"]: a["company_name"] for a in me["accounts"]
+        }
+        assert by_company["org_1"] == "Development / Acme"
+        assert by_company["org_p1"] == "Production / Acme"
+
+
+def test_login_via_second_instance_only(two_instances) -> None:
+    """A Production-only user is admitted even though Development has never
+    heard of them (union semantics)."""
+    with TestClient(two_instances) as c:
+        _login(c, "pat@prod.co")
+        me = c.get("/api/auth/me").json()
+        assert me["accounts"][0]["company_name"] == "Production / Gamma"
+
+
+def test_one_instance_down_login_still_works(
+    two_instances, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Development down: its orgs are skipped this login (fail closed per
+    instance), Production admissions are unaffected."""
+    async def flaky(secret_key: str) -> dict:
+        if secret_key == "sk_live_y":
+            return _PROD_DIRECTORY
+        raise clerk_svc.ClerkError("dev down")
+
+    monkeypatch.setattr(clerk_svc, "fetch_directory", flaky)
+    with TestClient(two_instances) as c:
+        _login(c, "pat@prod.co")  # would 303-deny if the union failed
+
+
+def test_directory_proxy_per_instance_fail_soft(
+    two_instances, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One instance down → its entry carries ok=False + the error while the
+    healthy instance still returns data (no blank tab)."""
+    async def flaky(secret_key: str) -> dict:
+        if secret_key == "sk_test_x":
+            return _DIRECTORY
+        raise clerk_svc.ClerkError("prod exploded")
+
+    monkeypatch.setattr(clerk_svc, "fetch_directory", flaky)
+    with TestClient(two_instances) as c:
+        _login(c, "orgadmin@acme.co")
+        _promote("orgadmin@acme.co")
+        body = c.get("/api/admin/clerk/directory").json()
+        by_name = {i["name"]: i for i in body["instances"]}
+        assert by_name["Development"]["ok"] is True
+        assert by_name["Development"]["organizations"]
+        assert by_name["Production"]["ok"] is False
+        assert "prod exploded" in by_name["Production"]["error"]
+        assert by_name["Production"]["live"] is True  # sk_live_ badge
+
+
+def test_admin_settings_patch_validates_instances(
+    clerk_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from voitta_rag_enterprise.config import reset_settings_cache
+
+    monkeypatch.setenv("VOITTA_SUPER_ADMINS", "root@super.co")
+    reset_settings_cache()
+    with TestClient(clerk_app) as c:
+        _login(c, "root@super.co")
+
+        def patch(instances):
+            return c.patch(
+                "/api/admin/settings", json={"clerk_instances": instances}
+            )
+
+        # Name required / duplicate / bad key prefix / enable-without-key.
+        assert patch([{"name": "", "secret_key": "sk_test_a"}]).status_code == 400
+        assert patch([
+            {"name": "Prod", "secret_key": "sk_live_a"},
+            {"name": "prod", "secret_key": "sk_live_b"},
+        ]).status_code == 400
+        assert patch([{"name": "P", "secret_key": "pk_live_x"}]).status_code == 400
+        assert patch([{"name": "P", "enabled": True}]).status_code == 400
+
+        # Valid save round-trips, with live/test derived from the prefix.
+        r = patch([
+            {"name": "Development", "secret_key": "sk_test_d", "enabled": True},
+            {"name": "Production", "secret_key": "sk_live_p", "enabled": False},
+        ])
+        assert r.status_code == 200, r.text
+        insts = {i["name"]: i for i in r.json()["clerk_instances"]}
+        assert insts["Production"]["live"] is True
+        assert insts["Development"]["live"] is False
+        # Deprecated mirror fields track the Development card.
+        assert r.json()["clerk_enabled"] is True
+        assert r.json()["clerk_secret_key"] == "sk_test_d"

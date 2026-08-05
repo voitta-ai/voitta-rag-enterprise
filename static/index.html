@@ -136,18 +136,20 @@
                                 Native directory (Users &amp; Groups, managed here)
                             </label>
                             <div id="admin-native-status" class="hint" style="margin:2px 0 10px 24px;"></div>
-                            <label class="admin-inline-check">
-                                <input id="admin-clerk-enabled" type="checkbox" />
-                                Clerk directory (read-only, from
+                            <div class="admin-inline-check" style="cursor:default;">
+                                Clerk instances (read-only directory, from
                                 <a href="https://dashboard.clerk.com" target="_blank" rel="noopener">clerk.com</a>)
-                            </label>
-                            <div class="admin-add-row" style="margin-top:8px;">
-                                <input id="admin-clerk-key" type="text"
-                                    placeholder="sk_test_… or sk_live_…"
-                                    autocomplete="off" spellcheck="false" />
-                                <button id="admin-clerk-save" class="btn btn-primary btn-sm">Save</button>
                             </div>
-                            <div id="admin-clerk-status" class="hint" style="margin-top:6px;"></div>
+                            <p class="hint" style="margin:2px 0 8px 24px;">
+                                Every instance is <strong>named</strong> — org labels show as
+                                <em>Instance / Organization</em> across the app.
+                            </p>
+                            <!-- One card per named Clerk instance; renderClerkInstances()
+                                 owns this container. -->
+                            <div id="admin-clerk-instances" style="margin-left:24px;"></div>
+                            <button id="admin-clerk-add" class="btn btn-secondary btn-sm"
+                                style="margin:6px 0 0 24px;">+ Add Clerk instance</button>
+                            <div id="admin-clerk-status" class="hint" style="margin:6px 0 0 24px;"></div>
                         </section>
                     </div>
                 </div>

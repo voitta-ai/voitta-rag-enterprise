@@ -236,36 +236,27 @@ function paintNfsStatus(el, settings) {
 
 let _clerkOn = false;
 let _nativeOn = true;
-let _clerkDir = null;          // cached /admin/clerk/directory payload
+let _clerkDir = null;          // cached /admin/clerk/directory payload ({instances:[…]})
 let _clerkDirPromise = null;   // in-flight guard
 let _clerkUserFilter = "";
+// Working copy of the instance list while editing (mirrors
+// settings.clerk_instances; re-seeded on every settings render unless a
+// card is mid-edit).
+let _clerkInstances = [];
+let _clerkEditing = false;
 
 function renderDirectorySettings(settings) {
     const nativeCb = $("#admin-native-enabled");
     const nativeStatus = $("#admin-native-status");
-    const cb = $("#admin-clerk-enabled");
-    const key = $("#admin-clerk-key");
-    const status = $("#admin-clerk-status");
-    if (!cb || !key || !status || !nativeCb) return;
+    if (!nativeCb) return;
     nativeCb.checked = settings.native_directory_enabled !== false;
     if (nativeStatus) {
         nativeStatus.textContent = nativeCb.checked
             ? "" : "Hidden — the Users and Groups tabs are not shown.";
     }
-    cb.checked = !!settings.clerk_enabled;
-    if (document.activeElement !== key) {
-        key.value = settings.clerk_secret_key || "";
-    }
-    if (settings.clerk_enabled) {
-        status.textContent = settings.clerk_key_from_env
-            ? "Enabled — key pre-filled from .env (CLERK_SECRET_KEY)."
-            : "Enabled.";
-    } else {
-        status.textContent = settings.clerk_secret_key
-            ? (settings.clerk_key_from_env
-                ? "Disabled — key pre-filled from .env, toggle on to use it."
-                : "Disabled.")
-            : "Disabled — paste your Clerk secret key to get started.";
+    if (!_clerkEditing) {
+        _clerkInstances = (settings.clerk_instances || []).map((i) => ({ ...i }));
+        renderClerkInstances();
     }
 }
 
@@ -282,25 +273,180 @@ async function saveNativeSettings(enabled) {
     }
 }
 
-async function saveClerkSettings(enabled) {
-    const key = $("#admin-clerk-key");
-    const cb = $("#admin-clerk-enabled");
+// ----- Named Clerk instance cards ------------------------------------------
+
+function _maskKey(key) {
+    if (!key) return "";
+    const m = key.match(/^(sk_(?:live|test)_)/);
+    const prefix = m ? m[1] : key.slice(0, 8);
+    return `${prefix}…${key.slice(-4)}`;
+}
+
+async function saveClerkInstances() {
     const status = $("#admin-clerk-status");
-    // Blur so the WS snapshot push isn't skipped by the focus guard.
     if (document.activeElement) document.activeElement.blur();
-    status.textContent = "Saving…";
+    if (status) status.textContent = "Saving…";
     try {
         const out = await api.adminUpdateSettings({
-            clerk_enabled: enabled,
-            clerk_secret_key: key.value.trim(),
+            clerk_instances: _clerkInstances.map((i) => ({
+                name: (i.name || "").trim(),
+                secret_key: (i.secret_key || "").trim(),
+                enabled: !!i.enabled,
+            })),
         });
-        _clerkDir = null;  // key/mode changed — refetch on next render
+        _clerkDir = null;  // keys/instances changed — refetch on next render
+        _clerkEditing = false;
+        if (status) status.textContent = "";
         renderDirectorySettings(out);
         applyDirectoryModes(out);
     } catch (err) {
-        cb.checked = _clerkOn;  // revert the optimistic flip
-        status.textContent = "✗ " + (err.message || "save failed");
+        if (status) status.textContent = "✗ " + (err.message || "save failed");
+        renderClerkInstances();  // keep the editor open with current values
     }
+}
+
+// One card per named instance. Saved cards render read-only (masked key,
+// live/test dot, enable toggle, Test + Remove); a card in edit mode shows
+// name + key inputs with Save/Cancel.
+function renderClerkInstances() {
+    const host = $("#admin-clerk-instances");
+    if (!host) return;
+    host.innerHTML = "";
+    if (!_clerkInstances.length) {
+        const p = document.createElement("p");
+        p.className = "hint";
+        p.textContent = "No Clerk instances configured — add one to enable the Clerk directory.";
+        host.appendChild(p);
+        return;
+    }
+    _clerkInstances.forEach((inst, idx) => {
+        const card = document.createElement("div");
+        card.className = "admin-provider-card admin-clerk-instance";
+        card.style.cssText = "padding:8px 10px;margin-bottom:6px;";
+
+        const row = document.createElement("div");
+        row.style.cssText = "display:flex;align-items:center;gap:8px;flex-wrap:wrap;";
+
+        // Live (sk_live_) = filled indigo dot; test = hollow gray.
+        const dot = document.createElement("span");
+        const live = (inst.secret_key || "").startsWith("sk_live_");
+        dot.textContent = live ? "●" : "○";
+        dot.style.color = live ? "#6366f1" : "var(--color-text-secondary)";
+        dot.title = live ? "Production key (sk_live_)" : "Test key (sk_test_)";
+        row.appendChild(dot);
+
+        if (inst._editing) {
+            const nameIn = document.createElement("input");
+            nameIn.type = "text";
+            nameIn.placeholder = "Name (e.g. Production)";
+            nameIn.value = inst.name || "";
+            nameIn.maxLength = 24;
+            nameIn.style.width = "150px";
+            nameIn.addEventListener("input", () => { inst.name = nameIn.value; });
+            const keyIn = document.createElement("input");
+            keyIn.type = "text";
+            keyIn.placeholder = "sk_test_… or sk_live_…";
+            keyIn.value = inst.secret_key || "";
+            keyIn.autocomplete = "off";
+            keyIn.spellcheck = false;
+            keyIn.style.flex = "1";
+            keyIn.addEventListener("input", () => { inst.secret_key = keyIn.value; });
+            const saveBtn = document.createElement("button");
+            saveBtn.className = "btn btn-primary btn-xs";
+            saveBtn.textContent = "Save";
+            saveBtn.addEventListener("click", () => {
+                delete inst._editing;
+                saveClerkInstances();
+            });
+            const cancelBtn = document.createElement("button");
+            cancelBtn.className = "btn btn-secondary btn-xs";
+            cancelBtn.textContent = "Cancel";
+            cancelBtn.addEventListener("click", () => {
+                _clerkEditing = false;
+                if (inst._new) _clerkInstances.splice(idx, 1);
+                else delete inst._editing;
+                renderClerkInstances();
+            });
+            row.append(nameIn, keyIn, saveBtn, cancelBtn);
+        } else {
+            const name = document.createElement("strong");
+            name.textContent = inst.name;
+            row.appendChild(name);
+            if (inst.from_env) {
+                const env = document.createElement("span");
+                env.className = "hint";
+                env.textContent = "(from .env)";
+                env.title = "Key comes from CLERK_SECRET_KEY — edit .env to change it.";
+                row.appendChild(env);
+            }
+            const key = document.createElement("span");
+            key.className = "hint";
+            key.style.fontFamily = "ui-monospace, monospace";
+            key.textContent = _maskKey(inst.secret_key);
+            row.appendChild(key);
+            const state = document.createElement("span");
+            state.id = `admin-clerk-inst-state-${idx}`;
+            state.className = "hint";
+            row.appendChild(state);
+
+            const spacer = document.createElement("span");
+            spacer.style.flex = "1";
+            row.appendChild(spacer);
+
+            const testBtn = document.createElement("button");
+            testBtn.className = "btn btn-secondary btn-xs";
+            testBtn.textContent = "Test";
+            testBtn.title = "Check the key against the Clerk API";
+            testBtn.addEventListener("click", async () => {
+                state.textContent = "testing…";
+                try {
+                    const dir = await api.adminClerkDirectory();
+                    const mine = (dir.instances || []).find((x) => x.name === inst.name);
+                    if (!mine) state.textContent = "✗ instance not enabled";
+                    else if (!mine.ok) state.textContent = "✗ " + (mine.error || "failed");
+                    else state.textContent =
+                        `✓ ${mine.organizations.length} orgs · ${mine.users.length} users`;
+                } catch (err) {
+                    state.textContent = "✗ " + (err.message || "test failed");
+                }
+            });
+            const editBtn = document.createElement("button");
+            editBtn.className = "btn btn-secondary btn-xs";
+            editBtn.textContent = "Edit";
+            editBtn.disabled = !!inst.from_env;
+            if (inst.from_env) editBtn.title = "Managed by .env (CLERK_SECRET_KEY)";
+            editBtn.addEventListener("click", () => {
+                _clerkEditing = true;
+                inst._editing = true;
+                renderClerkInstances();
+            });
+            const rmBtn = document.createElement("button");
+            rmBtn.className = "btn btn-secondary btn-xs";
+            rmBtn.textContent = "Remove";
+            rmBtn.addEventListener("click", () => {
+                if (!confirm(`Remove Clerk instance "${inst.name}"?\n\nIts orgs stop being offered at sign-in; existing accounts and folders are kept.`)) return;
+                _clerkInstances.splice(idx, 1);
+                saveClerkInstances();
+            });
+
+            // Enabled toggle mirrors the folder-tree switch styling.
+            const enLabel = document.createElement("label");
+            enLabel.className = "admin-inline-check";
+            enLabel.style.margin = "0";
+            const enCb = document.createElement("input");
+            enCb.type = "checkbox";
+            enCb.checked = !!inst.enabled;
+            enCb.addEventListener("change", () => {
+                inst.enabled = enCb.checked;
+                saveClerkInstances();
+            });
+            enLabel.append(enCb, document.createTextNode(" enabled"));
+
+            row.append(testBtn, editBtn, rmBtn, enLabel);
+        }
+        card.appendChild(row);
+        host.appendChild(card);
+    });
 }
 
 // Show/hide the four directory tabs to match the toggles, and kick off the
@@ -352,7 +498,18 @@ function _fmtClerkDate(ms) {
 
 function renderClerkDirectory() {
     if (!_clerkDir) return;
-    setClerkDirStatus("");
+    // Per-instance fail-soft: name the instances that failed while the
+    // healthy ones still render ("Production unreachable — showing
+    // Development only").
+    const insts = _clerkDir.instances || [];
+    const down = insts.filter((i) => !i.ok);
+    const up = insts.filter((i) => i.ok);
+    setClerkDirStatus(
+        down.length
+            ? `⚠ ${down.map((i) => i.name).join(", ")} unreachable — showing `
+              + (up.length ? up.map((i) => i.name).join(", ") + " only" : "nothing")
+            : "",
+    );
     renderClerkUsersTable();
     renderClerkCompanies();
 }
@@ -385,7 +542,15 @@ function renderClerkUsersTable() {
     const tbody = $("#admin-clerk-users-table tbody");
     if (!tbody || !_clerkDir) return;
     tbody.innerHTML = "";
-    const users = _clerkDir.users || [];
+    // Flatten users across instances; org labels get the instance prefix
+    // ("Production / Acme"). A person in two instances appears once per
+    // instance — they ARE distinct directory identities.
+    const users = (_clerkDir.instances || []).flatMap((inst) =>
+        (inst.users || []).map((u) => ({
+            ...u,
+            org_names: (u.org_names || []).map((n) => `${inst.name} / ${n}`),
+        })),
+    );
     const superAdmin = _isSuperAdmin();
     const q = _clerkUserFilter.trim().toLowerCase();
     const rows = q
@@ -433,11 +598,19 @@ function renderClerkCompanies() {
     const host = $("#admin-clerk-companies");
     if (!host || !_clerkDir) return;
     host.innerHTML = "";
-    const orgs = _clerkDir.organizations || [];
+    // Orgs across instances, each labelled "Instance / Org" with the
+    // live/test dot carried onto the card title.
+    const orgs = (_clerkDir.instances || []).flatMap((inst) =>
+        (inst.organizations || []).map((o) => ({
+            ...o,
+            _instName: inst.name,
+            _instLive: !!inst.live,
+        })),
+    );
     if (!orgs.length) {
         const p = document.createElement("p");
         p.className = "hint";
-        p.textContent = "No organizations in this Clerk instance.";
+        p.textContent = "No organizations in any enabled Clerk instance.";
         host.appendChild(p);
         return;
     }
@@ -450,7 +623,11 @@ function renderClerkCompanies() {
         head.className = "admin-clerk-org-head";
         const title = document.createElement("span");
         title.className = "provider-card-title";
-        title.textContent = org.name;
+        const instSpan = document.createElement("span");
+        instSpan.style.color = "var(--color-text-secondary)";
+        instSpan.textContent = `${org._instLive ? "●" : "○"} ${org._instName} / `;
+        instSpan.title = org._instLive ? "Production instance" : "Test instance";
+        title.append(instSpan, document.createTextNode(org.name));
         const admins = members.filter((m) => m.role === "admin");
         const adminEl = document.createElement("span");
         adminEl.className = "hint admin-clerk-org-admin";
@@ -1331,20 +1508,23 @@ $("#admin-backdrop").addEventListener("click", (e) => {
 wireAdminAdd("#admin-domain-input", "#admin-domain-add", api.adminAddDomain);
 wireAdminAdd("#admin-block-input", "#admin-block-add", api.adminBlock);
 
-// Directory toggles: commit immediately on change. The Clerk toggle also
-// carries whatever key is in the field; Save commits the key while keeping
-// the current mode.
+// Directory toggles: commit immediately on change. Clerk instances are
+// edited via per-card controls (renderClerkInstances); "+ Add" opens a
+// fresh card in edit mode.
 $("#admin-native-enabled").addEventListener("change", (e) =>
     saveNativeSettings(e.target.checked));
-$("#admin-clerk-enabled").addEventListener("change", (e) =>
-    saveClerkSettings(e.target.checked));
-$("#admin-clerk-save").addEventListener("click", () =>
-    saveClerkSettings($("#admin-clerk-enabled").checked));
-$("#admin-clerk-key").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-        e.preventDefault();
-        saveClerkSettings($("#admin-clerk-enabled").checked);
-    }
+$("#admin-clerk-add").addEventListener("click", () => {
+    _clerkEditing = true;
+    _clerkInstances.push({
+        name: "",
+        secret_key: "",
+        enabled: false,
+        _editing: true,
+        _new: true,
+    });
+    renderClerkInstances();
+    const inputs = $("#admin-clerk-instances").querySelectorAll("input[type=text]");
+    if (inputs.length) inputs[0].focus();
 });
 $("#admin-clerk-user-filter").addEventListener("input", (e) => {
     _clerkUserFilter = e.target.value;

@@ -249,28 +249,180 @@ def get_native_directory_enabled() -> bool:
     return bool(load_settings().get("native_directory_enabled", True))
 
 
+# ---------------------------------------------------------------------------
+# Named Clerk instances.
+#
+# Every Clerk instance is NAMED ("Development", "Production", …). Stored as
+# ``clerk_instances: [{name, secret_key, enabled}]`` in settings.json. The
+# legacy single-key fields (``clerk_enabled`` / ``clerk_secret_key``) are
+# kept in the file and MIRRORED from the instance named "Development" on
+# every save, so rolling back to a pre-instances build keeps Clerk working
+# unchanged. Reads synthesize the list from the legacy fields (or the
+# CLERK_SECRET_KEY env var) when no list has been saved yet — the migration
+# is read-side and touches nothing until an admin first edits instances.
+# ---------------------------------------------------------------------------
+
+# The migration name given to the legacy stored key / env key. Also the
+# instance whose key mirrors back into the legacy fields on save.
+LEGACY_INSTANCE_NAME = "Development"
+
+CLERK_INSTANCE_NAME_MAX = 24
+
+
+def _norm_instances(raw: object) -> list[dict[str, object]]:
+    """Validate/normalize a persisted or caller-supplied instance list."""
+    out: list[dict[str, object]] = []
+    seen: set[str] = set()
+    if not isinstance(raw, list):
+        return out
+    for row in raw:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name", "") or "").strip()[:CLERK_INSTANCE_NAME_MAX]
+        key = str(row.get("secret_key", "") or "").strip()
+        if not name or name.lower() in seen:
+            continue
+        seen.add(name.lower())
+        norm: dict[str, object] = {
+            "name": name,
+            "secret_key": key,
+            "enabled": bool(row.get("enabled", False)),
+        }
+        # Carried through so save_clerk_instances can blank env-sourced
+        # keys instead of persisting them (never stored to disk itself —
+        # the save side strips it from the written rows).
+        if row.get("from_env"):
+            norm["from_env"] = True
+        out.append(norm)
+    return out
+
+
+def get_clerk_instances() -> list[dict[str, object]]:
+    """The configured Clerk instances, migrating from legacy shape on read.
+
+    Precedence when no ``clerk_instances`` list has ever been saved:
+    legacy stored key → env key — either becomes a synthesized
+    "Development" instance carrying the legacy ``clerk_enabled`` flag.
+    Once a list exists in the file it is the single source of truth
+    (env is then only a fallback for the Development card's empty key,
+    preserving the pre-instances precedence rule).
+    """
+    s = load_settings()
+    raw = s.get("clerk_instances")
+    if isinstance(raw, list):
+        instances = _norm_instances(raw)
+        # Preserve the historical env-fallback: an empty stored key on the
+        # legacy-named instance defers to CLERK_SECRET_KEY from .env.
+        env_key = (get_settings().clerk_secret_key or "").strip()
+        if env_key:
+            for inst in instances:
+                if inst["name"] == LEGACY_INSTANCE_NAME and not inst["secret_key"]:
+                    inst["secret_key"] = env_key
+                    inst["from_env"] = True
+        return instances
+
+    # No list saved yet — synthesize from legacy fields (read-side migration).
+    stored = str(s.get("clerk_secret_key", "") or "").strip()
+    env_key = (get_settings().clerk_secret_key or "").strip()
+    key = stored or env_key
+    if not key:
+        return []
+    return [
+        {
+            "name": LEGACY_INSTANCE_NAME,
+            "secret_key": key,
+            "enabled": bool(s.get("clerk_enabled", False)),
+            **({"from_env": True} if not stored else {}),
+        }
+    ]
+
+
+def save_clerk_instances(instances: list[dict[str, object]]) -> None:
+    """Persist the instance list; mirror "Development" into legacy fields.
+
+    The mirror keeps a rollback to a pre-instances build fully working
+    (old code reads ``clerk_secret_key``/``clerk_enabled`` as before).
+    A one-time ``settings.json.bak-clerk-<ts>`` backup is written before
+    the first save that introduces the list. Keys flagged ``from_env``
+    are stored EMPTY (the read side re-applies the env fallback), so a
+    .env rotation is never shadowed by a stale copy.
+    """
+    import json as _json
+    import shutil
+    import time as _time
+
+    cleaned = _norm_instances(instances)
+    raw = [
+        {
+            "name": i["name"],
+            # Never persist an env-sourced key (see docstring).
+            "secret_key": "" if i.get("from_env") else i["secret_key"],
+            "enabled": i["enabled"],
+        }
+        for i in cleaned
+    ]
+    p = _settings_path()
+    if p.exists():
+        try:
+            has_list = isinstance(
+                _json.loads(p.read_text() or "{}").get("clerk_instances"), list
+            )
+        except (OSError, ValueError):
+            has_list = False
+        if not has_list:
+            with contextlib.suppress(OSError):
+                shutil.copy2(p, f"{p}.bak-clerk-{int(_time.time())}")
+
+    legacy = next(
+        (i for i in cleaned if i["name"] == LEGACY_INSTANCE_NAME), None
+    )
+    save_settings(
+        {
+            "clerk_instances": raw,
+            # Legacy mirror — rollback safety. Enabled mirrors the
+            # Development card; the key mirrors only store-sourced keys.
+            "clerk_enabled": bool(legacy and legacy["enabled"]),
+            "clerk_secret_key": (
+                "" if (legacy is None or legacy.get("from_env"))
+                else str(legacy["secret_key"])
+            ),
+        }
+    )
+
+
+def enabled_clerk_instances() -> list[dict[str, object]]:
+    """Instances that are enabled AND have a key — the auth-path view."""
+    return [
+        i for i in get_clerk_instances() if i["enabled"] and i["secret_key"]
+    ]
+
+
 def get_clerk_enabled() -> bool:
-    """True when an admin flipped the Clerk-directory toggle on."""
-    return bool(load_settings().get("clerk_enabled", False))
+    """True when at least one named Clerk instance is enabled with a key."""
+    return bool(enabled_clerk_instances())
 
 
 def get_clerk_secret_key() -> str:
-    """Effective Clerk Backend API secret key.
-
-    The admin-stored value wins; when it's empty we fall back to the
-    ``CLERK_SECRET_KEY`` / ``VOITTA_CLERK_SECRET_KEY`` env var so a key
-    already present in .env pre-populates the UI without re-entry.
+    """Legacy single-key view: the "Development" instance's key, else the
+    first enabled instance's. Kept for the deprecated admin-API fields and
+    any straggler callers; new code iterates ``enabled_clerk_instances``.
     """
-    stored = str(load_settings().get("clerk_secret_key", "") or "").strip()
-    if stored:
-        return stored
-    return (get_settings().clerk_secret_key or "").strip()
+    instances = get_clerk_instances()
+    for inst in instances:
+        if inst["name"] == LEGACY_INSTANCE_NAME and inst["secret_key"]:
+            return str(inst["secret_key"])
+    for inst in instances:
+        if inst["enabled"] and inst["secret_key"]:
+            return str(inst["secret_key"])
+    return ""
 
 
 def clerk_key_from_env() -> bool:
-    """True when the effective key comes from .env, not the admin store."""
-    stored = str(load_settings().get("clerk_secret_key", "") or "").strip()
-    return not stored and bool((get_settings().clerk_secret_key or "").strip())
+    """True when the Development instance's key comes from .env."""
+    return any(
+        i.get("from_env") and i["name"] == LEGACY_INSTANCE_NAME
+        for i in get_clerk_instances()
+    )
 
 
 def is_native_allowed(email: str) -> bool:

@@ -40,10 +40,14 @@ _DIRECTORY = {
 
 
 @pytest.fixture
-def clerk_dir(monkeypatch: pytest.MonkeyPatch):
+def clerk_dir(app, monkeypatch: pytest.MonkeyPatch):
+    # Legacy settings shape → read-side migration to a "Development"
+    # instance. Depends on ``app`` (→ auth_env → env) so the data dir the
+    # settings land in is the same one the requests read.
     scope_mod.clear_directory_cache()
-    monkeypatch.setattr(admin_store, "get_clerk_enabled", lambda: True)
-    monkeypatch.setattr(admin_store, "get_clerk_secret_key", lambda: "sk_test")
+    admin_store.save_settings(
+        {"clerk_enabled": True, "clerk_secret_key": "sk_test_x"}
+    )
 
     async def fake_directory(secret_key: str) -> dict:
         return _DIRECTORY
@@ -199,9 +203,14 @@ def test_clerk_directory_scoped_for_regular_admin(app: FastAPI, clerk_dir) -> No
     _make_regular_admin(app, "orgadmin@x")
     with TestClient(app) as c:
         out = c.get("/api/admin/clerk/directory").json()
-        org_ids = {o["id"] for o in out["organizations"]}
+        # Per-instance shape: the migrated legacy key appears as one
+        # healthy instance named "Development".
+        assert [i["name"] for i in out["instances"]] == ["Development"]
+        inst = out["instances"][0]
+        assert inst["ok"] is True and inst["error"] == ""
+        org_ids = {o["id"] for o in inst["organizations"]}
         assert org_ids == {"org_1"}  # only the org they administer
-        emails = {u["email"] for u in out["users"]}
+        emails = {u["email"] for u in inst["users"]}
         assert "carol@x" not in emails  # org_2 member hidden
 
 

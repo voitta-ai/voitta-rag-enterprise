@@ -128,3 +128,13 @@ curl -X DELETE -H "$AUTH" $BASE/folders/42/files/1337
   are provisioned on first use.
 - MCP access (for LLM agents) uses the same keys against `/mcp` — see
   [OPERATIONS.md §7](OPERATIONS.md#7-identity--accounts-sign-in-gate-clerk-directory-switching).
+- Company (`cvk_`) keys are scoped to a **Clerk organization**; membership is
+  verified live against the org's **named Clerk instance** (resolved
+  automatically — see *Named Clerk instances* in OPERATIONS.md §7). Admin
+  surface: `GET/PATCH /api/admin/settings` carries
+  `clerk_instances: [{name, secret_key, enabled, from_env, live}]` (the
+  legacy `clerk_enabled`/`clerk_secret_key` fields remain, deprecated,
+  mirroring the "Development" instance);
+  `GET /api/admin/clerk/directory` returns
+  `{instances: [{name, live, ok, error, users, organizations}]}` — one
+  entry per enabled instance.

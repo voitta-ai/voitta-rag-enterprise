@@ -20,6 +20,22 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+class ClerkInstanceOut(BaseModel):
+    """One NAMED Clerk instance ("Development", "Production", …).
+
+    ``secret_key`` is plaintext — same admin-gated posture as auth-provider
+    secrets. ``from_env`` marks the Development card whose key comes from
+    ``CLERK_SECRET_KEY`` in .env (read-only in the UI; never persisted).
+    ``live`` is derived from the key prefix (sk_live_) for the env badge.
+    """
+
+    name: str
+    secret_key: str
+    enabled: bool
+    from_env: bool = False
+    live: bool = False
+
+
 class AdminSettingsOut(BaseModel):
     nfs_root: str
     # ``nfs_available`` is ``nfs_root`` non-empty AND the directory
@@ -33,14 +49,20 @@ class AdminSettingsOut(BaseModel):
     # Companies tabs. Independent — any combination is valid. Display-only:
     # neither affects sign-in or authorization.
     native_directory_enabled: bool
-    # ``clerk_secret_key`` is the *effective* key (admin-stored value,
-    # falling back to CLERK_SECRET_KEY from .env) — plaintext, same posture
-    # as auth-provider secrets: this endpoint is admin-gated and admins can
-    # already read .env. ``clerk_key_from_env`` tells the UI to badge the
-    # pre-filled value.
+    # Named Clerk instances — the source of truth.
+    clerk_instances: list[ClerkInstanceOut]
+    # DEPRECATED legacy pair, kept one release for external readers:
+    # ``clerk_enabled`` = any instance enabled; ``clerk_secret_key`` =
+    # the "Development" instance's key (else first enabled).
     clerk_enabled: bool
     clerk_secret_key: str
     clerk_key_from_env: bool
+
+
+class ClerkInstanceIn(BaseModel):
+    name: str
+    secret_key: str = ""
+    enabled: bool = False
 
 
 class _AdminSettingsPatchIn(BaseModel):
@@ -50,9 +72,12 @@ class _AdminSettingsPatchIn(BaseModel):
     # ``None`` as the "leave alone" signal; require the key's presence.
     nfs_root: str | None = None
     native_directory_enabled: bool | None = None
+    # Full-list replacement for the named instances (the cards UI always
+    # sends the complete list). Validated per card below.
+    clerk_instances: list[ClerkInstanceIn] | None = None
+    # DEPRECATED legacy pair — still accepted; mapped onto the
+    # "Development" instance so old clients keep working.
     clerk_enabled: bool | None = None
-    # Empty string clears the stored key (the .env fallback, if any,
-    # then takes over again).
     clerk_secret_key: str | None = None
 
 
@@ -83,6 +108,16 @@ def _admin_settings_out() -> AdminSettingsOut:
         nfs_available=ok,
         nfs_status=status_str,
         native_directory_enabled=admin_store.get_native_directory_enabled(),
+        clerk_instances=[
+            ClerkInstanceOut(
+                name=str(i["name"]),
+                secret_key=str(i["secret_key"]),
+                enabled=bool(i["enabled"]),
+                from_env=bool(i.get("from_env")),
+                live=str(i["secret_key"]).startswith("sk_live_"),
+            )
+            for i in admin_store.get_clerk_instances()
+        ],
         clerk_enabled=admin_store.get_clerk_enabled(),
         clerk_secret_key=admin_store.get_clerk_secret_key(),
         clerk_key_from_env=admin_store.clerk_key_from_env(),
@@ -121,33 +156,118 @@ def update_admin_settings(
         updates["nfs_root"] = value
     if body.native_directory_enabled is not None:
         updates["native_directory_enabled"] = bool(body.native_directory_enabled)
-    if body.clerk_enabled is not None:
-        if body.clerk_enabled and not (
-            (body.clerk_secret_key or "").strip()
-            or admin_store.get_clerk_secret_key()
-        ):
-            raise HTTPException(
-                status.HTTP_400_BAD_REQUEST,
-                "Set a Clerk secret key (sk_…) before enabling Clerk mode.",
-            )
-        updates["clerk_enabled"] = bool(body.clerk_enabled)
-    if body.clerk_secret_key is not None:
-        value = body.clerk_secret_key.strip()
-        if value and not value.startswith("sk_"):
-            raise HTTPException(
-                status.HTTP_400_BAD_REQUEST,
-                "Clerk secret keys start with sk_test_ or sk_live_.",
-            )
-        # Storing the same value .env provides would shadow future .env
-        # rotations for no benefit — keep the store empty in that case.
+
+    # Named instances — full-list replacement, validated per card.
+    instances_to_save: list[dict[str, object]] | None = None
+    if body.clerk_instances is not None:
         from ....config import get_settings
 
-        if value == (get_settings().clerk_secret_key or "").strip():
-            value = ""
-        updates["clerk_secret_key"] = value
+        env_key = (get_settings().clerk_secret_key or "").strip()
+        seen: set[str] = set()
+        cleaned: list[dict[str, object]] = []
+        for inst in body.clerk_instances:
+            name = inst.name.strip()
+            if not name:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    "Every Clerk instance must have a name.",
+                )
+            if len(name) > admin_store.CLERK_INSTANCE_NAME_MAX:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    f"Instance name {name!r} is too long "
+                    f"(max {admin_store.CLERK_INSTANCE_NAME_MAX} chars).",
+                )
+            if name.lower() in seen:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    f"Duplicate Clerk instance name {name!r}.",
+                )
+            seen.add(name.lower())
+            key = inst.secret_key.strip()
+            if key and not key.startswith("sk_"):
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    f"Instance {name!r}: Clerk secret keys start with "
+                    "sk_test_ or sk_live_.",
+                )
+            from_env = (
+                name == admin_store.LEGACY_INSTANCE_NAME
+                and bool(env_key)
+                and key in ("", env_key)
+            )
+            if inst.enabled and not (key or from_env):
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    f"Instance {name!r}: set a secret key before enabling.",
+                )
+            cleaned.append(
+                {
+                    "name": name,
+                    "secret_key": env_key if (from_env and not key) else key,
+                    "enabled": bool(inst.enabled),
+                    **({"from_env": True} if from_env else {}),
+                }
+            )
+        instances_to_save = cleaned
+
+    # DEPRECATED legacy pair → mapped onto the "Development" instance so
+    # pre-instances clients (and tests) keep working unchanged.
+    if instances_to_save is None and (
+        body.clerk_enabled is not None or body.clerk_secret_key is not None
+    ):
+        instances = admin_store.get_clerk_instances()
+        dev = next(
+            (i for i in instances if i["name"] == admin_store.LEGACY_INSTANCE_NAME),
+            None,
+        )
+        if dev is None:
+            dev = {
+                "name": admin_store.LEGACY_INSTANCE_NAME,
+                "secret_key": "",
+                "enabled": False,
+            }
+            instances.append(dev)
+        if body.clerk_secret_key is not None:
+            value = body.clerk_secret_key.strip()
+            if value and not value.startswith("sk_"):
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    "Clerk secret keys start with sk_test_ or sk_live_.",
+                )
+            from ....config import get_settings
+
+            if value == (get_settings().clerk_secret_key or "").strip():
+                # Same value .env provides — keep the store empty so .env
+                # rotations aren't shadowed (from_env re-applies on read).
+                dev["secret_key"] = ""
+                dev.pop("from_env", None)
+            else:
+                dev["secret_key"] = value
+                dev.pop("from_env", None)
+        if body.clerk_enabled is not None:
+            if body.clerk_enabled and not (
+                str(dev.get("secret_key") or "").strip()
+                or admin_store.get_clerk_secret_key()
+            ):
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    "Set a Clerk secret key (sk_…) before enabling Clerk mode.",
+                )
+            dev["enabled"] = bool(body.clerk_enabled)
+        instances_to_save = instances
+
     if updates:
         admin_store.save_settings(updates)
-        logger.info("admin: %s updated settings: keys=%s", me.email, sorted(updates))
+    if instances_to_save is not None:
+        admin_store.save_clerk_instances(instances_to_save)
+    if updates or instances_to_save is not None:
+        logger.info(
+            "admin: %s updated settings: keys=%s%s",
+            me.email,
+            sorted(updates),
+            " +clerk_instances" if instances_to_save is not None else "",
+        )
         publish_admin_state()
     return _admin_settings_out()
 
@@ -161,46 +281,69 @@ def update_admin_settings(
 async def get_clerk_directory(
     me: CurrentUser = Depends(admin_user),
 ) -> dict:
-    """Users + organizations + memberships from Clerk, UI-ready.
+    """Users + organizations + memberships from every enabled instance.
 
-    Fetched live on every call (no caching): the admin view is
-    low-traffic and staleness would be more confusing than the
-    ~1 s round-trip. 400 when Clerk mode is off or no key is set;
-    502 when Clerk itself rejects us.
+    Shape: ``{"instances": [{name, live, ok, error, users, organizations}]}``
+    — one entry per enabled instance, fetched live and concurrently (no
+    caching: the admin view is low-traffic and staleness would be more
+    confusing than the ~1 s round-trip). Per-instance fail-soft: an
+    unreachable instance reports ``ok=False`` + its error while the others
+    still render — the UI shows a per-instance warning strip instead of a
+    blank tab. 400 only when NO instance is enabled.
 
-    Scoped: a superadmin sees the whole directory; a regular admin sees only
-    the orgs they administer (role=admin) and those orgs' members — mirroring
-    the users-list scoping so the Clerk tab can't leak other orgs.
+    Scoped: a superadmin sees every directory in full; a regular admin sees
+    only the orgs they administer (role=admin) in each instance and those
+    orgs' members — mirroring the users-list scoping.
     """
+    import asyncio as _asyncio
+
     from ....services import clerk as clerk_svc
     from ....services.admin_scope import admin_orgs_from_directory
     from ....services.admin_store import is_super_admin
 
-    if not admin_store.get_clerk_enabled():
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Clerk mode is not enabled.")
-    key = admin_store.get_clerk_secret_key()
-    if not key:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No Clerk secret key configured.")
-    try:
-        directory = await clerk_svc.fetch_directory(key)
-    except clerk_svc.ClerkError as e:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e)) from e
+    instances = admin_store.enabled_clerk_instances()
+    if not instances:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "No Clerk instance is enabled."
+        )
 
-    if is_super_admin(me.email):
-        return directory
+    results = await _asyncio.gather(
+        *(clerk_svc.fetch_directory(str(i["secret_key"])) for i in instances),
+        return_exceptions=True,
+    )
 
-    # Regular admin: restrict to the orgs they administer (reuse the same
-    # pure derivation the scope resolver uses — no second Clerk sweep).
-    admin_org_ids, _names = admin_orgs_from_directory(directory, me.email)
-    orgs = [o for o in directory.get("organizations", []) if o.get("id") in admin_org_ids]
-    visible_emails = {
-        (m.get("email") or "").strip().lower()
-        for o in orgs
-        for m in o.get("members", [])
-    }
-    users = [
-        u
-        for u in directory.get("users", [])
-        if (u.get("email") or "").strip().lower() in visible_emails
-    ]
-    return {"users": users, "organizations": orgs}
+    super_admin = is_super_admin(me.email)
+    out: list[dict] = []
+    for inst, res in zip(instances, results, strict=True):
+        entry: dict = {
+            "name": str(inst["name"]),
+            "live": str(inst["secret_key"]).startswith("sk_live_"),
+            "ok": not isinstance(res, BaseException),
+            "error": str(res) if isinstance(res, BaseException) else "",
+            "users": [],
+            "organizations": [],
+        }
+        if not isinstance(res, BaseException):
+            if super_admin:
+                entry["users"] = res.get("users", [])
+                entry["organizations"] = res.get("organizations", [])
+            else:
+                admin_org_ids, _names = admin_orgs_from_directory(res, me.email)
+                orgs = [
+                    o
+                    for o in res.get("organizations", [])
+                    if o.get("id") in admin_org_ids
+                ]
+                visible_emails = {
+                    (m.get("email") or "").strip().lower()
+                    for o in orgs
+                    for m in o.get("members", [])
+                }
+                entry["organizations"] = orgs
+                entry["users"] = [
+                    u
+                    for u in res.get("users", [])
+                    if (u.get("email") or "").strip().lower() in visible_emails
+                ]
+        out.append(entry)
+    return {"instances": out}

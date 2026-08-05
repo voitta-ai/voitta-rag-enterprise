@@ -118,26 +118,33 @@ async def resolve_admin_scope(db: Session, email: str) -> AdminScope:
         return AdminScope(is_super=True, is_native_admin=True)
 
     is_native_admin = admin_store.is_native_allowed(email)
-    org_ids: frozenset[str] = frozenset()
-    org_names: frozenset[str] = frozenset()
+    org_ids: set[str] = set()
+    org_names: set[str] = set()
     degraded = False
 
-    if admin_store.get_clerk_enabled():
-        secret_key = admin_store.get_clerk_secret_key()
-        if secret_key:
-            try:
-                directory = await _fetch_directory_cached(secret_key)
-                org_ids, org_names = admin_orgs_from_directory(directory, email)
-            except clerk_svc.ClerkError as e:
-                logger.warning(
-                    "admin_scope: Clerk directory unreachable for %s: %s", email, e
-                )
-                degraded = True
+    # Union the admin's org-admin roles across every enabled instance.
+    # Per-instance fail-closed: an unreachable instance contributes no
+    # orgs (its portion of the domain vanishes for this resolution) and
+    # flips ``clerk_degraded`` so the UI can explain the gap as an outage.
+    for inst in admin_store.enabled_clerk_instances():
+        try:
+            directory = await _fetch_directory_cached(str(inst["secret_key"]))
+        except clerk_svc.ClerkError as e:
+            logger.warning(
+                "admin_scope: Clerk instance %r unreachable for %s: %s",
+                inst["name"], email, e,
+            )
+            degraded = True
+            continue
+        ids, names = admin_orgs_from_directory(directory, email)
+        org_ids |= ids
+        # Prefix with the instance name — matches the account labels.
+        org_names |= {f"{inst['name']} / {n}" for n in names}
 
     return AdminScope(
         is_super=False,
-        admin_org_ids=org_ids,
-        admin_org_names=org_names,
+        admin_org_ids=frozenset(org_ids),
+        admin_org_names=frozenset(org_names),
         is_native_admin=is_native_admin,
         clerk_degraded=degraded,
     )

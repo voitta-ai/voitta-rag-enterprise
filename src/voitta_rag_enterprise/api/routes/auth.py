@@ -374,41 +374,66 @@ async def google_login_callback(
         return _deny("unverified", email)
 
     # Admission — native gate first (block-list / super-admin / allowlists).
-    # When the Clerk directory is enabled, membership there is an additional
-    # admission path: pull the directory *fresh* during the callback and admit
-    # any email that matches a Clerk user. Fail closed: if Clerk is
-    # unreachable, only the native rules apply (and any previous Clerk stamp
-    # is left untouched rather than cleared on bad data).
+    # When Clerk instances are configured, membership in ANY enabled
+    # instance is an additional admission path: each instance's directory
+    # is pulled *fresh* during the callback and matches are unioned. Fail
+    # closed per instance: an unreachable instance contributes nothing
+    # that login (its previous accounts stay, just not re-offered fresh
+    # names), while the others still admit normally.
     native_ok = is_email_allowed(email)
     clerk_info: dict | None = None
-    if admin_store.get_clerk_enabled():
-        clerk_key = admin_store.get_clerk_secret_key()
-        if clerk_key:
-            from ...services import clerk as clerk_svc
+    clerk_instances = admin_store.enabled_clerk_instances()
+    if clerk_instances:
+        import asyncio as _asyncio
 
-            try:
-                directory = await clerk_svc.fetch_directory(clerk_key)
-                match = next(
-                    (u for u in directory["users"]
-                     if (u.get("email") or "").strip().lower() == email),
-                    None,
+        from ...services import clerk as clerk_svc
+
+        results = await _asyncio.gather(
+            *(
+                clerk_svc.fetch_directory(str(inst["secret_key"]))
+                for inst in clerk_instances
+            ),
+            return_exceptions=True,
+        )
+        all_orgs: list[dict] = []
+        clerk_name = ""
+        for inst, res in zip(clerk_instances, results, strict=True):
+            if isinstance(res, BaseException):
+                logger.warning(
+                    "login: Clerk instance %r directory check failed: %s",
+                    inst["name"], res,
                 )
-                # Org membership is the credential: a Clerk user with no
-                # organization is NOT admitted via the Clerk path (they
-                # may still pass natively). Every Clerk-admitted user
-                # therefore has at least one company account to land in.
-                if match is not None and (match.get("orgs") or []):
-                    clerk_info = {
-                        "clerk_orgs": match.get("orgs") or [],
-                        "clerk_name": match.get("name") or "",
+                continue
+            match = next(
+                (u for u in res["users"]
+                 if (u.get("email") or "").strip().lower() == email),
+                None,
+            )
+            if match is None:
+                continue
+            clerk_name = clerk_name or (match.get("name") or "")
+            # Org membership is the credential: a Clerk user with no
+            # organization is NOT admitted via the Clerk path (they may
+            # still pass natively). Org display names are prefixed with
+            # the INSTANCE name ("Production / Acme") — company_name is
+            # display-only and restamped every login, so instance renames
+            # self-heal.
+            orgs = match.get("orgs") or []
+            if not orgs:
+                logger.info(
+                    "login: %s is in Clerk instance %r but belongs to no"
+                    " organization — not applicable", email, inst["name"],
+                )
+                continue
+            for org in orgs:
+                all_orgs.append(
+                    {
+                        "id": org.get("id", ""),
+                        "name": f"{inst['name']} / {org.get('name', '')}",
                     }
-                elif match is not None:
-                    logger.info(
-                        "login: %s is in Clerk but belongs to no organization"
-                        " — Clerk path not applicable", email,
-                    )
-            except clerk_svc.ClerkError as e:
-                logger.warning("login: Clerk directory check failed: %s", e)
+                )
+        if all_orgs:
+            clerk_info = {"clerk_orgs": all_orgs, "clerk_name": clerk_name}
 
     # Block-list trumps Clerk too: is_email_allowed already rejected blocked
     # addresses, but a blocked user could still match Clerk — check explicitly.

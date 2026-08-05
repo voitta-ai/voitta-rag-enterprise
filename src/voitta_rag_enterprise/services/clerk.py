@@ -235,3 +235,50 @@ async def fetch_org_members(secret_key: str, org_id: str) -> dict[str, str]:
 def clear_org_members_cache() -> None:
     """Drop the membership cache (tests; admin key rotation UX)."""
     _org_members_cache.clear()
+    _org_instance_map.clear()
+
+
+# ---------------------------------------------------------------------------
+# Multi-instance org resolution.
+#
+# Clerk instances are separate universes — an org id exists in exactly one.
+# Auth paths hold only the org id, so we resolve the serving instance by
+# TRIAL: ask each enabled instance (a foreign org 404s → ClerkError) and
+# remember the winner in ``_org_instance_map`` so subsequent calls go
+# straight to the right key. The map holds instance NAMES (not keys), so a
+# key rotation or instance edit never serves through a stale credential —
+# lookups re-read the current instance list every call.
+# ---------------------------------------------------------------------------
+
+# org_id -> instance name that last answered for it.
+_org_instance_map: dict[str, str] = {}
+
+
+async def fetch_org_members_multi(
+    instances: list[dict], org_id: str
+) -> dict[str, str]:
+    """``{email: role}`` for ``org_id`` across the given instances.
+
+    ``instances`` is the ``enabled_clerk_instances()`` shape
+    (``{name, secret_key, …}``). Tries the cached winner first, then the
+    rest. Raises :class:`ClerkError` when no instance answers — callers
+    keep their single-instance semantics (fail open for existing
+    accounts / fail closed for role checks), since a single-instance
+    miss surfaced exactly the same way.
+    """
+    if not instances:
+        raise ClerkError("No enabled Clerk instance is configured.")
+    cached = _org_instance_map.get(org_id)
+    ordered = sorted(instances, key=lambda i: i.get("name") != cached)
+    last_err: ClerkError | None = None
+    for inst in ordered:
+        try:
+            members = await fetch_org_members(str(inst["secret_key"]), org_id)
+        except ClerkError as e:
+            last_err = e
+            continue
+        _org_instance_map[org_id] = str(inst.get("name", ""))
+        return members
+    raise last_err or ClerkError(
+        f"Organization {org_id} not found in any enabled Clerk instance."
+    )

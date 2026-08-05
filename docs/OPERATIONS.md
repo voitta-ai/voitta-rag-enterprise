@@ -743,13 +743,44 @@ name + download + body. Provenance lives only on the Meta tab.)
 
 ## 7. Identity & accounts: sign-in gate, Clerk directory, switching
 
+### Named Clerk instances
+
+Every Clerk credential is a **named instance** — "Development",
+"Production", … (a Clerk *application* ships one Development and one
+Production instance; each has its own users, orgs, and `sk_test_`/`sk_live_`
+keypair — they share nothing at runtime). Voitta stores them as
+`clerk_instances: [{name, secret_key, enabled}]` in
+`<data_dir>/admin/settings.json` (`services/admin_store.py`):
+
+- **Names are required and unique** (≤24 chars); org labels everywhere in
+  the app render as **`Instance / Organization`** ("Production / Acme").
+  `company_name` is display-only and restamped at every login, so renaming
+  an instance self-heals without touching accounts.
+- **Migration** is read-side: a legacy single `clerk_secret_key` (or the
+  `CLERK_SECRET_KEY` env var) is synthesized as an instance named
+  **Development**. On the first instance-list save the legacy fields are
+  **mirrored back** from the Development card (rollback to a pre-instances
+  build keeps Clerk working) and a `settings.json.bak-clerk-<ts>` backup
+  is written once.
+- **Env seeding**: `CLERK_SECRET_KEY` backs the Development card's key when
+  no key is stored for it; env-sourced keys are badged *(from .env)*, are
+  read-only in the UI, and are never persisted (env rotations can't be
+  shadowed by a stale copy).
+- **Org → instance resolution**: auth paths hold only an org id, so the
+  serving instance is found by *trial* — ask each enabled instance (a
+  foreign org 404s), cache the winner in-process
+  (`services/clerk.py:fetch_org_members_multi`). An org whose instance was
+  disabled behaves exactly like "Clerk unreachable": existing accounts
+  keep working through the fail-open path; role checks fail closed.
+
 ### The account model
 
 A `users` row is an **account**, not a person: the unique key is
 `(email, company_id)`. `company_id = ''` is the reserved **Personal** account;
 a real company account's id is the **Clerk organization id** (`org_…`), with
-`company_name` as a display-only label refreshed at every login (an org rename
-in Clerk can't fork accounts — identity is the id). Everything downstream —
+`company_name` as a display-only label (`"{Instance} / {Org}"`) refreshed at
+every login (an org rename in Clerk can't fork accounts — identity is the
+id, and org ids are unique across instances). Everything downstream —
 `folders.owner_id`, `folder_acl`, `folder_user_settings`, `api_keys`,
 `user_groups` — hangs off `users.id`, so **all of it is account-scoped for
 free**: Ivan-as-Agnitio and Ivan-as-Demo are strangers unless a folder is
@@ -786,11 +817,11 @@ flowchart TB
     SA -->|yes| ADMIT
     SA --> NAT{"allowed_users.txt /<br/>allowed_domains.txt?"}
     NAT -->|match| ADMIT
-    NAT --> CK{"Clerk toggle on?"}
-    CK -->|off| DENY2["403"]
-    CK -->|on| FETCH["fetch Clerk directory FRESH<br/>(fail closed on error)"]
-    FETCH --> M{"email in Clerk users<br/>AND member of ≥1 org?"}
-    M -->|yes| ADMIT["provision accounts:<br/>Personal anchor + one per Clerk org<br/>set session cookie"]
+    NAT --> CK{"any Clerk instance enabled?"}
+    CK -->|none| DENY2["403"]
+    CK -->|yes| FETCH["fetch EACH enabled instance's<br/>directory FRESH, concurrently<br/>(fail closed per instance)"]
+    FETCH --> M{"email in any instance's users<br/>AND member of ≥1 org?"}
+    M -->|yes| ADMIT["provision accounts:<br/>Personal anchor + one per org across instances,<br/>company_name = 'Instance / Org'<br/>set session cookie"]
     M -->|no| DENY2
 ```
 
@@ -802,9 +833,10 @@ natively-allowed emails — Clerk-only users operate exclusively in their
 company accounts, and their Personal anchor is unreachable even by direct
 API call (`services/acl/accounts.py:offered_accounts_for_email`).
 
-Admission via Clerk pulls the directory **live during the callback** — never
-from a cache. If Clerk is unreachable, only the native rules apply
-(Clerk-only users are denied until Clerk is back; native users are
+Admission via Clerk pulls each enabled instance's directory **live during
+the callback** — never from a cache. Fail closed **per instance**: an
+unreachable instance contributes nothing that login (its users are denied
+unless another instance or the native rules admit them; other instances are
 unaffected). **No Clerk data is persisted beyond the identity columns**
 (`company_id`, `company_name`, display name) — there is no directory cache on
 disk; the admin UI's Clerk tabs are a live proxy too.
@@ -903,22 +935,28 @@ Rendered from `/me` (top bar) and per row in Admin → Users
 |-------|---------|
 | `SUPERADMIN` | email in `VOITTA_SUPER_ADMINS` (always shown) |
 | `VOITTA NATIVE` | active account is Personal and the email passes the native allowlist |
-| *company name* (purple) | active account is a company account (from Clerk) |
+| *Instance / Org* (purple) | active account is a company account (from Clerk; prefixed with the instance name, e.g. "Production / Acme") |
 | `CLERK` | Personal account of a Clerk-directory user with no native allowlist entry |
 
 ### Directory tabs (admin modal)
 
-Two independent display-only toggles on the Sign-in gate tab (persisted in
-`settings.json`): **Native directory** shows/hides the editable Users +
-Groups tabs; **Clerk directory** (toggle + `sk_…` secret key, pre-filled
-from `CLERK_SECRET_KEY` / `VOITTA_CLERK_SECRET_KEY` in `.env` when the
-stored value is empty) shows/hides read-only **Clerk users** / **Clerk
-companies** tabs. Those render from `GET /api/admin/clerk/directory` — a
-live, uncached proxy to the Clerk Backend API
+The Sign-in gate tab hosts the **Native directory** toggle (shows/hides the
+editable Users + Groups tabs) and the **named Clerk instance cards** — one
+card per instance with its name, masked key, a live/test dot (`sk_live_` =
+filled, `sk_test_` = hollow), an enable toggle, and inline **Test** (runs a
+directory fetch, shows `✓ N orgs · M users` or the exact Clerk error) /
+Edit / Remove. The Development card is read-only when its key comes from
+`.env` (badged *from .env*). Any enabled instance shows the read-only
+**Clerk users** / **Clerk companies** tabs, which render from
+`GET /api/admin/clerk/directory` — a live, uncached proxy returning
+`{instances: [{name, live, ok, error, users, organizations}]}`, one entry
+per enabled instance, fetched concurrently. Per-instance fail-soft: an
+unreachable instance shows a warning strip ("Production unreachable —
+showing Development only") while the others render
 ([services/clerk.py](../src/voitta_rag_enterprise/services/clerk.py);
 note: Clerk sits behind Cloudflare, which 403s generic user-agents — the
-client sends an explicit UA). The Clerk toggle is also what arms the
-Clerk admission path in the sign-in gate above.
+client sends an explicit UA). Having ≥1 enabled instance is also what arms
+the Clerk admission path in the sign-in gate above.
 
 Admin → Users groups the per-account rows by email — one line per person,
 one company chip per account; delete removes all of the person's accounts.
@@ -951,9 +989,10 @@ Admin power is **scoped**, not all-or-nothing
   domain* is the Clerk orgs where they hold role `admin` (same org-role
   signal company keys use) **plus** the native community if they're
   native-allowed. `resolve_admin_scope(db, email)` resolves this into an
-  `AdminScope`, deriving org-admin membership from a Clerk directory sweep
-  (cached ~45 s; fails **closed** to an empty org domain if Clerk is
-  unreachable, flagged `clerk_degraded` so the UI can explain the emptiness).
+  `AdminScope`, deriving org-admin membership from a directory sweep of
+  **every enabled Clerk instance**, unioned (cached ~45 s per key; fails
+  **closed** per instance — an unreachable instance contributes no orgs and
+  flags `clerk_degraded` so the UI can explain the gap as an outage).
 
 That scope drives two things:
 
@@ -965,7 +1004,7 @@ That scope drives two things:
    out-of-domain id (existence-hiding, like the file/folder ACL in §6). The
    Clerk-directory view (`GET /admin/clerk/directory`) is filtered the same way.
 2. **Global-settings mutations are superadmin-only.** Allowlist, super-admin
-   list, OAuth/auth-providers, indexing caps, NFS root, Clerk key, directory
+   list, OAuth/auth-providers, indexing caps, NFS root, Clerk instances, directory
    toggles, groups, and user pre-creation all swap the `admin_user` gate for
    `super_admin_user` (403 for a regular admin); the matching GETs stay
    `admin_user`, so a regular admin **views** these read-only. The scoped
@@ -999,7 +1038,7 @@ flowchart TB
 
     subgraph store["Persistence (services/admin_store.py + others)"]
         F1["allowed_domains.txt<br/>allowed_users.txt<br/>blocked_users.txt"]
-        F2["settings.json<br/>(nfs_root · native_directory_enabled ·<br/>clerk_enabled · clerk_secret_key)"]
+        F2["settings.json<br/>(nfs_root · native_directory_enabled ·<br/>clerk_instances — named, legacy pair mirrored)"]
         F3["indexing_caps.json"]
         F4[("SQLite: users.is_admin · display_name")]
         F5[("SQLite: auth_providers")]
@@ -1030,7 +1069,7 @@ flowchart TB
 |---------|-------------|-----------|--------------|
 | Allowed domains / users / blocklist | plain `.txt` files (`<data>/admin/`) | `is_email_allowed()` at sign-in (Clerk path layered on top — see §7) | takes effect at next sign-in |
 | `is_admin` flag · `display_name` | SQLite `users` (flag stamped on **all** account rows of the email) | `admin_user` dep (person-level check), per request | next request; super-admins re-stamped each login |
-| Directory toggles + Clerk secret key | `settings.json` (`native_directory_enabled`, `clerk_enabled`, `clerk_secret_key` — empty key falls back to `.env`) | sign-in gate (Clerk admission) + admin UI tab visibility | next sign-in / next `admin.snapshot` |
+| Directory toggle + named Clerk instances | `settings.json` (`native_directory_enabled`, `clerk_instances: [{name, secret_key, enabled}]`; legacy `clerk_enabled`/`clerk_secret_key` mirrored from the "Development" card for rollback; Development's empty key falls back to `.env`) | sign-in gate (Clerk admission across enabled instances) + admin UI tab visibility | next sign-in / next `admin.snapshot` |
 | User groups (organizational only) | SQLite `groups` + `user_groups` | `services/groups.py`; in `admin.snapshot` | live WS push on every group/membership change |
 | Auth providers (OAuth catalog) | SQLite `auth_providers` | read at login / sync-config time | next login or restart (env rows re-seed) |
 | NFS root | `settings.json` | `get_nfs_root()` | re-probed on every browse/sync call |

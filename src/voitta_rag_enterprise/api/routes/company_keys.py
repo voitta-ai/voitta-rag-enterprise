@@ -132,19 +132,21 @@ async def _email_in_scope(email: str, company_id: str) -> bool:
         # Native space: same gate as sign-in (allowlists + super-admins).
         return admin_store.is_email_allowed(email)
 
-    if admin_store.get_clerk_enabled():
-        secret_key = admin_store.get_clerk_secret_key()
-        if secret_key:
-            from ...services import clerk as clerk_svc
+    instances = admin_store.enabled_clerk_instances()
+    if instances:
+        from ...services import clerk as clerk_svc
 
-            try:
-                members = await clerk_svc.fetch_org_members(secret_key, company_id)
-                return email in members
-            except clerk_svc.ClerkError as e:
-                logger.warning(
-                    "company_key auth: Clerk membership check failed for %s: %s",
-                    company_id, e,
-                )
+        try:
+            members = await clerk_svc.fetch_org_members_multi(instances, company_id)
+            return email in members
+        except clerk_svc.ClerkError as e:
+            # Covers both "instance(s) unreachable" and "org in no enabled
+            # instance" (e.g. its instance was disabled) — fall through to
+            # the existing-account fail-open below, same as before.
+            logger.warning(
+                "company_key auth: Clerk membership check failed for %s: %s",
+                company_id, e,
+            )
 
     # Clerk disabled/unconfigured/unreachable: honour accounts that already
     # exist for this (email, org) — provisioned by a past login or a past
@@ -173,16 +175,18 @@ async def _require_scope_admin(db: Session, user: CurrentUser) -> None:
     """
     if person_is_admin(db, user.email):
         return
-    if user.company_id and admin_store.get_clerk_enabled():
-        secret_key = admin_store.get_clerk_secret_key()
-        if secret_key:
+    if user.company_id:
+        instances = admin_store.enabled_clerk_instances()
+        if instances:
             from ...services import clerk as clerk_svc
 
             try:
-                members = await clerk_svc.fetch_org_members(
-                    secret_key, user.company_id
+                members = await clerk_svc.fetch_org_members_multi(
+                    instances, user.company_id
                 )
             except clerk_svc.ClerkError as e:
+                # Fail closed (role checks) — includes "org in no enabled
+                # instance", identical to the old single-instance 404 path.
                 raise HTTPException(
                     status.HTTP_403_FORBIDDEN,
                     f"Could not verify organization role with Clerk: {e}",

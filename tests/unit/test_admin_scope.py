@@ -45,11 +45,13 @@ _DIRECTORY = {
 
 
 @pytest.fixture
-def clerk_dir(monkeypatch: pytest.MonkeyPatch):
-    """Clerk enabled with the fake directory above; fresh scope cache."""
+def clerk_dir(env: None, monkeypatch: pytest.MonkeyPatch):
+    """Clerk enabled via the LEGACY settings shape — exercises the read-side
+    migration to a named "Development" instance on every use."""
     scope_mod.clear_directory_cache()
-    monkeypatch.setattr(admin_store, "get_clerk_enabled", lambda: True)
-    monkeypatch.setattr(admin_store, "get_clerk_secret_key", lambda: "sk_test")
+    admin_store.save_settings(
+        {"clerk_enabled": True, "clerk_secret_key": "sk_test_x"}
+    )
 
     async def fake_directory(secret_key: str) -> dict:
         return _DIRECTORY
@@ -93,7 +95,8 @@ async def test_org_admin_scope(env: None, clerk_dir: dict) -> None:
         scope = await resolve_admin_scope(s, "alice@x")
     assert not scope.is_super
     assert scope.admin_org_ids == frozenset({"org_1"})
-    assert scope.admin_org_names == frozenset({"Acme"})
+    # Org names carry the instance prefix (migrated legacy key → "Development").
+    assert scope.admin_org_names == frozenset({"Development / Acme"})
     assert not scope.clerk_degraded
 
 
@@ -118,8 +121,9 @@ async def test_clerk_error_fails_closed(
 ) -> None:
     init_db()
     scope_mod.clear_directory_cache()
-    monkeypatch.setattr(admin_store, "get_clerk_enabled", lambda: True)
-    monkeypatch.setattr(admin_store, "get_clerk_secret_key", lambda: "sk_test")
+    admin_store.save_settings(
+        {"clerk_enabled": True, "clerk_secret_key": "sk_test_x"}
+    )
 
     async def boom(secret_key: str) -> dict:
         raise clerk_svc.ClerkError("down")
@@ -192,8 +196,9 @@ async def test_directory_cache_reuses_within_ttl(
     """A second resolve within the TTL doesn't re-hit Clerk."""
     init_db()
     scope_mod.clear_directory_cache()
-    monkeypatch.setattr(admin_store, "get_clerk_enabled", lambda: True)
-    monkeypatch.setattr(admin_store, "get_clerk_secret_key", lambda: "sk_test")
+    admin_store.save_settings(
+        {"clerk_enabled": True, "clerk_secret_key": "sk_test_x"}
+    )
     calls = {"n": 0}
 
     async def counting(secret_key: str) -> dict:
