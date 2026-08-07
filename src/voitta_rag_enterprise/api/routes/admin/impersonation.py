@@ -84,13 +84,17 @@ async def clerk_impersonate(
     """Impersonate a Clerk-directory user — SUPER-ADMIN only.
 
     Unlike the by-user-id route above, the target may never have signed
-    in: we pull the directory fresh (never cached), verify the email is
-    really in Clerk, provision their accounts exactly like the login
-    callback would (Personal + one per org), then impersonate the
-    requested account. Stop via the normal DELETE /impersonate.
+    in. We resolve their admission across EVERY enabled Clerk instance and
+    provision their accounts through the exact same helper the login
+    callback uses (``services/acl/clerk_provision.py``) — so an
+    impersonated account gets the same ``"Instance / Org"`` labels and the
+    same set of org accounts login would create (previously this path used
+    a single key and bare names, so a Production-only org was missed and
+    two same-named orgs across instances were indistinguishable). Stop via
+    the normal DELETE /impersonate.
     """
     from ....services import clerk as clerk_svc
-    from ....services.acl import get_or_create_user
+    from ....services.acl import provision_accounts, resolve_clerk_admission
     from ....services.admin_store import is_super_admin
 
     if not is_super_admin(me.email):
@@ -98,28 +102,22 @@ async def clerk_impersonate(
             status.HTTP_403_FORBIDDEN,
             "Impersonating Clerk users requires super-admin (VOITTA_SUPER_ADMINS).",
         )
-    if not admin_store.get_clerk_enabled():
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Clerk mode is not enabled.")
-    key = admin_store.get_clerk_secret_key()
-    if not key:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No Clerk secret key configured.")
+    if not admin_store.enabled_clerk_instances():
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "No Clerk instance is enabled."
+        )
 
     email = str(body.email).strip().lower()
     try:
-        directory = await clerk_svc.fetch_directory(key)
+        admission = await resolve_clerk_admission(email)
     except clerk_svc.ClerkError as e:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e)) from e
-    match = next(
-        (u for u in directory["users"]
-         if (u.get("email") or "").strip().lower() == email),
-        None,
-    )
-    if match is None:
+    if not admission.matched:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not a Clerk-directory user")
 
     # Org membership is the credential (same rule as the sign-in gate):
     # an org-less Clerk user can't sign in, so there is nothing to view as.
-    orgs = [o for o in (match.get("orgs") or []) if o.get("id")]
+    orgs = admission.orgs
     if not orgs and not admin_store.is_native_allowed(email):
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
@@ -127,17 +125,8 @@ async def clerk_impersonate(
             "natively allowed — they cannot sign in.",
         )
 
-    # Provision like the login callback: Personal anchor + one per org.
-    display_name = match.get("name") or ""
-    personal = get_or_create_user(db, email)
-    if not personal.display_name and display_name:
-        personal.display_name = display_name
-    by_company = {"": personal}
-    for org in orgs:
-        acc = get_or_create_user(db, email, org["id"], org.get("name", ""))
-        if not acc.display_name and display_name:
-            acc.display_name = display_name
-        by_company[org["id"]] = acc
+    by_company = provision_accounts(db, email, admission.display_name, orgs)
+    personal = by_company[""]
     db.commit()
 
     # Land where the user themself would: an explicit company_id wins;

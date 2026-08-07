@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 
 from ...config import get_settings
 from ...services import admin_store
-from ...services.acl import CurrentUser, get_or_create_user
+from ...services.acl import CurrentUser
 from ...services.admin_store import is_email_allowed, is_super_admin
 from ..deps import current_user, db_session, real_user
 
@@ -381,59 +381,19 @@ async def google_login_callback(
     # that login (its previous accounts stay, just not re-offered fresh
     # names), while the others still admit normally.
     native_ok = is_email_allowed(email)
+    # Multi-instance admission + prefixed org labels, shared verbatim with
+    # Clerk impersonation (services/acl/clerk_provision.py) so the two paths
+    # can't drift. Org membership is the credential: an org-less Clerk match
+    # is not admitted via the Clerk path (they may still pass natively).
+    from ...services.acl import resolve_clerk_admission
+
+    admission = await resolve_clerk_admission(email)
     clerk_info: dict | None = None
-    clerk_instances = admin_store.enabled_clerk_instances()
-    if clerk_instances:
-        import asyncio as _asyncio
-
-        from ...services import clerk as clerk_svc
-
-        results = await _asyncio.gather(
-            *(
-                clerk_svc.fetch_directory(str(inst["secret_key"]))
-                for inst in clerk_instances
-            ),
-            return_exceptions=True,
-        )
-        all_orgs: list[dict] = []
-        clerk_name = ""
-        for inst, res in zip(clerk_instances, results, strict=True):
-            if isinstance(res, BaseException):
-                logger.warning(
-                    "login: Clerk instance %r directory check failed: %s",
-                    inst["name"], res,
-                )
-                continue
-            match = next(
-                (u for u in res["users"]
-                 if (u.get("email") or "").strip().lower() == email),
-                None,
-            )
-            if match is None:
-                continue
-            clerk_name = clerk_name or (match.get("name") or "")
-            # Org membership is the credential: a Clerk user with no
-            # organization is NOT admitted via the Clerk path (they may
-            # still pass natively). Org display names are prefixed with
-            # the INSTANCE name ("Production / Acme") — company_name is
-            # display-only and restamped every login, so instance renames
-            # self-heal.
-            orgs = match.get("orgs") or []
-            if not orgs:
-                logger.info(
-                    "login: %s is in Clerk instance %r but belongs to no"
-                    " organization — not applicable", email, inst["name"],
-                )
-                continue
-            for org in orgs:
-                all_orgs.append(
-                    {
-                        "id": org.get("id", ""),
-                        "name": f"{inst['name']} / {org.get('name', '')}",
-                    }
-                )
-        if all_orgs:
-            clerk_info = {"clerk_orgs": all_orgs, "clerk_name": clerk_name}
+    if admission.orgs:
+        clerk_info = {
+            "clerk_orgs": admission.orgs,
+            "clerk_name": admission.display_name,
+        }
 
     # Block-list trumps Clerk too: is_email_allowed already rejected blocked
     # addresses, but a blocked user could still match Clerk — check explicitly.
@@ -450,17 +410,12 @@ async def google_login_callback(
     # persist for admin recovery). No Clerk data is cached beyond these
     # identity columns; everything else about Clerk is fetched live.
     display_name = (clerk_info or {}).get("clerk_name") or profile.get("name") or email.split("@")[0]
-    user = get_or_create_user(db, email)  # Personal
-    if not user.display_name and display_name:
-        user.display_name = display_name
-    account_ids = [user.id]
-    for org in (clerk_info or {}).get("clerk_orgs", []):
-        if not org.get("id"):
-            continue
-        acc = get_or_create_user(db, email, org["id"], org.get("name", ""))
-        if not acc.display_name and display_name:
-            acc.display_name = display_name
-        account_ids.append(acc.id)
+    from ...services.acl import provision_accounts
+
+    by_company = provision_accounts(
+        db, email, display_name, (clerk_info or {}).get("clerk_orgs", [])
+    )
+    account_ids = [u.id for u in by_company.values()]
     # Bootstrap admins are stamped on every sign-in: even if a previous
     # admin flipped the flag off in the DB, the next sign-in re-grants it.
     # That makes the env var the recoverable source of truth — wipe it
@@ -482,7 +437,7 @@ async def google_login_callback(
     prev_active = request.session.get("active_account_id")
     if prev_active not in offered_ids:
         request.session["active_account_id"] = (
-            offered_ids[0] if offered_ids else user.id
+            offered_ids[0] if offered_ids else by_company[""].id
         )
     logger.info(
         "login: %s (accounts=%s, offered=%s, active=%s)",

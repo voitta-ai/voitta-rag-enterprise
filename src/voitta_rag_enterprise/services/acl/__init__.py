@@ -50,6 +50,11 @@ from .accounts import (
     seed_users_from_file,
     stamp_person_admin,
 )
+from .clerk_provision import (
+    ClerkAdmission,
+    provision_accounts,
+    resolve_clerk_admission,
+)
 from .community import _owner_community, account_community
 from .folder_acl import (
     active_folder_ids,
@@ -70,6 +75,7 @@ from .identity import ROOT_EMAIL, CurrentUser, resolve_user_email
 
 __all__ = [
     "ROOT_EMAIL",
+    "ClerkAdmission",
     "CurrentUser",
     "_owner_community",
     "account_community",
@@ -86,7 +92,9 @@ __all__ = [
     "mcp_visible_folder_ids",
     "offered_accounts_for_email",
     "person_is_admin",
+    "provision_accounts",
     "public_user_ids",
+    "resolve_clerk_admission",
     "resolve_user_email",
     "revoke_folder",
     "seed_users_from_file",

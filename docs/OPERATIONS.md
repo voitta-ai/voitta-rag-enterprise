@@ -844,6 +844,25 @@ disk; the admin UI's Clerk tabs are a live proxy too.
 Super-admins get `is_admin` re-stamped (person-level) on every sign-in, so
 the env var stays the recoverable source of truth.
 
+**One provisioning path, two callers.** The multi-instance directory sweep
+and account creation live in `services/acl/clerk_provision.py`
+(`resolve_clerk_admission` → prefixed `{id, "Instance / Org"}` orgs;
+`provision_accounts` → the `users` rows). **Both** the sign-in callback and
+Clerk impersonation (Admin → "View as", `POST /admin/clerk/impersonate`) call
+it, so an impersonated account gets the identical set of org accounts and the
+identical `"Instance / Org"` labels a real login would create. (They used to
+diverge: impersonation ran a single-key, bare-name path, so a Production-only
+org was unreachable and two same-named orgs across instances — a Development
+"Agnitio" and a Production "Agnitio" — both showed as bare "Agnitio". The
+shared helper closes that drift; `company_name` is display-only and restamped
+on every login/impersonation, so stale bare labels self-heal on next use.)
+
+To fix already-provisioned accounts in bulk (users who haven't logged in or
+been re-impersonated since), run the idempotent reconciler once:
+`python scripts/backfill_clerk_company_names.py` (dry run) / `--apply`. It
+sweeps every enabled instance and restamps `company_name` to `"Instance /
+Org"`; rows whose org is in no enabled instance are left untouched.
+
 ### Session & per-request resolution
 
 The session is a signed cookie (Starlette `SessionMiddleware`) holding
