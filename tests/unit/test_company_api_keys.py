@@ -68,7 +68,7 @@ def clerk_org(env: None, monkeypatch: pytest.MonkeyPatch):
         {"clerk_enabled": True, "clerk_secret_key": "sk_test_x"}
     )
 
-    async def fake_members(secret_key: str, org_id: str) -> dict[str, str]:
+    async def fake_members(secret_key: str, org_id: str, **_kw) -> dict[str, str]:
         assert org_id == "org_1"
         return members
 
@@ -237,7 +237,7 @@ async def test_org_key_clerk_outage_falls_back_to_existing_account(
         {"clerk_enabled": True, "clerk_secret_key": "sk_test_x"}
     )
 
-    async def boom(secret_key: str, org_id: str) -> dict[str, str]:
+    async def boom(secret_key: str, org_id: str, **_kw) -> dict[str, str]:
         raise clerk_svc.ClerkError("down")
 
     monkeypatch.setattr(clerk_svc, "fetch_org_members", boom)
@@ -420,7 +420,7 @@ def test_clerk_error_in_admin_gate_is_403_not_500(
         {"clerk_enabled": True, "clerk_secret_key": "sk_test_x"}
     )
 
-    async def boom(secret_key: str, org_id: str) -> dict[str, str]:
+    async def boom(secret_key: str, org_id: str, **_kw) -> dict[str, str]:
         raise clerk_svc.ClerkError("down")
 
     monkeypatch.setattr(clerk_svc, "fetch_org_members", boom)

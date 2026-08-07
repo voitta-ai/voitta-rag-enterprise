@@ -198,17 +198,24 @@ ORG_MEMBERS_TTL_S = 300
 _org_members_cache: dict[tuple[str, str], tuple[float, dict[str, str]]] = {}
 
 
-async def fetch_org_members(secret_key: str, org_id: str) -> dict[str, str]:
+async def fetch_org_members(
+    secret_key: str, org_id: str, *, force_refresh: bool = False
+) -> dict[str, str]:
     """Return ``{email: role}`` for one org, cached for ORG_MEMBERS_TTL_S.
 
     Roles come back with Clerk's "org:" prefix stripped ("admin",
     "member"). Raises :class:`ClerkError` on auth/transport problems —
     callers decide whether to fail open (existing account) or closed.
+
+    ``force_refresh`` skips the cache *read* but still writes through, so a
+    screen-render / user-action path (the Settings cvk gate) sees a role
+    change immediately while the per-request auth hot path stays warm.
     """
     cache_key = (hashlib.sha256(secret_key.encode()).hexdigest()[:16], org_id)
-    hit = _org_members_cache.get(cache_key)
-    if hit is not None and (time.monotonic() - hit[0]) < ORG_MEMBERS_TTL_S:
-        return hit[1]
+    if not force_refresh:
+        hit = _org_members_cache.get(cache_key)
+        if hit is not None and (time.monotonic() - hit[0]) < ORG_MEMBERS_TTL_S:
+            return hit[1]
 
     base = get_settings().clerk_api_base.rstrip("/")
     try:
@@ -255,7 +262,7 @@ _org_instance_map: dict[str, str] = {}
 
 
 async def fetch_org_members_multi(
-    instances: list[dict], org_id: str
+    instances: list[dict], org_id: str, *, force_refresh: bool = False
 ) -> dict[str, str]:
     """``{email: role}`` for ``org_id`` across the given instances.
 
@@ -265,6 +272,10 @@ async def fetch_org_members_multi(
     keep their single-instance semantics (fail open for existing
     accounts / fail closed for role checks), since a single-instance
     miss surfaced exactly the same way.
+
+    ``force_refresh`` forwards to :func:`fetch_org_members` so a
+    screen/action path can bypass the membership cache while the auth hot
+    path stays cached.
     """
     if not instances:
         raise ClerkError("No enabled Clerk instance is configured.")
@@ -273,7 +284,9 @@ async def fetch_org_members_multi(
     last_err: ClerkError | None = None
     for inst in ordered:
         try:
-            members = await fetch_org_members(str(inst["secret_key"]), org_id)
+            members = await fetch_org_members(
+                str(inst["secret_key"]), org_id, force_refresh=force_refresh
+            )
         except ClerkError as e:
             last_err = e
             continue

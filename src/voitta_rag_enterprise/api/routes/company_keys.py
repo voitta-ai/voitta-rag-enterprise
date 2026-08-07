@@ -170,8 +170,10 @@ async def _require_scope_admin(db: Session, user: CurrentUser) -> None:
 
     Native admins (incl. super-admins, whose flag is stamped at login) pass
     for any scope. For an org scope, a Clerk org role of ``admin`` also
-    passes — checked live (TTL-cached) so a demotion in Clerk takes effect
-    within minutes, and failing CLOSED when Clerk can't answer.
+    passes — checked LIVE (``force_refresh``: this runs on the Settings cvk
+    screen / cvk create-delete actions, not the per-request auth hot path,
+    so a fresh promotion shows the cvk option immediately without a cache
+    wait or restart), and failing CLOSED when Clerk can't answer.
     """
     if person_is_admin(db, user.email):
         return
@@ -182,7 +184,7 @@ async def _require_scope_admin(db: Session, user: CurrentUser) -> None:
 
             try:
                 members = await clerk_svc.fetch_org_members_multi(
-                    instances, user.company_id
+                    instances, user.company_id, force_refresh=True
                 )
             except clerk_svc.ClerkError as e:
                 # Fail closed (role checks) — includes "org in no enabled

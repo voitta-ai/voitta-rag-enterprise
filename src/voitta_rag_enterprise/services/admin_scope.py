@@ -90,11 +90,14 @@ def admin_orgs_from_directory(
     return frozenset(ids), frozenset(names)
 
 
-async def _fetch_directory_cached(secret_key: str) -> dict:
+async def _fetch_directory_cached(
+    secret_key: str, *, force_refresh: bool = False
+) -> dict:
     cache_key = hashlib.sha256(secret_key.encode()).hexdigest()[:16]
-    hit = _directory_cache.get(cache_key)
-    if hit is not None and (time.monotonic() - hit[0]) < _DIRECTORY_TTL_S:
-        return hit[1]
+    if not force_refresh:
+        hit = _directory_cache.get(cache_key)
+        if hit is not None and (time.monotonic() - hit[0]) < _DIRECTORY_TTL_S:
+            return hit[1]
     directory = await clerk_svc.fetch_directory(secret_key)
     _directory_cache[cache_key] = (time.monotonic(), directory)
     return directory
@@ -105,7 +108,9 @@ def clear_directory_cache() -> None:
     _directory_cache.clear()
 
 
-async def resolve_admin_scope(db: Session, email: str) -> AdminScope:
+async def resolve_admin_scope(
+    db: Session, email: str, *, force_refresh: bool = False
+) -> AdminScope:
     """Resolve ``email``'s administrative domain.
 
     Assumes the caller already passed the ``admin_user`` gate (person-level
@@ -113,6 +118,11 @@ async def resolve_admin_scope(db: Session, email: str) -> AdminScope:
     Clerk orgs where they are an org admin, plus the native community when
     they are native-allowed. Clerk unreachable → ``clerk_degraded`` and an
     empty org domain (fail closed, mirroring ``company_keys``).
+
+    ``force_refresh`` bypasses the directory cache — the admin-console
+    render paths (admin dep + WS admin-snapshot build) pass ``True`` so a
+    just-changed org-admin role scopes the console correctly on the next
+    render, no TTL wait.
     """
     if admin_store.is_super_admin(email):
         return AdminScope(is_super=True, is_native_admin=True)
@@ -128,7 +138,9 @@ async def resolve_admin_scope(db: Session, email: str) -> AdminScope:
     # flips ``clerk_degraded`` so the UI can explain the gap as an outage.
     for inst in admin_store.enabled_clerk_instances():
         try:
-            directory = await _fetch_directory_cached(str(inst["secret_key"]))
+            directory = await _fetch_directory_cached(
+                str(inst["secret_key"]), force_refresh=force_refresh
+            )
         except clerk_svc.ClerkError as e:
             logger.warning(
                 "admin_scope: Clerk instance %r unreachable for %s: %s",

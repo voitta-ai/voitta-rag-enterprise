@@ -14,6 +14,7 @@
 
 import { api } from "../api.js";
 import { keysState, me } from "../store.js";
+import { refreshMe } from "./login.js";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -29,7 +30,12 @@ export function openSettings() {
     // Render from the live store; the WS delivers the user's keys on connect
     // and re-pushes after every create/delete. No HTTP fetch on open.
     renderKeys(keysState.get());
-    loadCompanyKeys();
+    // Refresh /me FIRST (re-provisions Clerk accounts live), THEN the cvk
+    // section — so a freshly-promoted org admin sees the company-key option
+    // on this open, no re-login or restart. The cvk gate (_require_scope_
+    // admin) also queries Clerk live. Chained so loadCompanyKeys sees the
+    // just-provisioned account scope.
+    refreshMe().finally(() => loadCompanyKeys());
 }
 
 // ----- MCP connection snippets -----

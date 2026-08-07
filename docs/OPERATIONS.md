@@ -844,24 +844,45 @@ disk; the admin UI's Clerk tabs are a live proxy too.
 Super-admins get `is_admin` re-stamped (person-level) on every sign-in, so
 the env var stays the recoverable source of truth.
 
-**One provisioning path, two callers.** The multi-instance directory sweep
+**One provisioning path, three callers.** The multi-instance directory sweep
 and account creation live in `services/acl/clerk_provision.py`
 (`resolve_clerk_admission` → prefixed `{id, "Instance / Org"}` orgs;
-`provision_accounts` → the `users` rows). **Both** the sign-in callback and
-Clerk impersonation (Admin → "View as", `POST /admin/clerk/impersonate`) call
-it, so an impersonated account gets the identical set of org accounts and the
-identical `"Instance / Org"` labels a real login would create. (They used to
-diverge: impersonation ran a single-key, bare-name path, so a Production-only
-org was unreachable and two same-named orgs across instances — a Development
-"Agnitio" and a Production "Agnitio" — both showed as bare "Agnitio". The
-shared helper closes that drift; `company_name` is display-only and restamped
-on every login/impersonation, so stale bare labels self-heal on next use.)
+`provision_accounts` → the `users` rows). The sign-in callback, Clerk
+impersonation (Admin → "View as", `POST /admin/clerk/impersonate`), **and
+`GET /api/auth/me`** all call it, so every one produces the identical set of
+org accounts and identical `"Instance / Org"` labels. (Impersonation used to
+diverge: a single-key, bare-name path, so a Production-only org was
+unreachable and two same-named orgs across instances — a Development "Agnitio"
+and a Production "Agnitio" — both showed as bare "Agnitio". The shared helper
+closes that drift; `company_name` is display-only and restamped on every
+call, so stale bare labels self-heal.)
 
-To fix already-provisioned accounts in bulk (users who haven't logged in or
-been re-impersonated since), run the idempotent reconciler once:
+To fix already-provisioned accounts in bulk (users who haven't hit any of
+those paths since a change), run the idempotent reconciler once:
 `python scripts/backfill_clerk_company_names.py` (dry run) / `--apply`. It
 sweeps every enabled instance and restamps `company_name` to `"Instance /
 Org"`; rows whose org is in no enabled instance are left untouched.
+
+#### Live vs cached Clerk reads
+
+Clerk **membership and role changes surface on the next screen open — no
+server restart, and (for account membership) no re-login.** The rule: every
+*screen-render / user-action* path reads Clerk **live**; the single
+high-frequency *auth hot path* keeps a short TTL cache so we don't hit Clerk
+on every request.
+
+| Surface | Path | Freshness |
+|---|---|---|
+| Account dropdown + badges | `GET /auth/me` → `resolve_clerk_admission` + `provision_accounts` | **live** every call (page load, dropdown-open, Settings-open) — a newly-added org appears as a new account, fail-soft if Clerk is down (existing accounts kept, never a 500, never removed) |
+| Company-key (`cvk_`) management gate | `_require_scope_admin` → `fetch_org_members_multi(force_refresh=True)` | **live** — a fresh org-admin promotion shows the cvk option on the next Settings open |
+| Admin console scope (Users list, mutations) | `resolve_admin_scope(force_refresh=True)` via the `admin_scope` dep + WS admin snapshot | **live** every admin request / snapshot build |
+| Admin → Clerk Users / Companies tabs | `GET /admin/clerk/directory` | **live** (uncached by design) |
+| **Company-key AUTH** (every `cvk_` request) | `_email_in_scope` → `fetch_org_members_multi` (default cached) | **cached**, `ORG_MEMBERS_TTL_S` (300 s) — the one hot path; a role/membership change here takes effect within the TTL |
+
+The SPA refetches `/me` on account-dropdown-open and Settings-open (not just
+at page load), so these live reads reach the UI in-session. The Clerk
+*instance config* itself (`settings.json`) is always read fresh — adding or
+editing an instance needs **no restart**.
 
 ### Session & per-request resolution
 

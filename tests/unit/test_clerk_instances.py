@@ -180,7 +180,7 @@ async def test_org_resolution_tries_instances_and_caches_winner(
 ) -> None:
     calls: list[tuple[str, str]] = []
 
-    async def fake(secret_key: str, org_id: str) -> dict[str, str]:
+    async def fake(secret_key: str, org_id: str, **_kw) -> dict[str, str]:
         calls.append((secret_key, org_id))
         if secret_key == "sk_prod" and org_id == "org_p":
             return {"pat@x": "admin"}
@@ -204,7 +204,7 @@ async def test_org_resolution_tries_instances_and_caches_winner(
 async def test_org_resolution_raises_when_nowhere(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def nope(secret_key: str, org_id: str) -> dict[str, str]:
+    async def nope(secret_key: str, org_id: str, **_kw) -> dict[str, str]:
         raise clerk_svc.ClerkError("404")
 
     monkeypatch.setattr(clerk_svc, "fetch_org_members", nope)

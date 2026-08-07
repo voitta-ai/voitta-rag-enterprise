@@ -218,9 +218,12 @@ async def _admin_scope_for(user_id: int | None) -> AdminScope:
         row = db.get(User, user_id)
         if row is None:
             return AdminScope()
-        # resolve_admin_scope may await Clerk (cached ~45s); holding this
-        # short-lived session across the await is fine on this rare path.
-        return await resolve_admin_scope(db, row.email)
+        # resolve_admin_scope awaits Clerk LIVE here (force_refresh): this
+        # builds the admin snapshot on connect / after each admin mutation,
+        # so a fresh org-admin role is reflected without a TTL wait.
+        # Holding this short-lived session across the await is fine on this
+        # rare path.
+        return await resolve_admin_scope(db, row.email, force_refresh=True)
     finally:
         db.close()
 

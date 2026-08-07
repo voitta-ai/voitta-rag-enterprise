@@ -13,34 +13,53 @@ import { sourceBadges } from "../components/badges.js";
 
 const $ = (sel) => document.querySelector(sel);
 
+// Apply a /me payload to the store + top bar (pill, badges, account
+// dropdown, admin button, impersonation banner). Shared by the initial
+// auth check and refreshMe().
+function _applyMe(me) {
+    meStore.set(me);
+    $("#user-pill").textContent = me.email;
+    $("#user-pill").hidden = false;
+    // Provenance badges for the ACTIVE account: SUPERADMIN / VOITTA NATIVE /
+    // company chip.
+    const badges = $("#user-badges");
+    badges.innerHTML = "";
+    badges.appendChild(sourceBadges(me));
+    renderAccountSelect(me);
+    $("#btn-logout").hidden = false;
+    // Admin button is gated on the *real* user's flag — impersonation never
+    // grants admin powers. /api/auth/me enforces the same.
+    $("#btn-admin").hidden = !me.is_admin;
+    // Impersonation banner: visible iff an admin has chosen "view as".
+    if (me.acting_as_user_id) {
+        $("#impersonate-text").textContent =
+            `Viewing the app as ${me.acting_as_email} — your own admin status is unaffected.`;
+        $("#impersonate-banner").hidden = false;
+    } else {
+        $("#impersonate-banner").hidden = true;
+    }
+}
+
+// Re-fetch /me and re-apply the top bar. /me re-provisions Clerk accounts
+// LIVE server-side, so this surfaces a newly-added org membership (a new
+// dropdown entry) or a role change without a re-login. Called when the
+// account dropdown and Settings modal open. Best-effort: a failure leaves
+// the current view intact.
+export async function refreshMe() {
+    try {
+        _applyMe(await api.me());
+    } catch (err) {
+        console.warn("refreshMe failed", err);
+    }
+}
+
 export async function ensureAuthenticated() {
     // Returns true when the user is signed in (or auth is bypassed via
     // VOITTA_SINGLE_USER / VOITTA_DEV_USER / forwarded headers); false when
     // we rendered the login gate and the rest of bootstrap should bail.
     try {
         const me = await api.me();
-        meStore.set(me);
-        $("#user-pill").textContent = me.email;
-        $("#user-pill").hidden = false;
-        // Provenance badges for the ACTIVE account: SUPERADMIN /
-        // VOITTA NATIVE / company chip.
-        const badges = $("#user-badges");
-        badges.innerHTML = "";
-        badges.appendChild(sourceBadges(me));
-        renderAccountSelect(me);
-        $("#btn-logout").hidden = false;
-        // Admin button is gated on the *real* user's flag — impersonation
-        // never grants admin powers. The /api/auth/me endpoint enforces
-        // the same: ``is_admin`` reflects the real identity.
-        $("#btn-admin").hidden = !me.is_admin;
-        // Impersonation banner: visible iff an admin has chosen "view as".
-        if (me.acting_as_user_id) {
-            $("#impersonate-text").textContent =
-                `Viewing the app as ${me.acting_as_email} — your own admin status is unaffected.`;
-            $("#impersonate-banner").hidden = false;
-        } else {
-            $("#impersonate-banner").hidden = true;
-        }
+        _applyMe(me);
         $("#login-gate").hidden = true;
         return true;
     } catch (err) {
@@ -112,6 +131,13 @@ function renderAccountSelect(me) {
                 alert(err.message || "account switch failed");
             }
         });
+        // Opening the dropdown re-fetches /me (which re-provisions Clerk
+        // accounts live), so a membership added since page load appears as
+        // a new entry. Best-effort — the re-render repopulates the options;
+        // the authoritative refreshes are page load + Settings-open (the
+        // latter also un-hides this dropdown when a 2nd account first
+        // appears, which is the new-membership case).
+        sel.addEventListener("mousedown", () => { refreshMe(); });
     }
 }
 

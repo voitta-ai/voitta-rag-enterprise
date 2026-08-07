@@ -122,8 +122,44 @@ class MeOut(BaseModel):
     accounts: list[dict] = []
 
 
+async def _refresh_clerk_accounts(db: Session, email: str) -> None:
+    """Re-provision ``email``'s Clerk org accounts from a live directory sweep.
+
+    Called from ``/me`` so a membership added/renamed in Clerk shows up
+    without a re-login. Deliberately best-effort:
+
+    * No enabled instances → no-op (native / single-user deployments).
+    * Clerk unreachable → swallowed; the caller proceeds with whatever
+      accounts already exist in the DB. NEVER raises to the request.
+    * Only ADDS/RESTAMPS rows (via the shared ``provision_accounts``);
+      it never deletes an account, so a transient Clerk blip can't strip a
+      user's company access mid-session.
+    * Idempotent under the ``UNIQUE(email, company_id)`` constraint — a
+      concurrent ``/me`` from another tab that races the same insert just
+      rolls back to a clean session; the row exists either way.
+    """
+    from ...services.acl import (
+        provision_accounts,
+        resolve_clerk_admission,
+    )
+
+    if not admin_store.enabled_clerk_instances():
+        return
+    try:
+        admission = await resolve_clerk_admission(email)
+        if not admission.matched:
+            return
+        provision_accounts(db, email, admission.display_name, admission.orgs)
+        db.commit()
+    except Exception:
+        # Live-refresh is a convenience, not a gate — the sign-in flow
+        # already provisioned whatever was current at login. Log and move on.
+        db.rollback()
+        logger.warning("me: live Clerk account refresh failed", exc_info=True)
+
+
 @router.get("/me", response_model=MeOut)
-def me(
+async def me(
     request: Request,
     db: Session = Depends(db_session),
     user: CurrentUser = Depends(current_user),
@@ -132,8 +168,18 @@ def me(
 
     Admin-related fields reflect the real (pre-impersonation) identity.
     A 401 from ``current_user`` lets the SPA render its login gate.
+
+    Clerk memberships are re-provisioned LIVE here: ``/me`` is fetched on
+    every SPA load and when the account dropdown / Settings open, so a
+    just-added org membership yields a new account row (and any renamed org
+    a fresh ``"Instance / Org"`` label) without a re-login or restart. This
+    is the one place the account list refreshes against Clerk; it's
+    fail-soft (Clerk down → existing DB accounts unchanged, never a 500)
+    and never removes accounts.
     """
     from ...db.models import User as _User
+
+    await _refresh_clerk_accounts(db, user.email)
 
     eff_row = db.get(_User, user.id)
 

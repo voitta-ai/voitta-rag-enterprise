@@ -321,7 +321,11 @@ async def admin_scope(
 
     Keeps the async Clerk directory lookup inside a dependency so handlers
     stay simple. Depends on ``admin_user`` so non-admins never reach here.
+
+    ``force_refresh``: this fires per admin request (screen render / admin
+    mutation), so a just-changed org-admin role scopes the console
+    correctly immediately rather than after the directory TTL.
     """
     from ..services.admin_scope import resolve_admin_scope
 
-    return await resolve_admin_scope(db, me.email)
+    return await resolve_admin_scope(db, me.email, force_refresh=True)
