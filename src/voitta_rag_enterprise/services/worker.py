@@ -61,30 +61,49 @@ class WorkerPool:
         logger.info("%s started", name)
         try:
             while not self._stop.is_set():
-                claimed = await asyncio.to_thread(job_queue.claim_one)
-                if claimed is None:
-                    with contextlib.suppress(TimeoutError):
-                        await asyncio.wait_for(self._stop.wait(), timeout=self._idle_sleep)
-                    continue
-                handler = self._handlers.get(claimed.kind)
-                if handler is None:
-                    await asyncio.to_thread(
-                        job_queue.mark_error, claimed.id, f"no handler for {claimed.kind}"
-                    )
-                    continue
-                with bind_context(job_id=claimed.id, kind=claimed.kind):
-                    logger.info("%s claim job", name)
-                    try:
-                        # Handlers may return a JSON-able summary dict (e.g.
-                        # sync stats); it's persisted on the job and shown in
-                        # the Jobs panel detail. Most return None.
-                        result = await handler(claimed.payload)
+                # The whole iteration is guarded: a transient infrastructure
+                # failure (SQLite "database is locked" during a bulk write
+                # burst hitting claim_one / mark_done / mark_error) used to
+                # propagate out of the loop and silently kill this task —
+                # the queue then sat frozen (rows stuck "queued", nothing
+                # claiming) until a process restart. Log, pause briefly,
+                # keep consuming. CancelledError is a BaseException, so
+                # pool shutdown's task.cancel() still tears us down cleanly.
+                try:
+                    claimed = await asyncio.to_thread(job_queue.claim_one)
+                    if claimed is None:
+                        with contextlib.suppress(TimeoutError):
+                            await asyncio.wait_for(self._stop.wait(), timeout=self._idle_sleep)
+                        continue
+                    handler = self._handlers.get(claimed.kind)
+                    if handler is None:
                         await asyncio.to_thread(
-                            job_queue.mark_done, claimed.id, result
+                            job_queue.mark_error, claimed.id, f"no handler for {claimed.kind}"
                         )
-                        logger.info("%s job done", name)
-                    except Exception as e:
-                        logger.exception("%s job failed", name)
-                        await asyncio.to_thread(job_queue.mark_error, claimed.id, str(e))
+                        continue
+                    with bind_context(job_id=claimed.id, kind=claimed.kind):
+                        logger.info("%s claim job", name)
+                        try:
+                            # Handlers may return a JSON-able summary dict (e.g.
+                            # sync stats); it's persisted on the job and shown in
+                            # the Jobs panel detail. Most return None.
+                            result = await handler(claimed.payload)
+                            await asyncio.to_thread(
+                                job_queue.mark_done, claimed.id, result
+                            )
+                            logger.info("%s job done", name)
+                        except Exception as e:
+                            logger.exception("%s job failed", name)
+                            await asyncio.to_thread(job_queue.mark_error, claimed.id, str(e))
+                except Exception:
+                    # If a claimed job's mark_done/mark_error itself failed,
+                    # the row stays "running" — reclaim_abandoned_jobs()
+                    # flips it to "error" on the next startup, same as any
+                    # mid-job crash. Nothing is lost by continuing.
+                    logger.exception(
+                        "%s worker-loop infrastructure error; retrying in 2s", name
+                    )
+                    with contextlib.suppress(TimeoutError):
+                        await asyncio.wait_for(self._stop.wait(), timeout=2.0)
         finally:
             logger.info("%s stopped", name)
