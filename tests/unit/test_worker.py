@@ -110,6 +110,51 @@ async def test_worker_marks_error_for_unknown_kind(env: None) -> None:
 
 
 @pytest.mark.asyncio
+async def test_worker_survives_transient_claim_failure(
+    env: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: an exception escaping claim_one (SQLite "database is
+    locked" during a bulk write burst) used to kill the worker task
+    silently — the queue froze until a process restart. The loop must
+    absorb it and keep consuming."""
+    init_db()
+    seen: list[dict] = []
+
+    real_claim = job_queue.claim_one
+    fails = {"left": 3}
+
+    def flaky_claim():
+        if fails["left"] > 0:
+            fails["left"] -= 1
+            raise RuntimeError("database is locked")
+        return real_claim()
+
+    monkeypatch.setattr(job_queue, "claim_one", flaky_claim)
+    # Also reach the worker module's reference (it imports the module, so
+    # patching the module attr covers it) — and shrink the error pause so
+    # the test doesn't wait 3 x 2s.
+    monkeypatch.setattr(
+        "voitta_rag_enterprise.services.worker.job_queue.claim_one", flaky_claim
+    )
+
+    async def handle(payload: dict) -> None:
+        seen.append(payload)
+
+    pool = WorkerPool(size=1, handlers={"extract": handle}, idle_sleep=0.05)
+    with session_scope() as s:
+        jid = job_queue.enqueue(s, "extract", {"x": 42})
+
+    await pool.start()
+    try:
+        # 3 claim failures x 2s pause = up to ~6s before the job is picked up.
+        await _wait_until(lambda: _job_state(jid) == "done", timeout=10.0)
+    finally:
+        await pool.stop()
+    assert seen == [{"x": 42}]
+    assert fails["left"] == 0  # every injected failure was actually hit
+
+
+@pytest.mark.asyncio
 async def test_workers_share_queue_across_pool(env: None) -> None:
     init_db()
     processed: list[int] = []
