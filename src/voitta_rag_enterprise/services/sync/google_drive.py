@@ -278,6 +278,13 @@ class GoogleDriveSyncStats:
     # this modal. Logged once, surfaced in the log/stats line, and the
     # modal stays clean of them.
     files_404: int = 0
+    # Native exports Google refused with 403 ``exportSizeLimitExceeded``
+    # (file bigger than Drive's export cap). Permanent per-file, and the
+    # per-tab markdown carries the content — so, like ``files_404``,
+    # counted here instead of polluting ``errors``. Retried (cheaply,
+    # one fast-failing request) on every sync so it self-heals if the
+    # file shrinks or Google raises the cap.
+    files_too_large: int = 0
     tabs_written: int = 0
     errors: list[str] = field(default_factory=list)
 
@@ -288,6 +295,7 @@ class GoogleDriveSyncStats:
             "files_removed": self.files_removed,
             "files_skipped": self.files_skipped,
             "files_404": self.files_404,
+            "files_too_large": self.files_too_large,
             "tabs_written": self.tabs_written,
             "errors": self.errors,
         }
@@ -1198,24 +1206,29 @@ class GoogleDriveConnector(SyncConnector):
 
         def _materialize_one(
             entry: RemoteEntry,
-        ) -> tuple[RemoteEntry, bool, bool, str | None, bool]:
+        ) -> tuple[RemoteEntry, bool, bool, str | None, str | None]:
             """Run the producer for one entry off the main thread.
 
             Returns ``(entry, was_unchanged, existed_before, error,
-            is_404)``. We keep stats + sidecar mutation on the main
+            skip)``. We keep stats + sidecar mutation on the main
             thread (single-threaded as ``as_completed`` drains) to
             avoid a lock.
 
-            ``is_404=True`` flags Drive's "we listed it, won't serve
-            it" race so the caller can route to ``stats.files_404``
-            instead of the user-facing ``stats.errors``. Common
-            triggers: file trashed / unshared / metadata stale
-            between ``files.list`` and ``files.get_media``.
+            ``skip`` buckets non-error outcomes away from the user-
+            facing ``stats.errors``:
+            * ``"404"`` — Drive's "we listed it, won't serve it" race
+              (file trashed / unshared / metadata stale between
+              ``files.list`` and ``files.get_media``) → ``files_404``.
+            * ``"too_large"`` — 403 ``exportSizeLimitExceeded`` on a
+              native export; permanent per-file, content already
+              covered by the per-tab markdown → ``files_too_large``.
+            Skipped entries are NOT recorded in the sidecar (nothing
+            was written), so the next sync re-checks them cheaply.
             """
             local = folder_root / entry.rel_path
             local.parent.mkdir(parents=True, exist_ok=True)
             if self._is_unchanged(local, entry):
-                return entry, True, False, None, False
+                return entry, True, False, None, None
             existed_before = local.exists()
             try:
                 entry.producer(
@@ -1231,19 +1244,27 @@ class GoogleDriveConnector(SyncConnector):
                         "Drive 404 (file vanished between list/get): %s",
                         entry.rel_path,
                     )
-                    return entry, False, existed_before, None, True
+                    return entry, False, existed_before, None, "404"
+                if _is_export_too_large(e):
+                    logger.info(
+                        "Drive export exceeds Google's size cap, skipped: %s",
+                        entry.rel_path,
+                    )
+                    return entry, False, existed_before, None, "too_large"
                 logger.exception("Drive download failed: %s", entry.rel_path)
-                return entry, False, existed_before, str(e), False
-            return entry, False, existed_before, None, False
+                return entry, False, existed_before, str(e), None
+            return entry, False, existed_before, None, None
 
         with ThreadPoolExecutor(
             max_workers=8, thread_name_prefix="gd-dl"
         ) as pool:
             futures = [pool.submit(_materialize_one, e) for e in entries]
             for i, fut in enumerate(as_completed(futures), start=1):
-                entry, was_unchanged, existed_before, err, is_404 = fut.result()
-                if is_404:
+                entry, was_unchanged, existed_before, err, skip = fut.result()
+                if skip == "404":
                     stats.files_404 += 1
+                elif skip == "too_large":
+                    stats.files_too_large += 1
                 elif err is not None:
                     stats.errors.append(f"{entry.rel_path}: {err}")
                 else:
@@ -1634,6 +1655,23 @@ def _is_drive_404(error: BaseException) -> bool:
     resp = getattr(error, "resp", None)
     status_code = getattr(resp, "status", None)
     return status_code == 404
+
+
+def _is_export_too_large(error: BaseException) -> bool:
+    """True iff ``error`` is Google's 403 ``exportSizeLimitExceeded``.
+
+    Raised when a native-file export (e.g. the full-workbook ``.xlsx``
+    sidecar for a Google Sheet) exceeds Drive's export cap (~10 MB).
+    It's a permanent property of the file, not a transient failure —
+    and the per-tab markdown files already carry the sheet content, so
+    the missing sidecar is cosmetic. Bucketed like ``_is_drive_404``:
+    logged once, counted in ``stats.files_too_large``, kept out of the
+    user-facing ``stats.errors`` block. Same duck-typing rationale as
+    ``_is_drive_404``.
+    """
+    resp = getattr(error, "resp", None)
+    status_code = getattr(resp, "status", None)
+    return status_code == 403 and "exportSizeLimitExceeded" in str(error)
 
 
 def _download_to(drive: Any, file_id: str, dest: Path) -> None:

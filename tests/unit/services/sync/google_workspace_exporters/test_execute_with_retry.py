@@ -114,3 +114,55 @@ def test_non_retryable_404_fails_fast() -> None:
     with pytest.raises(HttpError):
         execute_with_retry(req)
     assert req.calls == 1
+
+
+# ---------------------------------------------------------------------------
+# Sheets pacing — the 60-reads/min/user quota is shared across every worker
+# thread, so ``label="sheets"`` requests reserve evenly-spaced slots on a
+# process-wide clock before executing. Regression guard for the Agnitio
+# Drive sync flooding sheets.googleapis.com from 8 parallel download
+# threads: per-thread backoff alone kept collectively exceeding the quota
+# until files exhausted their retries and landed in ``stats.errors``.
+# ---------------------------------------------------------------------------
+
+_BASE = "voitta_rag_enterprise.services.sync.google_workspace_exporters.base"
+
+
+def test_sheets_label_paces_every_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Retries consume quota like first attempts — each must take a slot.
+    paced: list[int] = []
+    monkeypatch.setattr(f"{_BASE}._sheets_pace", lambda: paced.append(1))
+    req = _Request([_http_error(429, "rateLimitExceeded")] * 2, result="ok")
+    assert execute_with_retry(req, label="sheets") == "ok"
+    assert req.calls == 3
+    assert len(paced) == 3  # one slot per attempt, not one per request
+
+
+def test_non_sheets_labels_are_not_paced(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Docs/Slides/Forms (300/min) and Drive don't need pacing — only the
+    # sheets label pays the gate.
+    paced: list[int] = []
+    monkeypatch.setattr(f"{_BASE}._sheets_pace", lambda: paced.append(1))
+    req = _Request([])
+    assert execute_with_retry(req) == "ok"
+    assert execute_with_retry(_Request([]), label="docs") == "ok"
+    assert paced == []
+
+
+def test_sheets_pace_enforces_min_interval(monkeypatch: pytest.MonkeyPatch) -> None:
+    from voitta_rag_enterprise.services.sync.google_workspace_exporters import (
+        base as base_mod,
+    )
+
+    # Freeze the clock and capture sleeps; reset the module-global slot so
+    # this test is order-independent.
+    slept: list[float] = []
+    monkeypatch.setattr(f"{_BASE}.time.monotonic", lambda: 1000.0)
+    monkeypatch.setattr(f"{_BASE}.time.sleep", lambda s: slept.append(s))
+    monkeypatch.setattr(f"{_BASE}._sheets_next_slot", 0.0)
+
+    interval = 60.0 / base_mod._SHEETS_READS_PER_MIN
+    base_mod._sheets_pace()  # first call: slot is now — no sleep
+    base_mod._sheets_pace()  # second call: must wait one interval
+    base_mod._sheets_pace()  # third call: two intervals out
+    assert slept == pytest.approx([interval, 2 * interval])

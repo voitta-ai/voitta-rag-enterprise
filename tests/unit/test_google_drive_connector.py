@@ -1292,6 +1292,115 @@ async def test_404_on_download_routes_to_files_404_not_errors(
     assert (tmp_path / "root" / "Root" / "kept.txt").read_bytes() == b"hello"
 
 
+def test_is_export_too_large_recognises_export_limit_403() -> None:
+    """``_is_export_too_large`` routes Google's "This file is too large
+    to be exported" 403 into the silent ``files_too_large`` bucket.
+    False positives would swallow real permission errors."""
+    from googleapiclient.errors import HttpError
+    from httplib2 import Response
+
+    from voitta_rag_enterprise.services.sync.google_drive import _is_export_too_large
+
+    def _http_error(status: int, reason: str = "") -> HttpError:
+        resp = Response({"status": status})
+        resp.status = status
+        content = (
+            b'{"error": {"errors": [{"reason": "%s"}], "message": "%s"}}'
+            % (reason.encode(), reason.encode())
+        )
+        return HttpError(resp, content)
+
+    assert _is_export_too_large(_http_error(403, "exportSizeLimitExceeded")) is True
+    # Other 403 reasons are real permission errors — never bucketed.
+    assert _is_export_too_large(_http_error(403, "insufficientPermissions")) is False
+    # Same reason on a non-403 status doesn't match (defensive).
+    assert _is_export_too_large(_http_error(429, "exportSizeLimitExceeded")) is False
+    assert _is_export_too_large(_http_error(404)) is False
+    assert _is_export_too_large(RuntimeError("boom")) is False
+
+
+@pytest.mark.asyncio
+async def test_export_too_large_routes_to_files_too_large_not_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a 403 ``exportSizeLimitExceeded`` from a producer
+    (the Agnitio Drive's oversized workbook sidecar) must land in
+    ``stats.files_too_large``, not ``stats.errors`` — the per-tab
+    markdown already carries the content, so the missing sidecar is
+    a summary count, not a red error bullet."""
+    from googleapiclient.errors import HttpError
+    from httplib2 import Response
+
+    listings = {
+        "ROOT": [
+            {
+                "id": "huge",
+                "name": "planning.xlsx",
+                "mimeType": "application/octet-stream",
+                "size": "99999999",
+                "modifiedTime": "2026-05-10T00:00:00Z",
+                "md5Checksum": "abc",
+                "webViewLink": "https://drive.google.com/file/d/huge/view",
+            },
+            {
+                "id": "alive",
+                "name": "kept.txt",
+                "mimeType": "application/octet-stream",
+                "size": "5",
+                "modifiedTime": "2026-05-10T00:00:00Z",
+                "md5Checksum": "def",
+                "webViewLink": "https://drive.google.com/file/d/alive/view",
+            },
+        ]
+    }
+    drive = _FakeDrive(
+        _FakeFiles(
+            listings,
+            export_payloads={},
+            download_payloads={"alive": b"hello", "huge": b""},
+        )
+    )
+
+    class _SelectiveDownloader:
+        def __init__(self, fh, request: _FakeMediaRequest) -> None:
+            self._fh = fh
+            self._req = request
+
+        def next_chunk(self):
+            if self._req._body == b"":
+                resp = Response({"status": 403})
+                resp.status = 403
+                raise HttpError(
+                    resp,
+                    b'{"error": {"errors": [{"reason": "exportSizeLimitExceeded"}],'
+                    b' "message": "This file is too large to be exported."}}',
+                )
+            if self._req._consumed:
+                return None, True
+            self._fh.write(self._req._body)
+            self._req._consumed = True
+            return None, True
+
+    import googleapiclient.http as _ghttp
+
+    monkeypatch.setattr(_ghttp, "MediaIoBaseDownload", _SelectiveDownloader)
+
+    connector = GoogleDriveConnector()
+    _patch_services(connector, drive, _FakeDocs({}), monkeypatch)
+
+    stats = await connector.sync(
+        folder_root=tmp_path / "root",
+        auth=_make_auth(),
+        drive_folders=[{"id": "ROOT", "name": "Root"}],
+    )
+    assert stats.files_too_large == 1, (
+        f"expected 1 too-large skip, got {stats.files_too_large}"
+    )
+    assert stats.errors == [], f"unexpected error entries: {stats.errors}"
+    # The other file synced cleanly.
+    assert (tmp_path / "root" / "Root" / "kept.txt").read_bytes() == b"hello"
+
+
 def test_folders_field_round_trip() -> None:
     from voitta_rag_enterprise.services.sync.google_drive import (
         coerce_folders_field,

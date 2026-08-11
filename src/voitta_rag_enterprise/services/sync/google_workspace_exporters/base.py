@@ -28,8 +28,10 @@ they need — see :class:`ProducerContext`.
 from __future__ import annotations
 
 import logging
+import os
 import random
 import re
+import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -53,6 +55,43 @@ _SAFE_NAME_RE = re.compile(r"[<>:\"/\\|?*\x00-\x1f]")
 _RETRY_STATUSES = frozenset({403, 429, 500, 502, 503, 504})
 _RETRYABLE_429_REASONS = ("rateLimitExceeded", "userRateLimitExceeded")
 
+# --- Sheets read pacing -----------------------------------------------------
+#
+# The Sheets API read quota is 60 requests/min *per user* — shared across
+# every thread in both the export pool (4 workers) and the download pool
+# (8 workers). Backoff alone can't respect a *shared* budget: each thread
+# retries in isolation, so collectively they still exceed the ceiling and
+# some requests exhaust all attempts and land in ``stats.errors``. Instead,
+# every Sheets ``.execute()`` reserves the next evenly-spaced slot on a
+# process-wide clock before firing — under the quota by construction, with
+# the retry loop demoted to a rare safety net. Slots are reserved under the
+# lock but slept outside it, so the gate itself never serialises threads for
+# longer than the reservation bookkeeping. Retried attempts reserve a fresh
+# slot each time — a retry is a quota-consuming read like any other.
+#
+# Default 50/min leaves headroom for the odd out-of-band read (preflight
+# probes, a user opening the sheet in a browser). Docs/Slides/Forms have a
+# 300/min quota that the pools don't come close to; Drive media downloads
+# are quota'd far higher still — neither is paced.
+_SHEETS_READS_PER_MIN = float(os.getenv("VOITTA_SHEETS_READS_PER_MIN", "50") or 50)
+_sheets_gate_lock = threading.Lock()
+_sheets_next_slot = 0.0
+
+
+def _sheets_pace() -> None:
+    """Block until this thread's reserved Sheets slot arrives."""
+    global _sheets_next_slot
+    if _SHEETS_READS_PER_MIN <= 0:  # escape hatch: pacing disabled via env
+        return
+    interval = 60.0 / _SHEETS_READS_PER_MIN
+    with _sheets_gate_lock:
+        now = time.monotonic()
+        slot = max(now, _sheets_next_slot)
+        _sheets_next_slot = slot + interval
+    wait = slot - now
+    if wait > 0:
+        time.sleep(wait)
+
 
 def execute_with_retry(
     request: Any,
@@ -75,6 +114,10 @@ def execute_with_retry(
 
     for attempt in range(1, max_attempts + 1):
         try:
+            # Inside the loop deliberately: a retry consumes quota exactly
+            # like a first attempt, so it must reserve its own paced slot.
+            if label == "sheets":
+                _sheets_pace()
             return request.execute()
         except HttpError as e:
             status = getattr(e.resp, "status", None)
