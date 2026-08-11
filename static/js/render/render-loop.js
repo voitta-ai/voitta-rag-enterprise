@@ -32,14 +32,48 @@ export function setRenderers(renderers) {
     if (renderers.jobs) _renderers.jobs = renderers.jobs;
 }
 
+// Upper bound on full-tree renders during sustained delta bursts. rAF alone
+// caps us at ~60/s, but a full tree render over thousands of rows is expensive
+// enough that 60/s still pins the main thread through a long clone/sync. A
+// trailing throttle drops that to ~5/s during a burst while keeping the FIRST
+// render after idle on the very next frame — interactive updates stay snappy
+// because the throttle only engages when renders are already back-to-back.
+const FULL_RENDER_MIN_INTERVAL_MS = 200;
+let lastFullRenderTs = 0;
+let fullRenderTrailingTimer = null;
+
+function _now() {
+    return typeof performance !== "undefined" ? performance.now() : Date.now();
+}
+
+function _runFullRender() {
+    fullRenderPending = false;
+    sidebarRenderPending = false; // a full render covers the sidebar too
+    lastFullRenderTs = _now();
+    if (_renderers.full) _renderers.full();
+}
+
 export function scheduleFullRender() {
     if (fullRenderPending) return;
-    fullRenderPending = true;
-    requestAnimationFrame(() => {
-        fullRenderPending = false;
-        sidebarRenderPending = false; // a full render covers the sidebar too
-        if (_renderers.full) _renderers.full();
-    });
+    const sinceLast = _now() - lastFullRenderTs;
+    if (sinceLast >= FULL_RENDER_MIN_INTERVAL_MS) {
+        // Idle-ish: render on the next animation frame (snappy).
+        if (fullRenderTrailingTimer !== null) {
+            clearTimeout(fullRenderTrailingTimer);
+            fullRenderTrailingTimer = null;
+        }
+        fullRenderPending = true;
+        requestAnimationFrame(_runFullRender);
+    } else if (fullRenderTrailingTimer === null) {
+        // Mid-burst: coalesce every request in this window into ONE trailing
+        // render at the window edge.
+        fullRenderTrailingTimer = setTimeout(() => {
+            fullRenderTrailingTimer = null;
+            if (fullRenderPending) return;
+            fullRenderPending = true;
+            requestAnimationFrame(_runFullRender);
+        }, FULL_RENDER_MIN_INTERVAL_MS - sinceLast);
+    }
 }
 
 export function scheduleSidebarRender() {

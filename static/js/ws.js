@@ -18,6 +18,70 @@ let socket = null;
 let backoff = 500;
 let stopped = false;
 
+// --- File-delta coalescing --------------------------------------------------
+// During a bulk arrival (git clone, large sync) the server emits one
+// ``file.upserted`` per file — potentially thousands in a tight burst. Applying
+// each individually meant an O(n) findIndex + full array copy PER event on the
+// flat ``files`` store: O(n^2) across the burst, which pinned the browser main
+// thread for minutes. Instead we accumulate mutations and flush them into the
+// store in a single pass per microtask tick — one store write (hence one
+// coalesced render) per batch frame rather than one per file.
+const _pendingFileUpserts = new Map();   // id -> merged file payload
+const _pendingFileDeletes = new Set();   // id
+let _fileFlushScheduled = false;
+
+function _queueFileUpsert(f) {
+    _pendingFileDeletes.delete(f.id);
+    const prev = _pendingFileUpserts.get(f.id);
+    _pendingFileUpserts.set(f.id, prev ? { ...prev, ...f } : f);
+    // Reaching "indexed" means the file's images/layout were just (re)committed
+    // — drop the lazily-fetched artifact cache so an expanded row refetches
+    // instead of showing pre-index emptiness.
+    if (f.state === "indexed") invalidateFileArtifacts(f.id);
+    _scheduleFileFlush();
+}
+
+function _queueFileDelete(id) {
+    _pendingFileUpserts.delete(id);
+    _pendingFileDeletes.add(id);
+    invalidateFileArtifacts(id);
+    _scheduleFileFlush();
+}
+
+function _scheduleFileFlush() {
+    if (_fileFlushScheduled) return;
+    _fileFlushScheduled = true;
+    // Microtask (not rAF): guarantees the store is flushed BEFORE the rAF
+    // render reads it (spec order: microtasks → rAF), so a render never paints
+    // stale file state, while still collapsing a whole batch into one write.
+    queueMicrotask(_flushFileDeltas);
+}
+
+function _flushFileDeltas() {
+    _fileFlushScheduled = false;
+    if (_pendingFileUpserts.size === 0 && _pendingFileDeletes.size === 0) return;
+    files.update((list) => {
+        const byId = new Map(list.map((f) => [f.id, f]));   // O(n) once
+        for (const [id, f] of _pendingFileUpserts) {
+            const prev = byId.get(id);
+            byId.set(id, prev ? { ...prev, ...f } : f);
+        }
+        for (const id of _pendingFileDeletes) byId.delete(id);
+        return [...byId.values()];                          // O(n) once
+    });
+    _pendingFileUpserts.clear();
+    _pendingFileDeletes.clear();
+}
+
+// Drop queued file deltas without applying them — used when a ``files``
+// snapshot is about to replace the store wholesale (queued deltas are either
+// already reflected in the snapshot or superseded by it).
+function _discardPendingFileDeltas() {
+    _pendingFileUpserts.clear();
+    _pendingFileDeletes.clear();
+    _fileFlushScheduled = false;
+}
+
 export function connect() {
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     const url = `${proto}//${location.host}/ws`;
@@ -93,6 +157,9 @@ function applySnapshot(topic, items) {
             activeFolders.set(new Set(items));
             return;
         case "files":
+            // A snapshot is server truth and replaces the store wholesale, so
+            // any queued (pre-snapshot) file deltas are stale — drop them.
+            _discardPendingFileDeltas();
             files.set(items);
             return;
         case "jobs":
@@ -169,6 +236,9 @@ function handleEvent(event) {
             return;
         case "folder.removed":
             folders.update((list) => list.filter(f => f.id !== event.folder_id));
+            // Apply any queued file deltas first so the folder filter below
+            // operates on complete state (and drops this folder's files too).
+            _flushFileDeltas();
             files.update((list) => list.filter(f => f.folder_id !== event.folder_id));
             folderStats.update((map) => {
                 const next = new Map(map);
@@ -271,24 +341,13 @@ function handleEvent(event) {
                 return next;
             });
             return;
-        case "file.upserted": {
-            const f = event.file;
-            // Reaching "indexed" means the file's images/layout were just
-            // (re)committed — drop the lazily-fetched artifact cache so an
-            // expanded row refetches instead of showing pre-index emptiness.
-            if (f.state === "indexed") invalidateFileArtifacts(f.id);
-            files.update((list) => {
-                const idx = list.findIndex(x => x.id === f.id);
-                if (idx === -1) return [...list, f];
-                const next = list.slice();
-                next[idx] = { ...next[idx], ...f };
-                return next;
-            });
+        case "file.upserted":
+            // Coalesced + flushed once per microtask tick (see _queueFileUpsert)
+            // so a thousand-file clone burst is O(n), not O(n^2).
+            _queueFileUpsert(event.file);
             return;
-        }
         case "file.deleted":
-            invalidateFileArtifacts(event.file_id);
-            files.update((list) => list.filter(f => f.id !== event.file_id));
+            _queueFileDelete(event.file_id);
             return;
         case "job.started": {
             // started_at_ms is a client-side stamp used by the Jobs panel

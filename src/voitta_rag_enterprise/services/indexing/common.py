@@ -148,17 +148,24 @@ def file_event_payload(file: File, *, image_count: int | None = None) -> dict:
     file's own session.
     """
     if image_count is None:
-        from sqlalchemy import func
-        from sqlalchemy.orm import object_session
+        # Pre-index states have no committed images yet — figures are written in
+        # ``_commit_indexing``. Skip the COUNT for them: during a bulk clone this
+        # hook fires once per pending file, so the query would be N extra
+        # round-trips on the indexing thread for a guaranteed-zero result.
+        if file.state in ("pending", "deleted"):
+            image_count = 0
+        else:
+            from sqlalchemy import func
+            from sqlalchemy.orm import object_session
 
-        sess = object_session(file)
-        image_count = (
-            sess.execute(
-                select(func.count()).select_from(Image).where(Image.file_id == file.id)
-            ).scalar_one()
-            if sess is not None
-            else 0
-        )
+            sess = object_session(file)
+            image_count = (
+                sess.execute(
+                    select(func.count()).select_from(Image).where(Image.file_id == file.id)
+                ).scalar_one()
+                if sess is not None
+                else 0
+            )
     # Per-file source provenance (owner / editor / shared_by + created/modified
     # epochs) so the file-preview panel can show it. Parsed from the
     # File.source_meta JSON; None for non-synced files.

@@ -106,7 +106,12 @@ def _authenticate(ws: WebSocket) -> tuple[int | None, bool, set[int] | None] | N
 async def ws_endpoint(ws: WebSocket) -> None:
     await ws.accept()
 
-    auth = _authenticate(ws)
+    # Off the event loop: _authenticate opens a DB session and runs the
+    # visible-folder ACL query. On a reconnect storm, doing that inline would
+    # serialize every handshake on the loop thread and stall live traffic
+    # (deltas, other connections' snapshots). The rest of this module is
+    # careful to keep DB work off-thread; the initial auth must be too.
+    auth = await asyncio.to_thread(_authenticate, ws)
     if auth is None:
         try:
             await ws.send_json({"type": "error", "message": "unauthenticated"})
