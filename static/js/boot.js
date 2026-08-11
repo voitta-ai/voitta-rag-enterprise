@@ -31,6 +31,7 @@ import { ensureAuthenticated } from "./modals/login.js";
 import { setRootInfo } from "./modals/new-folder.js";
 import { setRenameRootInfo } from "./modals/rename-folder.js";  // self-wires #rename-* modal
 import "./modals/settings.js";  // self-wires user-pill click + Settings modal
+import "./modals/share.js";  // self-wires #share-* modal (opened from tree share pills)
 import "./modals/sync/index.js";  // self-wires #btn-sync + sync modal + GD picker
 import "./flows/upload.js";  // self-wires Upload button + file input
 import { updateToolbarState } from "./flows/toolbar.js";

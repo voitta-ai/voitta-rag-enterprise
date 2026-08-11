@@ -1388,6 +1388,68 @@
         </div>
     </div>
 
+    <!-- Modal: folder sharing (audience / groups / people). Sections are
+         shown per the owner's community: Clerk org → AUDIENCE(org)+PEOPLE,
+         native → AUDIENCE(everyone)+GROUPS+PEOPLE, no community → PEOPLE
+         only. Every action applies immediately; Done just closes. -->
+    <div id="share-backdrop" class="modal-backdrop" hidden>
+        <div class="modal">
+            <div class="modal-header">
+                <h3 id="share-title">Share</h3>
+                <button id="share-close" class="btn-text">×</button>
+            </div>
+            <div class="modal-body">
+                <div id="share-audience-section" class="share-section" hidden>
+                    <label id="share-audience-heading">Organization</label>
+                    <div class="share-box">
+                        <div class="share-audience-row">
+                            <div>
+                                <div id="share-audience-label"></div>
+                                <p class="hint" id="share-audience-hint"></p>
+                            </div>
+                            <span id="share-audience-switch-slot"></span>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="share-no-audience" class="share-section" hidden>
+                    <label>Organization</label>
+                    <div class="share-box">
+                        <p class="hint">This personal account has no organization
+                        to share with. Share with specific people below.</p>
+                    </div>
+                </div>
+
+                <div id="share-groups-section" class="share-section" hidden>
+                    <label>Groups</label>
+                    <div class="share-box">
+                        <div class="share-add-row">
+                            <select id="share-group-select"></select>
+                            <button id="share-group-add" class="btn btn-secondary">+ Add</button>
+                        </div>
+                        <ul id="share-group-list" class="share-list"></ul>
+                    </div>
+                </div>
+
+                <div class="share-section">
+                    <label>People <span class="hint-inline">independent of the sections above</span></label>
+                    <div class="share-box">
+                        <div class="share-add-row">
+                            <input type="text" id="share-email-input" placeholder="name@example.com">
+                            <button id="share-email-add" class="btn btn-secondary">+ Add</button>
+                        </div>
+                        <ul id="share-people-list" class="share-list"></ul>
+                    </div>
+                </div>
+                <p id="share-error" class="hint share-error" hidden></p>
+                <div class="actions actions-right share-footer">
+                    <span id="share-summary" class="hint"></span>
+                    <button id="share-done" class="btn btn-primary">Done</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Modal: user settings (currently just API keys). -->
     <div id="settings-backdrop" class="modal-backdrop" hidden>
         <div class="modal modal-wide">

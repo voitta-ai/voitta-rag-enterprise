@@ -122,8 +122,8 @@ CREATE TABLE IF NOT EXISTS folder_acl (
     PRIMARY KEY (folder_id, user_id)
 );
 
--- Organizational user groups. Purely a labelling/membership layer for now —
--- groups do NOT affect folder visibility (that wiring is a later feature).
+-- Organizational user groups. Membership layer managed in the admin
+-- console; folder visibility wiring lives in folder_group_acl below.
 CREATE TABLE IF NOT EXISTS groups (
     id          INTEGER PRIMARY KEY,
     name        TEXT NOT NULL UNIQUE,
@@ -137,6 +137,29 @@ CREATE TABLE IF NOT EXISTS user_groups (
     PRIMARY KEY (user_id, group_id)
 );
 CREATE INDEX IF NOT EXISTS idx_user_groups_group ON user_groups(group_id);
+
+-- Folder shared to a group: every member of the group can view. Evaluated
+-- at query time via user_groups — membership changes take effect
+-- immediately, no re-granting. Independent of folders.shared and
+-- folder_acl (visibility is the UNION of all share layers).
+CREATE TABLE IF NOT EXISTS folder_group_acl (
+    folder_id INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+    group_id  INTEGER NOT NULL REFERENCES groups(id)  ON DELETE CASCADE,
+    PRIMARY KEY (folder_id, group_id)
+);
+
+-- Folder shared to an EMAIL (stored lowercase), not an account id: matched
+-- against the viewer's email at query time. This makes shares work for
+-- addresses that haven't signed up yet ("pending" — access materialises on
+-- first sign-in with no extra step), spans every account carrying that
+-- email (native + Clerk), and is deliberately NOT restricted to the
+-- owner's org — external addresses are allowed.
+CREATE TABLE IF NOT EXISTS folder_email_acl (
+    folder_id INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+    email     TEXT NOT NULL,
+    PRIMARY KEY (folder_id, email)
+);
+CREATE INDEX IF NOT EXISTS idx_folder_email_acl_email ON folder_email_acl(email);
 
 -- Per-user, per-folder MCP-search opt-out. ``active=0`` means the folder
 -- is hidden from this user's MCP search calls (and the SPA renders the

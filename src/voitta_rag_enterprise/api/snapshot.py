@@ -36,13 +36,15 @@ def _folders_snapshot(
     db: Session, user_id: int, visible: set[int] | None
 ) -> list[dict[str, Any]]:
     """FolderOut payloads for every visible folder (mirrors ``list_folders``)."""
-    from .routes.folders import _sync_source_kind, _to_folder_out
+    from .routes.folders import _sync_source_kind, _to_folder_out, bulk_share_counts
 
     rows = db.execute(select(Folder).order_by(Folder.id)).scalars().all()
     sync_by_folder = {
         s.folder_id: s
         for s in db.execute(select(FolderSyncSource)).scalars().all()
     }
+    # Bulk (three queries total) — this builder must never go per-folder.
+    share_by_folder = bulk_share_counts(db)
     see_all = visible is None
     out: list[dict[str, Any]] = []
     for f in rows:
@@ -57,6 +59,7 @@ def _folders_snapshot(
                 sync_status=(src.sync_status if src else "idle"),
                 owned=see_all or is_folder_owner(db, f.id, user_id),
                 active=folder_active_for_user(db, f.id, user_id),
+                share_counts=share_by_folder.get(f.id, (0, 0)),
             ).model_dump()
         )
     return out

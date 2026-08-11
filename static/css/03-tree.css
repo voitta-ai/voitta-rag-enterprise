@@ -445,3 +445,30 @@
     color: #fff;
 }
 
+
+/* Share pill — replaces the old share toggle. Color encodes the widest
+   active layer: gray = private, green = audience share (org / native-
+   everyone), blue = targeted-only (groups / people). Click opens the
+   share modal. Theme-safe: built entirely on the semantic vars. */
+.share-pill {
+    flex-shrink: 0;
+    border: 1px solid var(--color-border);
+    border-radius: 9px;
+    background: transparent;
+    font-size: 11px;
+    line-height: 16px;
+    padding: 0 8px;
+    cursor: pointer;
+    white-space: nowrap;
+    color: var(--color-text-secondary);
+    transition: background var(--t);
+}
+.share-pill:hover { background: var(--color-bg-hover); }
+.share-pill-audience {
+    color: var(--color-success);
+    border-color: var(--color-success);
+}
+.share-pill-targeted {
+    color: var(--color-accent);
+    border-color: var(--color-accent);
+}

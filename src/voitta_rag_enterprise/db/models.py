@@ -150,6 +150,41 @@ class FolderAcl(Base):
     )
 
 
+class FolderGroupAcl(Base):
+    """Folder shared to a group — every member can view.
+
+    Evaluated at query time via ``user_groups``, so membership changes
+    apply immediately. One layer of the visibility UNION (independent of
+    ``folders.shared`` and ``folder_acl``).
+    """
+
+    __tablename__ = "folder_group_acl"
+
+    folder_id: Mapped[int] = mapped_column(
+        ForeignKey("folders.id", ondelete="CASCADE"), primary_key=True
+    )
+    group_id: Mapped[int] = mapped_column(
+        ForeignKey("groups.id", ondelete="CASCADE"), primary_key=True
+    )
+
+
+class FolderEmailAcl(Base):
+    """Folder shared to an EMAIL (lowercase), not an account id.
+
+    Matched against the viewer's email at query time: works for addresses
+    that haven't signed up yet (pending — access materialises on first
+    sign-in), spans all accounts carrying the email, and is deliberately
+    NOT restricted to the owner's org.
+    """
+
+    __tablename__ = "folder_email_acl"
+
+    folder_id: Mapped[int] = mapped_column(
+        ForeignKey("folders.id", ondelete="CASCADE"), primary_key=True
+    )
+    email: Mapped[str] = mapped_column(primary_key=True)
+
+
 class FolderDirMeta(Base):
     """Optional description for a folder (``subpath=''``) or a subfolder.
 

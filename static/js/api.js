@@ -41,6 +41,14 @@ export const api = {
     deleteFile: (folderId, fileId) => req("DELETE", `/api/folders/${folderId}/files/${fileId}`),
     deleteSubdir: (folderId, rel) => req("DELETE", `/api/folders/${folderId}/dirs?rel=${encodeURIComponent(rel)}`),
     setFolderShare: (id, shared) => req("PATCH", `/api/folders/${id}/share`, { shared }),
+    // --- Folder sharing (share modal). Every mutation returns the fresh
+    // SharingOut so the modal re-renders in one round-trip. ---
+    getSharing: (id) => req("GET", `/api/folders/${id}/sharing`),
+    shareToGroup: (id, groupId) => req("POST", `/api/folders/${id}/sharing/group`, { group_id: groupId }),
+    unshareGroup: (id, groupId) => req("DELETE", `/api/folders/${id}/sharing/group/${groupId}`),
+    shareToEmail: (id, email) => req("POST", `/api/folders/${id}/sharing/email`, { email }),
+    unshareEmail: (id, email) => req("DELETE", `/api/folders/${id}/sharing/email?email=${encodeURIComponent(email)}`),
+    listShareGroups: () => req("GET", "/api/groups"),
     setFolderActive: (id, active) => req("PATCH", `/api/folders/${id}/active`, { active }),
     getDirMeta: (folderId) => req("GET", `/api/folders/${folderId}/dir-meta`),
     putDirMeta: (folderId, subpath, description) =>

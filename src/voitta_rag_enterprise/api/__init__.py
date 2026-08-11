@@ -13,6 +13,8 @@ from .routes.folders import router as folders_router
 from .routes.images import router as images_router
 from .routes.jobs import router as jobs_router
 from .routes.search import router as search_router
+from .routes.sharing import groups_router as sharing_groups_router
+from .routes.sharing import router as sharing_router
 from .routes.sync import oauth_router as sync_oauth_router
 from .routes.sync import router as sync_router
 from .routes.users import router as users_router
@@ -26,6 +28,8 @@ api_router.include_router(auth_router)
 api_router.include_router(api_keys_router)  # same /auth prefix — /auth/keys
 api_router.include_router(company_keys_router)  # /auth/company-keys
 api_router.include_router(folders_router)
+api_router.include_router(sharing_router)  # /folders/{id}/sharing
+api_router.include_router(sharing_groups_router)  # /groups (pick-list)
 api_router.include_router(files_router)
 api_router.include_router(images_router)
 api_router.include_router(jobs_router)

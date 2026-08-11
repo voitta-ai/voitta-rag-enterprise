@@ -77,6 +77,13 @@ class FolderOut(BaseModel):
     owner_id: int | None = None
     owned: bool = False  # True if the calling user owns this folder
     shared: bool = False  # True if owner has flipped the shared switch on
+    # Targeted-share counts for the tree's share pill: groups granted via
+    # folder_group_acl, people = distinct emails across folder_email_acl
+    # and legacy folder_acl grants. Every _to_folder_out call site passes
+    # real values — client folder.upserted merges overwrite fields, so a
+    # defaulted 0 would visibly zero the pill.
+    share_groups: int = 0
+    share_people: int = 0
     # Per-user MCP-search opt-out (default-on, missing row = True).
     active: bool = True
 
@@ -151,6 +158,7 @@ def _to_folder_out(
     sync_status: str = "idle",
     owned: bool = False,
     active: bool = True,
+    share_counts: tuple[int, int] = (0, 0),
 ) -> FolderOut:
     return FolderOut(
         id=f.id,
@@ -165,8 +173,86 @@ def _to_folder_out(
         owner_id=f.owner_id,
         owned=owned,
         shared=bool(f.shared),
+        share_groups=share_counts[0],
+        share_people=share_counts[1],
         active=active,
     )
+
+
+def share_counts_for_folder(db: Session, folder_id: int) -> tuple[int, int]:
+    """(groups, people) targeted-share counts for one folder.
+
+    People = distinct lowercased emails across ``folder_email_acl`` and
+    the emails behind legacy ``folder_acl`` user grants, so the pill and
+    the modal agree on what "N people" means.
+    """
+    return bulk_share_counts(db, [folder_id]).get(folder_id, (0, 0))
+
+
+def bulk_share_counts(
+    db: Session, folder_ids: list[int] | None = None
+) -> dict[int, tuple[int, int]]:
+    """folder_id → (groups, people) for many folders in three queries.
+
+    ``folder_ids=None`` means "all folders" — used by the WS snapshot
+    builder, which must not run per-folder queries.
+    """
+    from sqlalchemy import func
+
+    from ...db.models import FolderAcl, FolderEmailAcl, FolderGroupAcl, User
+
+    def _scope(stmt, col):
+        return stmt if folder_ids is None else stmt.where(col.in_(folder_ids))
+
+    groups: dict[int, int] = dict(
+        db.execute(
+            _scope(
+                select(
+                    FolderGroupAcl.folder_id, func.count(FolderGroupAcl.group_id)
+                ).group_by(FolderGroupAcl.folder_id),
+                FolderGroupAcl.folder_id,
+            )
+        ).all()
+    )
+    # Owner emails per folder — the owner's own email never counts as a
+    # "person" (folder registration self-grants the owner in folder_acl;
+    # "shared with yourself" is noise). Mirrors _people_shares.
+    owner_email: dict[int, str] = {
+        fid: (email or "").lower()
+        for fid, email in db.execute(
+            _scope(
+                select(Folder.id, User.email).join(
+                    User, User.id == Folder.owner_id
+                ),
+                Folder.id,
+            )
+        ).all()
+    }
+    # People: union emails from the email store and legacy user grants.
+    people_emails: dict[int, set[str]] = {}
+    for fid, email in db.execute(
+        _scope(
+            select(FolderEmailAcl.folder_id, FolderEmailAcl.email),
+            FolderEmailAcl.folder_id,
+        )
+    ).all():
+        if email.lower() != owner_email.get(fid, ""):
+            people_emails.setdefault(fid, set()).add(email.lower())
+    for fid, email in db.execute(
+        _scope(
+            select(FolderAcl.folder_id, User.email).join(
+                User, User.id == FolderAcl.user_id
+            ),
+            FolderAcl.folder_id,
+        )
+    ).all():
+        low = (email or "").lower()
+        if low != owner_email.get(fid, ""):
+            people_emails.setdefault(fid, set()).add(low)
+    out: dict[int, tuple[int, int]] = {}
+    for fid in set(groups) | set(people_emails):
+        out[fid] = (groups.get(fid, 0), len(people_emails.get(fid, set())))
+    return out
 
 
 def _require_owner(
@@ -850,6 +936,7 @@ def set_share(
         sync_status=(sync_src.sync_status if sync_src else "idle"),
         owned=True,
         active=folder_active_for_user(db, folder_id, user.id),
+        share_counts=share_counts_for_folder(db, folder_id),
     )
     # A shared-flag flip changes visibility for *every* user — recompute all
     # connections' visible sets, then push the new state.
@@ -885,6 +972,7 @@ def set_active_endpoint(
         sync_status=(sync_src.sync_status if sync_src else "idle"),
         owned=is_folder_owner(db, folder_id, user.id),
         active=bool(body.active),
+        share_counts=share_counts_for_folder(db, folder_id),
     )
 
 
@@ -1099,6 +1187,7 @@ def rename_folder(
         sync_status=(sync_src.sync_status if sync_src else "idle"),
         owned=True,
         active=folder_active_for_user(db, folder_id, user.id),
+        share_counts=share_counts_for_folder(db, folder_id),
     )
     events.publish("folders", {"type": "folder.upserted", "folder": out.model_dump()})
     return out
@@ -1114,6 +1203,7 @@ def list_folders(
     sync_by_folder: dict[int, FolderSyncSource] = {
         s.folder_id: s for s in sync_rows
     }
+    share_by_folder = bulk_share_counts(db)
     if get_settings().single_user:
         return [
             _to_folder_out(
@@ -1127,6 +1217,7 @@ def list_folders(
                 ),
                 owned=True,
                 active=folder_active_for_user(db, f.id, user.id),
+                share_counts=share_by_folder.get(f.id, (0, 0)),
             )
             for f in rows
         ]
@@ -1143,6 +1234,7 @@ def list_folders(
             ),
             owned=is_folder_owner(db, f.id, user.id),
             active=folder_active_for_user(db, f.id, user.id),
+            share_counts=share_by_folder.get(f.id, (0, 0)),
         )
         for f in rows
         if f.id in visible

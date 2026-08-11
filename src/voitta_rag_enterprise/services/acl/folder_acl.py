@@ -11,7 +11,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ...config import get_settings
-from ...db.models import File, FolderAcl, FolderUserSettings, User
+from ...db.models import (
+    File,
+    FolderAcl,
+    FolderEmailAcl,
+    FolderGroupAcl,
+    FolderUserSettings,
+    User,
+    UserGroup,
+)
 from ...db.models import Folder as _Folder
 from .community import _owner_community, account_community
 
@@ -49,16 +57,27 @@ def folder_user_ids(session: Session, folder_id: int) -> list[int]:
 def visible_folder_ids(session: Session, user_id: int) -> list[int]:
     """Folders the account can see.
 
-    Union of three sources:
+    Union of five independent share layers — layers never mask each
+    other, so e.g. turning off a community share leaves per-user /
+    per-email / group shares fully intact:
 
     - **Owned** (``folders.owner_id == user_id``) — folders this account
       registered. Always visible to the owner.
     - **Granted** (``folder_acl(folder_id, user_id)``) — folders explicitly
-      shared with this account via the grant API.
+      shared with this account via the grant API. Deliberately NOT
+      community-scoped.
+    - **Email-shared** (``folder_email_acl``) — folders shared to this
+      account's email address (lowercased match). Spans every account
+      carrying the email and is NOT community-scoped — external
+      addresses are first-class.
+    - **Group-shared** (``folder_group_acl`` ⋈ ``user_groups``) — folders
+      shared to a group this account belongs to. Evaluated live, so
+      membership changes apply immediately. Like grants, an explicit
+      share — no community check.
     - **Community-shared** (``folders.shared = 1``) — visible only when the
       viewer account and the folder owner's account are in the SAME
-      community (same Clerk company, or both native). Sharing is
-      company-centric, never global.
+      community (same Clerk company, or both native). The one
+      audience-wide layer; company-centric, never global.
     """
     owned = {
         f.id
@@ -72,6 +91,25 @@ def visible_folder_ids(session: Session, user_id: int) -> list[int]:
             select(FolderAcl).where(FolderAcl.user_id == user_id)
         ).scalars()
     }
+    email_shared: set[int] = set()
+    viewer = session.get(User, user_id)
+    if viewer is not None and viewer.email:
+        email_shared = {
+            fid
+            for fid in session.execute(
+                select(FolderEmailAcl.folder_id).where(
+                    FolderEmailAcl.email == viewer.email.lower()
+                )
+            ).scalars()
+        }
+    group_shared = {
+        fid
+        for fid in session.execute(
+            select(FolderGroupAcl.folder_id)
+            .join(UserGroup, UserGroup.group_id == FolderGroupAcl.group_id)
+            .where(UserGroup.user_id == user_id)
+        ).scalars()
+    }
     shared: set[int] = set()
     community = account_community(session, user_id)
     if community is not None:
@@ -80,7 +118,7 @@ def visible_folder_ids(session: Session, user_id: int) -> list[int]:
         ).scalars():
             if _owner_community(session, f.owner_id) == community:
                 shared.add(f.id)
-    return sorted(owned | granted | shared)
+    return sorted(owned | granted | email_shared | group_shared | shared)
 
 
 def mcp_visible_folder_ids(session: Session, user_id: int) -> list[int]:
@@ -119,12 +157,38 @@ def user_can_see_folder(session: Session, folder_id: int, user_id: int) -> bool:
         viewer = account_community(session, user_id)
         if viewer is not None and viewer == _owner_community(session, folder.owner_id):
             return True
-    return (
+    if (
         session.execute(
             select(FolderAcl).where(
                 FolderAcl.folder_id == folder_id, FolderAcl.user_id == user_id
             )
         ).scalar_one_or_none()
+        is not None
+    ):
+        return True
+    # Email share: matched on the viewer's (lowercased) address.
+    row = session.get(User, user_id)
+    if row is not None and row.email:
+        if (
+            session.execute(
+                select(FolderEmailAcl).where(
+                    FolderEmailAcl.folder_id == folder_id,
+                    FolderEmailAcl.email == row.email.lower(),
+                )
+            ).scalar_one_or_none()
+            is not None
+        ):
+            return True
+    # Group share: viewer is a member of any granted group.
+    return (
+        session.execute(
+            select(FolderGroupAcl.folder_id)
+            .join(UserGroup, UserGroup.group_id == FolderGroupAcl.group_id)
+            .where(
+                FolderGroupAcl.folder_id == folder_id,
+                UserGroup.user_id == user_id,
+            )
+        ).first()
         is not None
     )
 

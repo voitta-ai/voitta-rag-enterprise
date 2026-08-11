@@ -77,6 +77,7 @@ import {
     userStateLabel,
 } from "../flows/tree-model.js";
 import { activeFolders, connStatus, files, folders, me, syncSources } from "../store.js";
+import { openShareModal } from "../modals/share.js";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -199,7 +200,7 @@ function buildFolderRoot(folderId) {
 
     li._refs = { nameCell, chevron, label, glyph, img, text, fileCount, indexedCount, tag, slot1, slot2 };
     li._activeSwitch = null;
-    li._shareSwitch = null;
+    li._sharePill = null;
     li._isRoot = true;
     li._sourceKind = null;
     return li;
@@ -457,42 +458,57 @@ function updateRootSwitches(li, folder) {
         : "MCP search excludes this folder. Click to include.";
     if (r.slot1.title !== activeTitle) r.slot1.title = activeTitle;
 
-    // Share toggle (slot2) — only for owners, and only when there is a
-    // community to share WITH. Hidden in single-user mode (the lone
-    // identity sees everything) and for accounts with no sharing
-    // community (Personal account of a Clerk-only user): sharing is
-    // company-centric — a company account shares with its company, a
-    // native Personal account with the native userbase — never global.
+    // Share pill (slot2) — owners only; opens the share modal. Shown for
+    // EVERY owned folder (community-less owners can still share to
+    // specific people); hidden only in single-user mode. Color encodes
+    // the widest active layer: gray = private, green = audience share
+    // (Clerk org / native-everyone), blue = targeted only (groups /
+    // people); a green pill also carries the targeted counts.
     const _me = me.get();
-    const shareCommunity = _me?.company_id
-        ? (_me.company_name || "this company")
-        : ((_me?.native_allowed || _me?.is_super_admin) ? "all Voitta Native users" : null);
-    if (folder.owned && !_me?.single_user && shareCommunity) {
-        if (!li._shareSwitch) {
-            const sw = buildSwitch({
-                title: "",
-                checked: folder.shared,
-                disabled: false,
-                onChange: (next) => toggleFolderShare(folder, next),
+    if (folder.owned && !_me?.single_user) {
+        if (!li._sharePill) {
+            const pill = document.createElement("button");
+            pill.className = "share-pill";
+            pill.addEventListener("click", (e) => {
+                e.stopPropagation();
+                openShareModal(folder);
             });
-            r.slot2.replaceWith(sw);
-            r.slot2 = sw;
-            li._shareSwitch = sw.querySelector("input");
+            r.slot2.replaceWith(pill);
+            r.slot2 = pill;
+            li._sharePill = pill;
         }
-        setIfChanged(li._shareSwitch, "checked", !!folder.shared);
-        const shareTitle = folder.shared
-            ? `Folder is shared with ${shareCommunity}. Click to unshare.`
-            : `Folder is private. Click to share with ${shareCommunity}.`;
-        if (r.slot2.title !== shareTitle) r.slot2.title = shareTitle;
-    } else if (li._shareSwitch) {
+        const g = folder.share_groups || 0;
+        const p = folder.share_people || 0;
+        const targeted = [g ? `${g}g` : "", p ? `${p}p` : ""].filter(Boolean).join("·");
+        let text, cls, title;
+        if (folder.shared) {
+            const aud = _me?.company_id ? "Org" : "All";
+            text = targeted ? `● ${aud} · ${targeted}` : `● ${aud}`;
+            cls = "share-pill share-pill-audience";
+            title = "Shared with " + (_me?.company_id ? "your organization" : "all native users")
+                + (targeted ? ` plus ${targeted}` : "") + ". Click to configure.";
+        } else if (targeted) {
+            text = `◐ ${targeted}`;
+            cls = "share-pill share-pill-targeted";
+            title = `Shared with ${g ? g + " group(s)" : ""}${g && p ? " and " : ""}${p ? p + " people" : ""}. Click to configure.`;
+        } else {
+            text = "○ Private";
+            cls = "share-pill share-pill-private";
+            title = "Private — click to share.";
+        }
+        text += " ▾";
+        if (li._sharePill.textContent !== text) li._sharePill.textContent = text;
+        if (li._sharePill.className !== cls) li._sharePill.className = cls;
+        if (li._sharePill.title !== title) li._sharePill.title = title;
+    } else if (li._sharePill) {
         // Owner status flipped from owned to not-owned (rare but possible
-        // if a folder is transferred). Drop the switch back to a spacer.
+        // if a folder is transferred). Drop the pill back to a spacer.
         const spacer = document.createElement("span");
         spacer.className = "folder-switch";
         spacer.style.visibility = "hidden";
         r.slot2.replaceWith(spacer);
         r.slot2 = spacer;
-        li._shareSwitch = null;
+        li._sharePill = null;
     }
 }
 
@@ -627,17 +643,6 @@ async function toggleFolderActive(folder, active) {
     } catch (err) {
         alert(err.message);
         renderFoldersFiltered(); // restore the original visual state
-    }
-}
-
-async function toggleFolderShare(folder, shared) {
-    try {
-        const updated = await api.setFolderShare(folder.id, shared);
-        const next = folders.get().map((f) => (f.id === folder.id ? updated : f));
-        folders.set(next);
-    } catch (err) {
-        alert(err.message);
-        renderFoldersFiltered();
     }
 }
 
