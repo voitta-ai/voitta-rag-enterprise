@@ -90,6 +90,31 @@ export function closeSyncModal() {
     ctx.folderId = null;
 }
 
+// True iff the currently-open folder is known (from the folders store) to have
+// a saved sync source. Lets "Sync now" fall back to the stored config when the
+// form itself isn't a valid/loaded source.
+function folderHasSyncSource() {
+    const f = folders.get().find((x) => x.id === ctx.folderId);
+    return !!(f && f.has_sync_source);
+}
+
+// Returns a human-readable reason the current form can't be saved as-is, or
+// null when it's valid. Prevents PUTting a source block that's missing a
+// required field — the classic case being an empty ``github.repo``, which the
+// server rejects with a 422 that used to block the entire sync (including for
+// Google-Drive folders whose source dropdown was left on the github default).
+function syncFormError() {
+    const t = $("#sync-type").value;
+    const handler = SOURCES.get(t);
+    if (!handler?.formConfig) return `Unknown sync source: ${t}`;
+    const cfg = handler.formConfig();
+    if (typeof handler.validate === "function") return handler.validate(cfg) || null;
+    if (t === "github" && !(cfg.repo && String(cfg.repo).trim())) {
+        return "Enter a repository URL before saving or syncing.";
+    }
+    return null;
+}
+
 export async function loadSyncSource() {
     try {
         // Read the config from the live store first. It's kept fresh by the
@@ -98,10 +123,14 @@ export async function loadSyncSource() {
         // when this folder's config isn't cached yet — the heavy per-folder
         // connector blob is intentionally not in the global snapshot.
         const cache = syncConfigs.get();
-        let src;
-        if (cache.has(ctx.folderId)) {
-            src = cache.get(ctx.folderId);  // may be null (config deleted)
-        } else {
+        // ``undefined`` = never fetched; ``null`` = fetched-and-none (or a
+        // stale "config deleted" marker / a prior failed fetch left behind).
+        let src = cache.has(ctx.folderId) ? cache.get(ctx.folderId) : undefined;
+        // Fetch when we've never loaded this folder's config, OR when the
+        // cache says "none" but the folder is KNOWN to have a sync source —
+        // that null is stale, and trusting it would leave the form on the
+        // hardcoded default (github), which "Sync now" would then try to PUT.
+        if (src === undefined || (src === null && folderHasSyncSource())) {
             src = await api.getSync(ctx.folderId);
             syncConfigs.update((m) => {
                 const next = new Map(m);
@@ -269,6 +298,8 @@ $("#btn-sync").addEventListener("click", openSyncModal);
 // secrets, flip placeholders to "(saved — type to replace)", scope
 // re-checks, …) lives on each handler's afterSave().
 export async function _doSave() {
+    const err = syncFormError();
+    if (err) throw new Error(err);
     const out = await api.putSync(ctx.folderId, syncBody());
     $("#sync-delete").hidden = false;
     renderSyncStatus(out);
@@ -300,13 +331,25 @@ $("#sync-save").addEventListener("click", async () => {
 });
 
 $("#sync-trigger").addEventListener("click", async () => {
-    // Always save first. Previously we only saved when no row existed,
-    // which meant edits made after the initial save (toggling extended,
-    // adding more folders to a Google Drive sync, …) were lost — the
-    // trigger fired against the old config. Saving every time gives the
-    // user the obvious "Sync now = sync what I see in this form" semantic.
+    // "Sync now" = sync what the user sees. We re-save the form first ONLY
+    // when it's a complete, valid source config — that preserves "edits I made
+    // get synced" (toggling extended, adding Google Drive folders, …),
+    // including the GDrive removed-folder cleanup that runs on save.
+    //
+    // If the form ISN'T a valid source (e.g. the dropdown was left on the
+    // default/empty github tab because the stored config didn't load), saving
+    // it would PUT a broken body and 422 — which used to block the sync
+    // entirely. In that case, if the folder already HAS a saved sync source,
+    // just run that stored config directly (POST /sync/trigger takes no body,
+    // so it's immune to whatever the form shows). Only when there's nothing
+    // valid to save AND nothing stored do we surface the validation reason.
     try {
-        await _doSave();
+        const formErr = syncFormError();
+        if (!formErr) {
+            await _doSave();
+        } else if (!folderHasSyncSource()) {
+            throw new Error(formErr);
+        }
         await api.triggerSync(ctx.folderId);
         alert("Sync queued. Watch the Recent jobs panel for progress.");
         closeSyncModal();
