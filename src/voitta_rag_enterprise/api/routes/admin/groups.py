@@ -1,4 +1,6 @@
-"""Groups (organizational; no folder-ACL effect)."""
+"""Groups (organizational). Membership is managed here; folders shared
+to a group via the sharing API (folder_group_acl) become visible to
+every member — see services/acl/folder_acl.py."""
 
 from __future__ import annotations
 
@@ -18,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Groups (organizational; no folder-ACL effect)
+# Groups (organizational; folder visibility wiring: folder_group_acl)
 # ---------------------------------------------------------------------------
 
 

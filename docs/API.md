@@ -104,6 +104,46 @@ curl -H "$AUTH" $BASE/jobs/recent
 Jira, NFS — are all in `/api/docs`; OAuth-based connectors need their
 browser consent flow completed once from the UI.)
 
+## Sharing
+
+Folder visibility is the **union of independent layers** that never mask
+each other — turning one off leaves the rest intact:
+
+- **audience** — `PATCH /folders/{id}/share {"shared": true}`: the whole
+  Clerk org (company owner) or all native users (native owner). Owners with
+  no community get a 400.
+- **groups** — voitta-native groups (admin-managed membership).
+- **people** — plain email addresses, matched at query time: **not**
+  restricted to the owner's org, and an address that hasn't signed up yet is
+  a live `pending` share that materialises on first sign-in.
+
+```bash
+# Full sharing state (owner only): audience variant + groups + people.
+# ``people`` merges email shares with legacy per-account grants (collapsed
+# by email; the owner's own registration self-grant is excluded).
+curl -H "$AUTH" $BASE/folders/42/sharing
+
+# Share to / unshare from a group
+curl -X POST -H "$AUTH" -H 'Content-Type: application/json' \
+     -d '{"group_id": 3}' $BASE/folders/42/sharing/group
+curl -X DELETE -H "$AUTH" $BASE/folders/42/sharing/group/3
+
+# Share to / unshare from an email (external addresses allowed).
+# DELETE removes the email share AND any legacy folder_acl grants for
+# accounts carrying that email — removal always fully removes.
+curl -X POST -H "$AUTH" -H 'Content-Type: application/json' \
+     -d '{"email": "guest@partner.io"}' $BASE/folders/42/sharing/email
+curl -X DELETE -H "$AUTH" "$BASE/folders/42/sharing/email?email=guest@partner.io"
+
+# Group pick-list (any signed-in user; names + member counts only)
+curl -H "$AUTH" $BASE/groups
+```
+
+Every mutation returns the fresh sharing state. Folder rows
+(`GET /folders`, WS snapshots/updates) carry `share_groups` /
+`share_people` counts for the tree's share pill. The legacy per-user
+`POST /folders/{id}/grant` / `revoke` (by `user_id`) remain supported.
+
 ## Files
 
 ```bash
@@ -121,7 +161,8 @@ curl -X DELETE -H "$AUTH" $BASE/folders/42/files/1337
   either doesn't exist *or* isn't visible to you — folders, files, and
   images you have no access to return 404, not 403, so their ids aren't
   probeable. Reading any file/image is gated by its folder's visibility
-  (owned, granted, community-shared, or single-user).
+  (owned, user-granted, email-shared, group-shared, community-shared, or
+  single-user — see *Sharing* above).
 - A `vk_` key acts as the exact account it was minted under (mint while
   the right company account is active). A `cvk_` key acts as the given
   email **within the key's company scope**; members who never signed in

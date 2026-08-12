@@ -489,7 +489,8 @@ class Job(Base):
 
 
 class Group(Base):
-    """Organizational user group. Membership only — no folder-ACL effect yet."""
+    """Organizational user group. Folders shared to a group via
+    ``FolderGroupAcl`` are visible to every member (evaluated live)."""
 
     __tablename__ = "groups"
 

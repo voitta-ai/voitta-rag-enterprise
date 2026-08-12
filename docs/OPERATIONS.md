@@ -321,6 +321,16 @@ flowchart TB
 A SQLite-backed queue with per-key in-flight deduplication. No automatic retry
 loop — failure is terminal; the operator requeues via a folder reindex.
 
+The worker loop itself is **crash-proof against infrastructure errors**:
+each iteration (claim → run → mark) is guarded, so a transient SQLite
+"database is locked" during a bulk write burst logs, pauses 2s, and keeps
+consuming instead of silently killing the worker task (the historical
+failure mode: thousands of rows stuck `queued` with nothing claiming,
+until a process restart). A claimed job whose `mark_done`/`mark_error`
+itself failed stays `running` and is flipped to `error` by
+`reclaim_abandoned_jobs()` on the next startup — the same recovery path
+as any mid-job crash.
+
 ```mermaid
 flowchart LR
     subgraph producers["Producers"]
@@ -373,6 +383,17 @@ flowchart LR
   the folder-active counter.
 - **Attempts** increments on each `claim_one`. On process restart, any rows
   left `running` are swept to `error` ("abandoned").
+- **Google Drive `sync` quota behavior:** per-tab Google Sheets reads are
+  paced **process-wide** (default 50/min, `VOITTA_SHEETS_READS_PER_MIN`;
+  `<=0` disables) because the 60-reads/min/user Sheets quota is shared
+  across all export/download threads — uncoordinated per-request backoff
+  alone collectively exceeded it until files exhausted retries and landed
+  in `stats.errors`. Retried attempts consume a paced slot like first
+  attempts. A 403 `exportSizeLimitExceeded` on a native export (e.g. the
+  full-workbook `.xlsx` sidecar of an oversized Sheet) is a **skip, not an
+  error**: counted in `stats.files_too_large` (mirroring `files_404`),
+  info-logged, re-checked cheaply each sync — the per-tab markdown already
+  carries the content.
 
 ---
 
@@ -479,14 +500,15 @@ flowchart TB
 ```
 
 - **Folder ACL:** `_event_folder_id(event)` ∈ the connection's cached
-  `visible` set (owned + granted + shared). **Admins get a real `visible` set
+  `visible` set (owned + granted + email/group-shared + community-shared —
+  see §7 *Sharing*). **Admins get a real `visible` set
   just like everyone else** — `is_admin` never widens folder/file/job
   visibility, only the `admin` topic (an empty folder one user creates is
   invisible to every other user, admin or not). `visible = None` (no folder
   filter) is reserved for **single-user mode**, where the lone identity owns
-  everything — there the SPA also hides the per-folder **Share** switch
-  (keyed on `single_user` from `GET /api/auth/me`): with no second user the
-  flag is a no-op, so the control isn't rendered at all. This mirrors
+  everything — there the SPA also hides the per-folder **share pill**
+  (keyed on `single_user` from `GET /api/auth/me`): with no second user
+  sharing is a no-op, so the control isn't rendered at all. This mirrors
   `routes/folders.list_folders` exactly. Removals
   filter against the **union** of the pre- and post-refresh visible sets so
   `folder.removed` / `file.deleted` for a folder you *could* see still arrive
@@ -604,6 +626,29 @@ The folder tree's status pill composes two server signals
   every folder row (REST + WS snapshot); live transitions arrive as
   `folder.sync_source_changed`; the snapshot resets the overlay on reconnect.
 
+The separate **share pill** on owned root rows (gray `Private` / green
+audience / blue targeted counts) renders from `shared` +
+`share_groups`/`share_people` on the folder row and opens the share modal
+— see §7 *Sharing*.
+
+### Client-side burst absorption
+
+Server-side coalescing caps what goes over the wire, but a bulk file
+arrival (git clone landing ~150k files, a large Drive sync) still emits
+one `file.upserted` per distinct file. The SPA absorbs the burst in two
+stages ([ws.js](../static/js/ws.js),
+[render/render-loop.js](../static/js/render/render-loop.js)):
+
+- **Store writes are coalesced per microtask tick** — `file.upserted` /
+  `file.deleted` accumulate in a Map and flush as ONE O(n) rebuild of the
+  files store per tick, instead of a findIndex + full array copy per event
+  (O(n²) across a burst — the historical "frozen tree for minutes during a
+  clone" failure mode). Snapshots discard queued deltas (server truth
+  replaces them).
+- **Full tree renders are trailing-throttled to one per 200 ms** during
+  sustained bursts; the first render after idle still fires on the next
+  animation frame, so interactive updates stay snappy.
+
 ---
 
 ## 6. Search query path
@@ -641,8 +686,9 @@ sequenceDiagram
 before the Qdrant call. The caller's identity is their **active account**
 (`users.id`, see §7) — for MCP, the account the API key was minted under.
 `_resolve_folder_ids` intersects the caller's requested
-`folder_ids` with their *visible* set (`visible_folder_ids` — owned + ACL-granted
-+ shared), so a request can't reach into another user's folder; an empty
+`folder_ids` with their *visible* set (`visible_folder_ids` — owned +
+ACL-granted + email/group-shared + community-shared, see §7 *Sharing*), so a
+request can't reach into another user's folder; an empty
 intersection becomes `[-1]` (an impossible id) to give Qdrant a cheap no-match
 path. The resulting list is passed to Qdrant as the `folder_ids` filter. In
 single-user mode the filter is skipped entirely (`None`).
@@ -663,7 +709,8 @@ folder isn't visible. This is what stops id-enumeration from reading
 another account's content, and it applies identically to session-cookie
 and API-key callers (the `deps` seam hands both the same account identity).
 The check is folder-level, mirroring search — a file is reachable exactly
-when its folder is (owned, ACL-granted, community-shared, or single-user).
+when its folder is (owned, ACL-granted, email-shared, group-shared,
+community-shared, or single-user).
 
 **The MCP tools carry the identical gate.** The MCP surface shares the
 bearer identity (`_current_user` ContextVar → account id) but has its own
@@ -788,14 +835,47 @@ explicitly granted or community-shared. (Company `cvk_` API keys are the one
 deliberate exception: they hang off a company scope, not an account — see
 *API keys* below.)
 
-**Sharing is community-scoped, never global** (`folders.shared = 1`): a
-company account shares into its Clerk company; a natively-allowed Personal
-account shares into the `"native"` community (allowlist users/domains +
-super-admins); accounts with no community can't share and see no community
-shares (`services/acl/community.py:account_community`). An unowned shared folder
-(owner deleted) falls back to native visibility. Explicit `folder_acl`
-grants are unaffected and are fanned out to all accounts of the grantee's
-email at grant time.
+**Sharing is a union of independent layers** — folder visibility
+(`services/acl/folder_acl.py:visible_folder_ids`) is
+
+```
+visible = owned
+        ∪ user grants   (folder_acl — per-account; fanned out to all
+                         accounts of the grantee's email at grant time;
+                         NOT community-scoped)
+        ∪ email shares  (folder_email_acl — lowercased email, matched
+                         against the viewer's email at query time; works
+                         for addresses that haven't signed up yet
+                         ("pending" — access materialises on first
+                         sign-in) and is deliberately NOT restricted to
+                         the owner's org)
+        ∪ group shares  (folder_group_acl ⋈ user_groups — voitta-native
+                         groups; membership changes apply live, no
+                         re-granting)
+        ∪ community     (folders.shared = 1 — the one audience-wide layer)
+```
+
+Layers never mask each other: sharing with three people, then the whole
+org, then un-sharing the org leaves the three personal shares fully
+intact — no state ever transfers between layers.
+
+**The community layer is community-scoped, never global**: a company
+account shares into its Clerk company; a natively-allowed Personal account
+shares into the `"native"` community (allowlist users/domains +
+super-admins); accounts with no community can't audience-share and see no
+community shares (`services/acl/community.py:account_community`). An
+unowned shared folder (owner deleted) falls back to native visibility.
+
+The SPA surface is the per-folder **share pill** (gray `Private` / green
+audience / blue targeted counts) opening the share modal
+([modals/share.js](../static/js/modals/share.js)); its
+`share_groups`/`share_people` counts ride on every folder row (REST +
+WS), bulk-counted so snapshots stay N+1-free. The modal's *People* list
+merges email shares with legacy `folder_acl` grants collapsed by email
+(the owner's registration-time self-grant excluded); removing an email
+wipes **both** stores so no zombie access survives. Every share mutation
+bumps `acl_version` (live WS visibility recompute) and republishes the
+folder row so pills update everywhere.
 
 Two person-level exceptions, both keyed by email across all account rows:
 
@@ -1388,7 +1468,10 @@ erDiagram
     groups ||--o{ user_groups : has
     folders ||--o{ files : contains
     folders ||--o| folder_sync_sources : "0..1 sync source"
-    folders ||--o{ folder_acl : grants
+    folders ||--o{ folder_acl : "user grants"
+    folders ||--o{ folder_email_acl : "email shares"
+    folders ||--o{ folder_group_acl : "group shares"
+    groups ||--o{ folder_group_acl : "shared to"
     folders ||--o{ folder_user_settings : "per-user active flag"
     files ||--o{ chunks : has
     files ||--o{ images : has

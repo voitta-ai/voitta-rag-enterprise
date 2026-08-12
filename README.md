@@ -9,7 +9,11 @@ Filesystem-driven RAG with first-class image support, content-addressable extrac
 - **Image ↔ chunk linkage:** every image carries an anchor chunk; chunks within radius `N` get a `nearby_image` link with chunk-index distance.
 - **No manual sync/embed buttons.** Re-indexing is whole-file on any change.
 - **SQLite stores metadata only.** Extracted text and images live in `cas/<sha>/...`.
-- **Multi-user with ACLs.** `VOITTA_SINGLE_USER=true` collapses to a `root` user.
+- **Multi-user with layered sharing.** Folder visibility is a union of
+  independent layers: owner + audience share (Clerk org / all-native) +
+  voitta-native groups + per-email shares (external addresses and
+  not-yet-registered "pending" emails included). `VOITTA_SINGLE_USER=true`
+  collapses to a `root` user.
 - **Frontend** is a vanilla ES-modules SPA over a WebSocket event stream.
 - **MCP server** exposes the same data to LLM agents.
 
