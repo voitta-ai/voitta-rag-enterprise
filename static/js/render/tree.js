@@ -495,7 +495,7 @@ function updateRootSwitches(li, folder) {
         let text, cls, title;
         if (folder.shared) {
             const aud = _me?.company_id ? "Org" : "All";
-            text = targeted ? `${aud} · ${targeted}` : aud;
+            text = targeted ? `${aud}·${targeted}` : aud;
             cls = "share-pill share-pill-audience";
             title = "Shared with " + (_me?.company_id ? "your organization" : "all native users")
                 + (targeted ? ` plus ${targeted}` : "") + ". Click to configure.";

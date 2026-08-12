@@ -17,7 +17,9 @@
    locked to a fixed width to keep alignment predictable. */
 :root {
     /* name · files · indexed · status · search · share */
-    --tree-cols: 1fr 56px 64px 100px 56px 56px;
+    /* Last column is the share pill: sized so "Private" + dot + chevron
+       fit without ellipsis (the old 56px switch column crushed the pill). */
+    --tree-cols: 1fr 56px 64px 100px 56px 90px;
     --tree-gap: 10px;
     --tree-pad-x: 16px;
 }
@@ -461,11 +463,11 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 5px;
+    gap: 4px;
     box-sizing: border-box;
     height: 18px;
-    min-width: 78px;
-    padding: 0 9px;
+    width: 100%;   /* fill the grid column — every pill identical width */
+    padding: 0 8px;
     border: 1px solid var(--color-border);
     border-radius: 9px;
     background: transparent;
@@ -480,7 +482,7 @@
 .share-pill-label {
     overflow: hidden;
     text-overflow: ellipsis;
-    max-width: 110px;
+    min-width: 0;  /* allow ellipsis only for extreme targeted combos */
 }
 /* Dot: hollow when private, filled when any share layer is active —
    same 7px circle in every state, only the fill/color changes. */
@@ -497,16 +499,17 @@
 .share-pill-targeted .share-pill-dot {
     background: currentColor;
 }
-/* Chevron: a 7×4 CSS triangle — pixel-identical on every pill, unlike
-   the ▾ glyph whose size tracks the font. */
+/* Chevron: a 6×3.5 CSS triangle — pixel-identical on every pill, unlike
+   the ▾ glyph whose size tracks the font. Kept slim so it reads as an
+   affordance hint, not a second glyph competing with the label. */
 .share-pill-chevron {
     flex-shrink: 0;
     width: 0;
     height: 0;
-    border-left: 3.5px solid transparent;
-    border-right: 3.5px solid transparent;
-    border-top: 4px solid currentColor;
-    opacity: 0.65;
+    border-left: 3px solid transparent;
+    border-right: 3px solid transparent;
+    border-top: 3.5px solid currentColor;
+    opacity: 0.55;
 }
 .share-pill-audience {
     color: var(--color-success);
