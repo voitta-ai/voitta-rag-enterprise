@@ -449,21 +449,65 @@
 /* Share pill — replaces the old share toggle. Color encodes the widest
    active layer: gray = private, green = audience share (org / native-
    everyone), blue = targeted-only (groups / people). Click opens the
-   share modal. Theme-safe: built entirely on the semantic vars. */
+   share modal.
+
+   Uniformity contract: every state renders with IDENTICAL geometry —
+   fixed 18px height (matches the folder-switch beside it), full-round
+   ends, shared min-width so "All"/"Org"/"Private" pills line up, a CSS
+   dot instead of text glyphs (○/●/◐ vary in width and weight across
+   fonts), and a CSS-triangle chevron. States differ in color ONLY. */
 .share-pill {
     flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    box-sizing: border-box;
+    height: 18px;
+    min-width: 78px;
+    padding: 0 9px;
     border: 1px solid var(--color-border);
     border-radius: 9px;
     background: transparent;
-    font-size: 11px;
-    line-height: 16px;
-    padding: 0 8px;
+    font: 500 11px/1 var(--font);
+    letter-spacing: 0.01em;
     cursor: pointer;
     white-space: nowrap;
     color: var(--color-text-secondary);
-    transition: background var(--t);
+    transition: background var(--t), border-color var(--t);
 }
 .share-pill:hover { background: var(--color-bg-hover); }
+.share-pill-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 110px;
+}
+/* Dot: hollow when private, filled when any share layer is active —
+   same 7px circle in every state, only the fill/color changes. */
+.share-pill-dot {
+    flex-shrink: 0;
+    width: 7px;
+    height: 7px;
+    box-sizing: border-box;
+    border-radius: 50%;
+    border: 1.5px solid currentColor;
+    background: transparent;
+}
+.share-pill-audience .share-pill-dot,
+.share-pill-targeted .share-pill-dot {
+    background: currentColor;
+}
+/* Chevron: a 7×4 CSS triangle — pixel-identical on every pill, unlike
+   the ▾ glyph whose size tracks the font. */
+.share-pill-chevron {
+    flex-shrink: 0;
+    width: 0;
+    height: 0;
+    border-left: 3.5px solid transparent;
+    border-right: 3.5px solid transparent;
+    border-top: 4px solid currentColor;
+    opacity: 0.65;
+}
 .share-pill-audience {
     color: var(--color-success);
     border-color: var(--color-success);

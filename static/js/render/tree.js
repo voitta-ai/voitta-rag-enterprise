@@ -467,8 +467,19 @@ function updateRootSwitches(li, folder) {
     const _me = me.get();
     if (folder.owned && !_me?.single_user) {
         if (!li._sharePill) {
+            // Structured pill — dot + label + chevron as separate spans so
+            // every state has IDENTICAL geometry (text glyphs like ○/●/◐
+            // render at different widths/weights across fonts; a CSS dot
+            // and a CSS-triangle chevron don't).
             const pill = document.createElement("button");
             pill.className = "share-pill";
+            const dot = document.createElement("span");
+            dot.className = "share-pill-dot";
+            const label = document.createElement("span");
+            label.className = "share-pill-label";
+            const chev = document.createElement("span");
+            chev.className = "share-pill-chevron";
+            pill.append(dot, label, chev);
             pill.addEventListener("click", (e) => {
                 e.stopPropagation();
                 openShareModal(folder);
@@ -476,6 +487,7 @@ function updateRootSwitches(li, folder) {
             r.slot2.replaceWith(pill);
             r.slot2 = pill;
             li._sharePill = pill;
+            li._sharePillLabel = label;
         }
         const g = folder.share_groups || 0;
         const p = folder.share_people || 0;
@@ -483,21 +495,20 @@ function updateRootSwitches(li, folder) {
         let text, cls, title;
         if (folder.shared) {
             const aud = _me?.company_id ? "Org" : "All";
-            text = targeted ? `● ${aud} · ${targeted}` : `● ${aud}`;
+            text = targeted ? `${aud} · ${targeted}` : aud;
             cls = "share-pill share-pill-audience";
             title = "Shared with " + (_me?.company_id ? "your organization" : "all native users")
                 + (targeted ? ` plus ${targeted}` : "") + ". Click to configure.";
         } else if (targeted) {
-            text = `◐ ${targeted}`;
+            text = targeted;
             cls = "share-pill share-pill-targeted";
             title = `Shared with ${g ? g + " group(s)" : ""}${g && p ? " and " : ""}${p ? p + " people" : ""}. Click to configure.`;
         } else {
-            text = "○ Private";
+            text = "Private";
             cls = "share-pill share-pill-private";
             title = "Private — click to share.";
         }
-        text += " ▾";
-        if (li._sharePill.textContent !== text) li._sharePill.textContent = text;
+        if (li._sharePillLabel.textContent !== text) li._sharePillLabel.textContent = text;
         if (li._sharePill.className !== cls) li._sharePill.className = cls;
         if (li._sharePill.title !== title) li._sharePill.title = title;
     } else if (li._sharePill) {
@@ -509,6 +520,7 @@ function updateRootSwitches(li, folder) {
         r.slot2.replaceWith(spacer);
         r.slot2 = spacer;
         li._sharePill = null;
+        li._sharePillLabel = null;
     }
 }
 
