@@ -269,26 +269,30 @@
 .tree-delete-btn:hover { opacity: 1 !important; color: var(--color-danger, #c0392b); background: var(--color-bg-hover); }
 
 /* Super-admin "view as owner" chip on a shared (someone-else's) folder.
-   Lets a super-admin impersonate the owner to re-sync it. Rendered inline
-   right after the folder name so it never collides with the switches at the
-   row's right edge. flex:0 0 auto keeps it fully visible while the name
-   ellipsizes. */
+   Lets a super-admin impersonate the owner to re-sync it. Lives in the SHARE
+   column where an owned folder's share pill would sit, so it mirrors the
+   pill's geometry (full-column width, same height / radius) for a consistent
+   column. */
 .tree-impersonate-btn {
-    flex: 0 0 auto;
+    box-sizing: border-box;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 18px;
+    width: 100%;
     padding: 0 8px;
     border: 1px solid var(--color-border);
-    background: var(--color-bg-subtle, var(--color-bg-hover));
-    color: var(--color-text-secondary);
-    font-size: 11px;
-    line-height: 17px;
-    cursor: pointer;
     border-radius: 9px;
+    background: transparent;
+    font: 500 11px/1 var(--font);
+    letter-spacing: 0.01em;
+    color: var(--color-text-secondary);
+    cursor: pointer;
     white-space: nowrap;
-    opacity: .8;
-    transition: opacity .1s, color .1s, border-color .1s;
+    transition: background var(--t), border-color var(--t), color var(--t);
 }
-.tree-impersonate-btn:hover { opacity: 1; color: var(--color-accent); border-color: var(--color-accent); }
-.tree-row.selected .tree-impersonate-btn { color: #fff; border-color: rgba(255, 255, 255, .55); background: transparent; }
+.tree-impersonate-btn:hover { color: var(--color-accent); border-color: var(--color-accent); background: var(--color-bg-hover); }
+.tree-row.selected .tree-impersonate-btn { color: #fff; border-color: rgba(255, 255, 255, .55); }
 .tree-row.selected,
 .tree-row.selected:hover { background: var(--color-accent); color: #fff; }
 .tree-row.selected .num,

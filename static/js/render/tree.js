@@ -195,12 +195,11 @@ function buildFolderRoot(folderId) {
     const slot1 = document.createElement("span");
     const slot2 = document.createElement("span");
 
-    // Super-admin "view as owner" chip — rendered inline right after the
-    // folder name (not far-right, where the MCP-active / share switches live).
-    // Shown only on a shared (someone-else's) folder to a super-admin; wired
-    // in updateRootSwitches once the folder is known.
+    // Super-admin "view as owner" chip — lives in the SHARE column (slot2)
+    // on a shared (someone-else's) folder, where an owned folder's share
+    // pill would otherwise sit. Swapped into slot2 by updateRootSwitches
+    // once the folder is known.
     const impBtn = _buildImpersonateBtn(() => onImpersonateOwner(li));
-    nameCell.append(impBtn);
 
     li.append(nameCell, fileCount, indexedCount, tag, slot1, slot2);
     li.addEventListener("click", onRowClick);
@@ -208,6 +207,7 @@ function buildFolderRoot(folderId) {
     li._refs = { nameCell, chevron, label, glyph, img, text, fileCount, indexedCount, tag, slot1, slot2, impBtn };
     li._activeSwitch = null;
     li._sharePill = null;
+    li._slot2Mode = null;
     li._isRoot = true;
     li._sourceKind = null;
     return li;
@@ -457,19 +457,6 @@ function updateTreeRow(li, { folder, displayName, depth, isOpen, hasChildren, is
 
 function updateRootSwitches(li, folder) {
     const r = li._refs;
-    const _me0 = me.get();
-
-    // "View as owner" tablet — a super-admin looking at someone else's shared
-    // folder can impersonate its owner (owner_id is a users.id) to re-sync it.
-    // Excluded for own folders (folder.owned) and non-super users.
-    if (r.impBtn) {
-        const canImpersonate =
-            !!(_me0?.is_super_admin) &&
-            !!folder.shared && !folder.owned &&
-            folder.owner_id != null;
-        li._ownerId = canImpersonate ? folder.owner_id : null;
-        if (r.impBtn.hidden === canImpersonate) r.impBtn.hidden = !canImpersonate;
-    }
 
     // MCP-search toggle (slot1) — present on every root, regardless of ownership.
     if (!li._activeSwitch) {
@@ -489,15 +476,26 @@ function updateRootSwitches(li, folder) {
         : "MCP search excludes this folder. Click to include.";
     if (r.slot1.title !== activeTitle) r.slot1.title = activeTitle;
 
-    // Share pill (slot2) — owners only; opens the share modal. Shown for
-    // EVERY owned folder (community-less owners can still share to
-    // specific people); hidden only in single-user mode. Color encodes
-    // the widest active layer: gray = private, green = audience share
-    // (Clerk org / native-everyone), blue = targeted only (groups /
-    // people); a green pill also carries the targeted counts.
+    // SHARE column (slot2) — one of three mutually-exclusive occupants:
+    //   • owned folder → share pill (opens the share modal)
+    //   • super-admin viewing a shared, not-owned folder → "⇄ owner" chip
+    //     (impersonate the owner to re-sync); fills the same cell the pill
+    //     would occupy on an owned row, so the column stays consistent
+    //   • otherwise → hidden spacer
+    // Ownership is stable per row, so the occupant is swapped only when the
+    // mode actually changes; the pill's own state is then updated in place.
     const _me = me.get();
-    if (folder.owned && !_me?.single_user) {
-        if (!li._sharePill) {
+    const canImpersonate =
+        !!(_me?.is_super_admin) && !!folder.shared && !folder.owned &&
+        folder.owner_id != null;
+    li._ownerId = canImpersonate ? folder.owner_id : null;
+    const mode = (folder.owned && !_me?.single_user) ? "pill"
+        : canImpersonate ? "imp"
+        : "spacer";
+
+    if (li._slot2Mode !== mode) {
+        let el;
+        if (mode === "pill") {
             // Structured pill — dot + label + chevron as separate spans so
             // every state has IDENTICAL geometry (text glyphs like ○/●/◐
             // render at different widths/weights across fonts; a CSS dot
@@ -515,11 +513,28 @@ function updateRootSwitches(li, folder) {
                 e.stopPropagation();
                 openShareModal(folder);
             });
-            r.slot2.replaceWith(pill);
-            r.slot2 = pill;
+            el = pill;
             li._sharePill = pill;
             li._sharePillLabel = label;
+        } else if (mode === "imp") {
+            el = r.impBtn;
+            r.impBtn.hidden = false;
+        } else {
+            const spacer = document.createElement("span");
+            spacer.className = "folder-switch";
+            spacer.style.visibility = "hidden";
+            el = spacer;
         }
+        r.slot2.replaceWith(el);
+        r.slot2 = el;
+        li._slot2Mode = mode;
+        if (mode !== "pill") { li._sharePill = null; li._sharePillLabel = null; }
+    }
+
+    if (mode === "pill") {
+        // Color encodes the widest active layer: gray = private, green =
+        // audience share (Clerk org / native-everyone), blue = targeted only
+        // (groups / people); a green pill also carries the targeted counts.
         const g = folder.share_groups || 0;
         const p = folder.share_people || 0;
         const targeted = [g ? `${g}g` : "", p ? `${p}p` : ""].filter(Boolean).join("·");
@@ -542,16 +557,6 @@ function updateRootSwitches(li, folder) {
         if (li._sharePillLabel.textContent !== text) li._sharePillLabel.textContent = text;
         if (li._sharePill.className !== cls) li._sharePill.className = cls;
         if (li._sharePill.title !== title) li._sharePill.title = title;
-    } else if (li._sharePill) {
-        // Owner status flipped from owned to not-owned (rare but possible
-        // if a folder is transferred). Drop the pill back to a spacer.
-        const spacer = document.createElement("span");
-        spacer.className = "folder-switch";
-        spacer.style.visibility = "hidden";
-        r.slot2.replaceWith(spacer);
-        r.slot2 = spacer;
-        li._sharePill = null;
-        li._sharePillLabel = null;
     }
 }
 
