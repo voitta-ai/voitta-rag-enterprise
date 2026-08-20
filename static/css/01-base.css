@@ -171,6 +171,7 @@ body {
     min-height: 0;
 }
 .toolbar {
+    position: relative;              /* anchor for the floating upload panel */
     display: flex;
     gap: var(--sm);
     align-items: center;
@@ -187,65 +188,122 @@ body {
     background: var(--color-border);
     margin: 0 4px;
 }
+/* Upload progress — a compact pill that FLOATS just below the toolbar's
+   right edge (absolute, so it's out of the flex flow: the toolbar never wraps
+   or changes height while files stream in). Its detail list drops below the
+   pill as a second floating panel. The toolbar is position:relative so both
+   pin to its bottom-right corner. */
 .upload-progress {
-    display: flex;
-    flex-wrap: wrap;
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 30;
+}
+.upload-pill {
+    position: relative;
+    display: inline-flex;
     align-items: center;
-    gap: 8px;
-    margin-left: auto;
-    min-width: 220px;
-    max-width: 480px;
-}
-.upload-progress-label {
-    font-size: 11px;
-    color: var(--color-text-secondary);
-    white-space: nowrap;
-}
-.upload-progress-bar {
-    flex: 1;
-    min-width: 120px;
-    height: 6px;
-    background: var(--color-bg);
-    border: 1px solid var(--color-border);
-    border-radius: 3px;
+    gap: 6px;
+    height: 28px;
+    max-width: 260px;
+    padding: 0 10px;
     overflow: hidden;
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    font-size: 12px;
+    color: var(--color-text-primary);
+    cursor: pointer;
+    transition: background var(--t), border-color var(--t);
 }
-.upload-progress-fill {
-    height: 100%;
+.upload-pill:hover { background: var(--color-bg-hover); border-color: var(--color-accent); }
+.upload-pill-icon { flex-shrink: 0; color: var(--color-accent); }
+.upload-progress-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+    color: var(--color-text-secondary);
+}
+.upload-pill-caret {
+    flex-shrink: 0;
+    font-size: 10px;
+    color: var(--color-text-tertiary);
+    transition: transform 120ms ease;
+}
+.upload-progress[data-open="true"] .upload-pill-caret { transform: rotate(180deg); }
+/* The aggregate progress rides as a thin accent underline across the pill. */
+.upload-pill-underline {
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    height: 2px;
     width: 0;
     background: var(--color-accent);
     transition: width 100ms linear;
 }
+.upload-pill.state-done { border-color: var(--color-accent); }
+.upload-pill.state-failed { border-color: #c33; }
+.upload-pill.state-failed .upload-pill-icon { color: #c33; }
+
+/* Floating detail panel — overlays the folder list; never reflows layout. */
+.upload-panel {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 30;
+    width: 340px;
+    max-width: 80vw;
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+    padding: 6px;
+    display: none;
+}
+.upload-progress[data-open="true"] .upload-panel { display: block; }
 .upload-file-list {
-    flex-basis: 100%;
-    margin: 4px 0 0;
+    margin: 0;
     padding: 0;
     list-style: none;
-    max-height: 140px;
+    max-height: 240px;
     overflow-y: auto;
-    font-size: 11px;
+    font-size: 12px;
     color: var(--color-text-secondary);
 }
 .upload-file-list li {
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 2px 0;
+    gap: 8px;
+    padding: 3px 6px;
+    border-radius: var(--radius-sm);
+}
+.upload-file-list li:hover { background: var(--color-bg-hover); }
+.upload-file-list li .glyph {
+    flex-shrink: 0;
+    width: 14px;
+    text-align: center;
+    color: var(--color-text-tertiary);
 }
 .upload-file-list li .name {
     flex: 1;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
 .upload-file-list li .pct {
+    flex-shrink: 0;
     font-variant-numeric: tabular-nums;
-    color: var(--color-text-secondary);
-    min-width: 36px;
+    color: var(--color-text-tertiary);
+    min-width: 34px;
     text-align: right;
 }
-.upload-file-list li.done .pct,
-.upload-file-list li.done .name { color: var(--color-accent); }
+.upload-file-list li.active .glyph { color: var(--color-accent); }
+.upload-file-list li.done .glyph,
+.upload-file-list li.done .name,
+.upload-file-list li.done .pct { color: var(--color-accent); }
+.upload-file-list li.failed .glyph,
 .upload-file-list li.failed .pct,
 .upload-file-list li.failed .name { color: #c33; }
 .browser-layout {

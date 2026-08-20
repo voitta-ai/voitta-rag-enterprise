@@ -139,13 +139,17 @@ async function runUpload(entries) {
     if (!entries.length || !uploadTargetFolder()) return;
 
     const wrap = $("#upload-progress");
+    const pill = $("#upload-pill");
     const fill = $("#upload-progress-fill");
     const label = $("#upload-progress-label");
     const list = $("#upload-file-list");
 
-    // Per-file row: name (with optional rel_dir prefix) + percent + state.
+    // Per-file row: status glyph + name (with optional rel_dir prefix) + pct.
     const rows = entries.map(({ file, relDir }) => {
         const li = document.createElement("li");
+        const glyph = document.createElement("span");
+        glyph.className = "glyph";
+        glyph.textContent = "·";                     // queued
         const name = document.createElement("span");
         name.className = "name";
         // Show the per-file target path so the user can confirm the
@@ -159,17 +163,20 @@ async function runUpload(entries) {
         name.textContent = displayDir
             ? `${displayDir}/${file.name}`
             : file.name;
+        name.title = name.textContent;
         const pct = document.createElement("span");
         pct.className = "pct";
         pct.textContent = "0%";
-        li.append(name, pct);
+        li.append(glyph, name, pct);
         list.append(li);
-        return { file, relDir, li, pct, loaded: 0 };
+        return { file, relDir, li, glyph, pct, loaded: 0 };
     });
     const totalBytes = entries.reduce((sum, e) => sum + (e.file.size || 0), 0);
-    wrap.hidden = false;
+    pill.className = "upload-pill";
     fill.style.width = "0%";
     label.textContent = `Uploading ${entries.length} file(s)…`;
+    wrap.hidden = false;
+    setUploadPanelOpen(true);                        // auto-open while active
 
     function refreshAggregate() {
         const loaded = rows.reduce((sum, r) => sum + r.loaded, 0);
@@ -179,8 +186,8 @@ async function runUpload(entries) {
                                           && !r.li.classList.contains("failed")).length;
         const done = rows.length - remaining;
         label.textContent = remaining === 0
-            ? "Done"
-            : `Uploading ${done}/${rows.length} — ${overall}%`;
+            ? `Uploaded ${rows.length}`
+            : `Uploading ${done}/${rows.length} · ${overall}%`;
     }
 
     try {
@@ -192,35 +199,56 @@ async function runUpload(entries) {
                 concurrency: 3,
                 onFileProgress: (idx, _file, p) => {
                     rows[idx].loaded = p.loaded;
+                    rows[idx].li.classList.add("active");
+                    rows[idx].glyph.textContent = "⟳";
                     rows[idx].pct.textContent = `${Math.round(p.fraction * 100)}%`;
                     refreshAggregate();
                 },
                 onFileDone: (idx, file) => {
                     rows[idx].loaded = file.size || rows[idx].loaded;
+                    rows[idx].li.classList.remove("active");
                     rows[idx].li.classList.add("done");
-                    rows[idx].pct.textContent = "✓";
+                    rows[idx].glyph.textContent = "✓";
+                    rows[idx].pct.textContent = "";
                     refreshAggregate();
                 },
                 onFileError: (idx, _file, err) => {
+                    rows[idx].li.classList.remove("active");
                     rows[idx].li.classList.add("failed");
-                    rows[idx].pct.textContent = "×";
+                    rows[idx].glyph.textContent = "×";
+                    rows[idx].pct.textContent = "";
                     rows[idx].li.title = err.message;
                     refreshAggregate();
                 },
             },
         );
-        if (failures.length) {
-            label.textContent = `Done — ${failures.length} failed`;
-        }
+        pill.classList.add(failures.length ? "state-failed" : "state-done");
+        label.textContent = failures.length
+            ? `${rows.length - failures.length}/${rows.length} · ${failures.length} failed`
+            : `Uploaded ${rows.length}`;
+        // Leave failures open so the user can read them; collapse a clean run.
+        if (!failures.length) setUploadPanelOpen(false);
         setTimeout(() => {
             wrap.hidden = true;
+            setUploadPanelOpen(false);
             list.replaceChildren();
         }, failures.length ? 5000 : 1500);
     } catch (err) {
         wrap.hidden = true;
+        setUploadPanelOpen(false);
         list.replaceChildren();
         alert(err.message);
     }
+}
+
+// Show/hide the floating detail panel (pure CSS via a data-attr on the
+// wrapper; the pill is a toggle button so the list is inspectable on demand).
+function setUploadPanelOpen(open) {
+    const wrap = $("#upload-progress");
+    const pill = $("#upload-pill");
+    if (!wrap) return;
+    wrap.dataset.open = open ? "true" : "false";
+    if (pill) pill.setAttribute("aria-expanded", open ? "true" : "false");
 }
 
 // ---------------------------------------------------------------------------
@@ -231,6 +259,17 @@ $("#btn-upload").addEventListener("click", () => $("#upload-input").click());
 $("#btn-upload-folder").addEventListener("click", () =>
     $("#upload-folder-input").click()
 );
+
+// Pill toggles the floating detail panel; a click elsewhere closes it.
+$("#upload-pill").addEventListener("click", (e) => {
+    e.stopPropagation();
+    const wrap = $("#upload-progress");
+    setUploadPanelOpen(wrap.dataset.open !== "true");
+});
+document.addEventListener("click", (e) => {
+    const wrap = $("#upload-progress");
+    if (wrap && !wrap.hidden && !wrap.contains(e.target)) setUploadPanelOpen(false);
+});
 
 $("#upload-input").addEventListener("change", async (e) => {
     const files = Array.from(e.target.files);
