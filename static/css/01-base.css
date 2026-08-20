@@ -306,6 +306,25 @@ body {
 .upload-file-list li.failed .glyph,
 .upload-file-list li.failed .pct,
 .upload-file-list li.failed .name { color: #c33; }
+/* Persistent drag-drop discoverability hint. Muted one-liner between the
+   toolbar and the list — makes the "drag several folders at once" path
+   visible without the user first having to start a drag. */
+.drop-hint {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: -6px 0 0;
+    padding: 0 2px;
+    font-size: 11px;
+    color: var(--color-text-tertiary);
+    user-select: none;
+}
+.drop-hint-icon {
+    flex-shrink: 0;
+    font-size: 12px;
+    opacity: 0.8;
+}
+
 .browser-layout {
     display: grid;
     grid-template-columns: 1fr 360px;
@@ -320,7 +339,7 @@ body {
    pointer-events guard keeps child interactivity working during a
    drag (without it, dragover would not bubble correctly). */
 .browser-layout.drop-active::after {
-    content: "Drop folders or files here";
+    content: "Drop files or folders here — multiple folders OK, subfolders kept";
     position: absolute;
     inset: 0;
     border: 2px dashed var(--accent, #5b8def);
