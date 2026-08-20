@@ -334,24 +334,36 @@ body {
     min-height: 0;
     position: relative;
 }
-/* Active drag-and-drop highlight on the browser pane. Outlines the
-   whole grid so it's obvious the drop is being accepted; the
-   pointer-events guard keeps child interactivity working during a
-   drag (without it, dragover would not bubble correctly). */
-.browser-layout.drop-active::after {
-    content: "Drop files or folders here — multiple folders OK, subfolders kept";
+/* Drag-and-drop drop zone. A faint dashed frame marks the whole folder
+   area as droppable AT REST — so the capability is visible before any
+   drag starts, not only once one is in flight. On an active drag the
+   frame brightens, tints, and shows the prompt. It spans the entire
+   browser-layout, which IS the drop target, so what lights up matches
+   exactly where drops are accepted. pointer-events stay off so the
+   child rows keep working (and dragover keeps bubbling) mid-drag. */
+.browser-layout::after {
+    content: "";
     position: absolute;
     inset: 0;
-    border: 2px dashed var(--accent, #5b8def);
-    border-radius: 8px;
-    background: rgba(91, 141, 239, 0.08);
-    color: var(--accent, #5b8def);
+    border: 1.5px dashed var(--color-border);
+    border-radius: 10px;
+    background: transparent;
+    color: var(--color-accent);
     display: flex;
     align-items: center;
     justify-content: center;
     font-weight: 600;
     pointer-events: none;
     z-index: 10;
+    opacity: 0.5;
+    transition: opacity var(--t), border-color var(--t), background var(--t);
+}
+.browser-layout.drop-active::after {
+    content: "Drop files or folders here — multiple folders OK, subfolders kept";
+    border-color: var(--color-accent);
+    border-width: 2px;
+    background: rgba(0, 113, 227, 0.08);
+    opacity: 1;
 }
 
 
