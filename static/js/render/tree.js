@@ -195,10 +195,17 @@ function buildFolderRoot(folderId) {
     const slot1 = document.createElement("span");
     const slot2 = document.createElement("span");
 
+    // Super-admin "view as owner" chip — rendered inline right after the
+    // folder name (not far-right, where the MCP-active / share switches live).
+    // Shown only on a shared (someone-else's) folder to a super-admin; wired
+    // in updateRootSwitches once the folder is known.
+    const impBtn = _buildImpersonateBtn(() => onImpersonateOwner(li));
+    nameCell.append(impBtn);
+
     li.append(nameCell, fileCount, indexedCount, tag, slot1, slot2);
     li.addEventListener("click", onRowClick);
 
-    li._refs = { nameCell, chevron, label, glyph, img, text, fileCount, indexedCount, tag, slot1, slot2 };
+    li._refs = { nameCell, chevron, label, glyph, img, text, fileCount, indexedCount, tag, slot1, slot2, impBtn };
     li._activeSwitch = null;
     li._sharePill = null;
     li._isRoot = true;
@@ -212,6 +219,17 @@ function _buildDeleteBtn(onClick) {
     btn.className = "tree-delete-btn";
     btn.title = "Delete";
     btn.textContent = "×";
+    btn.addEventListener("click", (e) => { e.stopPropagation(); onClick(); });
+    return btn;
+}
+
+function _buildImpersonateBtn(onClick) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "tree-impersonate-btn";
+    btn.title = "View as this folder's owner to re-sync it";
+    btn.textContent = "⇄ owner";
+    btn.hidden = true;
     btn.addEventListener("click", (e) => { e.stopPropagation(); onClick(); });
     return btn;
 }
@@ -439,6 +457,19 @@ function updateTreeRow(li, { folder, displayName, depth, isOpen, hasChildren, is
 
 function updateRootSwitches(li, folder) {
     const r = li._refs;
+    const _me0 = me.get();
+
+    // "View as owner" tablet — a super-admin looking at someone else's shared
+    // folder can impersonate its owner (owner_id is a users.id) to re-sync it.
+    // Excluded for own folders (folder.owned) and non-super users.
+    if (r.impBtn) {
+        const canImpersonate =
+            !!(_me0?.is_super_admin) &&
+            !!folder.shared && !folder.owned &&
+            folder.owner_id != null;
+        li._ownerId = canImpersonate ? folder.owner_id : null;
+        if (r.impBtn.hidden === canImpersonate) r.impBtn.hidden = !canImpersonate;
+    }
 
     // MCP-search toggle (slot1) — present on every root, regardless of ownership.
     if (!li._activeSwitch) {
@@ -605,6 +636,28 @@ function updateFileRow(li, { file, depth }) {
     // Delete button — only for owned regular folders.
     const canDel = !!(li._canDelete);
     if (r.delBtn.hidden === canDel) r.delBtn.hidden = !canDel;
+}
+
+// Super-admin: view as a shared folder's owner, then re-sync from that
+// identity. Reuses the generic impersonate-by-user-id endpoint (owner_id is a
+// users.id) and hard-reloads so every store re-keys to the owner — where the
+// toolbar Re-sync button is available. Gated server-side too: the endpoint is
+// admin-only and out-of-scope targets 404 (a super-admin sees all).
+async function onImpersonateOwner(li) {
+    const ownerId = li._ownerId;
+    if (ownerId == null) return;
+    const name = li._refs.text.textContent;
+    if (!confirm(
+        `View the app as the owner of "${name}"?\n\n` +
+        "You'll switch into their account so you can re-sync this folder. " +
+        "Use \"Stop viewing as\" to return to your own identity.",
+    )) return;
+    try {
+        await api.adminImpersonate(ownerId);
+        window.location.reload();
+    } catch (err) {
+        alert(err.message || "Could not view as the folder owner.");
+    }
 }
 
 // ---------------------------------------------------------------------------

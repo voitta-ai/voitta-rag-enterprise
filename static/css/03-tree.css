@@ -267,6 +267,28 @@
 }
 .tree-row:hover .tree-delete-btn { opacity: .5; }
 .tree-delete-btn:hover { opacity: 1 !important; color: var(--color-danger, #c0392b); background: var(--color-bg-hover); }
+
+/* Super-admin "view as owner" chip on a shared (someone-else's) folder.
+   Lets a super-admin impersonate the owner to re-sync it. Rendered inline
+   right after the folder name so it never collides with the switches at the
+   row's right edge. flex:0 0 auto keeps it fully visible while the name
+   ellipsizes. */
+.tree-impersonate-btn {
+    flex: 0 0 auto;
+    padding: 0 8px;
+    border: 1px solid var(--color-border);
+    background: var(--color-bg-subtle, var(--color-bg-hover));
+    color: var(--color-text-secondary);
+    font-size: 11px;
+    line-height: 17px;
+    cursor: pointer;
+    border-radius: 9px;
+    white-space: nowrap;
+    opacity: .8;
+    transition: opacity .1s, color .1s, border-color .1s;
+}
+.tree-impersonate-btn:hover { opacity: 1; color: var(--color-accent); border-color: var(--color-accent); }
+.tree-row.selected .tree-impersonate-btn { color: #fff; border-color: rgba(255, 255, 255, .55); background: transparent; }
 .tree-row.selected,
 .tree-row.selected:hover { background: var(--color-accent); color: #fff; }
 .tree-row.selected .num,
