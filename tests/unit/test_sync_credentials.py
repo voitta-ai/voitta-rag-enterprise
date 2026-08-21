@@ -234,6 +234,76 @@ def test_credential_auth_init_returns_google_url(
     assert "cid.apps.googleusercontent.com" in url
 
 
+def test_get_names_the_shared_credential(app: FastAPI, client: TestClient) -> None:
+    """The GET/PUT echo identifies the credential (label + kind) so the
+    sync dialog can render its read-only pane without a second fetch."""
+    auth_as(app, "a@corp.com")
+    cred = _mk_oauth(client, label="Corp Drive")
+    folder_id = _mk_folder(client)
+    _put_sync_with_credential(client, folder_id, cred["id"])
+
+    gd = client.get(f"/api/folders/{folder_id}/sync").json()["google_drive"]
+    assert gd["credential_id"] == cred["id"]
+    assert gd["credential_label"] == "Corp Drive"
+    assert gd["credential_kind"] == "google_oauth_client"
+
+
+def test_modal_roundtrip_preserves_reference(
+    app: FastAPI, client: TestClient
+) -> None:
+    """The sync dialog's credential-mode payload (credential_id + folders,
+    inline fields blank) keeps the reference and updates the folder set —
+    this is the exact body a Save / Sync-now sends."""
+    auth_as(app, "a@corp.com")
+    cred = _mk_oauth(client)
+    folder_id = _mk_folder(client)
+    _put_sync_with_credential(client, folder_id, cred["id"])
+
+    out = client.put(
+        f"/api/folders/{folder_id}/sync",
+        json={
+            "source_type": "google_drive",
+            "google_drive": {
+                "credential_id": cred["id"],
+                "client_id": "",
+                "client_secret": "",
+                "folders": [{"id": "drive-folder-1", "name": "Shared Drive"}],
+                "service_account_json": "",
+                "use_loopback": False,
+                "use_builtin": False,
+                "files_only": True,
+            },
+        },
+    )
+    assert out.status_code == 200, out.text
+    gd = out.json()["google_drive"]
+    assert gd["credential_id"] == cred["id"]
+    assert [f["id"] for f in gd["folders"]] == ["drive-folder-1"]
+    assert gd["files_only"] is True
+
+
+def test_blank_repost_names_the_credential(
+    app: FastAPI, client: TestClient
+) -> None:
+    """A credential-backed row re-posted WITHOUT its credential_id (a client
+    that dropped the reference) fails with an error naming the shared
+    credential, not the generic provide-credentials message."""
+    auth_as(app, "a@corp.com")
+    cred = _mk_oauth(client)
+    folder_id = _mk_folder(client)
+    _put_sync_with_credential(client, folder_id, cred["id"])
+
+    r = client.put(
+        f"/api/folders/{folder_id}/sync",
+        json={"source_type": "google_drive", "google_drive": {}},
+    )
+    assert r.status_code == 400
+    assert "shared company credential" in r.json()["detail"]
+    # The failed save must not have touched the stored reference.
+    gd = client.get(f"/api/folders/{folder_id}/sync").json()["google_drive"]
+    assert gd["credential_id"] == cred["id"]
+
+
 def test_switching_to_inline_clears_reference(
     app: FastAPI, client: TestClient
 ) -> None:

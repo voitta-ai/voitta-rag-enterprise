@@ -88,6 +88,11 @@ class GoogleDriveSyncIn(BaseModel):
 
 class GoogleDriveSyncOut(BaseModel):
     credential_id: int | None = None
+    # Identity of the referenced shared credential, so the sync dialog can
+    # name it ("SS1 — service account") without a second fetch. Empty for
+    # inline/builtin rows and for dangling references.
+    credential_label: str = ""
+    credential_kind: str = ""
     client_id: str
     folders: list[GoogleDriveFolder]
     has_client_secret: bool
@@ -135,23 +140,27 @@ def build_out(src: FolderSyncSource) -> GoogleDriveSyncOut:
     # picker and "connected" pill correctly without a second fetch. A
     # dangling reference degrades to all-False rather than failing the GET.
     if src.gd_credential_id is not None:
-        try:
-            resolved = resolve_gd_auth(src)
-        except RuntimeError:
-            resolved = None
-        return GoogleDriveSyncOut(
-            credential_id=src.gd_credential_id,
-            client_id=resolved.client_id if resolved else "",
-            folders=[
-                GoogleDriveFolder(**f) for f in coerce_folders_field(src.gd_folder_id)
-            ],
-            has_client_secret=bool(resolved and resolved.client_secret),
-            has_service_account=bool(resolved and resolved.service_account_json),
-            connected=bool(resolved and resolved.connected),
-            use_loopback=False,
-            files_only=bool(src.gd_files_only),
-            use_builtin=False,
-        )
+        from ....db.database import session_scope
+        from ....db.models import SyncCredential
+
+        with session_scope() as s:
+            cred = s.get(SyncCredential, int(src.gd_credential_id))
+            return GoogleDriveSyncOut(
+                credential_id=src.gd_credential_id,
+                credential_label=cred.label if cred else "",
+                credential_kind=cred.kind if cred else "",
+                client_id=(cred.client_id or "") if cred else "",
+                folders=[
+                    GoogleDriveFolder(**f)
+                    for f in coerce_folders_field(src.gd_folder_id)
+                ],
+                has_client_secret=bool(cred and cred.client_secret),
+                has_service_account=bool(cred and cred.service_account_json),
+                connected=bool(cred and cred.refresh_token),
+                use_loopback=False,
+                files_only=bool(src.gd_files_only),
+                use_builtin=False,
+            )
     return GoogleDriveSyncOut(
         # Built-in rows echo a blank client_id — the SPA doesn't need
         # the shipped client's identity and mustn't render it.
@@ -265,6 +274,16 @@ def apply_config(
             "Built-in Google sign-in is not available on this deployment",
         )
     if not cfg.use_builtin and not has_oauth and not has_sa:
+        if existing is not None and existing.gd_credential_id is not None:
+            # A credential-backed row re-posted without its credential_id:
+            # the client dropped the reference (stale cached UI). Name the
+            # real problem instead of demanding fields that live elsewhere.
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "This folder authenticates through a shared company "
+                "credential; include its credential_id (the sync dialog "
+                "does this automatically) or supply replacement credentials",
+            )
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             "Provide either OAuth client_id+client_secret or a service-account JSON",

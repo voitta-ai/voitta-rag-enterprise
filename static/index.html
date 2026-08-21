@@ -816,6 +816,14 @@
                             class="seg-tab" role="tab" aria-selected="false">
                             Sign in (no setup)
                         </button>
+                        <!-- Company-credential tab — shown only when the saved
+                             row references a shared sync credential
+                             (gd_credential_id). The credential supplies all
+                             auth; this pane has nothing to configure. -->
+                        <button type="button" id="sync-gd-tab-credential" hidden
+                            class="seg-tab" role="tab" aria-selected="false">
+                            Company credential
+                        </button>
                         <button type="button" id="sync-gd-tab-oauth"
                             class="seg-tab active" role="tab" aria-selected="true">
                             Your OAuth client
@@ -849,6 +857,25 @@
                         <div class="actions actions-right" style="margin-top:8px;">
                             <button type="button" id="sync-gd-connect-builtin" class="btn btn-primary btn-sm">Connect Google Drive</button>
                             <span id="sync-gd-conn-status-builtin" class="hint" style="margin-left:auto;"></span>
+                        </div>
+                    </div>
+
+                    <!-- Company-credential pane — read-only: auth lives on the
+                         shared credential (one consent / one key serves every
+                         folder referencing it), so the folder itself carries
+                         nothing to edit. Switching to another tab and entering
+                         credentials there replaces the reference on Save. -->
+                    <div id="sync-gd-pane-credential" class="sync-gd-pane" hidden>
+                        <p class="hint">
+                            This folder authenticates through
+                            <strong id="sync-gd-credential-label"></strong>, a
+                            <span id="sync-gd-credential-kind"></span> shared across
+                            your organization — there is nothing to configure here.
+                            To use different credentials for this folder, switch to
+                            another tab and enter them there.
+                        </p>
+                        <div class="actions actions-right" style="margin-top:8px;">
+                            <span id="sync-gd-conn-status-credential" class="hint" style="margin-left:auto;"></span>
                         </div>
                     </div>
 

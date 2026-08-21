@@ -152,27 +152,31 @@ function _snapshotSavedGdFolders(folders) {
 // different gotchas (OAuth needs Connect + redirect URI; SA needs
 // folder-shared-with-client_email), so we render exactly one set of
 // fields and persist the mode the user actually used.
-let gdAuthMode = "oauth"; // "builtin" | "oauth" | "sa" | "local"
+let gdAuthMode = "oauth"; // "credential" | "builtin" | "oauth" | "sa" | "local"
+
+// Set when the loaded row references a shared company credential
+// (gd_credential_id). The credential supplies ALL auth, so the
+// "credential" pane is read-only; gdFormConfig round-trips this id so a
+// Save/Sync-now doesn't strip the reference. gdCredentialReady mirrors
+// the server-resolved auth state (consented OAuth or a stored SA key)
+// and gates the Pick/Test buttons.
+let gdCredentialId = null;
+let gdCredentialReady = false;
 
 export function getGdAuthMode() {
     return gdAuthMode;
 }
 
 export function setGdAuthMode(mode) {
-    gdAuthMode = ["builtin", "sa", "local"].includes(mode) ? mode : "oauth";
-    const builtinTab = $("#sync-gd-tab-builtin");
-    const oauthTab = $("#sync-gd-tab-oauth");
-    const saTab = $("#sync-gd-tab-sa");
-    const localTab = $("#sync-gd-tab-local");
-    for (const [tab, m] of [[builtinTab, "builtin"], [oauthTab, "oauth"], [saTab, "sa"], [localTab, "local"]]) {
-        if (!tab) continue;
-        tab.classList.toggle("active", gdAuthMode === m);
-        tab.setAttribute("aria-selected", gdAuthMode === m ? "true" : "false");
+    gdAuthMode = ["credential", "builtin", "sa", "local"].includes(mode) ? mode : "oauth";
+    for (const m of ["credential", "builtin", "oauth", "sa", "local"]) {
+        const tab = $(`#sync-gd-tab-${m}`);
+        if (tab) {
+            tab.classList.toggle("active", gdAuthMode === m);
+            tab.setAttribute("aria-selected", gdAuthMode === m ? "true" : "false");
+        }
+        $(`#sync-gd-pane-${m}`).hidden = gdAuthMode !== m;
     }
-    $("#sync-gd-pane-builtin").hidden = gdAuthMode !== "builtin";
-    $("#sync-gd-pane-oauth").hidden = gdAuthMode !== "oauth";
-    $("#sync-gd-pane-sa").hidden = gdAuthMode !== "sa";
-    $("#sync-gd-pane-local").hidden = gdAuthMode !== "local";
 
     // The local "This Mac" tab is a CREATE flow with its own button — hide the
     // shared selector + standard footer, and (re)load the folder picker.
@@ -187,7 +191,24 @@ export function setGdAuthMode(mode) {
     // keep the Pick button visible-but-disabled with a clear hint.
     const pickBtn = $("#sync-gd-pick-folder");
     const idInput = $("#sync-gd-add-folder-id");
-    if (gdAuthMode === "builtin") {
+    if (gdAuthMode === "credential") {
+        // Shared credential: auth is already on the server, so Pick/Test
+        // work off the saved row directly — gated only on the credential
+        // actually being usable (consented OAuth or a stored SA key).
+        pickBtn.hidden = false;
+        pickBtn.disabled = !gdCredentialReady;
+        pickBtn.title = gdCredentialReady
+            ? "Pick a Drive folder"
+            : "The shared credential is not connected yet";
+        const testBtn = $("#sync-gd-test-apis");
+        testBtn.disabled = !gdCredentialReady;
+        testBtn.title = gdCredentialReady
+            ? "Probe which Workspace APIs are enabled"
+            : "The shared credential is not connected yet";
+        idInput.placeholder = "Or paste a folder ID and press Enter";
+        $("#sync-gd-folders-hint").textContent =
+            "Each picked folder syncs into its own subdirectory under this folder.";
+    } else if (gdAuthMode === "builtin") {
         // Built-in client: same connected-gated Pick/Test as OAuth, but the
         // connection state lives on the builtin pane's own status span.
         const connected = $("#sync-gd-conn-status-builtin").textContent.startsWith("Connected");
@@ -274,6 +295,7 @@ function setGdConnState({ connected, hasClientSecret }) {
     }
 }
 
+$("#sync-gd-tab-credential").addEventListener("click", () => setGdAuthMode("credential"));
 $("#sync-gd-tab-builtin").addEventListener("click", () => setGdAuthMode("builtin"));
 $("#sync-gd-tab-oauth").addEventListener("click", () => setGdAuthMode("oauth"));
 $("#sync-gd-tab-sa").addEventListener("click", () => setGdAuthMode("sa"));
@@ -304,6 +326,20 @@ function gdFormConfig() {
     // arrive (so "saved" placeholders aren't wiped on every save).
     const useLoopback = !!$("#sync-gd-use-loopback")?.checked;
     const filesOnly = !!$("#sync-gd-files-only")?.checked;
+    if (gdAuthMode === "credential") {
+        // Shared credential: round-trip the reference — the credential
+        // supplies all auth server-side, so no inline fields apply.
+        return {
+            credential_id: gdCredentialId,
+            client_id: "",
+            client_secret: "",
+            folders: gdFolders,
+            service_account_json: "",
+            use_loopback: false,
+            use_builtin: false,
+            files_only: filesOnly,
+        };
+    }
     if (gdAuthMode === "builtin") {
         // Built-in client: no user credentials at all; the loopback
         // bridge doesn't apply (desktop reaches 127.0.0.1 directly).
@@ -843,6 +879,9 @@ $("#gd-pick-ok").addEventListener("click", () => {
 // ---------------------------------------------------------------------------
 
 function gdReset() {
+    gdCredentialId = null;
+    gdCredentialReady = false;
+    $("#sync-gd-tab-credential").hidden = true;
     $("#sync-gd-client-id").value = "";
     $("#sync-gd-client-secret").value = "";
     $("#sync-gd-client-secret").placeholder = "GOCSPX-…";
@@ -873,25 +912,47 @@ function gdReset() {
 function loadGdForm(src) {
     const gd = src.google_drive;
     if (!gd) return;
-    $("#sync-gd-client-id").value = gd.client_id || "";
-    preselectGdProviderByClientId(gd.client_id || "");
+    gdCredentialId = gd.credential_id ?? null;
+    const inline = gdCredentialId === null;
+    $("#sync-gd-tab-credential").hidden = inline;
+    // For credential-backed rows the has_*/connected flags describe the
+    // SHARED credential, not this row's (empty) inline columns — keep the
+    // inline panes blank so switching tabs presents an honest "enter
+    // replacement credentials" form instead of "(saved)" placeholders
+    // that a blank re-save would fail.
+    $("#sync-gd-client-id").value = inline ? (gd.client_id || "") : "";
+    preselectGdProviderByClientId(inline ? (gd.client_id || "") : "");
     setGdFolders(gd.folders || []);
     _snapshotSavedGdFolders(gd.folders || []);
-    $("#sync-gd-client-secret").placeholder = gd.has_client_secret ? "(saved — type to replace)" : "GOCSPX-…";
-    $("#sync-gd-sa-json").placeholder = gd.has_service_account ? "(service account JSON saved — paste a new one to replace)" : '{"type":"service_account","client_email":"…","private_key":"…"}';
+    $("#sync-gd-client-secret").placeholder = inline && gd.has_client_secret ? "(saved — type to replace)" : "GOCSPX-…";
+    $("#sync-gd-sa-json").placeholder = inline && gd.has_service_account ? "(service account JSON saved — paste a new one to replace)" : '{"type":"service_account","client_email":"…","private_key":"…"}';
     $("#sync-gd-use-loopback").checked = !!gd.use_loopback;
     $("#sync-gd-files-only").checked = !!gd.files_only;
     $("#sync-gd-api-result").hidden = true;
     updateGdRedirectHint();
-    // Pick the right tab. Built-in rows land on their own tab
-    // (even when the deploy no longer offers it — the status
-    // then explains why Connect fails). Otherwise: SA when the
+    // Pick the right tab — a 1:1 mirror of the saved row's auth state:
+    // shared credential → its own read-only tab; built-in rows land on
+    // their own tab (even when the deploy no longer offers it — the
+    // status then explains why Connect fails); otherwise SA when the
     // saved config has only a service-account key, else OAuth.
     // Setting the mode AFTER populating the inputs so
     // setGdConnState reads the right placeholders.
     $("#sync-gd-conn-status-builtin").textContent =
         gd.connected ? "Connected ✓" : "Not connected";
-    if (gd.use_builtin) {
+    if (!inline) {
+        gdCredentialReady = !!(gd.connected || gd.has_service_account);
+        $("#sync-gd-credential-label").textContent =
+            gd.credential_label || `credential #${gdCredentialId}`;
+        $("#sync-gd-credential-kind").textContent =
+            gd.credential_kind === "google_service_account"
+                ? "service account"
+                : "Google OAuth client";
+        $("#sync-gd-conn-status-credential").textContent = gd.connected
+            ? "Connected ✓"
+            : (gd.has_service_account ? "Service-account key on file ✓" : "Not connected");
+        setGdAuthMode("credential");
+        setGdConnState({ connected: false, hasClientSecret: false });
+    } else if (gd.use_builtin) {
         $("#sync-gd-tab-builtin").hidden = false;
         setGdAuthMode("builtin");
     } else {
@@ -910,6 +971,20 @@ function loadGdForm(src) {
 function gdAfterSave(out) {
     const gd = out.google_drive;
     if (!gd) return;
+    if (gd.credential_id != null) {
+        // Credential-backed row: no inline secrets were sent, so there is
+        // nothing to re-mask — re-rendering from the server echo (folders,
+        // credential pane status, mode) covers everything.
+        loadGdForm(out);
+        return;
+    }
+    // Folders the server now considers persisted — adopt them as
+    // the canonical state so a subsequent Sync-now goes through
+    // exactly what was saved (and we surface server-side renames
+    // / dedupes in the next render).
+    setGdFolders(gd.folders || []);
+    _snapshotSavedGdFolders(gd.folders || []);
+    $("#sync-gd-files-only").checked = !!gd.files_only;
     $("#sync-gd-client-secret").value = "";
     $("#sync-gd-client-secret").placeholder = gd.has_client_secret
         ? "(saved — type to replace)"
@@ -918,13 +993,6 @@ function gdAfterSave(out) {
     $("#sync-gd-sa-json").placeholder = gd.has_service_account
         ? "(service account JSON saved — paste a new one to replace)"
         : '{"type":"service_account","client_email":"…","private_key":"…"}';
-    // Folders the server now considers persisted — adopt them as
-    // the canonical state so a subsequent Sync-now goes through
-    // exactly what was saved (and we surface server-side renames
-    // / dedupes in the next render).
-    setGdFolders(gd.folders || []);
-    _snapshotSavedGdFolders(gd.folders || []);
-    $("#sync-gd-files-only").checked = !!gd.files_only;
     setGdConnState({ connected: gd.connected, hasClientSecret: gd.has_client_secret });
 }
 
@@ -936,6 +1004,9 @@ function gdAfterLoad() {
     // overriding an existing sync's saved value.
     const sel = $("#sync-gd-provider-picker");
     const idInput = $("#sync-gd-client-id");
+    // Credential-backed rows aren't a fresh form — auth is settled on the
+    // shared credential, so don't prefill the (hidden) OAuth inputs.
+    if (gdAuthMode === "credential") return;
     if (!sel.value && !idInput.value && gdGoogleProviders.size === 1) {
         const onlyId = [...gdGoogleProviders.keys()][0];
         sel.value = String(onlyId);
