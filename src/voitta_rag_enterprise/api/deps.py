@@ -315,7 +315,6 @@ def super_admin_user(
 
 async def admin_scope(
     me: CurrentUser = Depends(admin_user),
-    db: Session = Depends(db_session),
 ) -> AdminScope:
     """Resolve the caller's administrative domain for domain-scoped routes.
 
@@ -328,4 +327,4 @@ async def admin_scope(
     """
     from ..services.admin_scope import resolve_admin_scope
 
-    return await resolve_admin_scope(db, me.email, force_refresh=True)
+    return await resolve_admin_scope(me.email, force_refresh=True)

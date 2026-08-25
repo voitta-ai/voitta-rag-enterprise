@@ -84,15 +84,13 @@ def test_admin_orgs_from_directory() -> None:
 async def test_super_admin_sees_all(env: None, monkeypatch: pytest.MonkeyPatch) -> None:
     init_db()
     monkeypatch.setattr(admin_store, "is_super_admin", lambda e: e == "root@x")
-    with session_scope() as s:
-        scope = await resolve_admin_scope(s, "root@x")
+    scope = await resolve_admin_scope("root@x")
     assert scope.is_super and scope.is_native_admin
 
 
 async def test_org_admin_scope(env: None, clerk_dir: dict) -> None:
     init_db()
-    with session_scope() as s:
-        scope = await resolve_admin_scope(s, "alice@x")
+    scope = await resolve_admin_scope("alice@x")
     assert not scope.is_super
     assert scope.admin_org_ids == frozenset({"org_1"})
     # Org names carry the instance prefix (migrated legacy key → "Development").
@@ -102,16 +100,14 @@ async def test_org_admin_scope(env: None, clerk_dir: dict) -> None:
 
 async def test_org_member_has_no_org_domain(env: None, clerk_dir: dict) -> None:
     init_db()
-    with session_scope() as s:
-        scope = await resolve_admin_scope(s, "bob@x")  # member, not admin
+    scope = await resolve_admin_scope("bob@x")  # member, not admin
     assert scope.admin_org_ids == frozenset()
 
 
 async def test_native_admin_flag(env: None, clerk_dir: dict) -> None:
     init_db()
     admin_store.add_allowed_user("nate@x")
-    with session_scope() as s:
-        scope = await resolve_admin_scope(s, "nate@x")
+    scope = await resolve_admin_scope("nate@x")
     assert scope.is_native_admin
     assert scope.admin_org_ids == frozenset()  # native but no org-admin role
 
@@ -129,16 +125,14 @@ async def test_clerk_error_fails_closed(
         raise clerk_svc.ClerkError("down")
 
     monkeypatch.setattr(clerk_svc, "fetch_directory", boom)
-    with session_scope() as s:
-        scope = await resolve_admin_scope(s, "alice@x")
+    scope = await resolve_admin_scope("alice@x")
     assert scope.admin_org_ids == frozenset() and scope.clerk_degraded
 
 
 async def test_clerk_disabled_empty_org_domain(env: None) -> None:
     init_db()
     # env default: Clerk off. A non-super, non-native admin → empty domain.
-    with session_scope() as s:
-        scope = await resolve_admin_scope(s, "someone@x")
+    scope = await resolve_admin_scope("someone@x")
     assert not scope.is_super
     assert scope.admin_org_ids == frozenset()
     assert not scope.clerk_degraded
@@ -206,7 +200,6 @@ async def test_directory_cache_reuses_within_ttl(
         return _DIRECTORY
 
     monkeypatch.setattr(clerk_svc, "fetch_directory", counting)
-    with session_scope() as s:
-        await resolve_admin_scope(s, "alice@x")
-        await resolve_admin_scope(s, "bob@x")
+    await resolve_admin_scope("alice@x")
+    await resolve_admin_scope("bob@x")
     assert calls["n"] == 1

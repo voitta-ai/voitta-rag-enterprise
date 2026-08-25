@@ -183,8 +183,8 @@ async def test_readonly_flag_in_state_snapshot(app: FastAPI, clerk_dir) -> None:
 
     _make_regular_admin(app, "orgadmin@x")
     _seed_accounts()
+    scope = await resolve_admin_scope("orgadmin@x")
     with session_scope() as s:
-        scope = await resolve_admin_scope(s, "orgadmin@x")
         state = build_admin_state(s, scope)
     assert state["read_only"] is True
     assert state["permissions"]["is_super"] is False

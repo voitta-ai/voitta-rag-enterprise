@@ -214,23 +214,30 @@ async def _admin_scope_for(user_id: int | None) -> AdminScope:
 
     Subscriptions carry ``user_id`` but not email, so we look the email up
     here. A missing user row yields an empty ``AdminScope`` — never see-all.
+
+    The lookup runs in a thread with the session opened and closed there:
+    a synchronous pool checkout on the event loop would freeze the whole
+    server for the pool timeout whenever the pool is exhausted, and no
+    connection may be held across the Clerk await that follows.
     """
     if user_id is None:
         return AdminScope()
-    factory = get_session_factory()
-    db = factory()
-    try:
-        row = db.get(User, user_id)
-        if row is None:
-            return AdminScope()
-        # resolve_admin_scope awaits Clerk LIVE here (force_refresh): this
-        # builds the admin snapshot on connect / after each admin mutation,
-        # so a fresh org-admin role is reflected without a TTL wait.
-        # Holding this short-lived session across the await is fine on this
-        # rare path.
-        return await resolve_admin_scope(db, row.email, force_refresh=True)
-    finally:
-        db.close()
+
+    def _email_for_user() -> str | None:
+        db = get_session_factory()()
+        try:
+            row = db.get(User, user_id)
+            return None if row is None else row.email
+        finally:
+            db.close()
+
+    email = await asyncio.to_thread(_email_for_user)
+    if email is None:
+        return AdminScope()
+    # resolve_admin_scope awaits Clerk LIVE here (force_refresh): this
+    # builds the admin snapshot on connect / after each admin mutation,
+    # so a fresh org-admin role is reflected without a TTL wait.
+    return await resolve_admin_scope(email, force_refresh=True)
 
 
 async def _send_admin_frame(ws: WebSocket, sub: events.Subscription) -> None:

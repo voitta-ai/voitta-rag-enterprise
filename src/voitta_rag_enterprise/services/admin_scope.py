@@ -31,8 +31,6 @@ import time
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
-from sqlalchemy.orm import Session
-
 from ..db.models import User
 from . import admin_store
 from . import clerk as clerk_svc
@@ -109,7 +107,7 @@ def clear_directory_cache() -> None:
 
 
 async def resolve_admin_scope(
-    db: Session, email: str, *, force_refresh: bool = False
+    email: str, *, force_refresh: bool = False
 ) -> AdminScope:
     """Resolve ``email``'s administrative domain.
 
