@@ -18,11 +18,13 @@ const $ = (sel) => document.querySelector(sel);
 export function updateToolbarState() {
     const folder = folders.get().find((f) => f.id === getSelectedFolderId());
     const isRoot = !!folder && getSelectedRelDir() === "";
-    // Read-only = a shared folder owned by someone else. Owner-only mutations
-    // (upload, mkdir, reindex, sync, remove) are disabled; viewers can still
-    // expand the tree and read files.
+    // Content writes (upload, mkdir, reindex, delete files/subdirs) follow
+    // ``writable`` — the owner, or an admin the folder is shared with.
+    // Folder lifecycle (sync, rename, delete folder) stays owner-only.
+    // Read-only viewers can still expand the tree and read files.
     const isOwned = !!(folder && folder.owned);
-    const readOnly = !!folder && !isOwned;
+    const canWrite = !!(folder && folder.writable);
+    const readOnly = !!folder && !canWrite;
     // Synced folders (git, google drive, …) mirror a remote source: their
     // contents are owned by the sync, so manual uploads/mkdir make no sense
     // (the next sync would clobber or orphan them). Disable those buttons
@@ -50,7 +52,7 @@ export function updateToolbarState() {
     // existing folder of files. When a sync source already exists, the
     // same button reads "Config" (re-opens the same modal).
     const syncBtn = $("#btn-sync");
-    if (!folder || !isRoot || readOnly) {
+    if (!folder || !isRoot || !isOwned) {
         syncBtn.hidden = true;
         syncBtn.disabled = true;
     } else {
@@ -76,11 +78,12 @@ export function updateToolbarState() {
     }
     const selectedFileId = getSelectedFileId();
     const selectedRelDir = getSelectedRelDir();
-    // Remove enabled for: top-level folder (owner only), subdir (owned regular), file (owned regular)
-    const canRemove = !!folder && isOwned && (
-        isRoot ||
-        (!selectedFileId && selectedRelDir && isRegular) ||
-        (!!selectedFileId && isRegular)
+    // Remove enabled for: top-level folder (owner only), subdir and file
+    // (writable + regular — content-scope, so shared-folder admins get it).
+    const canRemove = !!folder && (
+        (isRoot && isOwned) ||
+        (canWrite && !isRoot && !selectedFileId && !!selectedRelDir && isRegular) ||
+        (canWrite && !!selectedFileId && isRegular)
     );
     $("#btn-remove").disabled = !canRemove;
     // Rename is a top-level, owner-only action (it can move the directory

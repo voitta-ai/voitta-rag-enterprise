@@ -26,9 +26,9 @@ from sqlalchemy.orm import Session
 if TYPE_CHECKING:
     from ..services.admin_scope import AdminScope
 
-from ..db.models import File, Folder, FolderSyncSource, Image, Job
+from ..db.models import File, Folder, FolderSyncSource, Image, Job, User
 from ..services import folder_active
-from ..services.acl import folder_active_for_user, is_folder_owner
+from ..services.acl import folder_active_for_user, is_folder_owner, person_is_admin
 from ..services.indexing import file_event_payload
 
 
@@ -46,18 +46,24 @@ def _folders_snapshot(
     # Bulk (three queries total) — this builder must never go per-folder.
     share_by_folder = bulk_share_counts(db)
     see_all = visible is None
+    # One person-level admin lookup for the whole snapshot: every folder
+    # emitted below is visible to the viewer, so admin ⇒ writable on each.
+    viewer = db.get(User, user_id)
+    admin_writer = bool(viewer) and person_is_admin(db, viewer.email)
     out: list[dict[str, Any]] = []
     for f in rows:
         if not see_all and f.id not in visible:
             continue
         src = sync_by_folder.get(f.id)
+        owned = see_all or is_folder_owner(db, f.id, user_id)
         out.append(
             _to_folder_out(
                 f,
                 has_sync_source=src is not None,
                 sync_source_kind=_sync_source_kind(src),
                 sync_status=(src.sync_status if src else "idle"),
-                owned=see_all or is_folder_owner(db, f.id, user_id),
+                owned=owned,
+                writable=owned or admin_writer,
                 active=folder_active_for_user(db, f.id, user_id),
                 share_counts=share_by_folder.get(f.id, (0, 0)),
             ).model_dump()

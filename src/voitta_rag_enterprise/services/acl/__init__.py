@@ -59,6 +59,7 @@ from .community import _owner_community, account_community
 from .folder_acl import (
     active_folder_ids,
     allowed_user_ids_for_file,
+    can_write_folder,
     folder_active_for_user,
     folder_user_id_email,
     folder_user_ids,
@@ -82,6 +83,7 @@ __all__ = [
     "accounts_for_email",
     "active_folder_ids",
     "allowed_user_ids_for_file",
+    "can_write_folder",
     "default_account_for_email",
     "folder_active_for_user",
     "folder_user_id_email",

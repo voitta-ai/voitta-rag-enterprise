@@ -827,7 +827,7 @@ function emitTreeRow({ targetRows, seenKeys, folder, node, relDir, displayName, 
     const isSelected = folder.id === getSelectedFolderId()
         && relDir === getSelectedRelDir()
         && getSelectedFileId() === null;
-    const sharedReadonly = isRoot && folder.shared && !folder.owned;
+    const sharedReadonly = isRoot && folder.shared && !folder.writable;
 
     const cacheKey = isRoot ? `root:${folder.id}` : `dir:${folder.id}:${relDir}`;
     let li = rowCache.get(cacheKey);
@@ -841,7 +841,7 @@ function emitTreeRow({ targetRows, seenKeys, folder, node, relDir, displayName, 
     // can be the Drive mount itself — labelling it "spreadsheet"
     // because one of its files came from Sheets would be wrong.)
     const dirKind = isRoot ? null : (node.kind || null);
-    const canDelete = !isRoot && !!(folder.owned) && (folder.sync_source_kind || "regular") === "regular";
+    const canDelete = !isRoot && !!(folder.writable) && (folder.sync_source_kind || "regular") === "regular";
     updateTreeRow(li, { folder, displayName, depth, isOpen, hasChildren, isSelected, summary, sharedReadonly, dirKind, canDelete });
     targetRows.push(li);
     seenKeys.add(cacheKey);
@@ -860,7 +860,7 @@ function emitTreeRow({ targetRows, seenKeys, folder, node, relDir, displayName, 
             folderActive,
         });
     }
-    const fileCanDelete = !!(folder.owned) && (folder.sync_source_kind || "regular") === "regular";
+    const fileCanDelete = !!(folder.writable) && (folder.sync_source_kind || "regular") === "regular";
     for (const f of [...node.files].sort((a, b) => a.rel_path.localeCompare(b.rel_path))) {
         const fkey = `file:${f.id}`;
         let fli = rowCache.get(fkey);

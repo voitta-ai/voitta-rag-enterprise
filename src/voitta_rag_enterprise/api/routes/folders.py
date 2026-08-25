@@ -23,9 +23,11 @@ from ...services.indexing import file_event_payload, publish_file_upserted
 from ...services.indexing import folder_cards
 from ...services.acl import (
     CurrentUser,
+    can_write_folder,
     folder_active_for_user,
     grant_folder,
     is_folder_owner,
+    person_is_admin,
     revoke_folder,
     set_folder_active,
     user_can_see_folder,
@@ -76,6 +78,12 @@ class FolderOut(BaseModel):
     # Ownership / sharing — see services/acl.py docstring.
     owner_id: int | None = None
     owned: bool = False  # True if the calling user owns this folder
+    # True when the caller may modify FILES here: the owner, or an admin
+    # the folder is shared with (services/acl can_write_folder). Gates the
+    # SPA's upload / mkdir / reindex / delete-content affordances; the
+    # owner-only affordances (share, rename, delete folder, sync) keep
+    # keying off ``owned``.
+    writable: bool = False
     shared: bool = False  # True if owner has flipped the shared switch on
     # Targeted-share counts for the tree's share pill: groups granted via
     # folder_group_acl, people = distinct emails across folder_email_acl
@@ -159,6 +167,10 @@ def _to_folder_out(
     owned: bool = False,
     active: bool = True,
     share_counts: tuple[int, int] = (0, 0),
+    # None = "same as owned" — the right default everywhere the viewer is
+    # the owner (create/rename/share responses). List/snapshot builders
+    # pass the real admin-aware value.
+    writable: bool | None = None,
 ) -> FolderOut:
     return FolderOut(
         id=f.id,
@@ -172,6 +184,7 @@ def _to_folder_out(
         sync_status=sync_status,
         owner_id=f.owner_id,
         owned=owned,
+        writable=owned if writable is None else writable,
         shared=bool(f.shared),
         share_groups=share_counts[0],
         share_people=share_counts[1],
@@ -271,6 +284,26 @@ def _require_owner(
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
             "Only the folder owner can perform this action.",
+        )
+    return folder
+
+
+def _require_writer(
+    db: Session, folder_id: int, user: CurrentUser
+) -> Folder:
+    """Authorize a FILE-content mutation (upload / mkdir / dir-meta /
+    reindex / delete file or subdir): the owner, or an admin the folder
+    is shared with — see ``can_write_folder``. Folder lifecycle and sync
+    config stay behind ``_require_owner`` / ``check_owner``. Same 404
+    non-probeability contract as ``_require_owner``.
+    """
+    folder = db.get(Folder, folder_id)
+    if folder is None or not user_can_see_folder(db, folder_id, user.id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Folder not found")
+    if not can_write_folder(db, folder_id, user.id):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Only the folder owner or an admin can modify files here.",
         )
     return folder
 
@@ -497,7 +530,7 @@ async def upload_file(
     watcher can fire ``file.upserted`` and the SPA can show the file
     while later files in the same POST are still uploading.
     """
-    folder = _require_owner(db, folder_id, user)
+    folder = _require_writer(db, folder_id, user)
     _require_regular(folder, db.get(FolderSyncSource, folder_id), "upload into")
     folder_root = Path(folder.path).resolve()
 
@@ -753,7 +786,7 @@ def mkdir(
     the empty directory (no file events), so the directory exists on disk
     but no DB rows are created.
     """
-    folder = _require_owner(db, folder_id, user)
+    folder = _require_writer(db, folder_id, user)
     _require_regular(folder, db.get(FolderSyncSource, folder_id), "create directories in")
     rel = _safe_rel_path(body.path)
     target = (Path(folder.path) / rel).resolve()
@@ -971,6 +1004,7 @@ def set_active_endpoint(
         sync_source_kind=_sync_source_kind(sync_src),
         sync_status=(sync_src.sync_status if sync_src else "idle"),
         owned=is_folder_owner(db, folder_id, user.id),
+        writable=can_write_folder(db, folder_id, user.id),
         active=bool(body.active),
         share_counts=share_counts_for_folder(db, folder_id),
     )
@@ -1033,7 +1067,7 @@ def put_dir_meta(
     The description is embedded into the folder's search cards, so a save
     enqueues a (deduped, no-op-when-unchanged) card rebuild.
     """
-    _require_owner(db, folder_id, user)
+    _require_writer(db, folder_id, user)
 
     subpath = (body.subpath or "").strip().strip("/")
     if subpath:
@@ -1222,23 +1256,32 @@ def list_folders(
             for f in rows
         ]
     visible = set(visible_folder_ids(db, user.id))
-    return [
-        _to_folder_out(
-            f,
-            has_sync_source=f.id in sync_by_folder,
-            sync_source_kind=_sync_source_kind(sync_by_folder.get(f.id)),
-            sync_status=(
-                sync_by_folder[f.id].sync_status
-                if f.id in sync_by_folder
-                else "idle"
-            ),
-            owned=is_folder_owner(db, f.id, user.id),
-            active=folder_active_for_user(db, f.id, user.id),
-            share_counts=share_by_folder.get(f.id, (0, 0)),
+    # One person-level admin lookup for the whole listing: every folder in
+    # ``visible`` is by definition shared with (or owned by) the caller,
+    # so admin ⇒ writable on each of them.
+    admin_writer = person_is_admin(db, user.email)
+    out: list[FolderOut] = []
+    for f in rows:
+        if f.id not in visible:
+            continue
+        owned = is_folder_owner(db, f.id, user.id)
+        out.append(
+            _to_folder_out(
+                f,
+                has_sync_source=f.id in sync_by_folder,
+                sync_source_kind=_sync_source_kind(sync_by_folder.get(f.id)),
+                sync_status=(
+                    sync_by_folder[f.id].sync_status
+                    if f.id in sync_by_folder
+                    else "idle"
+                ),
+                owned=owned,
+                writable=owned or admin_writer,
+                active=folder_active_for_user(db, f.id, user.id),
+                share_counts=share_by_folder.get(f.id, (0, 0)),
+            )
         )
-        for f in rows
-        if f.id in visible
-    ]
+    return out
 
 
 # States a reindex may target. ``deleted`` is deliberately absent — those
@@ -1297,7 +1340,7 @@ def reindex_folder(
     the duration of the running extract, with the browser timing out and
     the user seeing nothing happen.
     """
-    _require_owner(db, folder_id, user)
+    _require_writer(db, folder_id, user)
 
     rel_dir = (body.rel_dir or "").strip().strip("/")
     # Block path traversal — relative paths only, no ``..`` segments. Empty
@@ -1542,7 +1585,7 @@ def delete_file(
     user: CurrentUser = Depends(current_user),
 ) -> None:
     """Delete a single file (and its .voitta.meta sidecar if present) from a regular folder."""
-    folder = _require_owner(db, folder_id, user)
+    folder = _require_writer(db, folder_id, user)
     source = db.get(FolderSyncSource, folder_id)
     _require_regular(folder, source, "delete files from")
 
@@ -1577,7 +1620,7 @@ def delete_subdir(
     user: CurrentUser = Depends(current_user),
 ) -> None:
     """Delete a subdirectory and all its contents from a regular folder."""
-    folder = _require_owner(db, folder_id, user)
+    folder = _require_writer(db, folder_id, user)
     source = db.get(FolderSyncSource, folder_id)
     _require_regular(folder, source, "delete directories from")
 

@@ -218,8 +218,18 @@ def _push_folder_update(db: Session, folder: Folder, user: CurrentUser) -> None:
         active=folder_active_for_user(db, folder.id, user.id),
         share_counts=share_counts_for_folder(db, folder.id),
     )
+    # ``owned``/``writable``/``active`` are per-viewer — this event goes to
+    # every subscriber, and the client merges fields over its store, so
+    # broadcasting the mutating owner's values would mark the folder
+    # owned/writable in everyone else's tree. Send a partial payload
+    # (like sync/base.publish_folder_changed) and let each viewer keep
+    # their own flags.
     events.publish(
-        "folders", {"type": "folder.upserted", "folder": out.model_dump()}
+        "folders",
+        {
+            "type": "folder.upserted",
+            "folder": out.model_dump(exclude={"owned", "writable", "active"}),
+        },
     )
 
 

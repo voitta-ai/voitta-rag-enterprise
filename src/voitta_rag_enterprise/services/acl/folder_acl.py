@@ -193,6 +193,26 @@ def user_can_see_folder(session: Session, folder_id: int, user_id: int) -> bool:
     )
 
 
+def can_write_folder(session: Session, folder_id: int, user_id: int) -> bool:
+    """FILE-content write authorization: the owner, or an admin the folder
+    is shared with.
+
+    Admin is person-level (``person_is_admin`` — same seam as the Admin
+    gate), and the share requirement rides on ``user_can_see_folder``, so
+    community scoping bounds admins exactly like every other viewer.
+    Folder lifecycle (share / rename / delete / sync config) is NOT
+    covered here — those stay owner-only at the routes.
+    """
+    if is_folder_owner(session, folder_id, user_id):
+        return True
+    from .accounts import person_is_admin
+
+    row = session.get(User, user_id)
+    if row is None or not person_is_admin(session, row.email):
+        return False
+    return user_can_see_folder(session, folder_id, user_id)
+
+
 def is_folder_owner(session: Session, folder_id: int, user_id: int) -> bool:
     """True if ``user_id`` is the registered owner of ``folder_id``.
 

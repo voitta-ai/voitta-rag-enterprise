@@ -322,8 +322,9 @@ function renderDirMeta(folder, relDir) {
     editor.hidden = true;
     textEl.textContent = desc;
     textEl.hidden = !desc;
-    // Only the owner can edit; viewers just see the text (if any).
-    editBtn.hidden = !folder.owned;
+    // Writers (owner, or an admin the folder is shared with) can edit;
+    // viewers just see the text (if any).
+    editBtn.hidden = !folder.writable;
     editBtn.textContent = desc ? "Edit description" : "Add description";
 }
 

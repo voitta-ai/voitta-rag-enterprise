@@ -24,14 +24,15 @@ import { folders } from "../store.js";
 const $ = (sel) => document.querySelector(sel);
 
 // The currently-selected folder, but only if uploads are allowed into it:
-// it must exist, be owned by the user, and be a regular (non-synced)
-// folder. Synced folders (git, google drive, …) mirror a remote source,
-// so manually uploaded files would be clobbered or orphaned by the next
-// sync — the toolbar buttons are disabled for them and drag-and-drop must
-// refuse them too. Returns null when uploads are not allowed.
+// it must exist, be writable by the user (owner, or an admin it's shared
+// with), and be a regular (non-synced) folder. Synced folders (git,
+// google drive, …) mirror a remote source, so manually uploaded files
+// would be clobbered or orphaned by the next sync — the toolbar buttons
+// are disabled for them and drag-and-drop must refuse them too. Returns
+// null when uploads are not allowed.
 function uploadTargetFolder() {
     const folder = folders.get().find((f) => f.id === getSelectedFolderId());
-    if (!folder || !folder.owned) return null;
+    if (!folder || !folder.writable) return null;
     if ((folder.sync_source_kind || "regular") !== "regular") return null;
     return folder;
 }
