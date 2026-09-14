@@ -324,6 +324,14 @@ class FolderSyncSource(Base):
     gdl_account: Mapped[str | None] = mapped_column(default=None)
     gdl_path: Mapped[str | None] = mapped_column(default=None)
     gdl_paths: Mapped[str | None] = mapped_column(default=None)  # JSON list
+    # Linked folder (index in place, nothing copied). ``ll_path`` mirrors
+    # ``folder.path`` — the linked directory — so the row is self-describing
+    # for ``build_out`` / ``resolve_config`` (which by contract read only the
+    # row), the same arrangement as ``gdl_path`` for the Drive mount.
+    # ``ll_ignore`` is a JSON array of extra ignore patterns (path-segment
+    # names / globs) applied on top of the global list for this folder only.
+    ll_path: Mapped[str | None] = mapped_column(default=None)
+    ll_ignore: Mapped[str | None] = mapped_column(default=None)  # JSON list
     # Jira. ``jira_auth_method`` is "cloud" (HTTP Basic with email:api_token,
     # ``*.atlassian.net`` / REST v3) or "server" (Bearer PAT, Server/Data
     # Center / REST v2) — set explicitly so on-prem instances on custom

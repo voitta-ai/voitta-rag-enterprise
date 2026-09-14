@@ -15,7 +15,8 @@ from sqlalchemy.orm import Session
 from ..db.models import File, Folder
 from . import job_queue
 from .ignore import IgnoreMatcher
-from .ignore import from_settings as _ignore_from_settings
+from .ignore import for_folder as _ignore_for_folder
+from .in_place import indexes_in_place
 
 logger = logging.getLogger(__name__)
 
@@ -197,7 +198,11 @@ def scan_folder(
     Caller is responsible for committing the session.
     """
     if ignore is None:
-        ignore = _ignore_from_settings()
+        # Global patterns plus the folder's own (linked folders carry an
+        # ignore list on their sync row). Built here so every caller — the
+        # post-sync rescan, the startup scan, folder creation — gets the same
+        # answer without knowing about per-folder patterns.
+        ignore = _ignore_for_folder(session, folder)
     if max_file_bytes is None:
         from .indexing_caps import get_caps
 
@@ -210,10 +215,11 @@ def scan_folder(
     if scan_roots is None:
         return ScanResult(0, 0, 0)
 
-    # Cloud-local sidecar lives under data_dir, never inside the (read-only)
-    # Drive mount; regular folders keep it at the folder root.
+    # In-place folders (Drive mount, linked directory) never get a file
+    # written into their tree: their sidecar lives under data_dir. Regular
+    # folders keep it at the folder root.
     sidecar_file: Path | None = None
-    if folder.source_type == "google_drive_local":
+    if indexes_in_place(folder):
         from .sync.cloud_local import cloud_sidecar_path
 
         sidecar_file = cloud_sidecar_path(folder.id)

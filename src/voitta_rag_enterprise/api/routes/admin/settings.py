@@ -1,4 +1,5 @@
-"""Admin-typed settings (NFS root, directory toggles) + Clerk directory proxy."""
+"""Admin-typed settings (NFS root, linked-folder root, directory toggles) +
+Clerk directory proxy."""
 
 from __future__ import annotations
 
@@ -16,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Admin-typed settings (currently: NFS root)
+# Admin-typed settings (NFS root, linked-folder root, directory toggles)
 # ---------------------------------------------------------------------------
 
 
@@ -44,6 +45,11 @@ class AdminSettingsOut(BaseModel):
     # restart.
     nfs_available: bool
     nfs_status: str  # 'disabled' | 'ok' | 'missing' | 'not_a_directory' | 'unreadable'
+    # Linked-folder root: directories below it may be indexed IN PLACE by
+    # folder owners (nothing copied). Same availability contract as NFS.
+    link_root: str
+    link_available: bool
+    link_status: str
     # Directory toggles. ``native_directory_enabled`` shows/hides the local
     # Users + Groups tabs; ``clerk_enabled`` the read-only Clerk Users +
     # Companies tabs. Independent — any combination is valid. Display-only:
@@ -71,6 +77,7 @@ class _AdminSettingsPatchIn(BaseModel):
     # string is a valid value (disables the feature) so we can't use
     # ``None`` as the "leave alone" signal; require the key's presence.
     nfs_root: str | None = None
+    link_root: str | None = None
     native_directory_enabled: bool | None = None
     # Full-list replacement for the named instances (the cards UI always
     # sends the complete list). Validated per card below.
@@ -81,8 +88,9 @@ class _AdminSettingsPatchIn(BaseModel):
     clerk_secret_key: str | None = None
 
 
-def _probe_nfs_root(value: str) -> tuple[bool, str]:
-    """Classify the configured NFS root for the UI status pill."""
+def _probe_directory(value: str) -> tuple[bool, str]:
+    """Classify an admin-configured root directory (NFS / linked-folder)
+    for the UI status pill."""
     from pathlib import Path
 
     if not value:
@@ -102,11 +110,16 @@ def _probe_nfs_root(value: str) -> tuple[bool, str]:
 
 def _admin_settings_out() -> AdminSettingsOut:
     nfs_root = admin_store.get_nfs_root()
-    ok, status_str = _probe_nfs_root(nfs_root)
+    ok, status_str = _probe_directory(nfs_root)
+    link_root = admin_store.get_link_root()
+    link_ok, link_status = _probe_directory(link_root)
     return AdminSettingsOut(
         nfs_root=nfs_root,
         nfs_available=ok,
         nfs_status=status_str,
+        link_root=link_root,
+        link_available=link_ok,
+        link_status=link_status,
         native_directory_enabled=admin_store.get_native_directory_enabled(),
         clerk_instances=[
             ClerkInstanceOut(
@@ -136,24 +149,29 @@ def update_admin_settings(
 ) -> AdminSettingsOut:
     """Update one or more typed admin settings.
 
-    ``nfs_root`` is validated at write time. An empty string is
-    accepted (turns the feature off); a non-empty path must exist and
-    be readable, otherwise 400 — the admin gets immediate feedback
-    rather than a delayed "no files found" at sync time. The runtime
-    check still re-runs every browse / sync request, so a path that
-    disappears after configuration also degrades gracefully.
+    ``nfs_root`` and ``link_root`` are validated at write time. An empty
+    string is accepted (turns the feature off); a non-empty path must exist
+    and be readable, otherwise 400 — the admin gets immediate feedback rather
+    than a delayed "no files found" at sync time. The runtime check still
+    re-runs every browse / sync request, so a path that disappears after
+    configuration also degrades gracefully.
     """
     updates: dict[str, object] = {}
-    if body.nfs_root is not None:
-        value = body.nfs_root.strip()
+    for key, raw, label in (
+        ("nfs_root", body.nfs_root, "NFS root"),
+        ("link_root", body.link_root, "Linked-folder root"),
+    ):
+        if raw is None:
+            continue
+        value = raw.strip()
         if value:
-            ok, status_str = _probe_nfs_root(value)
+            ok, status_str = _probe_directory(value)
             if not ok:
                 raise HTTPException(
                     status.HTTP_400_BAD_REQUEST,
-                    f"NFS root {value!r} cannot be used: {status_str}",
+                    f"{label} {value!r} cannot be used: {status_str}",
                 )
-        updates["nfs_root"] = value
+        updates[key] = value
     if body.native_directory_enabled is not None:
         updates["native_directory_enabled"] = bool(body.native_directory_enabled)
 

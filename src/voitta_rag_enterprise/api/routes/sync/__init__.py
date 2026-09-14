@@ -13,6 +13,7 @@ handler registry so the core endpoints stay source-agnostic:
 - ``jira``          issue sync + project picker
 - ``confluence``    page sync + space picker
 - ``nfs``           admin-rooted mount + directory picker
+- ``local_link``    admin-rooted directory indexed in place (own connect endpoint)
 
 Per-folder routes live under ``/folders/{folder_id}/sync`` (``router``);
 the OAuth callbacks and other folder-agnostic endpoints live under

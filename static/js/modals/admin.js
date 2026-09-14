@@ -160,33 +160,64 @@ function refreshAdmin() {
 }
 
 // ---------------------------------------------------------------------------
-// Storage tab (NFS root)
+// Storage tab — admin-rooted directories.
+//
+// Two roots share one control shape (input + Save + Disable + status line):
+//   nfs_root   — subtrees below it are COPIED into a folder by the NFS connector
+//   link_root  — subtrees below it are indexed IN PLACE by linked folders
 // ---------------------------------------------------------------------------
 
+const ROOT_ROWS = [
+    {
+        key: "nfs_root", availKey: "nfs_available", statusKey: "nfs_status",
+        input: "#admin-nfs-root", status: "#admin-nfs-status",
+        save: "#admin-nfs-save", clear: "#admin-nfs-clear",
+        disabledText: "Disabled — folder owners will not see NFS as a sync option.",
+        availableText: (root) => `Available — folder owners can now configure NFS sync rooted at ${root}.`,
+        unavailableText: (status) => `Unavailable (${status}). Fix the mount or pick another path; users won't see NFS as a sync option.`,
+    },
+    {
+        key: "link_root", availKey: "link_available", statusKey: "link_status",
+        input: "#admin-link-root", status: "#admin-link-status",
+        save: "#admin-link-save", clear: "#admin-link-clear",
+        disabledText: "Disabled — folder owners will not see “Linked folder” as a sync option.",
+        availableText: (root) => `Available — folder owners can link directories under ${root} and index them in place.`,
+        unavailableText: (status) => `Unavailable (${status}). Fix the path; users won't see “Linked folder” as a sync option.`,
+    },
+];
+
 function renderStorageSettings(settings) {
-    const input = $("#admin-nfs-root");
-    const status = $("#admin-nfs-status");
-    const saveBtn = $("#admin-nfs-save");
-    const clearBtn = $("#admin-nfs-clear");
+    for (const spec of ROOT_ROWS) renderRootRow(spec, settings);
+}
+
+function renderRootRow(spec, settings) {
+    const input = $(spec.input);
+    const status = $(spec.status);
+    const saveBtn = $(spec.save);
+    const clearBtn = $(spec.clear);
     if (!input || !status || !saveBtn || !clearBtn) return;
     // Reset value to server truth on every refresh, but only when the
     // user isn't actively editing (focus on the input is treated as
     // "leave my draft alone"). Saves the awkward case where a
     // background WS refresh clobbers what they were typing.
     if (document.activeElement !== input) {
-        input.value = settings.nfs_root || "";
+        input.value = settings[spec.key] || "";
     }
-    paintNfsStatus(status, settings);
+    paintRootStatus(status, settings, spec);
     // Bind once.
     if (!saveBtn._bound) {
         saveBtn._bound = true;
         saveBtn.addEventListener("click", async () => {
             try {
-                const out = await api.adminUpdateSettings({ nfs_root: input.value.trim() });
-                input.value = out.nfs_root;
-                paintNfsStatus(status, out);
+                const out = await api.adminUpdateSettings({ [spec.key]: input.value.trim() });
+                input.value = out[spec.key];
+                paintRootStatus(status, out, spec);
             } catch (err) {
-                paintNfsStatus(status, { nfs_available: false, nfs_status: err.message || "save failed", nfs_root: input.value });
+                paintRootStatus(status, {
+                    [spec.availKey]: false,
+                    [spec.statusKey]: err.message || "save failed",
+                    [spec.key]: input.value,
+                }, spec);
             }
         });
     }
@@ -194,9 +225,9 @@ function renderStorageSettings(settings) {
         clearBtn._bound = true;
         clearBtn.addEventListener("click", async () => {
             try {
-                const out = await api.adminUpdateSettings({ nfs_root: "" });
+                const out = await api.adminUpdateSettings({ [spec.key]: "" });
                 input.value = "";
-                paintNfsStatus(status, out);
+                paintRootStatus(status, out, spec);
             } catch (err) {
                 alert(err.message);
             }
@@ -204,23 +235,23 @@ function renderStorageSettings(settings) {
     }
 }
 
-function paintNfsStatus(el, settings) {
-    const root = settings.nfs_root || "";
-    const status = settings.nfs_status || (root ? "ok" : "disabled");
-    const available = !!settings.nfs_available;
+function paintRootStatus(el, settings, spec) {
+    const root = settings[spec.key] || "";
+    const status = settings[spec.statusKey] || (root ? "ok" : "disabled");
+    const available = !!settings[spec.availKey];
     el.hidden = false;
     el.classList.remove("ok", "warn", "err");
     if (!root) {
         el.classList.add("warn");
-        el.textContent = "Disabled — folder owners will not see NFS as a sync option.";
+        el.textContent = spec.disabledText;
         return;
     }
     if (available) {
         el.classList.add("ok");
-        el.textContent = `Available — folder owners can now configure NFS sync rooted at ${root}.`;
+        el.textContent = spec.availableText(root);
     } else {
         el.classList.add("err");
-        el.textContent = `Unavailable (${status}). Fix the mount or pick another path; users won't see NFS as a sync option.`;
+        el.textContent = spec.unavailableText(status);
     }
 }
 

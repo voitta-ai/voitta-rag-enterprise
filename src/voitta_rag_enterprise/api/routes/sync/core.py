@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from ....db.models import FolderSyncSource
 from ....services import events, job_queue
 from ....services.acl import CurrentUser
+from ....services.in_place import indexes_in_place
 from ...deps import current_user, db_session
 from . import registry
 from .base import (
@@ -34,6 +35,7 @@ from .github import GithubSyncIn, GithubSyncOut
 from .google_drive import GoogleDriveSyncIn, GoogleDriveSyncOut
 from .google_local import GoogleDriveLocalSyncOut
 from .jira import JiraSyncIn, JiraSyncOut
+from .local_link import LocalLinkSyncOut
 from .microsoft import SharePointSyncIn, SharePointSyncOut, TeamsSyncIn, TeamsSyncOut
 from .nfs import NfsSyncIn, NfsSyncOut
 
@@ -69,6 +71,7 @@ class SyncSourceOut(BaseModel):
     github: GithubSyncOut | None = None
     google_drive: GoogleDriveSyncOut | None = None
     google_drive_local: GoogleDriveLocalSyncOut | None = None
+    local_link: LocalLinkSyncOut | None = None
     nfs: NfsSyncOut | None = None
     sharepoint: SharePointSyncOut | None = None
     teams: TeamsSyncOut | None = None
@@ -180,6 +183,17 @@ def delete_sync_source(
     src = db.get(FolderSyncSource, folder_id)
     if src is None:
         return
+    if indexes_in_place(folder):
+        # The sync row is what marks this folder as external/read-only. Dropping
+        # it would leave a bare folder pointing at a tree Voitta doesn't own —
+        # and accepting uploads and deletes into it. Deleting the folder removes
+        # the index rows and leaves the tree untouched.
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "This folder indexes an external directory in place; its sync source "
+            "cannot be removed on its own. Delete the folder instead — the "
+            "directory is left untouched.",
+        )
     db.delete(src)
     db.commit()
     publish_folder_changed(folder, has_sync_source=False)

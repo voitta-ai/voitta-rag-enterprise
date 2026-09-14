@@ -12,7 +12,7 @@ from voitta_rag_enterprise.services.sync import (
 
 EXPECTED_TYPES = {
     "github", "google_drive", "google_drive_local", "nfs", "sharepoint",
-    "teams", "jira", "confluence",
+    "teams", "jira", "confluence", "local_link",
 }
 
 
@@ -29,11 +29,13 @@ def test_get_connector_resolves_each_type(source_type: str) -> None:
     assert isinstance(c.supports_progress, bool)
 
 
-def test_only_github_lacks_progress() -> None:
+def test_only_github_and_local_link_lack_progress() -> None:
+    """local_link has nothing to report: its sync() is a directory check and
+    the work happens in the post-sync rescan."""
     progressless = {
         t for t in EXPECTED_TYPES if not get_connector(t).supports_progress
     }
-    assert progressless == {"github"}
+    assert progressless == {"github", "local_link"}
 
 
 def test_unknown_source_type_raises() -> None:
@@ -57,6 +59,7 @@ def _blank_row():
         "gd_service_account_json "
         "nfs_subpaths nfs_subpath "
         "gdl_account gdl_path gdl_paths folder_id "
+        "ll_path ll_ignore "
         "ms_tenant_id ms_client_id ms_client_secret ms_cert_pem ms_refresh_token "
         "ms_auth_method sp_selected_sites sp_all_sites "
         "tm_user_mode tm_user_id tm_include_attended "
@@ -75,6 +78,7 @@ def _blank_row():
         ("google_drive", {"drive_folders", "files_only", "auth"}),
         ("google_drive_local", {"gdl_paths", "gdl_account", "folder_id"}),
         ("nfs", {"nfs_subpaths"}),
+        ("local_link", {"ignore"}),
         ("sharepoint", {"auth", "sites", "all_sites"}),
         ("teams", {"auth", "user_mode", "user_id", "include_attended"}),
         ("jira", {"auth", "projects", "all_projects", "jql_extra"}),

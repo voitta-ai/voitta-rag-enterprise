@@ -74,6 +74,7 @@ SYNC_SOURCE_TYPES = {
     "google_drive",
     "google_drive_local",
     "nfs",
+    "local_link",
     "sharepoint",
     "teams",
     "jira",
@@ -101,7 +102,7 @@ def test_sync_registry_covers_every_source_type() -> None:
     # registerSource never runs at import time).
     index = (sync_dir / "index.js").read_text()
     connectors = {
-        "github", "google_drive", "google_local", "nfs",
+        "github", "google_drive", "google_local", "nfs", "local_link",
         "microsoft", "jira", "confluence",
     }
     for name in connectors:

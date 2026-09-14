@@ -186,6 +186,13 @@ export const api = {
     nfsStatus: () => req("GET", "/api/sync/nfs/status"),
     nfsBrowse: (rel = "") =>
         req("GET", `/api/sync/nfs/browse?rel=${encodeURIComponent(rel || "")}`),
+    // Linked folder — index a host directory IN PLACE (nothing copied). Same
+    // admin-rooted probe + scoped browse shape as NFS; connect re-points the
+    // opened folder at the chosen directory and enqueues the first rescan.
+    linkStatus: () => req("GET", "/api/sync/link/status"),
+    linkBrowse: (rel = "") =>
+        req("GET", `/api/sync/link/browse?rel=${encodeURIComponent(rel || "")}`),
+    linkConnect: (body) => req("POST", "/api/sync/link/connect", body),
     // Google Drive LOCAL (desktop, no credentials). Enumerate signed-in
     // accounts, browse the (free, stub) tree one level at a time, then
     // register the chosen subtree as an indexed-in-place folder. Read-only:
