@@ -88,6 +88,11 @@ function _sourceIcon(kind) {
             // Custom teal folder with network-topology glyph (hub + spokes).
             // Teal body immediately distinguishes it from all yellow folders.
             return `${M_FOLDER}/folder-network.svg`;
+        case "local_link":
+            // A directory on the host indexed in place — the server-rack
+            // folder says "lives on this machine", distinct from the network
+            // (NFS copy) and upload folders.
+            return `${M_FOLDER}/folder-server.svg`;
         case "sharepoint":
             return `${SIMPLE}/sharepoint.svg`;
         case "jira":

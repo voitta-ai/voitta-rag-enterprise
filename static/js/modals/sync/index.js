@@ -11,6 +11,7 @@ import "./github.js";
 import "./google_drive.js";
 import "./google_local.js";
 import "./nfs.js";
+import "./local_link.js";
 import "./microsoft.js";
 import "./jira.js";
 import "./confluence.js";

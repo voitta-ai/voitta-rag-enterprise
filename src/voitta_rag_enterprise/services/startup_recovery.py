@@ -57,7 +57,7 @@ from sqlalchemy.orm import Session
 from ..db.models import Chunk, File, Folder, Image, Job
 from . import job_queue
 from .ignore import IgnoreMatcher
-from .ignore import from_settings as _ignore_from_settings
+from .ignore import for_folder as _ignore_for_folder
 from .scanner import file_present_in_scope, resolve_scan_roots
 
 logger = logging.getLogger(__name__)
@@ -104,15 +104,20 @@ class RecoveryReport:
 
 @dataclass
 class _Scope:
-    """A folder's disk scope: root plus the subtrees a scan would walk.
+    """A folder's disk scope: root, the subtrees a scan would walk, and the
+    ignore matcher that scan would apply.
 
     ``scan_roots is None`` means the disk state is unknowable right now
     (missing root, offline cloud mount) or out of bounds (folder disabled) —
     every presence probe answers ``None`` and the sweeps skip the folder.
+
+    ``ignore`` is per folder (global patterns plus the folder's own) so the
+    sweep and the scan can never disagree about whether a file counts.
     """
 
     root: Path
     scan_roots: list[Path] | None
+    ignore: IgnoreMatcher
 
 
 def _load_scopes(session: Session) -> dict[int, _Scope]:
@@ -121,13 +126,16 @@ def _load_scopes(session: Session) -> dict[int, _Scope]:
         # Disabled folders sit outside the scanner's and watcher's scope;
         # recovery must not re-initiate work for them either.
         roots = resolve_scan_roots(session, folder) if folder.enabled else None
-        scopes[folder.id] = _Scope(root=Path(folder.path), scan_roots=roots)
+        scopes[folder.id] = _Scope(
+            root=Path(folder.path),
+            scan_roots=roots,
+            ignore=_ignore_for_folder(session, folder),
+        )
     return scopes
 
 
 def _present(
     scopes: dict[int, _Scope],
-    ignore: IgnoreMatcher,
     folder_id: int,
     rel_path: str,
 ) -> bool | None:
@@ -135,7 +143,7 @@ def _present(
     scope = scopes.get(folder_id)
     if scope is None or scope.scan_roots is None:
         return None
-    return file_present_in_scope(scope.root, scope.scan_roots, ignore, rel_path)
+    return file_present_in_scope(scope.root, scope.scan_roots, scope.ignore, rel_path)
 
 
 def _cancel_job(job: Job, reason: str) -> None:
@@ -183,7 +191,6 @@ def _resurrect(session: Session, file: File) -> None:
 def _sweep_jobs(
     session: Session,
     scopes: dict[int, _Scope],
-    ignore: IgnoreMatcher,
     report: RecoveryReport,
 ) -> set[int]:
     """Phase A: queued-job hygiene.
@@ -240,7 +247,7 @@ def _sweep_jobs(
             continue
 
         if job.kind == "delete_file":
-            if _present(scopes, ignore, file.folder_id, file.rel_path) is True:
+            if _present(scopes, file.folder_id, file.rel_path) is True:
                 # The bytes are right there — this delete is a leftover from
                 # a scan/watcher race, not a user intent we can still trust.
                 _cancel_job(job, "target file present on disk")
@@ -255,7 +262,6 @@ def _sweep_jobs(
 def _sweep_files(
     session: Session,
     scopes: dict[int, _Scope],
-    ignore: IgnoreMatcher,
     live_deletes: set[int],
     report: RecoveryReport,
 ) -> None:
@@ -274,7 +280,7 @@ def _sweep_files(
     ).scalars():
         if file.id in live_deletes:
             continue
-        on_disk = _present(scopes, ignore, file.folder_id, file.rel_path)
+        on_disk = _present(scopes, file.folder_id, file.rel_path)
         if on_disk is True:
             _resurrect(session, file)
             report.resurrected_files += 1
@@ -314,7 +320,7 @@ def _sweep_files(
     ).scalars():
         if not (file.error or "").startswith(_RETRYABLE_ERROR_PREFIXES):
             continue
-        if _present(scopes, ignore, file.folder_id, file.rel_path) is not True:
+        if _present(scopes, file.folder_id, file.rel_path) is not True:
             continue
         _resurrect(session, file)
         report.retried_errors += 1
@@ -325,7 +331,6 @@ def run_startup_recovery() -> RecoveryReport:
     from ..db.database import session_scope
 
     report = RecoveryReport()
-    ignore = _ignore_from_settings()
     with session_scope() as session:
         scopes = _load_scopes(session)
         unreachable = sorted(
@@ -337,8 +342,8 @@ def run_startup_recovery() -> RecoveryReport:
                 "leaving their rows untouched",
                 unreachable,
             )
-        live_deletes = _sweep_jobs(session, scopes, ignore, report)
-        _sweep_files(session, scopes, ignore, live_deletes, report)
+        live_deletes = _sweep_jobs(session, scopes, report)
+        _sweep_files(session, scopes, live_deletes, report)
 
     if report.total():
         logger.warning(

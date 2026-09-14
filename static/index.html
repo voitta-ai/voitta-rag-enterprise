@@ -408,6 +408,25 @@
                         </div>
                         <div id="admin-nfs-status" class="admin-nfs-status" hidden></div>
                     </section>
+                    <section class="admin-section">
+                        <header>
+                            <h4>Linked folders</h4>
+                            <span class="hint">
+                                Absolute path to a directory on the host whose subdirectories
+                                folder owners may index <strong>in place</strong> — nothing is
+                                copied and nothing is written into them. Leave blank to
+                                disable. Validated when you save and re-checked on every
+                                request.
+                            </span>
+                        </header>
+                        <div class="form-row admin-nfs-row">
+                            <label for="admin-link-root">Linked-folder root</label>
+                            <input id="admin-link-root" type="text" placeholder="/mnt/data" />
+                            <button id="admin-link-save" type="button" class="btn-primary">Save</button>
+                            <button id="admin-link-clear" type="button">Disable</button>
+                        </div>
+                        <div id="admin-link-status" class="admin-nfs-status" hidden></div>
+                    </section>
                 </div>
             </div>
         </div>
@@ -725,6 +744,9 @@
                          root and the path is reachable. sync.js drops
                          this <option> on open via setNfsAvailability. -->
                     <option value="nfs" id="sync-type-option-nfs" hidden>NFS share</option>
+                    <!-- Shown only when the admin has configured a linked-folder
+                         root and the path is reachable (local_link.js). -->
+                    <option value="local_link" id="sync-type-option-local_link" hidden>Linked folder (index in place)</option>
                 </select>
 
                 <div id="sync-form-github">
@@ -1403,6 +1425,47 @@
                     </div>
                     <ul id="sync-nfs-tree" class="nfs-tree" style="margin:0;padding:6px 0 6px 4px;max-height:40vh;overflow:auto;border:1px solid var(--border, #ccc);border-radius:4px;list-style:none;font-size:13px;"></ul>
                     <p class="hint" id="sync-nfs-hint" style="margin-top:6px;">Click ▶ to expand, click a checkbox to (de)select that subtree.</p>
+                </div>
+
+                <!-- Linked folder: a directory on the host indexed IN PLACE.
+                     Nothing is copied and nothing is written into it; refresh
+                     is the auto-sync rescan. One directory per folder — the
+                     picker descends one level at a time under the admin's
+                     linked-folder root (local_link.js). -->
+                <div id="sync-form-local_link" hidden>
+                    <p class="hint" style="margin:0 0 6px;">
+                        Index a directory where it is. Nothing is copied and Voitta never
+                        writes into it; uploads and deletes are disabled for this folder.
+                        Pick one directory under the admin's linked-folder root.
+                    </p>
+                    <label>Linked-folder root (set by admin)</label>
+                    <input type="text" id="sync-link-root-display" readonly
+                        placeholder="(set the linked-folder root in Admin → Storage)"
+                        class="readonly-input">
+
+                    <label>Directory to link</label>
+                    <div class="branches-row" style="margin-bottom:6px;">
+                        <button type="button" id="sync-link-up" class="btn btn-secondary btn-sm">↑ Up</button>
+                        <span id="sync-link-breadcrumb" class="hint" style="margin:0;word-break:break-all;">/</span>
+                        <button type="button" id="sync-link-use" class="btn btn-secondary btn-sm" style="margin-left:auto;" disabled>Use this directory</button>
+                    </div>
+                    <ul id="sync-link-list" class="nfs-tree" style="margin:0;padding:4px 0;max-height:32vh;overflow:auto;border:1px solid var(--border,#ccc);border-radius:4px;list-style:none;font-size:13px;"></ul>
+                    <p class="hint" id="sync-link-selected" style="margin-top:6px;">Nothing selected.</p>
+
+                    <label for="sync-link-ignore">Skip (one name or glob per line)</label>
+                    <textarea id="sync-link-ignore" rows="4" spellcheck="false"
+                        placeholder="e.g. node_modules&#10;*.tmp&#10;build"
+                        style="width:100%;font-family:monospace;font-size:12px;"></textarea>
+                    <p class="hint" style="margin-top:4px;">
+                        Matched against every path segment, so a directory name here skips
+                        its whole subtree. Applied on top of the global ignore list.
+                    </p>
+
+                    <div class="actions actions-right" style="margin-top:8px;">
+                        <button type="button" id="sync-link-rescan" class="btn btn-secondary btn-sm" hidden>Rescan now</button>
+                        <button type="button" id="sync-link-connect" class="btn btn-primary btn-sm" disabled>Link &amp; index into this folder</button>
+                    </div>
+                    <p id="sync-link-status" class="hint" hidden style="margin-top:6px;"></p>
                 </div>
 
                 <!-- Auto-sync schedule. Common to all source types. The

@@ -179,6 +179,11 @@ def init_db() -> None:
         # JSON array of selected subtree paths (multi-select). NULL-safe; code
         # falls back to the single gdl_path when this is empty.
         _ensure_column(raw_conn, "folder_sync_sources", "gdl_paths", "TEXT")
+        # Linked folder (indexed in place): the linked directory (mirrors
+        # folder.path) and a JSON array of extra ignore patterns. NULL-safe;
+        # no existing row is local_link.
+        _ensure_column(raw_conn, "folder_sync_sources", "ll_path", "TEXT")
+        _ensure_column(raw_conn, "folder_sync_sources", "ll_ignore", "TEXT")
         # Jira sync. base_url + auth_method ("cloud"|"server") + email/token,
         # plus the per-folder project selection (JSON array of {key,name}) and
         # an "all projects" flag. Optional jira_jql is a power-user filter

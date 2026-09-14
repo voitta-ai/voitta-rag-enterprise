@@ -33,6 +33,7 @@ from ...services.acl import (
     user_can_see_folder,
     visible_folder_ids,
 )
+from ...services.in_place import indexes_in_place
 from ...services.scanner import scan_folder
 from ...services.watcher import unwatch_folder_in_default, watch_folder_in_default
 from ..deps import current_user, db_session
@@ -147,6 +148,8 @@ def _sync_source_kind(source: FolderSyncSource | None) -> str:
         return "google_drive"
     if source.source_type == "nfs":
         return "nfs"
+    if source.source_type == "local_link":
+        return "local_link"
     if source.source_type == "sharepoint":
         return "sharepoint"
     if source.source_type == "teams":
@@ -1513,16 +1516,18 @@ def delete_folder(
     settings = get_settings()
     root = settings.root_path
     folder_path = Path(folder_path_str)
-    # Cloud-local folders are indexed IN PLACE on the user's read-only Drive
-    # mount — their path is NOT app-managed storage. Never wipe it from disk:
-    # a delete inside ~/Library/CloudStorage would propagate UP to Google Drive
-    # via File Provider and destroy the user's cloud data. This explicit guard
-    # is path-independent (does not rely on the mount happening to fall outside
-    # VOITTA_ROOT_PATH), removing only the DB rows.
-    if folder.source_type == "google_drive_local":
+    # In-place folders (a Drive mount, a linked directory) are indexed where
+    # they are — their path is NOT app-managed storage. Never wipe it from
+    # disk: a delete inside ~/Library/CloudStorage would propagate UP to
+    # Google Drive via File Provider, and a linked directory belongs to
+    # whoever produces it. This explicit guard is path-independent (does not
+    # rely on the tree happening to fall outside VOITTA_ROOT_PATH), removing
+    # only the DB rows.
+    if indexes_in_place(folder):
         logger.info(
-            "delete_folder %d is cloud-local (read-only Drive mount) — "
-            "removing index rows only, leaving Drive content untouched", folder_id
+            "delete_folder %d indexes %s in place (%s) — removing index rows "
+            "only, leaving the directory untouched",
+            folder_id, folder_path_str, folder.source_type,
         )
     elif root is not None and folder_path.exists():
         try:
@@ -1686,14 +1691,12 @@ def list_folder_dirs(
     folder = db.get(Folder, folder_id)
     if folder is None or not user_can_see_folder(db, folder_id, user.id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Folder not found")
-    # Cloud-local (Google Drive) folders: ``folder.path`` is the whole account
-    # MOUNT, so walking it would return EVERY directory in the Drive as an empty
-    # "ghost dir" — flooding the tree with folders the user never selected (and
-    # an expensive full-Drive walk on every boot). Ghost dirs only make sense
-    # for upload folders (mkdir → upload into). For a read-only Drive mirror we
-    # seed nothing: the tree is built purely from indexed file paths, so only
-    # folders that actually contain content appear.
-    if folder.source_type == "google_drive_local":
+    # In-place folders (Drive mount, linked directory): ghost dirs only make
+    # sense for upload folders (mkdir → upload into), which these can never be.
+    # Walking a Drive mount would also return EVERY directory in the Drive, and
+    # a linked tree can hold tens of thousands. Seed nothing: the tree is built
+    # purely from indexed file paths, so only directories with content appear.
+    if indexes_in_place(folder):
         return []
     root = Path(folder.path)
     if not root.is_dir():

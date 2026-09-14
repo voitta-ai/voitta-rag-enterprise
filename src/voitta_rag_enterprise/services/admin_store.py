@@ -42,14 +42,15 @@ ALLOWED_USERS = "allowed_users.txt"
 BLOCKED_USERS = "blocked_users.txt"
 SETTINGS_JSON = "settings.json"
 
-# Default typed settings shipped with the app. ``nfs_root`` is empty
-# until an admin sets it; an empty value disables the NFS connector
-# entirely (the UI hides the option, the API rejects configuration).
-# ``clerk_enabled`` / ``clerk_secret_key`` drive the read-only Clerk
-# directory view in the admin UI; an empty stored key falls back to
-# ``CLERK_SECRET_KEY`` from .env (see :func:`get_clerk_secret_key`).
+# Default typed settings shipped with the app. ``nfs_root`` and
+# ``link_root`` are empty until an admin sets them; an empty value disables
+# the respective connector entirely (the UI hides the option, the API
+# rejects configuration). ``clerk_enabled`` / ``clerk_secret_key`` drive the
+# read-only Clerk directory view in the admin UI; an empty stored key falls
+# back to ``CLERK_SECRET_KEY`` from .env (see :func:`get_clerk_secret_key`).
 _DEFAULT_SETTINGS: dict[str, object] = {
     "nfs_root": "",
+    "link_root": "",
     "native_directory_enabled": True,
     "clerk_enabled": False,
     "clerk_secret_key": "",
@@ -241,6 +242,18 @@ def get_nfs_root() -> str:
     without any restart.
     """
     raw = load_settings().get("nfs_root", "")
+    return str(raw) if raw is not None else ""
+
+
+def get_link_root() -> str:
+    """Return the admin-configured linked-folder root, or empty string.
+
+    Directories below it may be indexed IN PLACE by linked folders (never
+    copied). Same contract as :func:`get_nfs_root`: empty means disabled,
+    and every read point re-checks existence so a path that disappears
+    flips the feature off without a restart.
+    """
+    raw = load_settings().get("link_root", "")
     return str(raw) if raw is not None else ""
 
 

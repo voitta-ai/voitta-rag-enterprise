@@ -32,6 +32,7 @@ from ..db.models import File, Folder
 from . import job_queue
 from .ignore import IgnoreMatcher
 from .ignore import from_settings as _ignore_from_settings
+from .in_place import indexes_in_place
 
 logger = logging.getLogger(__name__)
 
@@ -304,6 +305,16 @@ class WatcherManager:
 
     def watch(self, folder: Folder, max_file_bytes: int, ignore: IgnoreMatcher) -> None:
         if folder.id in self._managed_dirname or folder.id in self._watches:
+            return
+        if indexes_in_place(folder):
+            # Read-only trees indexed where they are (Drive mount, linked
+            # directory) are refreshed by the auto-sync rescan, never by
+            # inotify: Drive FSEvents are unreliable, and a linked tree can
+            # hold tens of thousands of directories — one recursive watch
+            # there would eat the inotify budget every other folder shares.
+            # This is the single choke point both startup
+            # (from_settings_for_all_folders) and folder-create go through.
+            logger.info("watcher: folder %d indexes in place — not watched", folder.id)
             return
         root = Path(folder.path)
         if self._is_managed(root):

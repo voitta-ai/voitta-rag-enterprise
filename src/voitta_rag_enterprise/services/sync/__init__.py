@@ -6,8 +6,10 @@ existing pipeline. Each connector is invoked from a queue job of kind
 ``sync`` so progress, errors, and retries land in the same UI as extract /
 embed jobs.
 
-Supported ``source_type`` values: ``github``, ``google_drive``, ``nfs``,
-``sharepoint``, ``teams``.
+Supported ``source_type`` values: ``github``, ``google_drive``,
+``google_drive_local``, ``nfs``, ``sharepoint``, ``teams``, ``jira``,
+``confluence``, and ``local_link`` — the one connector that mirrors nothing:
+a linked folder is indexed where it is (see ``services.in_place``).
 """
 
 from .base import SyncConnector
@@ -15,6 +17,7 @@ from .confluence import ConfluenceConnector
 from .github import GitHubConnector
 from .google_drive import GoogleDriveConnector
 from .jira import JiraConnector
+from .local_link import LocalLinkConnector
 from .nfs import NfsConnector
 from .registry import SyncRegistry, get_registry
 from .sharepoint import SharePointConnector
@@ -25,6 +28,7 @@ __all__ = [
     "GitHubConnector",
     "GoogleDriveConnector",
     "JiraConnector",
+    "LocalLinkConnector",
     "NfsConnector",
     "SharePointConnector",
     "SyncConnector",

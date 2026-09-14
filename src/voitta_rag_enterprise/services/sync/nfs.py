@@ -44,6 +44,8 @@ from typing import Any, Callable
 
 from ..admin_store import get_nfs_root
 from .base import SyncConnector
+from .localfs import list_children as _list_children_under
+from .localfs import resolve_under
 
 logger = logging.getLogger(__name__)
 
@@ -79,38 +81,10 @@ class NfsSyncStats:
 
 
 def _resolve_under(root: Path, rel: str) -> Path:
-    """Return ``root / rel`` resolved on the filesystem AND confirmed to
-    still live under ``root``.
-
-    Raises ``ValueError`` for ``..``-escapes, absolute ``rel`` values,
-    or symlink redirections that lead outside ``root``. The strict
-    resolve uses ``Path.resolve(strict=False)`` then verifies the
-    common-ancestor relationship — both ``root`` and the candidate are
-    resolved so trailing-slash / case-fold / symlink quirks are
-    handled by the OS rather than by string ops.
-    """
-    root_abs = root.resolve(strict=False)
-    raw = (rel or "").strip()
-    # Special-case bare "" or "/" → root itself. Anything else with a
-    # leading slash is an absolute path the caller shouldn't be asking
-    # for; same for Windows-style drive-letter prefixes.
-    if raw in ("", "/"):
-        return root_abs
-    if raw.startswith("/") or raw.startswith("\\") or (len(raw) >= 2 and raw[1] == ":"):
-        raise ValueError("absolute paths are not allowed")
-    rel = raw
-    # Pre-flight: explicit ``..`` segment rejection. A symlink can still
-    # try to escape, but we'll catch that via the post-resolve check.
-    parts = [seg for seg in rel.split("/") if seg not in ("", ".")]
-    if any(p == ".." for p in parts):
-        raise ValueError("path traversal (``..``) is not allowed")
-    candidate = root_abs.joinpath(*parts) if parts else root_abs
-    resolved = candidate.resolve(strict=False)
-    try:
-        resolved.relative_to(root_abs)
-    except ValueError as e:  # pragma: no cover — defensive, exercised in tests
-        raise ValueError("resolved path escapes the NFS root") from e
-    return resolved
+    """NFS-labelled wrapper over :func:`localfs.resolve_under` — the name the
+    REST layer and the tests import. Same guarantees: no ``..`` escapes, no
+    absolute paths, no symlink redirections outside ``root``."""
+    return resolve_under(root, rel, root_label="NFS root")
 
 
 def canonicalise_subpaths(subpaths: list[str]) -> list[str]:
@@ -167,37 +141,7 @@ def list_children(rel: str) -> list[dict[str, str]]:
     root = get_nfs_root()
     if not root:
         raise ValueError("NFS root is not configured")
-    root_path = Path(root)
-    if not root_path.is_dir():
-        raise FileNotFoundError(f"NFS root does not exist: {root}")
-    target = _resolve_under(root_path, rel)
-    if not target.exists():
-        raise FileNotFoundError(f"path not found: {rel}")
-    if not target.is_dir():
-        raise NotADirectoryError(f"path is not a directory: {rel}")
-    out: list[dict[str, str]] = []
-    try:
-        with os.scandir(target) as it:
-            for entry in it:
-                # Skip files (the picker only walks dirs) and hidden
-                # entries — same conventions as Finder / VS Code.
-                if entry.name.startswith("."):
-                    continue
-                try:
-                    if not entry.is_dir(follow_symlinks=True):
-                        continue
-                except OSError:
-                    # Symlink to a missing target → skip silently.
-                    continue
-                # Relative path back to the root, for the UI's next
-                # browse call. Posix-style separator so the round-trip
-                # to the DB stays canonical.
-                child_rel = str(target.joinpath(entry.name).resolve().relative_to(root_path.resolve()))
-                out.append({"name": entry.name, "rel_path": child_rel})
-    except PermissionError as e:
-        raise PermissionError(f"cannot list {rel}: {e}") from e
-    out.sort(key=lambda x: x["name"].lower())
-    return out
+    return _list_children_under(Path(root), rel, root_label="NFS root")
 
 
 # ---------------------------------------------------------------------------

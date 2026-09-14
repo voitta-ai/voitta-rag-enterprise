@@ -69,20 +69,22 @@ export function setSyncType(t) {
     applyChrome();
 }
 
-// The local "This Mac" Google Drive tab CREATES a new indexed folder via its
-// own "Connect & index" button, so the shared Drive-folder selector and the
-// standard Save / Sync-now / Remove footer + auto-sync row don't apply to it.
-// A handler opts in via hidesChrome() — google_drive_local returns true iff
-// source == google_drive AND its sub-tab == local.
+// Handlers whose server side is their own connect endpoint (google_drive_local,
+// local_link) have their own "Connect" button, so the shared Drive-folder
+// selector and the standard Save / Sync-now / Remove footer don't apply to
+// them. A handler opts in via hidesChrome(). The auto-sync row is hidden with
+// the footer unless the handler also declares keepsAutoSync() — a linked
+// folder keeps it because that row IS its rescan schedule.
 export function applyChrome() {
-    const local = [...SOURCES.values()].some((h) => h.hidesChrome?.() === true);
+    const hider = [...SOURCES.values()].find((h) => h.hidesChrome?.() === true);
+    const local = hider !== undefined;
     const shared = $("#sync-gd-shared");
     if (shared) shared.hidden = local;
     $("#sync-save").hidden = local;
     $("#sync-trigger").hidden = local;
     if (local) $("#sync-delete").hidden = true;
     const autoRow = document.querySelector(".sync-auto-row");
-    if (autoRow) autoRow.hidden = local;
+    if (autoRow) autoRow.hidden = local && hider.keepsAutoSync?.() !== true;
 }
 
 export function closeSyncModal() {
@@ -165,7 +167,7 @@ export async function loadSyncSource() {
     }
 }
 
-function renderSyncStatus(src) {
+export function renderSyncStatus(src) {
     const line = $("#sync-status-line");
     if (!src) { line.hidden = true; return; }
 
