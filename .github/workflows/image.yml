@@ -20,6 +20,15 @@ on:
         description: "Image tag to push (default: short SHA)"
         required: false
         type: string
+  workflow_call:
+    # Invoked by release.yml's tag-and-release job. A tag created with
+    # GITHUB_TOKEN does not trigger the `tags: ["v*.*.*"]` push event
+    # above, so the release job calls this workflow directly instead.
+    inputs:
+      release_tag:
+        description: "Semver tag being released (e.g. v0.1.1)"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -64,6 +73,29 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Determine release tag
+        # workflow_call gives us the version explicitly (a GITHUB_TOKEN-
+        # created tag doesn't fire the push:tags event below). A direct
+        # tag push or workflow_dispatch on a tag ref has no such input,
+        # so fall back to github.ref in that case. Anything else (a plain
+        # branch push or a workflow_dispatch not on a tag) isn't a
+        # release build - leave it empty and the semver/latest tags stay
+        # disabled below.
+        id: ver
+        env:
+          RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [ -n "$RELEASE_TAG_INPUT" ]; then
+            release_tag="$RELEASE_TAG_INPUT"
+          elif [[ "$REF" == refs/tags/v* ]]; then
+            release_tag="${REF#refs/tags/}"
+          else
+            release_tag=""
+          fi
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+
       - name: Compute tags
         id: meta
         uses: docker/metadata-action@v5
@@ -71,10 +103,10 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{version}},value=${{ steps.ver.outputs.release_tag }},enable=${{ steps.ver.outputs.release_tag != '' }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.ver.outputs.release_tag }},enable=${{ steps.ver.outputs.release_tag != '' }}
             type=sha,prefix=sha-
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=latest,enable=${{ steps.ver.outputs.release_tag != '' }}
             type=raw,value=${{ inputs.tag }},enable=${{ inputs.tag != '' }}
 
       - name: Build and push

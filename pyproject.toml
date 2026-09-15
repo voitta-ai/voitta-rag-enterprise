@@ -1,6 +1,6 @@
 [project]
 name = "voitta-rag-enterprise"
-version = "0.1.0"
+version = "0.1.1"
 description = "Voitta RAG Enterprise — filesystem-driven RAG with first-class image support."
 readme = "README.md"
 license = "AGPL-3.0-or-later"
