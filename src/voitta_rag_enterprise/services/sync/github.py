@@ -335,13 +335,53 @@ def _inject_token_into_url(repo_url: str, username: str, token: str) -> str:
     return urlunparse(parsed._replace(netloc=netloc))
 
 
+# Credentials in a ``scheme://user:secret@host`` URL — the exact shape
+# ``_inject_token_into_url`` produces, and the one git quotes straight back in
+# "Authentication failed for '…'" / "repository '…' not found". The username is
+# kept (it is diagnostic: x-access-token vs. a real login); only the secret goes.
+_URL_CREDS_RE = re.compile(
+    r"(?P<scheme>[A-Za-z][A-Za-z0-9+.\-]*://)(?P<user>[^/\s:@]+):[^/\s@]*@"
+)
+
+# Bare PATs, for the remote-side messages that quote the token on its own
+# rather than as part of the URL.
+_BARE_TOKEN_RE = re.compile(
+    r"\b(?:ghp|gho|ghs|ghu|ghr)_[A-Za-z0-9]{16,}"
+    r"|\bgithub_pat_[A-Za-z0-9_]{20,}"
+    r"|\bglpat-[A-Za-z0-9_\-]{16,}"
+)
+
+
+def _redact_secrets(text: str) -> str:
+    """Strip credential-shaped strings out of git/ssh output.
+
+    We authenticate HTTPS remotes by putting the PAT in the URL, and git echoes
+    that URL verbatim on failure. Whatever we hand back from here ends up in
+    ``folder_sync_sources.sync_error`` (durable, re-served to the SPA), in the
+    400 body of the branch-picker route, and in the application log — so the
+    redaction has to happen before the string leaves the connector, not at each
+    of those sinks.
+
+    Biased toward over-redaction: a false positive costs a little readability in
+    an error toast, a false negative persists a live credential.
+    """
+    out = _URL_CREDS_RE.sub(r"\g<scheme>\g<user>:***@", text)
+    out = _BARE_TOKEN_RE.sub("***", out)
+    return out
+
+
 def _clean_git_stderr(stderr: str) -> str:
-    """Trim git/ssh stderr to the actionable lines for UI display.
+    """Trim git/ssh stderr to the actionable lines for UI display, with any
+    credentials redacted.
 
     OpenSSH prints an ``@``-bordered warning box (e.g. "UNPROTECTED PRIVATE KEY
     FILE") that renders as a wall of ``@`` in a one-line error toast. Drop those
     border lines and the boilerplate advisory, keeping the lines that actually
     say what went wrong (Permission denied, bad permissions, fatal: …).
+
+    This is the single choke point for git stderr — every error site routes
+    through it so none of them can reintroduce the leak by interpolating the
+    raw string.
     """
     keep: list[str] = []
     for raw in stderr.splitlines():
@@ -364,7 +404,8 @@ def _clean_git_stderr(stderr: str) -> str:
             continue
         keep.append(inner)
     cleaned = "; ".join(keep).strip()
-    return cleaned or stderr.strip()
+    retval = _redact_secrets(cleaned or stderr.strip())
+    return retval
 
 
 # Cache for the (expensive) login-shell probe — the agent socket is stable for
@@ -616,6 +657,13 @@ def _run_git(
                 timeout=timeout,
             )
         return proc.returncode, proc.stdout, proc.stderr
+    except subprocess.TimeoutExpired as e:
+        # ``str(TimeoutExpired)`` embeds the argv, and for an HTTPS remote the
+        # argv carries the tokenized URL — so the default message is a PAT
+        # leak into sync_error / the log / the 400 body. ``from None`` matters:
+        # ``_format_exception`` records the whole traceback, and a chained
+        # original would print the unredacted text right alongside.
+        raise RuntimeError(_redact_secrets(str(e))) from None
     finally:
         for path in cleanup:
             with contextlib.suppress(OSError):
@@ -668,13 +716,13 @@ def _ensure_mirror(mirror_dir: Path, repo_url: str, auth: GitAuth | None) -> Non
     mirror_dir.mkdir(parents=True, exist_ok=True)
     rc, _, err = _run_git(["init", "--bare", "-q", str(mirror_dir)])
     if rc != 0:
-        raise RuntimeError(f"git init failed: {err.strip()}")
+        raise RuntimeError(f"git init failed: {_clean_git_stderr(err)}")
     rc, _, err = _run_git(
         ["-C", str(mirror_dir), "remote", "add", "origin",
          _maybe_token_url(repo_url, auth)]
     )
     if rc != 0:
-        raise RuntimeError(f"git remote add failed: {err.strip()}")
+        raise RuntimeError(f"git remote add failed: {_clean_git_stderr(err)}")
 
 
 def _fetch_refs(
@@ -798,7 +846,9 @@ def _materialize_branch(
             args += ["--", subfolder]
         rc, _, err = _run_git(args)
         if rc != 0:
-            raise RuntimeError(f"git archive failed for {branch}: {err.strip()}")
+            raise RuntimeError(
+                f"git archive failed for {branch}: {_clean_git_stderr(err)}"
+            )
 
         extract_dir = Path(td) / "tree"
         extract_dir.mkdir()
@@ -841,7 +891,9 @@ def _dump_commits(
         cwd=str(repo_dir),
     )
     if rc != 0:
-        raise RuntimeError(f"git log failed for {branch}: {stderr.strip()}")
+        raise RuntimeError(
+            f"git log failed for {branch}: {_clean_git_stderr(stderr)}"
+        )
 
     written = 0
     for line in stdout.splitlines():
