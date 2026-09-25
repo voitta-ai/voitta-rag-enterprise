@@ -222,6 +222,7 @@ CREATE TABLE IF NOT EXISTS folder_sync_sources (
     gd_use_loopback           INTEGER NOT NULL DEFAULT 0,    -- 1 = OAuth redirect via http://localhost:53682 (admin runs a local nginx bridge that proxies the callback back to this server)
     gd_use_builtin            INTEGER NOT NULL DEFAULT 0,    -- 1 = OAuth creds from VOITTA_GD_BUILTIN_CLIENT_ID/SECRET (desktop built-in client), not this row
     gd_files_only             INTEGER NOT NULL DEFAULT 0,    -- 1 = sync binary files only, skip native Docs/Sheets/Slides/Forms (only the Drive API is then required)
+    gd_shared_with_me         INTEGER NOT NULL DEFAULT 0,    -- 1 = also ingest files shared directly with the credential (Drive's "Shared with me"), which no folder walk can reach
     gd_credential_id          INTEGER REFERENCES sync_credentials(id) ON DELETE SET NULL,  -- shared company credential; when set, inline gd_* auth fields are ignored
     -- NFS (admin-defined root path + user-chosen subpath underneath).
     -- The connector mirrors files from ``<admin nfs_root>/<nfs_subpath>``

@@ -270,6 +270,7 @@ class FolderSyncSource(Base):
     # APIs (only the Drive API is then required). Default 0 = export
     # native files too (the all-or-nothing preflight applies).
     gd_files_only: Mapped[bool] = mapped_column(default=False)
+    gd_shared_with_me: Mapped[bool] = mapped_column(default=False)
     # Shared company credential (sync_credentials.id). When set, the inline
     # gd_client_id/secret/refresh_token/service_account_json above are
     # ignored — auth resolves from the credential, including the refresh

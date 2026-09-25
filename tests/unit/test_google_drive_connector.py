@@ -1630,3 +1630,254 @@ async def test_cannot_download_routes_to_files_undownloadable_not_errors(
     assert stats.errors == [], f"unexpected error entries: {stats.errors}"
     assert stats.as_dict()["files_undownloadable"] == 1
     assert (tmp_path / "root" / "Root" / "kept.txt").read_bytes() == b"hello"
+
+
+# ---------------------------------------------------------------------------
+# shared-with-me discovery. A file shared one-by-one is readable but
+# unreachable by any folder walk (Drive grants the file, not its parent, and
+# hides parents the caller can't see). See docs/gdrive-sync-fixes.md.
+# ---------------------------------------------------------------------------
+
+
+class _FakeFilesShared(_FakeFiles):
+    """``_FakeFiles`` that also answers ``sharedWithMe=true`` queries.
+
+    Mirrors the real API's shape: the shared set is keyed independently of
+    the parent-based listings, because that is exactly the point — these
+    files have no parent this credential can list.
+    """
+
+    def __init__(self, *args: Any, shared: list[dict[str, Any]] | None = None,
+                 **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._shared = shared or []
+
+    def list(self, **kwargs):
+        if "sharedWithMe" in kwargs.get("q", ""):
+            return _FakeRequest({"files": self._shared})
+        return super().list(**kwargs)
+
+
+def _shared_doc(fid: str, name: str, md5: str = "aaa") -> dict[str, Any]:
+    return {
+        "id": fid,
+        "name": name,
+        "mimeType": "application/octet-stream",
+        "size": "5",
+        "modifiedTime": "2026-09-22T00:00:00Z",
+        "md5Checksum": md5,
+        "webViewLink": f"https://drive.google.com/file/d/{fid}/view",
+        "sharingUser": {"displayName": "Gigi", "emailAddress": "gigi@agnitio.ai"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_shared_with_me_off_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Opt-in: without the flag the shared set is never even queried, so
+    existing installs don't silently start ingesting unrelated documents."""
+    drive = _FakeDrive(_FakeFilesShared(
+        {"ROOT": []}, export_payloads={}, download_payloads={"s1": b"hello"},
+        shared=[_shared_doc("s1", "hand-shared.txt")],
+    ))
+    connector = GoogleDriveConnector()
+    _patch_services(connector, drive, _FakeDocs({}), monkeypatch)
+    stats = await connector.sync(
+        folder_root=tmp_path / "root", auth=_make_auth(),
+        drive_folders=[{"id": "ROOT", "name": "Root"}],
+    )
+    assert stats.files_added == 0
+    assert not (tmp_path / "root" / "Shared with me").exists()
+
+
+@pytest.mark.asyncio
+async def test_shared_with_me_ingests_unreachable_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The incident: a file that no ``'<id>' in parents`` query returns is
+    picked up and lands under the synthetic directory."""
+    drive = _FakeDrive(_FakeFilesShared(
+        {"ROOT": []}, export_payloads={}, download_payloads={"s1": b"hello"},
+        shared=[_shared_doc("s1", "Triadex Checkin - Notes by Gemini.txt")],
+    ))
+    connector = GoogleDriveConnector()
+    _patch_services(connector, drive, _FakeDocs({}), monkeypatch)
+    stats = await connector.sync(
+        folder_root=tmp_path / "root", auth=_make_auth(),
+        drive_folders=[{"id": "ROOT", "name": "Root"}],
+        shared_with_me=True,
+    )
+    dest = tmp_path / "root" / "Shared with me" / "Triadex Checkin - Notes by Gemini.txt"
+    assert dest.read_bytes() == b"hello", f"not materialised; errors={stats.errors}"
+    assert stats.files_added == 1
+    assert stats.errors == []
+
+
+@pytest.mark.asyncio
+async def test_shared_with_me_does_not_duplicate_folder_walked_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A file reachable BOTH ways keeps its real folder path — the shared
+    pass skips ids the walk already saw, so it is not synced twice."""
+    item = _shared_doc("dup", "kept.txt")
+    drive = _FakeDrive(_FakeFilesShared(
+        {"ROOT": [item]}, export_payloads={}, download_payloads={"dup": b"hello"},
+        shared=[item],
+    ))
+    connector = GoogleDriveConnector()
+    _patch_services(connector, drive, _FakeDocs({}), monkeypatch)
+    stats = await connector.sync(
+        folder_root=tmp_path / "root", auth=_make_auth(),
+        drive_folders=[{"id": "ROOT", "name": "Root"}],
+        shared_with_me=True,
+    )
+    assert (tmp_path / "root" / "Root" / "kept.txt").read_bytes() == b"hello"
+    assert not (tmp_path / "root" / "Shared with me").exists(), (
+        "folder-walked file must not be duplicated under the synthetic dir"
+    )
+    assert stats.files_added == 1
+
+
+@pytest.mark.asyncio
+async def test_shared_with_me_respects_ignore_patterns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shared pass goes through the same ``_process_item``, so ignore
+    globs (the reason Meet .mp4 recordings stay out) still apply."""
+    monkeypatch.setenv("VOITTA_IGNORE_PATTERNS", "*.mp4")
+    drive = _FakeDrive(_FakeFilesShared(
+        {"ROOT": []}, export_payloads={},
+        download_payloads={"vid": b"x", "ok": b"hello"},
+        shared=[_shared_doc("vid", "Recording.mp4"), _shared_doc("ok", "notes.txt", "bbb")],
+    ))
+    connector = GoogleDriveConnector()
+    _patch_services(connector, drive, _FakeDocs({}), monkeypatch)
+    stats = await connector.sync(
+        folder_root=tmp_path / "root", auth=_make_auth(),
+        drive_folders=[{"id": "ROOT", "name": "Root"}],
+        shared_with_me=True,
+    )
+    shared_dir = tmp_path / "root" / "Shared with me"
+    assert (shared_dir / "notes.txt").exists()
+    assert not (shared_dir / "Recording.mp4").exists()
+    assert stats.files_skipped >= 1
+
+
+@pytest.mark.asyncio
+async def test_shared_with_me_failure_keeps_folder_walk_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A broken shared pass is reported but must not discard what the
+    folder walk already found."""
+    class _Exploding(_FakeFilesShared):
+        def list(self, **kwargs):
+            if "sharedWithMe" in kwargs.get("q", ""):
+                raise RuntimeError("drive is sulking")
+            return _FakeFiles.list(self, **kwargs)
+
+    drive = _FakeDrive(_Exploding(
+        {"ROOT": [_shared_doc("ok", "kept.txt")]},
+        export_payloads={}, download_payloads={"ok": b"hello"},
+    ))
+    connector = GoogleDriveConnector()
+    _patch_services(connector, drive, _FakeDocs({}), monkeypatch)
+    stats = await connector.sync(
+        folder_root=tmp_path / "root", auth=_make_auth(),
+        drive_folders=[{"id": "ROOT", "name": "Root"}],
+        shared_with_me=True,
+    )
+    assert (tmp_path / "root" / "Root" / "kept.txt").read_bytes() == b"hello"
+    assert len(stats.errors) == 1 and "drive is sulking" in stats.errors[0]
+
+
+@pytest.mark.asyncio
+async def test_shared_dir_name_cannot_collide_with_a_real_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A picked root genuinely named "Shared with me" keeps that dir; the
+    synthetic one is suffixed via the same dedup the roots use."""
+    drive = _FakeDrive(_FakeFilesShared(
+        {"ROOT": [_shared_doc("r1", "from-root.txt")]},
+        export_payloads={},
+        download_payloads={"r1": b"root", "s1": b"shared"},
+        shared=[_shared_doc("s1", "from-shared.txt", "bbb")],
+    ))
+    connector = GoogleDriveConnector()
+    _patch_services(connector, drive, _FakeDocs({}), monkeypatch)
+    await connector.sync(
+        folder_root=tmp_path / "root", auth=_make_auth(),
+        drive_folders=[{"id": "ROOT", "name": "Shared with me"}],
+        shared_with_me=True,
+    )
+    assert (tmp_path / "root" / "Shared with me" / "from-root.txt").exists()
+    assert (tmp_path / "root" / "Shared with me-2" / "from-shared.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_shared_folder_that_is_a_picked_root_is_not_rewalked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: the picked roots are themselves shared with the credential,
+    so ``sharedWithMe=true`` returns them as folders. Recursing into one would
+    re-add the entire corpus under the synthetic directory. Caught on the live
+    Agnitio Drive, where 7 of the 24 shared items were the configured roots."""
+    child = _shared_doc("c1", "kept.txt")
+    root_as_shared_folder = {
+        "id": "ROOT",
+        "name": "Meet Recordings",
+        "mimeType": "application/vnd.google-apps.folder",
+        "modifiedTime": "2026-09-22T00:00:00Z",
+        "webViewLink": "https://drive.google.com/drive/folders/ROOT",
+    }
+    drive = _FakeDrive(_FakeFilesShared(
+        {"ROOT": [child]}, export_payloads={},
+        download_payloads={"c1": b"hello"},
+        shared=[root_as_shared_folder],
+    ))
+    connector = GoogleDriveConnector()
+    _patch_services(connector, drive, _FakeDocs({}), monkeypatch)
+    stats = await connector.sync(
+        folder_root=tmp_path / "root", auth=_make_auth(),
+        drive_folders=[{"id": "ROOT", "name": "Meet Recordings"}],
+        shared_with_me=True,
+    )
+    assert (tmp_path / "root" / "Meet Recordings" / "kept.txt").read_bytes() == b"hello"
+    assert not (tmp_path / "root" / "Shared with me").exists(), (
+        "picked root returned by sharedWithMe must not be re-walked"
+    )
+    assert stats.files_added == 1, f"corpus duplicated: {stats.as_dict()}"
+
+
+@pytest.mark.asyncio
+async def test_shared_subtree_skips_children_already_walked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defence in depth for the same hole one level down: a shared folder that
+    is NOT a picked root still must not duplicate children the walk reached."""
+    shared_child = _shared_doc("dup", "already-have.txt")
+    fresh_child = _shared_doc("new", "brand-new.txt", "ccc")
+    shared_folder = {
+        "id": "SHARED_DIR",
+        "name": "Some Shared Folder",
+        "mimeType": "application/vnd.google-apps.folder",
+        "modifiedTime": "2026-09-22T00:00:00Z",
+        "webViewLink": "https://drive.google.com/drive/folders/SHARED_DIR",
+    }
+    drive = _FakeDrive(_FakeFilesShared(
+        {"ROOT": [shared_child], "SHARED_DIR": [shared_child, fresh_child]},
+        export_payloads={},
+        download_payloads={"dup": b"hello", "new": b"fresh"},
+        shared=[shared_folder],
+    ))
+    connector = GoogleDriveConnector()
+    _patch_services(connector, drive, _FakeDocs({}), monkeypatch)
+    await connector.sync(
+        folder_root=tmp_path / "root", auth=_make_auth(),
+        drive_folders=[{"id": "ROOT", "name": "Root"}],
+        shared_with_me=True,
+    )
+    shared_dir = tmp_path / "root" / "Shared with me" / "Some Shared Folder"
+    assert (tmp_path / "root" / "Root" / "already-have.txt").exists()
+    assert not (shared_dir / "already-have.txt").exists(), "duplicated child"
+    assert (shared_dir / "brand-new.txt").read_bytes() == b"fresh"

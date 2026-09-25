@@ -131,6 +131,71 @@ it migrates and back up `~/.voitta-image-rag/voitta.db` (97 MB) first. Also
 reports `files_skipped: 140` per run, so expect that number to move. None of
 this applies to the branch as it stands, which is `google_drive.py` + tests only.
 
+## Bug 3 — hand-shared files are unreachable (commit 2)
+
+Found while chasing "it still says no new data in": the index stopped at
+meetings dated **2026-09-10**, while 10 meeting-notes docs from **Sep 15–25**
+existed and were **fully readable** by the service account (verified: Docs API
+returns the document, `files.export` returns 14,490 bytes of text).
+
+They were invisible because of *how* they are shared. Drive grants access to
+an individually-shared file and nothing else: `files.get` on it succeeds, its
+`parents` array comes back empty (Drive omits parents the caller cannot see),
+and therefore **no `'<id>' in parents` query will ever return it**. The
+connector discovered content exactly one way — a folder walk — so these files
+were readable and permanently invisible at the same time.
+
+`sharedWithMeTime` shows what changed: sporadic 1–3 files/month through July,
+then **5 on 2026-09-18** and **5 on 2026-09-25**. Those two batches are the 10
+missing docs. Meeting notes stopped arriving in the readable roots around Sep
+10 (cause still Drive-side and unknown), and gigi@agnitio.ai worked around it
+by sharing the docs one-by-one — a reasonable-looking move that Voitta had no
+way to consume. The hand-sharing is a symptom, not the cause.
+
+### The fix: a second discovery source, not a second pipeline
+
+`_enumerate_shared_with_me()` queries `sharedWithMe=true` and hands each item
+to the **same `_process_item`** the folder walk uses, feeding the **same
+`entries` list**. So ignore patterns, native-type routing, the export fan-out,
+the download pool, orphan cleanup and the sidecar are shared by construction.
+
+That structure is load-bearing, not stylistic: phase 4 unlinks every local
+file not in `expected_paths`. A separate pass with its own download step would
+have its files deleted on the very next sync, or would need a parallel cleanup
+to avoid it. One list makes that class of bug impossible.
+
+Design decisions:
+
+| Decision | Choice | Rationale |
+|---|---|---|
+| Opt-in? | **Yes** — `gd_shared_with_me`, default `0` | The shared set also holds unrelated docs (timesheets, `Arlo v2`, PostHog feedback). Never a surprise for existing installs. |
+| Directory | `Shared with me/` | Matches Drive's own label. Routed through the same `used_dirs` dedup as a picked root, so a real folder of that name can't collide (it gets `-2`). |
+| Precedence | Folder walk first; shared pass skips ids already seen | A real folder path beats a synthetic one. Dedup is by Drive **file id**, never by name. |
+| Shared folders | Not special-cased | `_process_item` recurses into `NATIVE_FOLDER` already, so sharing a folder yields its subtree. |
+| Dedup plumbing | `seen_ids: set[str]` threaded through `_enumerate` → `_process_item`, one `add()` before any early return | Native exporters emit several entries per item, so stamping entries individually would miss paths. Recording before the skip branches stops an *ignored* file reappearing under the synthetic dir. |
+| Pass failure | Caught, appended to `stats.errors`, folder-walk results kept | A sulking shared query must not discard a successful sync. |
+| Shared folder that IS a picked root | Root ids registered in `seen_ids`; `skip_ids` filters inside recursion too | **Caught by previewing the live data before enabling:** 7 of the 24 shared items are the configured "Meet Recordings" roots and `aclaw`. Filtering only top-level shared items would have recursed into them and re-added the entire corpus under `Shared with me/`. Dedup therefore lives in `_process_item` (via `skip_ids`), not in the pass's own loop, so it applies at every depth. `skip_ids` is set **only** by the shared pass — the folder walk passes `None`, so a multi-parented file still appears under each of its parents exactly as before. |
+
+Full flag path, mirroring `gd_files_only` exactly: `db/schema.sql`,
+`db/models.py`, `db/database.py` (`_ensure_column`, idempotent),
+`api/routes/sync/google_drive.py` (in/out models, both save branches,
+`clear_fields`, both `build_out` branches), `services/sync/google_drive.py`,
+`static/index.html`, `static/js/modals/sync/google_drive.js`.
+
+8 more tests: opt-out default (the shared set is never queried), the incident
+itself, no-duplicate-when-reachable-both-ways, ignore patterns still applied,
+pass-failure keeps folder results, the `Shared with me-2` collision case, and
+two for the corpus-duplication hole above (a picked root returned by
+`sharedWithMe`, and a shared non-root subtree whose children were already
+walked). Both duplication tests were confirmed to fail against the connector
+without the fix.
+
+⚠️ **This commit adds a DB column.** `_ensure_column` applies it on boot and
+is a no-op on an already-migrated DB, so deploy needs no manual step — but
+back up `voitta.db` before rolling forward or back, and note that rolling
+*back* to a build without the column leaves it in place harmlessly (SQLite
+can't drop it; nothing reads it).
+
 ## Still open (not code)
 
 1. **Share the two dead roots** with

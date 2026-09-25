@@ -128,6 +128,18 @@ def init_db() -> None:
             "gd_use_builtin",
             "INTEGER NOT NULL DEFAULT 0",
         )
+        # Ingest files shared *directly* with the credential in addition to
+        # walking the configured roots. A folder walk can only ever see
+        # children of a readable parent, so a file someone shares one-by-one
+        # is unreachable no matter that the credential can read it. Default
+        # 0 because "Shared with me" also collects unrelated documents —
+        # this has to be a deliberate per-source choice, not a surprise.
+        _ensure_column(
+            raw_conn,
+            "folder_sync_sources",
+            "gd_shared_with_me",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
         # Files-only Drive sync: skip native Docs/Sheets/Slides/Forms so a
         # project that hasn't enabled those APIs can still sync binary
         # files. Default 0 = export native files too. NULL-safe for

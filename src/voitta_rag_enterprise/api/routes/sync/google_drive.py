@@ -80,6 +80,13 @@ class GoogleDriveSyncIn(BaseModel):
     # Google-native Docs/Sheets/Slides/Forms — so it works even when the
     # project hasn't enabled those Workspace APIs (only Drive is required).
     files_only: bool = False
+    # When True, sync also ingests files shared *directly* with this
+    # credential ("Shared with me"), landing them under a synthetic
+    # ``Shared with me/`` directory. A folder walk only ever sees children
+    # of a readable parent, so a hand-shared file is otherwise invisible
+    # even though the credential can read it. Off by default: the shared
+    # set also collects unrelated documents.
+    shared_with_me: bool = False
     # When True the OAuth creds come from the deploy's built-in
     # Desktop-app client (desktop/single-user only) — client_id and
     # client_secret above are then ignored.
@@ -100,6 +107,7 @@ class GoogleDriveSyncOut(BaseModel):
     connected: bool  # true once a refresh_token has been stored
     use_loopback: bool = False
     files_only: bool = False
+    shared_with_me: bool = False
     use_builtin: bool = False
 
 
@@ -131,6 +139,7 @@ def clear_fields(src: FolderSyncSource) -> None:
     src.gd_use_loopback = False
     src.gd_use_builtin = False
     src.gd_files_only = False
+    src.gd_shared_with_me = False
     src.gd_credential_id = None
 
 
@@ -159,6 +168,7 @@ def build_out(src: FolderSyncSource) -> GoogleDriveSyncOut:
                 connected=bool(cred and cred.refresh_token),
                 use_loopback=False,
                 files_only=bool(src.gd_files_only),
+                shared_with_me=bool(src.gd_shared_with_me),
                 use_builtin=False,
             )
     return GoogleDriveSyncOut(
@@ -173,6 +183,7 @@ def build_out(src: FolderSyncSource) -> GoogleDriveSyncOut:
         connected=bool(src.gd_refresh_token),
         use_loopback=bool(src.gd_use_loopback),
         files_only=bool(src.gd_files_only),
+        shared_with_me=bool(src.gd_shared_with_me),
         use_builtin=bool(src.gd_use_builtin),
     )
 
@@ -257,6 +268,7 @@ def apply_config(
             [{"id": f.id, "name": f.name} for f in cfg.folders]
         )
         src.gd_files_only = bool(cfg.files_only)
+        src.gd_shared_with_me = bool(cfg.shared_with_me)
         return src
 
     # ``has_client_secret`` is true when only the public client_id was
@@ -339,6 +351,7 @@ def apply_config(
     src.gd_use_loopback = bool(cfg.use_loopback)
     src.gd_use_builtin = bool(cfg.use_builtin)
     src.gd_files_only = bool(cfg.files_only)
+    src.gd_shared_with_me = bool(cfg.shared_with_me)
     return src
 
 

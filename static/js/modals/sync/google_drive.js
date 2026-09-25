@@ -326,6 +326,7 @@ function gdFormConfig() {
     // arrive (so "saved" placeholders aren't wiped on every save).
     const useLoopback = !!$("#sync-gd-use-loopback")?.checked;
     const filesOnly = !!$("#sync-gd-files-only")?.checked;
+    const sharedWithMe = !!$("#sync-gd-shared-with-me")?.checked;
     if (gdAuthMode === "credential") {
         // Shared credential: round-trip the reference — the credential
         // supplies all auth server-side, so no inline fields apply.
@@ -338,6 +339,7 @@ function gdFormConfig() {
             use_loopback: false,
             use_builtin: false,
             files_only: filesOnly,
+            shared_with_me: sharedWithMe,
         };
     }
     if (gdAuthMode === "builtin") {
@@ -351,6 +353,7 @@ function gdFormConfig() {
             use_loopback: false,
             use_builtin: true,
             files_only: filesOnly,
+            shared_with_me: sharedWithMe,
         };
     }
     if (gdAuthMode === "sa") {
@@ -362,6 +365,7 @@ function gdFormConfig() {
             use_loopback: useLoopback,
             use_builtin: false,
             files_only: filesOnly,
+            shared_with_me: sharedWithMe,
         };
     }
     return {
@@ -372,6 +376,7 @@ function gdFormConfig() {
         use_loopback: useLoopback,
         use_builtin: false,
         files_only: filesOnly,
+        shared_with_me: sharedWithMe,
     };
 }
 
@@ -928,6 +933,7 @@ function loadGdForm(src) {
     $("#sync-gd-sa-json").placeholder = inline && gd.has_service_account ? "(service account JSON saved — paste a new one to replace)" : '{"type":"service_account","client_email":"…","private_key":"…"}';
     $("#sync-gd-use-loopback").checked = !!gd.use_loopback;
     $("#sync-gd-files-only").checked = !!gd.files_only;
+    $("#sync-gd-shared-with-me").checked = !!gd.shared_with_me;
     $("#sync-gd-api-result").hidden = true;
     updateGdRedirectHint();
     // Pick the right tab — a 1:1 mirror of the saved row's auth state:
@@ -985,6 +991,7 @@ function gdAfterSave(out) {
     setGdFolders(gd.folders || []);
     _snapshotSavedGdFolders(gd.folders || []);
     $("#sync-gd-files-only").checked = !!gd.files_only;
+    $("#sync-gd-shared-with-me").checked = !!gd.shared_with_me;
     $("#sync-gd-client-secret").value = "";
     $("#sync-gd-client-secret").placeholder = gd.has_client_secret
         ? "(saved — type to replace)"

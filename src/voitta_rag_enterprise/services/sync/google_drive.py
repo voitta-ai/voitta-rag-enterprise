@@ -678,6 +678,7 @@ class GoogleDriveConnector(SyncConnector):
         return {
             "drive_folders": coerce_folders_field(row.gd_folder_id),
             "files_only": bool(row.gd_files_only),
+            "shared_with_me": bool(row.gd_shared_with_me),
             "auth": GoogleDriveAuth(
                 client_id=resolved.client_id,
                 client_secret=resolved.client_secret,
@@ -693,6 +694,7 @@ class GoogleDriveConnector(SyncConnector):
         auth: GoogleDriveAuth,
         drive_folders: list[dict[str, str]],
         files_only: bool = False,
+        shared_with_me: bool = False,
         progress_cb: Callable[[str, int, int, dict[str, Any] | None], None]
         | None = None,
     ) -> GoogleDriveSyncStats:
@@ -701,6 +703,10 @@ class GoogleDriveConnector(SyncConnector):
         ``files_only=True`` downloads ordinary binary files (PDF, DOCX,
         images, …) and skips Google-native Docs/Sheets/Slides/Forms — only
         the Drive API needs to be enabled in that mode.
+
+        ``shared_with_me=True`` adds a second discovery pass for files shared
+        directly with the credential, which no folder walk can reach (see
+        ``_enumerate_shared_with_me``). They land under ``Shared with me/``.
 
         ``progress_cb(phase, done, total, detail)`` — optional. Called
         from the worker thread at every phase boundary, per Drive API
@@ -733,6 +739,7 @@ class GoogleDriveConnector(SyncConnector):
             progress_cb=progress_cb,
             drive_folders=drive_folders,
             files_only=files_only,
+            shared_with_me=shared_with_me,
         )
 
     # -- service plumbing ---------------------------------------------------
@@ -881,6 +888,7 @@ class GoogleDriveConnector(SyncConnector):
         auth: GoogleDriveAuth,
         drive_folders: list[dict[str, str]],
         files_only: bool = False,
+        shared_with_me: bool = False,
         progress_cb: Callable[[str, int, int, dict[str, Any] | None], None]
         | None = None,
     ) -> GoogleDriveSyncStats:
@@ -969,6 +977,10 @@ class GoogleDriveConnector(SyncConnector):
         # with a stable fallback when it's missing.
         used_dirs: set[str] = set()
         n_drive_folders = len(drive_folders)
+        # Drive ids the folder walk reaches, so the shared-with-me pass can
+        # skip anything that already has a real path. Collected even when the
+        # pass is off — it costs one set insert per item.
+        seen_ids: set[str] = set()
 
         # Build a per-folder "tick" callback the recursive enumerator can
         # call after every Drive API page. Without this, big folders with
@@ -1027,6 +1039,11 @@ class GoogleDriveConnector(SyncConnector):
             # below. For a folder shared into this account (e.g. via a service
             # account) ``sharingUser`` names who shared it; otherwise fall back
             # to the folder's owner. Best-effort — never block the sync on it.
+            # The picked root itself is normally shared with the credential,
+            # so the shared-with-me query returns it as a folder. Register it
+            # here so that pass skips it outright instead of re-listing this
+            # whole subtree under the synthetic directory.
+            seen_ids.add(folder_id)
             self._shared_by, root_access_error = self._fetch_shared_by(
                 drive, folder_id
             )
@@ -1040,6 +1057,7 @@ class GoogleDriveConnector(SyncConnector):
                     skipped_counter=skipped_during_listing,
                     pending_native=pending_native,
                     enabled_native_mimes=enabled_native_mimes,
+                    seen_ids=seen_ids,
                 )
             except Exception as e:
                 logger.exception("Drive enumeration failed for %s", folder_id)
@@ -1084,6 +1102,53 @@ class GoogleDriveConnector(SyncConnector):
                     "items_skipped": skipped_during_listing[0],
                 },
             )
+
+        # Phase 1b: files shared directly with this credential. Deliberately
+        # AFTER the folder loop so ``seen_ids`` is complete and anything with
+        # a real folder path keeps it. The synthetic directory goes through
+        # the same ``used_dirs`` dedup as a picked root, so a real folder
+        # actually named "Shared with me" cannot collide with it.
+        if shared_with_me:
+            shared_dir = "Shared with me"
+            n = 2
+            while shared_dir in used_dirs:
+                shared_dir = f"Shared with me-{n}"
+                n += 1
+            used_dirs.add(shared_dir)
+            _emit(
+                "listing",
+                len(entries),
+                0,
+                {
+                    "folders_done": n_drive_folders,
+                    "folders_total": n_drive_folders,
+                    "current_folder": shared_dir,
+                    "items_seen": len(entries),
+                    "items_skipped": skipped_during_listing[0],
+                },
+            )
+            before_shared = len(entries)
+            try:
+                self._enumerate_shared_with_me(
+                    drive, docs, shared_dir, entries, stats, ignore, seen_ids,
+                    on_page=_make_listing_tick(n_drive_folders, shared_dir),
+                    skipped_counter=skipped_during_listing,
+                    pending_native=pending_native,
+                    enabled_native_mimes=enabled_native_mimes,
+                )
+            except Exception as e:
+                # Same contract as a failed root: report it, keep the rest of
+                # the sync. A broken shared-with-me pass must not discard
+                # everything the folder walk found.
+                logger.exception("Drive shared-with-me enumeration failed")
+                stats.errors.append(f"list {shared_dir}: {e}")
+            else:
+                logger.info(
+                    "shared-with-me pass added %d entries (%d ids already "
+                    "reached by the folder walk)",
+                    len(entries) - before_shared,
+                    len(seen_ids),
+                )
 
         # Phase 2: fan out the per-file structural API calls accumulated
         # during listing. Every native Workspace type (Doc / Sheet /
@@ -1377,6 +1442,8 @@ class GoogleDriveConnector(SyncConnector):
         skipped_counter: list[int] | None = None,
         pending_native: list[tuple[dict[str, Any], str]] | None = None,
         enabled_native_mimes: frozenset[str] = frozenset(),
+        seen_ids: set[str] | None = None,
+        skip_ids: set[str] | None = None,
     ) -> None:
         """Recursive Drive listing.
 
@@ -1386,6 +1453,15 @@ class GoogleDriveConnector(SyncConnector):
         a frozen "Listing — 3/11" pill. ``skipped_counter[0]`` is bumped
         for every ignore-pattern match so the badge can show
         items_skipped alongside items_seen.
+
+        ``seen_ids``, when given, collects the Drive id of every item this
+        walk touches. The shared-with-me pass reads it to skip files it has
+        already reached through a real folder path.
+
+        ``skip_ids``, when given, suppresses items already in it. Only the
+        shared-with-me pass sets this; the folder walk leaves it ``None`` so
+        its behaviour (including a multi-parented file appearing under each
+        of its parents) is unchanged.
         """
         page_token: str | None = None
         while True:
@@ -1414,6 +1490,99 @@ class GoogleDriveConnector(SyncConnector):
                     skipped_counter=skipped_counter,
                     pending_native=pending_native,
                     enabled_native_mimes=enabled_native_mimes,
+                    seen_ids=seen_ids,
+                    skip_ids=skip_ids,
+                )
+            if on_page is not None:
+                on_page()
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break
+
+    def _enumerate_shared_with_me(
+        self,
+        drive: Any,
+        docs: Any,
+        rel_prefix: str,
+        out: list[RemoteEntry],
+        stats: GoogleDriveSyncStats,
+        ignore: Any,  # IgnoreMatcher
+        seen_ids: set[str],
+        on_page: Callable[[], None] | None = None,
+        skipped_counter: list[int] | None = None,
+        pending_native: list[tuple[dict[str, Any], str]] | None = None,
+        enabled_native_mimes: frozenset[str] = frozenset(),
+    ) -> None:
+        """List files shared *directly* with this credential.
+
+        The folder walk in ``_enumerate`` can only ever see children of a
+        parent it can read. When someone shares an individual file, Drive
+        grants access to the file and nothing else — ``files.get`` on it
+        succeeds, its ``parents`` come back empty (Drive omits parents the
+        caller cannot see), and no ``'<id>' in parents`` query will ever
+        return it. Such a file is readable and permanently invisible at the
+        same time, which is how ten meeting-notes docs went unindexed while
+        being fully accessible.
+
+        This pass closes that hole from the other side: ask Drive for the
+        shared set directly, then hand each item to the same
+        ``_process_item`` the folder walk uses. Everything downstream —
+        ignore patterns, native-type routing, the export fan-out, the
+        download pool, orphan cleanup, the sidecar — is shared with the
+        folder path by construction rather than reimplemented here.
+
+        ``seen_ids`` holds every id the folder walk already reached, and is
+        passed as both the running record AND the skip set, so a file visible
+        both ways keeps its real folder path instead of being duplicated under
+        ``rel_prefix``. Run this AFTER the folder walk so the set is complete.
+
+        Shared *folders* are not special-cased: ``_process_item`` recurses
+        into them like any other directory, so sharing a folder directly
+        yields its whole subtree. This matters more than it sounds — the
+        picked roots are themselves usually shared with the credential, so
+        they come back from this query too. Their ids are in ``seen_ids``
+        (the root loop adds them), which stops the pass re-walking the entire
+        corpus; and even if one slipped through, every child it found would
+        be skipped by id.
+        """
+        page_token: str | None = None
+        while True:
+            resp = (
+                drive.files()
+                .list(
+                    q="sharedWithMe=true and trashed=false",
+                    fields=(
+                        "nextPageToken,"
+                        "files(id,name,mimeType,size,modifiedTime,createdTime,"
+                        "md5Checksum,webViewLink,"
+                        "owners(displayName,emailAddress),"
+                        "sharingUser(displayName,emailAddress),"
+                        "lastModifyingUser(displayName,emailAddress))"
+                    ),
+                    pageSize=1000,
+                    pageToken=page_token,
+                    supportsAllDrives=True,
+                    includeItemsFromAllDrives=True,
+                )
+                .execute()
+            )
+            for item in resp.get("files", []):
+                # Whoever shared the file IS the provenance here — there is no
+                # containing folder to inherit it from, so stamp it per item
+                # rather than relying on the per-root ``self._shared_by``.
+                sharer = item.get("sharingUser") or {}
+                self._shared_by = {
+                    "name": sharer.get("displayName") or "",
+                    "email": sharer.get("emailAddress") or "",
+                }
+                self._process_item(
+                    drive, docs, item, rel_prefix, out, stats, ignore,
+                    on_page=on_page,
+                    skipped_counter=skipped_counter,
+                    pending_native=pending_native,
+                    enabled_native_mimes=enabled_native_mimes,
+                    seen_ids=seen_ids,
+                    skip_ids=seen_ids,
                 )
             if on_page is not None:
                 on_page()
@@ -1434,10 +1603,26 @@ class GoogleDriveConnector(SyncConnector):
         skipped_counter: list[int] | None = None,
         pending_native: list[tuple[dict[str, Any], str]] | None = None,
         enabled_native_mimes: frozenset[str] = frozenset(),
+        seen_ids: set[str] | None = None,
+        skip_ids: set[str] | None = None,
     ) -> None:
         name = item["name"]
         mime = item["mimeType"]
         rel_here = f"{rel_prefix}/{name}" if rel_prefix else name
+
+        # Already covered elsewhere in this sync (shared-with-me pass only).
+        # Checked before the recording below so the very first visit still
+        # registers. This is what stops a shared folder that is ALSO a picked
+        # root from re-adding its whole subtree under the synthetic directory.
+        if skip_ids is not None and item["id"] in skip_ids:
+            return
+
+        # Record provenance before any skip/return below: the shared-with-me
+        # pass must treat "reached by the folder walk" as covered even when
+        # the walk chose to ignore it, or an ignored file would sneak back in
+        # under the synthetic directory.
+        if seen_ids is not None:
+            seen_ids.add(item["id"])
 
         # Stamp the current synced-root's "shared by" onto the item now, while
         # self._shared_by is correct for this folder. Native exports are
@@ -1495,6 +1680,8 @@ class GoogleDriveConnector(SyncConnector):
                 skipped_counter=skipped_counter,
                 pending_native=pending_native,
                 enabled_native_mimes=enabled_native_mimes,
+                seen_ids=seen_ids,
+                skip_ids=skip_ids,
             )
             return
 

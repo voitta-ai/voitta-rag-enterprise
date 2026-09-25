@@ -1060,6 +1060,21 @@
                         are off — sync already skips only the disabled types
                         automatically. Use it when you deliberately want binaries only.
                     </p>
+
+                    <label class="check-row" style="margin-top:10px;">
+                        <input type="checkbox" id="sync-gd-shared-with-me">
+                        <span style="text-transform:none;letter-spacing:0;color:var(--color-text);font-size:12px;">
+                            Also sync files shared directly with this account
+                        </span>
+                    </label>
+                    <p class="hint" style="margin:4px 0 0;">
+                        Picks up files someone shared one-by-one rather than by
+                        sharing a folder. Those are invisible to a normal folder
+                        scan — Drive grants access to the file alone, so nothing
+                        lists it — and they arrive under <em>Shared with me/</em>.
+                        Leave off unless you need it: it also pulls in unrelated
+                        documents that happen to be shared with this account.
+                    </p>
                     </div><!-- /#sync-gd-shared -->
                 </div>
 

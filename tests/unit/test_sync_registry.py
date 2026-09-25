@@ -55,7 +55,8 @@ def _blank_row():
     cols = (
         "gh_repo gh_path gh_branches gh_all_branches gh_extended gh_auth_method "
         "gh_username gh_pat gh_token "
-        "gd_folder_id gd_files_only gd_client_id gd_client_secret gd_refresh_token "
+        "gd_folder_id gd_files_only gd_shared_with_me "
+        "gd_client_id gd_client_secret gd_refresh_token "
         "gd_service_account_json "
         "nfs_subpaths nfs_subpath "
         "gdl_account gdl_path gdl_paths folder_id "
@@ -75,7 +76,7 @@ def _blank_row():
     ("source_type", "must_have_keys"),
     [
         ("github", {"repo_url", "branches", "auth"}),
-        ("google_drive", {"drive_folders", "files_only", "auth"}),
+        ("google_drive", {"drive_folders", "files_only", "shared_with_me", "auth"}),
         ("google_drive_local", {"gdl_paths", "gdl_account", "folder_id"}),
         ("nfs", {"nfs_subpaths"}),
         ("local_link", {"ignore"}),
