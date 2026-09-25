@@ -285,6 +285,14 @@ class GoogleDriveSyncStats:
     # one fast-failing request) on every sync so it self-heals if the
     # file shrinks or Google raises the cap.
     files_too_large: int = 0
+    # Files Google refuses to serve at all: 403 ``cannotDownloadFile``.
+    # Google Chat transcript attachments are the common case — Drive lists
+    # them happily but never permits ``alt=media``, so this is permanent
+    # and nothing the user can fix from the sync modal. Bucketed like
+    # ``files_404`` / ``files_too_large`` rather than ``errors``: three
+    # undownloadable Chat logs used to pin the whole folder to
+    # ``sync_status='error'`` on every run, drowning out real failures.
+    files_undownloadable: int = 0
     tabs_written: int = 0
     errors: list[str] = field(default_factory=list)
 
@@ -296,6 +304,7 @@ class GoogleDriveSyncStats:
             "files_skipped": self.files_skipped,
             "files_404": self.files_404,
             "files_too_large": self.files_too_large,
+            "files_undownloadable": self.files_undownloadable,
             "tabs_written": self.tabs_written,
             "errors": self.errors,
         }
@@ -1018,9 +1027,12 @@ class GoogleDriveConnector(SyncConnector):
             # below. For a folder shared into this account (e.g. via a service
             # account) ``sharingUser`` names who shared it; otherwise fall back
             # to the folder's owner. Best-effort — never block the sync on it.
-            self._shared_by = self._fetch_shared_by(drive, folder_id)
+            self._shared_by, root_access_error = self._fetch_shared_by(
+                drive, folder_id
+            )
             tick = _make_listing_tick(idx, display)
             tick()  # entering this folder — flips current_folder in the badge
+            entries_before = len(entries)
             try:
                 self._enumerate(
                     drive, docs, folder_id, unique, entries, stats, ignore,
@@ -1032,6 +1044,31 @@ class GoogleDriveConnector(SyncConnector):
             except Exception as e:
                 logger.exception("Drive enumeration failed for %s", folder_id)
                 stats.errors.append(f"list {display or folder_id}: {e}")
+            else:
+                # A root the credential cannot see does NOT raise here:
+                # ``files.list(q="'<id>' in parents")`` answers an empty page
+                # rather than 403, so an unshared root is indistinguishable
+                # from an empty one and syncs nothing in total silence. The
+                # ``files.get`` above is the call that does fail, so pair the
+                # two signals — nothing listed AND metadata unreadable — and
+                # surface that as a real error. A root that is genuinely
+                # empty but readable stays quiet (no access error).
+                if (
+                    len(entries) == entries_before
+                    and root_access_error is not None
+                    and _is_root_inaccessible(root_access_error)
+                ):
+                    logger.warning(
+                        "Drive root %s (%s) listed 0 items and its metadata "
+                        "is unreadable — not shared with this credential?",
+                        folder_id,
+                        display or "(unnamed)",
+                    )
+                    stats.errors.append(
+                        f"root {display or folder_id}: listed 0 items and "
+                        f"metadata is unreadable — folder is probably not "
+                        f"shared with this credential ({root_access_error})"
+                    )
             # Emit after each top-level folder so a multi-folder sync flips
             # through "1/3", "2/3", "3/3" — useful when listing a Shared
             # Drive can take a minute.
@@ -1222,6 +1259,9 @@ class GoogleDriveConnector(SyncConnector):
             * ``"too_large"`` — 403 ``exportSizeLimitExceeded`` on a
               native export; permanent per-file, content already
               covered by the per-tab markdown → ``files_too_large``.
+            * ``"undownloadable"`` — 403 ``cannotDownloadFile``; Drive
+              never serves this file's bytes (Chat attachments), so it
+              is permanent → ``files_undownloadable``.
             Skipped entries are NOT recorded in the sidecar (nothing
             was written), so the next sync re-checks them cheaply.
             """
@@ -1251,6 +1291,13 @@ class GoogleDriveConnector(SyncConnector):
                         entry.rel_path,
                     )
                     return entry, False, existed_before, None, "too_large"
+                if _is_cannot_download(e):
+                    logger.info(
+                        "Drive will not serve this file "
+                        "(cannotDownloadFile), skipped: %s",
+                        entry.rel_path,
+                    )
+                    return entry, False, existed_before, None, "undownloadable"
                 logger.exception("Drive download failed: %s", entry.rel_path)
                 return entry, False, existed_before, str(e), None
             return entry, False, existed_before, None, None
@@ -1265,6 +1312,8 @@ class GoogleDriveConnector(SyncConnector):
                     stats.files_404 += 1
                 elif skip == "too_large":
                     stats.files_too_large += 1
+                elif skip == "undownloadable":
+                    stats.files_undownloadable += 1
                 elif err is not None:
                     stats.errors.append(f"{entry.rel_path}: {err}")
                 else:
@@ -1524,11 +1573,22 @@ class GoogleDriveConnector(SyncConnector):
                 return False
         return False
 
-    def _fetch_shared_by(self, drive: Any, folder_id: str) -> dict[str, str]:
-        """Resolve who shared the synced root folder → ``{name, email}`` or {}.
+    def _fetch_shared_by(
+        self, drive: Any, folder_id: str
+    ) -> tuple[dict[str, str], BaseException | None]:
+        """Resolve who shared the synced root → ``({name, email}, error)``.
 
         ``sharingUser`` when the folder was shared into this account; else the
-        folder's owner. Best-effort: any API hiccup yields {} (no shared_by).
+        folder's owner. Best-effort for the ``shared_by`` half: any API hiccup
+        yields {} and never blocks the sync.
+
+        The second element is the exception, if any. This ``files.get`` is the
+        ONLY call in the sync that fails outright for a root the credential
+        cannot see (Drive answers 404 — it hides a file's existence from an
+        unauthorised caller), so the caller pairs it with "listed 0 items" to
+        detect a root that is silently contributing nothing. It used to be
+        swallowed, which is exactly why two unshared roots went unnoticed for
+        four months.
         """
         try:
             meta = drive.files().get(
@@ -1537,15 +1597,18 @@ class GoogleDriveConnector(SyncConnector):
                        "owners(displayName,emailAddress),ownedByMe",
                 supportsAllDrives=True,
             ).execute()
-        except Exception:
-            return {}
+        except Exception as e:
+            return {}, e
         u = meta.get("sharingUser")
         if not u and not meta.get("ownedByMe"):
             owners = meta.get("owners") or []
             u = owners[0] if owners else None
         if not u:
-            return {}
-        return {"name": u.get("displayName") or "", "email": u.get("emailAddress") or ""}
+            return {}, None
+        return (
+            {"name": u.get("displayName") or "", "email": u.get("emailAddress") or ""},
+            None,
+        )
 
     def _drive_item_meta(self, item: dict) -> dict:
         """Build the source_meta dict for one Drive item (owner/editor/dates +
@@ -1672,6 +1735,37 @@ def _is_export_too_large(error: BaseException) -> bool:
     resp = getattr(error, "resp", None)
     status_code = getattr(resp, "status", None)
     return status_code == 403 and "exportSizeLimitExceeded" in str(error)
+
+
+def _is_root_inaccessible(error: BaseException) -> bool:
+    """True iff ``error`` says Drive won't reveal a root to this credential.
+
+    A root that was never shared with the credential (or was un-shared)
+    answers ``files.get`` with **404** — Drive hides a file's existence from
+    an unauthorised caller rather than admitting it with a 403. A 403 is
+    accepted too, for shared drives that do admit existence.
+
+    Deliberately narrow: only these two statuses mean "you cannot see this
+    root". Any other exception (a transport blip, or an ``AttributeError``
+    from a stubbed client in tests) must NOT be read as "not shared", or the
+    dead-root check would cry wolf on every genuinely empty folder.
+    """
+    resp = getattr(error, "resp", None)
+    return getattr(resp, "status", None) in (403, 404)
+
+
+def _is_cannot_download(error: BaseException) -> bool:
+    """True iff ``error`` is Google's 403 ``cannotDownloadFile``.
+
+    Drive lists these files but refuses ``alt=media`` for them outright —
+    Google Chat transcript attachments are the canonical case. Permanent
+    per-file and unfixable from our side (no scope or share grants it),
+    so it is bucketed into ``stats.files_undownloadable`` rather than
+    ``stats.errors``. Same duck-typing rationale as ``_is_drive_404``.
+    """
+    resp = getattr(error, "resp", None)
+    status_code = getattr(resp, "status", None)
+    return status_code == 403 and "cannotDownloadFile" in str(error)
 
 
 def _download_to(drive: Any, file_id: str, dest: Path) -> None:

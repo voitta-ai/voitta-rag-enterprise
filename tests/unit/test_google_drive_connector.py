@@ -1423,3 +1423,210 @@ def test_folders_field_round_trip() -> None:
     # Empty / drop-id entries are filtered on encode
     assert encode_folders_field([{"id": "", "name": ""}]) is None
     assert encode_folders_field(None) is None
+
+
+# ---------------------------------------------------------------------------
+# Regressions from the Sep 2026 Agnitio incident: two Drive roots had been
+# unshared from the service account for ~4 months and synced 0 files in
+# silence, while 3 permanently-undownloadable Chat attachments held the
+# folder at sync_status='error' on every run. See docs/gdrive-sync-fixes.md.
+# ---------------------------------------------------------------------------
+
+
+def _http_err(status: int, reason: str = "", message: str = ""):
+    """Build an HttpError the way googleapiclient hands one to us."""
+    from googleapiclient.errors import HttpError
+    from httplib2 import Response
+
+    resp = Response({"status": status})
+    resp.status = status
+    body = (
+        b'{"error": {"errors": [{"reason": "%s"}], "message": "%s"}}'
+        % (reason.encode(), (message or reason).encode())
+    )
+    return HttpError(resp, body)
+
+
+def test_is_cannot_download_recognises_chat_attachment_403() -> None:
+    """``cannotDownloadFile`` (Chat transcripts) buckets silently; every
+    other 403 stays a real, user-visible error."""
+    from voitta_rag_enterprise.services.sync.google_drive import _is_cannot_download
+
+    assert _is_cannot_download(_http_err(403, "cannotDownloadFile")) is True
+    assert _is_cannot_download(_http_err(403, "insufficientPermissions")) is False
+    assert _is_cannot_download(_http_err(403, "exportSizeLimitExceeded")) is False
+    assert _is_cannot_download(_http_err(404, "cannotDownloadFile")) is False
+    assert _is_cannot_download(RuntimeError("boom")) is False
+
+
+def test_is_root_inaccessible_only_matches_403_404() -> None:
+    """Narrow on purpose: a transport blip or a stubbed client must never
+    be mistaken for "this root is not shared with us"."""
+    from voitta_rag_enterprise.services.sync.google_drive import _is_root_inaccessible
+
+    assert _is_root_inaccessible(_http_err(404, "notFound")) is True
+    assert _is_root_inaccessible(_http_err(403, "PERMISSION_DENIED")) is True
+    assert _is_root_inaccessible(_http_err(500, "backendError")) is False
+    assert _is_root_inaccessible(_http_err(429, "rateLimitExceeded")) is False
+    assert _is_root_inaccessible(AttributeError("no attribute 'get'")) is False
+    assert _is_root_inaccessible(RuntimeError("boom")) is False
+
+
+class _FakeFilesWithGet(_FakeFiles):
+    """``_FakeFiles`` plus the ``files().get`` that ``_fetch_shared_by``
+    calls, so a root's metadata can be made readable or not."""
+
+    def __init__(self, *args: Any, get_status: dict[str, int] | None = None,
+                 **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._get_status = get_status or {}
+
+    def get(self, *, fileId: str, **kwargs: Any):
+        status = self._get_status.get(fileId)
+        if status is not None:
+            raise _http_err(status, "notFound", "File not found.")
+        return _FakeRequest({"ownedByMe": True})
+
+
+@pytest.mark.asyncio
+async def test_unshared_root_listing_zero_items_is_surfaced_as_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The incident itself: Drive answers "'<id>' in parents" for an
+    unshared root with an empty page, not a 403 — so the only signal is
+    the 404 from ``files.get``. Zero items AND unreadable metadata must
+    become a visible error instead of silence."""
+    drive = _FakeDrive(
+        _FakeFilesWithGet(
+            {"DEAD": [], "LIVE": [{
+                "id": "alive",
+                "name": "kept.txt",
+                "mimeType": "application/octet-stream",
+                "size": "5",
+                "modifiedTime": "2026-05-10T00:00:00Z",
+                "md5Checksum": "def",
+                "webViewLink": "https://drive.google.com/file/d/alive/view",
+            }]},
+            export_payloads={},
+            download_payloads={"alive": b"hello"},
+            get_status={"DEAD": 404},
+        )
+    )
+    connector = GoogleDriveConnector()
+    _patch_services(connector, drive, _FakeDocs({}), monkeypatch)
+
+    stats = await connector.sync(
+        folder_root=tmp_path / "root",
+        auth=_make_auth(),
+        drive_folders=[
+            {"id": "DEAD", "name": "Meet Recordings"},
+            {"id": "LIVE", "name": "Live Folder"},
+        ],
+    )
+    assert len(stats.errors) == 1, f"expected 1 dead-root error, got {stats.errors}"
+    assert "Meet Recordings" in stats.errors[0]
+    assert "not" in stats.errors[0] and "shared" in stats.errors[0]
+    # The reachable root still synced.
+    assert (tmp_path / "root" / "Live Folder" / "kept.txt").read_bytes() == b"hello"
+
+
+@pytest.mark.asyncio
+async def test_empty_but_readable_root_is_not_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The false-positive guard: the Agnitio Drive has an accessible root
+    ('aclaw') that is simply empty. Readable metadata => stay quiet."""
+    drive = _FakeDrive(
+        _FakeFilesWithGet(
+            {"EMPTY": []}, export_payloads={}, download_payloads={},
+        )
+    )
+    connector = GoogleDriveConnector()
+    _patch_services(connector, drive, _FakeDocs({}), monkeypatch)
+
+    stats = await connector.sync(
+        folder_root=tmp_path / "root",
+        auth=_make_auth(),
+        drive_folders=[{"id": "EMPTY", "name": "aclaw"}],
+    )
+    assert stats.errors == [], f"empty-but-readable root must stay quiet: {stats.errors}"
+
+
+@pytest.mark.asyncio
+async def test_cannot_download_routes_to_files_undownloadable_not_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Chat attachment's 403 ``cannotDownloadFile`` must count into
+    ``files_undownloadable`` and leave ``stats.errors`` empty, so three of
+    them stop pinning the folder to sync_status='error' forever."""
+    from googleapiclient.errors import HttpError
+    from httplib2 import Response
+
+    listings = {
+        "ROOT": [
+            {
+                "id": "chat",
+                "name": "Demo Sync - Chat",
+                "mimeType": "application/octet-stream",
+                "size": "100",
+                "modifiedTime": "2026-05-10T00:00:00Z",
+                "md5Checksum": "abc",
+                "webViewLink": "https://drive.google.com/file/d/chat/view",
+            },
+            {
+                "id": "alive",
+                "name": "kept.txt",
+                "mimeType": "application/octet-stream",
+                "size": "5",
+                "modifiedTime": "2026-05-10T00:00:00Z",
+                "md5Checksum": "def",
+                "webViewLink": "https://drive.google.com/file/d/alive/view",
+            },
+        ]
+    }
+    drive = _FakeDrive(
+        _FakeFiles(
+            listings,
+            export_payloads={},
+            download_payloads={"alive": b"hello", "chat": b""},
+        )
+    )
+
+    class _ChatRefusingDownloader:
+        def __init__(self, fh, request: _FakeMediaRequest) -> None:
+            self._fh = fh
+            self._req = request
+
+        def next_chunk(self):
+            if self._req._body == b"":
+                resp = Response({"status": 403})
+                resp.status = 403
+                raise HttpError(
+                    resp,
+                    b'{"error": {"errors": [{"reason": "cannotDownloadFile"}],'
+                    b' "message": "This file cannot be downloaded by the user."}}',
+                )
+            if self._req._consumed:
+                return None, True
+            self._fh.write(self._req._body)
+            self._req._consumed = True
+            return None, True
+
+    import googleapiclient.http as _ghttp
+
+    monkeypatch.setattr(_ghttp, "MediaIoBaseDownload", _ChatRefusingDownloader)
+
+    connector = GoogleDriveConnector()
+    _patch_services(connector, drive, _FakeDocs({}), monkeypatch)
+
+    stats = await connector.sync(
+        folder_root=tmp_path / "root",
+        auth=_make_auth(),
+        drive_folders=[{"id": "ROOT", "name": "Root"}],
+    )
+    assert stats.files_undownloadable == 1, (
+        f"expected 1 undownloadable skip, got {stats.files_undownloadable}"
+    )
+    assert stats.errors == [], f"unexpected error entries: {stats.errors}"
+    assert stats.as_dict()["files_undownloadable"] == 1
+    assert (tmp_path / "root" / "Root" / "kept.txt").read_bytes() == b"hello"
