@@ -1575,14 +1575,20 @@ class GoogleDriveConnector(SyncConnector):
         both ways keeps its real folder path instead of being duplicated under
         ``rel_prefix``. Run this AFTER the folder walk so the set is complete.
 
-        Shared *folders* are not special-cased: ``_process_item`` recurses
-        into them like any other directory, so sharing a folder directly
-        yields its whole subtree. This matters more than it sounds — the
-        picked roots are themselves usually shared with the credential, so
-        they come back from this query too. Their ids are in ``seen_ids``
-        (the root loop adds them), which stops the pass re-walking the entire
-        corpus; and even if one slipped through, every child it found would
-        be skipped by id.
+        Shared **folders are skipped**, and that is a deliberate limit. This
+        pass exists for files that no folder walk can reach; a shared folder
+        IS reachable — add it as a root in the picker and it gets a real path,
+        its own error reporting and its own cleanup prefix. Recursing here
+        instead bought three problems: the picked roots come back from this
+        query too (so it re-walked the whole corpus), unrelated shared
+        subtrees dragged in hundreds of files, and the deep sub-listings hit
+        Drive 500s that aborted the entire pass (jobs 39189/39458 — which
+        then cost 277 files to orphan cleanup).
+
+        Per-item failures are contained: one unreadable file is recorded and
+        the rest of the pass continues, mirroring the per-root isolation in
+        the folder loop. Only a failure of the paginated listing itself can
+        end the pass, and the caller marks the prefix unverified when it does.
         """
         page_token: str | None = None
         while True:
@@ -1606,6 +1612,15 @@ class GoogleDriveConnector(SyncConnector):
                 .execute()
             )
             for item in resp.get("files", []):
+                if item["mimeType"] == NATIVE_FOLDER:
+                    # Reachable by a folder walk → belongs in the picker as a
+                    # root, not here. See the docstring.
+                    logger.debug(
+                        "shared-with-me: skipping folder %s (add it as a "
+                        "synced root to index its contents)",
+                        item.get("name") or item["id"],
+                    )
+                    continue
                 # Whoever shared the file IS the provenance here — there is no
                 # containing folder to inherit it from, so stamp it per item
                 # rather than relying on the per-root ``self._shared_by``.
@@ -1614,15 +1629,25 @@ class GoogleDriveConnector(SyncConnector):
                     "name": sharer.get("displayName") or "",
                     "email": sharer.get("emailAddress") or "",
                 }
-                self._process_item(
-                    drive, docs, item, rel_prefix, out, stats, ignore,
-                    on_page=on_page,
-                    skipped_counter=skipped_counter,
-                    pending_native=pending_native,
-                    enabled_native_mimes=enabled_native_mimes,
-                    seen_ids=seen_ids,
-                    skip_ids=seen_ids,
-                )
+                try:
+                    self._process_item(
+                        drive, docs, item, rel_prefix, out, stats, ignore,
+                        on_page=on_page,
+                        skipped_counter=skipped_counter,
+                        pending_native=pending_native,
+                        enabled_native_mimes=enabled_native_mimes,
+                        seen_ids=seen_ids,
+                        skip_ids=seen_ids,
+                    )
+                except Exception as e:
+                    # Contain it: one bad file must not cost us the rest of
+                    # the pass (and, via cleanup, the files it already synced).
+                    logger.exception(
+                        "shared-with-me: item failed: %s", item.get("name")
+                    )
+                    stats.errors.append(
+                        f"{rel_prefix}/{item.get('name') or item['id']}: {e}"
+                    )
             if on_page is not None:
                 on_page()
             page_token = resp.get("nextPageToken")

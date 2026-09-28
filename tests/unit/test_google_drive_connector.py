@@ -1844,17 +1844,18 @@ async def test_shared_folder_that_is_a_picked_root_is_not_rewalked(
     )
     assert (tmp_path / "root" / "Meet Recordings" / "kept.txt").read_bytes() == b"hello"
     assert not (tmp_path / "root" / "Shared with me").exists(), (
-        "picked root returned by sharedWithMe must not be re-walked"
+        "a shared folder must not be walked by the shared-with-me pass"
     )
     assert stats.files_added == 1, f"corpus duplicated: {stats.as_dict()}"
 
 
 @pytest.mark.asyncio
-async def test_shared_subtree_skips_children_already_walked(
+async def test_shared_folders_are_skipped_entirely(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Defence in depth for the same hole one level down: a shared folder that
-    is NOT a picked root still must not duplicate children the walk reached."""
+    """Shared folders are out of scope for this pass: they are reachable by a
+    folder walk, so they belong in the picker as roots. Recursing here dragged
+    in unrelated subtrees and hit Drive 500s that aborted the whole pass."""
     shared_child = _shared_doc("dup", "already-have.txt")
     fresh_child = _shared_doc("new", "brand-new.txt", "ccc")
     shared_folder = {
@@ -1877,10 +1878,10 @@ async def test_shared_subtree_skips_children_already_walked(
         drive_folders=[{"id": "ROOT", "name": "Root"}],
         shared_with_me=True,
     )
-    shared_dir = tmp_path / "root" / "Shared with me" / "Some Shared Folder"
     assert (tmp_path / "root" / "Root" / "already-have.txt").exists()
-    assert not (shared_dir / "already-have.txt").exists(), "duplicated child"
-    assert (shared_dir / "brand-new.txt").read_bytes() == b"fresh"
+    # Nothing from inside the shared folder is pulled in — not the duplicate,
+    # not even the file only reachable through it.
+    assert not (tmp_path / "root" / "Shared with me").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -1991,3 +1992,36 @@ async def test_cleanup_still_removes_orphans_under_healthy_sources(
     assert not gone.exists(), "healthy source's orphan should still be removed"
     assert protected.exists(), "broken source's file must be kept"
     assert stats.files_removed == 1
+
+
+@pytest.mark.asyncio
+async def test_shared_pass_survives_one_bad_item(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One unreadable shared file must not cost us the whole pass — that is
+    what turned a single Drive 500 into 277 deleted files (job 39189)."""
+    good = _shared_doc("good", "meeting-notes.txt")
+    bad = _shared_doc("bad", "cursed.txt", "bbb")
+
+    class _OneBadDownload(_FakeFilesShared):
+        def get_media(self, *, fileId: str, **kwargs: Any):
+            if fileId == "bad":
+                raise _http_err(500, "internalError", "Internal Error")
+            return super().get_media(fileId=fileId, **kwargs)
+
+    drive = _FakeDrive(_OneBadDownload(
+        {"ROOT": []}, export_payloads={},
+        download_payloads={"good": b"hello", "bad": b""},
+        shared=[bad, good],
+    ))
+    connector = GoogleDriveConnector()
+    _patch_services(connector, drive, _FakeDocs({}), monkeypatch)
+    stats = await connector.sync(
+        folder_root=tmp_path / "root", auth=_make_auth(),
+        drive_folders=[{"id": "ROOT", "name": "Root"}],
+        shared_with_me=True,
+    )
+    # The healthy sibling still landed despite the bad one.
+    assert (tmp_path / "root" / "Shared with me" / "meeting-notes.txt").exists(), (
+        f"good item lost to a bad sibling; errors={stats.errors}"
+    )

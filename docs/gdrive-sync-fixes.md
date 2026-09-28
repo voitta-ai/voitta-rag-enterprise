@@ -236,6 +236,34 @@ keeps its files, a failed root keeps its files, and — the surgical half — a
 healthy source still has its genuine orphans removed while another source is
 broken.
 
+## Bug 5 — recursing into shared folders was the fault line (commit 5)
+
+Jobs 39189 and 39458 both failed the same way: a **Drive HTTP 500 on a
+sub-listing inside a shared folder** (`1Lt73WF…`, then `1a4DsEO…`). The pass
+had succeeded 23 times and then failed 3 times in a row, because the
+`try/except` wrapped the *whole* pass — one bad subtree ended all shared
+discovery, which with Bug 4's cleanup meant 277 deleted files.
+
+Three separate problems all traced to the same decision to recurse:
+
+1. the picked roots are themselves shared, so the pass re-walked the corpus
+   (fixed in commit 2 by `skip_ids`, but only by papering over it);
+2. unrelated shared subtrees dragged in **264 files** — `01_Product` (137),
+   `Customer Experience` (67), contracts, case studies;
+3. deep sub-listings hit transient 500s that aborted everything.
+
+**Shared folders are now skipped.** The rule is simple and matches what the
+pass is for: it exists for files *no folder walk can reach*. A shared folder
+IS reachable — add it in the picker and it gets a real path, its own error
+reporting, and its own cleanup prefix. The pass is now one paginated listing
+plus per-item processing, with **per-item error isolation** so a single
+unreadable file is recorded and the rest continues, mirroring the per-root
+isolation in the folder loop.
+
+This also answers the scope question that was open for three days: the 264
+unrelated files were never a deliberate feature, they were a side effect of
+the recursion that was simultaneously breaking the pass.
+
 ## Still open (not code)
 
 1. **Share the two dead roots** with
