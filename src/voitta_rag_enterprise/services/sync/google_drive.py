@@ -976,6 +976,15 @@ class GoogleDriveConnector(SyncConnector):
         # subdirectory is the folder's display name (set by the picker UI),
         # with a stable fallback when it's missing.
         used_dirs: set[str] = set()
+        # Directory prefixes whose remote listing did NOT complete this run —
+        # an API error, or a root the credential cannot see. Orphan cleanup
+        # below refuses to delete anything underneath them: a local file is
+        # only provably stale when we actually finished listing its source.
+        # Without this a transient Drive 500 mid-listing silently deletes
+        # every file that source had synced (it happened: 277 files, job
+        # 39189), because a half-built ``expected_paths`` looks exactly like
+        # "the remote no longer has these".
+        unverified_prefixes: set[str] = set()
         n_drive_folders = len(drive_folders)
         # Drive ids the folder walk reaches, so the shared-with-me pass can
         # skip anything that already has a real path. Collected even when the
@@ -1062,6 +1071,7 @@ class GoogleDriveConnector(SyncConnector):
             except Exception as e:
                 logger.exception("Drive enumeration failed for %s", folder_id)
                 stats.errors.append(f"list {display or folder_id}: {e}")
+                unverified_prefixes.add(unique)
             else:
                 # A root the credential cannot see does NOT raise here:
                 # ``files.list(q="'<id>' in parents")`` answers an empty page
@@ -1087,6 +1097,7 @@ class GoogleDriveConnector(SyncConnector):
                         f"metadata is unreadable — folder is probably not "
                         f"shared with this credential ({root_access_error})"
                     )
+                    unverified_prefixes.add(unique)
             # Emit after each top-level folder so a multi-folder sync flips
             # through "1/3", "2/3", "3/3" — useful when listing a Shared
             # Drive can take a minute.
@@ -1142,6 +1153,7 @@ class GoogleDriveConnector(SyncConnector):
                 # everything the folder walk found.
                 logger.exception("Drive shared-with-me enumeration failed")
                 stats.errors.append(f"list {shared_dir}: {e}")
+                unverified_prefixes.add(shared_dir)
             else:
                 logger.info(
                     "shared-with-me pass added %d entries (%d ids already "
@@ -1400,17 +1412,44 @@ class GoogleDriveConnector(SyncConnector):
         # them like any other entry — no separate keep entry needed for
         # the dir itself.
         keep = {".voitta_sources.json", ".voitta_timestamps.json"}
+
+        def _unverified(rel: str) -> bool:
+            """True iff ``rel`` sits under a source we failed to list."""
+            return any(
+                rel == pre or rel.startswith(f"{pre}/")
+                for pre in unverified_prefixes
+            )
+
+        if unverified_prefixes:
+            logger.warning(
+                "orphan cleanup skipped under %d unlisted source(s): %s — "
+                "their remote listing did not complete, so local files there "
+                "cannot be proven stale",
+                len(unverified_prefixes),
+                ", ".join(sorted(unverified_prefixes)),
+            )
+        kept_unverified = 0
         for path in list(folder_root.rglob("*")):
             if not path.is_file():
                 continue
             rel = path.relative_to(folder_root).as_posix()
             if rel in keep or rel in expected_paths:
                 continue
+            if _unverified(rel):
+                kept_unverified += 1
+                continue
             try:
                 path.unlink()
                 stats.files_removed += 1
             except OSError as e:
                 stats.errors.append(f"unlink {rel}: {e}")
+
+        if kept_unverified:
+            logger.warning(
+                "kept %d local file(s) that would otherwise have been deleted "
+                "as orphans; retry once Drive answers",
+                kept_unverified,
+            )
 
         # Tidy empty directories left behind by deletes.
         for d in sorted(folder_root.rglob("*"), reverse=True):

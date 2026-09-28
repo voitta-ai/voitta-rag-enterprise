@@ -1881,3 +1881,113 @@ async def test_shared_subtree_skips_children_already_walked(
     assert (tmp_path / "root" / "Root" / "already-have.txt").exists()
     assert not (shared_dir / "already-have.txt").exists(), "duplicated child"
     assert (shared_dir / "brand-new.txt").read_bytes() == b"fresh"
+
+
+# ---------------------------------------------------------------------------
+# Orphan cleanup must never delete files whose source failed to list.
+# Job 39189 on the live Agnitio Drive: Drive answered HTTP 500 partway
+# through the shared-with-me listing, expected_paths came back half-built,
+# and phase 4 deleted 277 previously-synced files. See docs/.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_failed_shared_pass_does_not_delete_its_existing_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient error during the shared-with-me listing must not turn its
+    previously-synced files into orphans."""
+    class _Exploding(_FakeFilesShared):
+        def list(self, **kwargs):
+            if "sharedWithMe" in kwargs.get("q", ""):
+                raise _http_err(500, "internalError", "Internal Error")
+            return _FakeFiles.list(self, **kwargs)
+
+    drive = _FakeDrive(_Exploding(
+        {"ROOT": [_shared_doc("r1", "from-root.txt")]},
+        export_payloads={}, download_payloads={"r1": b"root"},
+    ))
+    root = tmp_path / "root"
+    # A file a previous successful shared pass had left behind.
+    stale = root / "Shared with me" / "earlier-meeting.md"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("notes from a previous run")
+
+    connector = GoogleDriveConnector()
+    _patch_services(connector, drive, _FakeDocs({}), monkeypatch)
+    stats = await connector.sync(
+        folder_root=root, auth=_make_auth(),
+        drive_folders=[{"id": "ROOT", "name": "Root"}],
+        shared_with_me=True,
+    )
+    assert stale.exists(), (
+        "file under a source that failed to list was deleted as an orphan"
+    )
+    assert stats.files_removed == 0, f"unexpected deletions: {stats.as_dict()}"
+    assert any("Shared with me" in e for e in stats.errors)
+
+
+@pytest.mark.asyncio
+async def test_failed_root_listing_does_not_delete_that_roots_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same protection for the folder walk — this exposure pre-dates the
+    shared-with-me pass."""
+    class _ExplodingRoot(_FakeFilesShared):
+        def list(self, **kwargs):
+            if "'BOOM'" in kwargs.get("q", ""):
+                raise _http_err(500, "internalError", "Internal Error")
+            return _FakeFiles.list(self, **kwargs)
+
+    drive = _FakeDrive(_ExplodingRoot(
+        {"OK": [_shared_doc("o1", "fine.txt")], "BOOM": []},
+        export_payloads={}, download_payloads={"o1": b"fine"},
+    ))
+    root = tmp_path / "root"
+    stale = root / "Broken" / "previously-synced.md"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("still valid, we just could not list it")
+
+    connector = GoogleDriveConnector()
+    _patch_services(connector, drive, _FakeDocs({}), monkeypatch)
+    stats = await connector.sync(
+        folder_root=root, auth=_make_auth(),
+        drive_folders=[{"id": "OK", "name": "Fine"}, {"id": "BOOM", "name": "Broken"}],
+    )
+    assert stale.exists(), "failed root's files must survive cleanup"
+    assert stats.files_removed == 0
+
+
+@pytest.mark.asyncio
+async def test_cleanup_still_removes_orphans_under_healthy_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard must be surgical: a source that listed fine still gets its
+    genuinely-deleted files cleaned up, even while another source is broken."""
+    class _ExplodingRoot(_FakeFilesShared):
+        def list(self, **kwargs):
+            if "'BOOM'" in kwargs.get("q", ""):
+                raise _http_err(500, "internalError", "Internal Error")
+            return _FakeFiles.list(self, **kwargs)
+
+    drive = _FakeDrive(_ExplodingRoot(
+        {"OK": [_shared_doc("o1", "fine.txt")], "BOOM": []},
+        export_payloads={}, download_payloads={"o1": b"fine"},
+    ))
+    root = tmp_path / "root"
+    (root / "Fine").mkdir(parents=True)
+    gone = root / "Fine" / "deleted-in-drive.md"
+    gone.write_text("no longer on the remote")
+    protected = root / "Broken" / "keep-me.md"
+    protected.parent.mkdir(parents=True)
+    protected.write_text("source failed to list")
+
+    connector = GoogleDriveConnector()
+    _patch_services(connector, drive, _FakeDocs({}), monkeypatch)
+    stats = await connector.sync(
+        folder_root=root, auth=_make_auth(),
+        drive_folders=[{"id": "OK", "name": "Fine"}, {"id": "BOOM", "name": "Broken"}],
+    )
+    assert not gone.exists(), "healthy source's orphan should still be removed"
+    assert protected.exists(), "broken source's file must be kept"
+    assert stats.files_removed == 1

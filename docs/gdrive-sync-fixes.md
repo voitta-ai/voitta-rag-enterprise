@@ -196,6 +196,46 @@ back up `voitta.db` before rolling forward or back, and note that rolling
 *back* to a build without the column leaves it in place harmlessly (SQLite
 can't drop it; nothing reads it).
 
+## Bug 4 — a half-listed source got its files deleted (commit 4)
+
+Caught by deploying the rebased branch to production *before* merging, which
+is the only reason it was found at all.
+
+Job 39189: Drive answered **HTTP 500 Internal Error** partway through the
+shared-with-me listing. The pass raised, the error was reported, the
+folder-walk results were kept — all as designed. But `expected_paths` was
+half-built, and phase 4 cannot tell "the remote no longer has this file" from
+"we never finished asking". It deleted **277 previously-synced files**.
+
+This invalidates the claim made for Bug 3, that feeding one `entries` list
+made this class of bug impossible. It does prevent a *separate* cleanup from
+racing, but a *partial* discovery failure still becomes deletions — and the
+same exposure pre-dates the shared-with-me pass: a root failing mid-listing
+has always meant that root's local files get unlinked.
+
+### The fix
+
+`unverified_prefixes` collects the directory prefix of every source whose
+listing did not complete — an enumeration exception, the shared pass raising,
+or a root detected unreadable. Orphan cleanup then refuses to delete anything
+underneath them, logs what it kept, and leaves the rest of the tree alone.
+
+Deliberately per-prefix rather than a global "skip all cleanup on any error":
+folder 1 has two permanently-unreadable roots, so a global switch would
+disable orphan cleanup forever and the corpus would silently stop reflecting
+real Drive deletions. Per-prefix keeps cleanup working everywhere it is
+provably safe. It self-heals — the next successful listing deletes whatever
+genuinely went away.
+
+A local file that lingers one extra hour costs nothing. A deleted meeting
+costs a re-sync and, until someone notices, an answer the RAG can no longer
+give. The asymmetry decides the default.
+
+3 tests, all three confirmed failing without the guard: a failed shared pass
+keeps its files, a failed root keeps its files, and — the surgical half — a
+healthy source still has its genuine orphans removed while another source is
+broken.
+
 ## Still open (not code)
 
 1. **Share the two dead roots** with
