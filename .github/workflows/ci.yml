@@ -15,6 +15,12 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+      # tests/unit/test_js_static_checks.py shells out to `node --check` and
+      # skips silently when node is absent — which it was, so no JS in
+      # static/ has ever been syntax-checked by CI.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
       - name: Install
         run: |
           python -m pip install --upgrade pip
