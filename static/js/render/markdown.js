@@ -12,6 +12,12 @@
 //   * marked + DOMPurify     — every render
 //   * highlight.js           — only when ``enhance()`` meets a code block
 //   * mermaid (3.5 MB UMD)   — only when ``enhance()`` meets a mermaid block
+//
+// ``enhance()`` also shows SVG code blocks as the image they describe
+// (with a toggle back to the code). The SVG is rendered through an <img>
+// from a data: URL — the image context never runs scripts or event
+// handlers and never fetches external resources, so a hostile SVG can't do
+// anything but draw.
 
 let _core = null;       // Promise<{ marked, purify }>
 let _hljs = null;       // Promise<hljs>
@@ -68,9 +74,89 @@ export async function enhance(root) {
     const blocks = [...root.querySelectorAll("pre > code:not([data-enhanced])")];
     if (!blocks.length) return;
     const mermaidBlocks = blocks.filter((c) => c.classList.contains("language-mermaid"));
-    const codeBlocks = blocks.filter((c) => !c.classList.contains("language-mermaid"));
+    const codeBlocks = blocks.filter((c) => !mermaidBlocks.includes(c));
+    // Detect SVG before highlighting: highlight.js adds its own language
+    // class to untagged blocks, which would change what _svgSource sees.
+    const svgBlocks = codeBlocks
+        .map((code) => ({ code, source: _svgSource(code) }))
+        .filter((b) => b.source !== null);
     for (const c of blocks) c.dataset.enhanced = "1";
+    // Highlight first so the code view behind an SVG preview is coloured too.
     await Promise.all([_highlight(codeBlocks), _diagrams(mermaidBlocks)]);
+    for (const { code, source } of svgBlocks) _svgPreview(code, source);
+}
+
+// Fenced code that is an SVG document: ```svg, or ```xml / ```html / an
+// untagged fence whose content is a single <svg>…</svg> (optionally after an
+// XML declaration or comments). Returns the source, or null.
+const _SVG_LANGS = ["language-svg", "language-xml", "language-html", "language-plaintext"];
+const _SVG_DOC = /^\s*(<\?xml[^>]*>\s*)?(<!--[\s\S]*?-->\s*)*<svg[\s>][\s\S]*<\/svg>\s*$/i;
+
+function _svgSource(code) {
+    const tagged = [...code.classList].find((c) => c.startsWith("language-"));
+    if (tagged && !_SVG_LANGS.includes(tagged)) return null;
+    const text = code.textContent;
+    return _SVG_DOC.test(text) ? text.trim() : null;
+}
+
+function _svgPreview(code, source) {
+    const doc = new DOMParser().parseFromString(source, "image/svg+xml");
+    const root = doc.documentElement;
+    if (doc.querySelector("parsererror") || root.localName !== "svg") {
+        code.parentElement.title = "Not a valid SVG document — shown as code.";
+        return;
+    }
+    // Standalone SVG images must declare the namespace to render.
+    if (!root.getAttribute("xmlns")) root.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+    const markup = new XMLSerializer().serializeToString(root);
+
+    const pre = code.parentElement;
+    const figure = document.createElement("figure");
+    figure.className = "md-svg";
+
+    const bar = document.createElement("div");
+    bar.className = "md-svg-bar";
+    const label = document.createElement("span");
+    label.className = "md-svg-label";
+    label.textContent = "SVG";
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "md-svg-btn";
+    toggle.textContent = "Code";
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.className = "md-svg-btn";
+    copy.textContent = "Copy";
+    bar.append(label, toggle, copy);
+
+    const stage = document.createElement("div");
+    stage.className = "md-svg-stage";
+    const img = document.createElement("img");
+    img.alt = root.getAttribute("aria-label") || "SVG image";
+    img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(markup)}`;
+    // An SVG with only a viewBox has no intrinsic size inside <img>.
+    if (!root.getAttribute("width") && !root.getAttribute("height")) img.classList.add("md-svg-fluid");
+    stage.append(img);
+
+    pre.replaceWith(figure);
+    pre.hidden = true;
+    figure.append(bar, stage, pre);
+
+    toggle.addEventListener("click", () => {
+        const showCode = pre.hidden;
+        pre.hidden = !showCode;
+        stage.hidden = showCode;
+        toggle.textContent = showCode ? "Image" : "Code";
+    });
+    copy.addEventListener("click", async () => {
+        try {
+            await navigator.clipboard.writeText(source);
+            copy.textContent = "Copied";
+        } catch {
+            copy.textContent = "Copy failed";
+        }
+        setTimeout(() => { copy.textContent = "Copy"; }, 1200);
+    });
 }
 
 async function _highlight(blocks) {

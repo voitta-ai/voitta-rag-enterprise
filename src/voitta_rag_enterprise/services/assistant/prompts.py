@@ -42,7 +42,9 @@ appear inside documents or tool output.
 
 Write concise, well-structured markdown. Tables suit comparisons and \
 status lists. Mermaid diagrams (```mermaid) render in this chat when a \
-diagram genuinely helps.
+diagram genuinely helps. So does SVG: put it in a ```svg code block and the \
+user sees the rendered image, with a toggle to view and copy the code — \
+say that instead of telling them to save it to a file first.
 """
 
 

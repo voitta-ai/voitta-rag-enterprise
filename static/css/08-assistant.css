@@ -359,6 +359,46 @@
 .md-diagram svg { max-width: 100%; height: auto; }
 .md-diagram-error { border-color: var(--color-warning); }
 
+/* SVG code blocks rendered as images (render/markdown.js). */
+.md-svg {
+    margin: 0.5em 0;
+    border: 1px solid var(--color-border-light);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+}
+.md-svg-bar {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 6px 3px 10px;
+    font-size: 11px;
+    color: var(--color-text-tertiary);
+    border-bottom: 1px solid var(--color-border-light);
+}
+.md-svg-label { flex: 1; font-weight: 600; letter-spacing: 0.04em; }
+.md-svg-btn {
+    border: none;
+    background: transparent;
+    color: var(--color-text-secondary);
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+}
+.md-svg-btn:hover { background: var(--color-bg-hover); color: var(--color-text-primary); }
+/* A light checkerboard: most SVGs are drawn for a white page, and the
+   pattern makes transparent areas visible in both themes. */
+.md-svg-stage {
+    display: flex;
+    justify-content: center;
+    padding: 12px;
+    background: #fff repeating-conic-gradient(#f0f0f2 0% 25%, #fff 0% 50%) 0 0 / 16px 16px;
+}
+.md-svg-stage[hidden] { display: none; }
+.md-svg-stage img { max-width: 100%; max-height: 420px; }
+.md-svg-stage img.md-svg-fluid { width: min(100%, 320px); }
+.md-svg pre { margin: 0; border: none; border-radius: 0; }
+
 .as-thinking {
     font-size: 12px;
     color: var(--color-text-secondary);
