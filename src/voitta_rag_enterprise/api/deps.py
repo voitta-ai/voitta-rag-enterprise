@@ -42,11 +42,12 @@ def _cu(u: User) -> CurrentUser:
 
 _VOITTA_KEY_PREFIXES = ("vk_", "cvk_")
 
-# Session-cookie-only surface: identity/impersonation/key management. An API
-# key must not mint or delete keys, switch accounts, or reach the admin
-# console. GET /api/auth/me stays reachable as a "whoami" so clients can
-# verify a key and see which account it resolves to.
-_COOKIE_ONLY_PREFIXES = ("/api/admin", "/api/auth")
+# Session-cookie-only surface: identity/impersonation/key management and the
+# in-app assistant. An API key must not mint or delete keys, switch accounts,
+# reach the admin console, or read assistant chats / manage LLM credentials.
+# GET /api/auth/me stays reachable as a "whoami" so clients can verify a key
+# and see which account it resolves to.
+_COOKIE_ONLY_PREFIXES = ("/api/admin", "/api/auth", "/api/assistant")
 _BEARER_EXCEPTIONS = {("GET", "/api/auth/me"), ("HEAD", "/api/auth/me")}
 
 
@@ -231,21 +232,20 @@ async def current_user(
     return _cu(target)
 
 
-def resolve_ws_user(
+def resolve_ws_identity(
     session: Mapping[str, Any] | None,
     db: Session,
-) -> tuple[CurrentUser, bool] | None:
-    """Resolve ``(effective_user, real_is_admin)`` for a WebSocket connection.
+) -> tuple[CurrentUser, CurrentUser, bool] | None:
+    """Resolve ``(real, effective, real_is_admin)`` for a WebSocket connection.
 
-    Mirrors :func:`current_user` — including the admin "view as"
-    impersonation — but works from a raw session mapping (``ws.session``)
-    rather than a ``Request``, and returns ``None`` instead of raising when
-    the caller is not signed in. The WS handler turns ``None`` into a
-    ``close(4401)``.
+    Mirrors :func:`real_user` + :func:`current_user` — including the admin
+    "view as" impersonation — but works from a raw session mapping
+    (``ws.session``) rather than a ``Request``, and returns ``None`` instead
+    of raising when the caller is not signed in (the WS handlers turn that
+    into ``close(4401)``).
 
-    The returned bool is the *real* user's admin flag (impersonation never
-    confers admin). The event broker uses it to bypass per-folder ACL
-    filtering for admins, who can see everything.
+    ``real_is_admin`` is the *real* user's admin flag (impersonation never
+    confers admin).
     """
     from ..services.admin_store import is_super_admin
 
@@ -260,12 +260,13 @@ def resolve_ws_user(
     else:
         return None
 
-    real = _resolve_account(db, email, session)
-    if is_super_admin(email) and not real.is_admin:
+    real_row = _resolve_account(db, email, session)
+    if is_super_admin(email) and not real_row.is_admin:
         stamp_person_admin(db, email, True)
     db.commit()
     real_is_admin = person_is_admin(db, email)
-    effective = _cu(real)
+    real = _cu(real_row)
+    effective = real
 
     # Impersonation ("view as") — only honoured for a real admin.
     target_id = session.get("acting_as_user_id") if session else None
@@ -274,6 +275,20 @@ def resolve_ws_user(
         if target is not None:
             effective = _cu(target)
 
+    return real, effective, real_is_admin
+
+
+def resolve_ws_user(
+    session: Mapping[str, Any] | None,
+    db: Session,
+) -> tuple[CurrentUser, bool] | None:
+    """``(effective_user, real_is_admin)`` for the event WebSocket — see
+    :func:`resolve_ws_identity`. The event broker uses the admin flag only
+    for the ``admin`` topic."""
+    resolved = resolve_ws_identity(session, db)
+    if resolved is None:
+        return None
+    _real, effective, real_is_admin = resolved
     return effective, real_is_admin
 
 

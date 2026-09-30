@@ -339,3 +339,70 @@ CREATE TABLE IF NOT EXISTS auth_providers (
 );
 CREATE INDEX IF NOT EXISTS idx_auth_providers_provider
     ON auth_providers(provider, enabled);
+
+-- ---------------------------------------------------------------------------
+-- In-app assistant (services/assistant). See docs/OPERATIONS.md §11.
+-- ---------------------------------------------------------------------------
+
+-- One chat. ``owner_user_id`` is the ACCOUNT whose conversation list it lives
+-- in — during an admin "view as" session that can be the impersonated
+-- account (the chat window's Mine/Theirs toggle picks which list a new chat
+-- joins). ``created_by_user_id`` is the real account that started it.
+-- ``engine`` / ``model`` are pinned at creation: replaying history into a
+-- different engine or model would break its thinking-block continuity.
+-- ``sdk_session_id`` is the Claude-subscription engine's resume handle.
+CREATE TABLE IF NOT EXISTS assistant_conversations (
+    id                 INTEGER PRIMARY KEY,
+    owner_user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    title              TEXT NOT NULL DEFAULT '',
+    engine             TEXT NOT NULL,          -- 'anthropic_api' | 'claude_subscription'
+    model              TEXT NOT NULL,
+    sdk_session_id     TEXT,
+    created_at         INTEGER NOT NULL,
+    updated_at         INTEGER NOT NULL,
+    archived_at        INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_assistant_conversations_owner
+    ON assistant_conversations(owner_user_id, archived_at, updated_at);
+
+-- Append-only transcript, one row per model-facing message: ``user`` (typed
+-- by a person), ``assistant`` (model output: text / thinking / tool_use
+-- blocks) and ``tool`` (tool results, sent to the model in the user role).
+-- ``content_json`` holds engine-neutral blocks; images are stored as
+-- ``image_ref`` blocks (image id), never inline bytes. ``author_user_id`` is
+-- the real person who typed (user rows); ``acting_user_id`` the identity the
+-- tools ran under (differs while impersonating).
+CREATE TABLE IF NOT EXISTS assistant_messages (
+    id               INTEGER PRIMARY KEY,
+    conversation_id  INTEGER NOT NULL REFERENCES assistant_conversations(id) ON DELETE CASCADE,
+    seq              INTEGER NOT NULL,
+    role             TEXT NOT NULL,            -- 'user' | 'assistant' | 'tool'
+    content_json     TEXT NOT NULL,
+    author_user_id   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    acting_user_id   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    usage_json       TEXT,
+    stop_reason      TEXT,
+    created_at       INTEGER NOT NULL,
+    UNIQUE (conversation_id, seq)
+);
+
+-- LLM credentials, encrypted at rest with services/secret_box (the Fernet
+-- key lives outside the DB). ``scope`` = 'deployment' (scope_key '') or
+-- 'person' (scope_key = lowercased email — a person, not an account row).
+-- ``kind`` = 'anthropic_api_key' | 'claude_oauth_token'. The subscription
+-- token is deployment-scoped only and usable by super-admins only.
+CREATE TABLE IF NOT EXISTS assistant_credentials (
+    id                INTEGER PRIMARY KEY,
+    scope             TEXT NOT NULL,
+    scope_key         TEXT NOT NULL DEFAULT '',
+    kind              TEXT NOT NULL,
+    secret_enc        TEXT NOT NULL,
+    hint              TEXT NOT NULL DEFAULT '',     -- masked tail for display
+    created_by        TEXT NOT NULL DEFAULT '',     -- email
+    created_at        INTEGER NOT NULL,
+    updated_at        INTEGER NOT NULL,
+    last_verified_at  INTEGER,
+    last_error        TEXT,
+    UNIQUE (scope, scope_key, kind)
+);

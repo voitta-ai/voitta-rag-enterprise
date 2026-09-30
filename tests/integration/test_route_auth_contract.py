@@ -42,6 +42,15 @@ PUBLIC = {
 }
 
 COOKIE_ONLY = {
+    "DELETE /api/assistant/conversations/{conversation_id}",
+    "DELETE /api/assistant/credentials/{scope}/{kind}",
+    "GET /api/assistant/config",
+    "GET /api/assistant/conversations",
+    "GET /api/assistant/conversations/{conversation_id}",
+    "PATCH /api/assistant/conversations/{conversation_id}",
+    "PATCH /api/assistant/policy",
+    "POST /api/assistant/credentials/{scope}/{kind}/test",
+    "PUT /api/assistant/credentials/{scope}/{kind}",
     "DELETE /api/admin/allowlist/domains/{domain}",
     "DELETE /api/admin/allowlist/users/{email}",
     "DELETE /api/admin/auth-providers/{provider_id}",
@@ -82,6 +91,11 @@ COOKIE_ONLY = {
 }
 
 BEARER = {
+    "DELETE /api/sync/credentials/{cred_id}",
+    "GET /api/sync/credentials",
+    "POST /api/sync/credentials",
+    "POST /api/sync/credentials/import-from-folder/{folder_id}",
+    "POST /api/sync/credentials/{cred_id}/google/auth",
     "GET /api/auth/me",  # the whoami exception
     "GET /api/docs",
     "GET /api/openapi.json",

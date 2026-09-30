@@ -2,9 +2,11 @@
 
 from fastapi import APIRouter
 
+from .assistant_ws import router as assistant_ws_router
 from .routes.admin import router as admin_router
 from .routes.api_keys import router as api_keys_router
 from .routes.assets import router as assets_router
+from .routes.assistant import router as assistant_router
 from .routes.auth import router as auth_router
 from .routes.company_keys import router as company_keys_router
 from .routes.docs import router as docs_router
@@ -39,6 +41,7 @@ api_router.include_router(sync_oauth_router)
 api_router.include_router(users_router)
 api_router.include_router(admin_router)
 api_router.include_router(assets_router)
+api_router.include_router(assistant_router)  # /assistant (cookie-only)
 api_router.include_router(docs_router)  # /api/docs + /api/openapi.json (authed)
 
-__all__ = ["api_router", "ws_router"]
+__all__ = ["api_router", "assistant_ws_router", "ws_router"]

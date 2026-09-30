@@ -520,3 +520,65 @@ class UserGroup(Base):
     group_id: Mapped[int] = mapped_column(
         ForeignKey("groups.id", ondelete="CASCADE"), primary_key=True
     )
+
+
+class AssistantConversation(Base):
+    """One assistant chat. See schema.sql for the owner / creator split."""
+
+    __tablename__ = "assistant_conversations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    owner_user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE")
+    )
+    created_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), default=None
+    )
+    title: Mapped[str] = mapped_column(default="")
+    engine: Mapped[str]
+    model: Mapped[str]
+    sdk_session_id: Mapped[str | None] = mapped_column(default=None)
+    created_at: Mapped[int] = mapped_column(default=_now_s)
+    updated_at: Mapped[int] = mapped_column(default=_now_s)
+    archived_at: Mapped[int | None] = mapped_column(default=None)
+
+
+class AssistantMessage(Base):
+    """One model-facing transcript message (append-only)."""
+
+    __tablename__ = "assistant_messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    conversation_id: Mapped[int] = mapped_column(
+        ForeignKey("assistant_conversations.id", ondelete="CASCADE")
+    )
+    seq: Mapped[int]
+    role: Mapped[str]
+    content_json: Mapped[str]
+    author_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), default=None
+    )
+    acting_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), default=None
+    )
+    usage_json: Mapped[str | None] = mapped_column(default=None)
+    stop_reason: Mapped[str | None] = mapped_column(default=None)
+    created_at: Mapped[int] = mapped_column(default=_now_s)
+
+
+class AssistantCredential(Base):
+    """An encrypted LLM credential (services/assistant/credentials.py)."""
+
+    __tablename__ = "assistant_credentials"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    scope: Mapped[str]
+    scope_key: Mapped[str] = mapped_column(default="")
+    kind: Mapped[str]
+    secret_enc: Mapped[str]
+    hint: Mapped[str] = mapped_column(default="")
+    created_by: Mapped[str] = mapped_column(default="")
+    created_at: Mapped[int] = mapped_column(default=_now_s)
+    updated_at: Mapped[int] = mapped_column(default=_now_s)
+    last_verified_at: Mapped[int | None] = mapped_column(default=None)
+    last_error: Mapped[str | None] = mapped_column(default=None)

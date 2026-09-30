@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 
-from .api import api_router, ws_router
+from .api import api_router, assistant_ws_router, ws_router
 from .config import get_settings
 from .db.database import init_db, session_scope
 from .db.models import Folder
@@ -488,6 +488,11 @@ def create_app() -> FastAPI:
             finally:
                 import contextlib
 
+                # Stop in-flight assistant turns first: each owns an LLM stream
+                # or a Claude Code subprocess that must not outlive the app.
+                from .services.assistant.turns import shutdown_turn_runner
+
+                await shutdown_turn_runner()
                 # Background startup may still be warming up — stop it first so
                 # it doesn't start workers/watcher mid-teardown.
                 if getattr(app.state, "bg_startup_task", None) is not None:
@@ -571,6 +576,7 @@ def create_app() -> FastAPI:
 
     app.include_router(api_router, prefix="/api")
     app.include_router(ws_router)
+    app.include_router(assistant_ws_router)
 
     # MCP under /mcp on the same port. We splice the routes (rather than
     # ``app.mount``) so the canonical URL is /mcp with no trailing-slash

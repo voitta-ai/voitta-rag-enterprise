@@ -251,6 +251,12 @@ class Settings(BaseSettings):
     )
     clerk_api_base: str = "https://api.clerk.com/v1"
     session_secret: str | None = None
+    # Fernet key (urlsafe base64, 32 bytes) encrypting secrets stored in the
+    # database — today the assistant's LLM credentials. Deliberately NOT
+    # derived from ``session_secret``: rotating the cookie secret must not
+    # destroy stored credentials. Unset = generated once and persisted at
+    # ``data_dir/.secret_key``. See services/secret_box.py.
+    secret_key: str | None = None
     # Cookie lifetime for the signed session. 30 days is the same default the
     # voitta-rag app uses; tune via env when stricter rotation is needed.
     session_max_age_seconds: int = 60 * 60 * 24 * 30
@@ -283,6 +289,20 @@ class Settings(BaseSettings):
     # Pre-ping silently replaces a connection that's been killed
     # underneath us (rare on SQLite, but free insurance).
     db_pool_pre_ping: bool = True
+
+    # In-app assistant — operational limits (deployment policy such as the
+    # on/off switch and default model is admin-managed, see
+    # services/assistant/policy.py). Concurrent turns across the whole
+    # process; tool-call rounds per turn before the turn is stopped; and a
+    # wall-clock bound on one turn.
+    # Deployment Anthropic API key supplied by the environment (e.g. a
+    # Terraform-managed secret). Shown read-only in the UI and used when no
+    # deployment key is stored in the DB. Never passed to the Claude
+    # subscription engine.
+    assistant_api_key: str | None = None
+    assistant_max_concurrent_turns: int = 4
+    assistant_max_tool_rounds: int = 24
+    assistant_turn_timeout_s: float = 900.0
 
     # Test/dev override: when true, the lifespan does not start the watcher
     # or the worker pool. Production leaves this false.
@@ -409,6 +429,34 @@ class Settings(BaseSettings):
         with contextlib.suppress(OSError):
             path.chmod(0o600)
         return secret
+
+    def resolved_secret_key(self) -> str:
+        """Return the at-rest encryption key, generating + persisting one on
+        first use (``data_dir/.secret_key``, 0600).
+
+        Losing this file makes every stored credential undecryptable (they
+        must then be re-entered); back it up with the database.
+        """
+        if self.secret_key:
+            return self.secret_key
+        import os as _os
+
+        from cryptography.fernet import Fernet
+
+        path = self.data_dir / ".secret_key"
+        if path.exists():
+            return path.read_text().strip()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        key = Fernet.generate_key().decode("ascii")
+        # O_EXCL: two processes racing the first boot must not each write a
+        # different key — the loser re-reads the winner's.
+        try:
+            fd = _os.open(path, _os.O_WRONLY | _os.O_CREAT | _os.O_EXCL, 0o600)
+        except FileExistsError:
+            return path.read_text().strip()
+        with _os.fdopen(fd, "w") as f:
+            f.write(key)
+        return key
 
 
 @lru_cache(maxsize=1)
