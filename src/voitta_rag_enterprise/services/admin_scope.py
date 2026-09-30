@@ -181,3 +181,58 @@ def filter_users_for_scope(
     if scope.is_super:
         return list(users)
     return [u for u in users if user_in_scope(scope, u)]
+
+
+async def scoped_clerk_directory(email: str) -> list[dict]:
+    """Users + organizations of every enabled Clerk instance, scoped to
+    ``email``'s administrative domain.
+
+    One entry per enabled instance: ``{name, live, ok, error, users,
+    organizations}``, fetched live and concurrently (no caching — staleness
+    would be more confusing than the round-trip). Per-instance fail-soft: an
+    unreachable instance reports ``ok=False`` + its error while the others
+    still answer. A super-admin sees every directory in full; a regular
+    admin only the orgs they administer (role=admin) and those orgs'
+    members — mirroring the users-list scoping. Returns ``[]`` when no
+    instance is enabled. Caller has already passed the admin gate.
+    """
+    import asyncio
+
+    instances = admin_store.enabled_clerk_instances()
+    results = await asyncio.gather(
+        *(clerk_svc.fetch_directory(str(i["secret_key"])) for i in instances),
+        return_exceptions=True,
+    )
+    super_admin = admin_store.is_super_admin(email)
+    out: list[dict] = []
+    for inst, res in zip(instances, results, strict=True):
+        entry: dict = {
+            "name": str(inst["name"]),
+            "live": str(inst["secret_key"]).startswith("sk_live_"),
+            "ok": not isinstance(res, BaseException),
+            "error": str(res) if isinstance(res, BaseException) else "",
+            "users": [],
+            "organizations": [],
+        }
+        if not isinstance(res, BaseException):
+            if super_admin:
+                entry["users"] = res.get("users", [])
+                entry["organizations"] = res.get("organizations", [])
+            else:
+                admin_org_ids, _names = admin_orgs_from_directory(res, email)
+                orgs = [
+                    o for o in res.get("organizations", []) if o.get("id") in admin_org_ids
+                ]
+                visible_emails = {
+                    (m.get("email") or "").strip().lower()
+                    for o in orgs
+                    for m in o.get("members", [])
+                }
+                entry["organizations"] = orgs
+                entry["users"] = [
+                    u
+                    for u in res.get("users", [])
+                    if (u.get("email") or "").strip().lower() in visible_emails
+                ]
+        out.append(entry)
+    return out

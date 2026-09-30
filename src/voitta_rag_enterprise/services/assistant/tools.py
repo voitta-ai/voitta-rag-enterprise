@@ -2,13 +2,17 @@
 
 Every tool is a :class:`ToolSpec`: a name, a model-facing description, a
 Pydantic input model (the JSON schema the model sees AND the validator its
-arguments go through) and a synchronous handler. Handlers are run off the
-event loop by the engines (``asyncio.to_thread``); they open their own DB
-sessions through the services they call.
+arguments go through) and a handler. Synchronous handlers run off the event
+loop (``asyncio.to_thread``) and open their own DB sessions through the
+services they call; async handlers (live directory lookups) are awaited.
 
-All tools are read-only and run as ``ToolContext.viewer`` — the effective
-(possibly impersonated) account, folder scope ``"visible"`` — so folder ACL
-is enforced by services/retrieval and services/sync_overview, not here.
+All tools are read-only. Content, sync and folder tools run as
+``ToolContext.viewer`` — the effective (possibly impersonated) account,
+folder scope ``"visible"`` — so folder ACL is enforced by the services they
+call, not here. Admin tools use ``ToolContext.admin_scope``: the REAL
+person's administrative domain, set only when they are an admin — exactly
+the admin console's rule — and are offered to the model only then
+(:func:`tools_for`).
 
 Results are JSON text for the model plus, for image tools, image payloads.
 Oversized text is truncated with an explicit note, never silently.
@@ -16,16 +20,20 @@ Oversized text is truncated with an explicit note, never silently.
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import inspect
 import json
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ...db.database import session_scope
-from .. import retrieval, sync_overview
+from .. import retrieval, settings_overview, sync_overview
+from ..acl import CurrentUser
+from ..admin_scope import AdminScope
 from ..retrieval import Viewer
 
 # Upper bound on one tool result's text. Large enough for a long chunk
@@ -38,6 +46,13 @@ DEFAULT_IMAGE_EDGE = 1024
 @dataclass(frozen=True)
 class ToolContext:
     viewer: Viewer
+    # The person typing and the account whose view is active (they differ
+    # during impersonation). None only in contexts without a signed-in
+    # person (tests of content tools).
+    real: CurrentUser | None = None
+    effective: CurrentUser | None = None
+    # Set only when the real person is an admin; scopes the admin tools.
+    admin_scope: AdminScope | None = None
 
 
 @dataclass(frozen=True)
@@ -61,23 +76,25 @@ class ToolSpec:
     name: str
     description: str
     input_model: type[BaseModel]
-    handler: Callable[[ToolContext, Any], ToolOutput]
+    handler: Callable[[ToolContext, Any], ToolOutput | Awaitable[ToolOutput]]
 
     def input_schema(self) -> dict[str, Any]:
         schema = self.input_model.model_json_schema()
         schema.pop("title", None)
         return schema
 
-    def run(self, ctx: ToolContext, raw_input: Any) -> ToolOutput:
-        """Validate ``raw_input`` and run the handler. Never raises: every
-        failure becomes an ``is_error`` result the model can read and
-        recover from."""
+    async def run(self, ctx: ToolContext, raw_input: Any) -> ToolOutput:
+        """Validate ``raw_input`` and run the handler. Never raises for bad
+        input or a refused lookup: those become ``is_error`` results the
+        model can read and recover from."""
         try:
             args = self.input_model.model_validate(raw_input or {})
         except ValidationError as e:
             return error_output(f"invalid arguments for {self.name}: {e.errors(include_url=False)}")
         try:
-            return self.handler(ctx, args)
+            if inspect.iscoroutinefunction(self.handler):
+                return await self.handler(ctx, args)
+            return await asyncio.to_thread(self.handler, ctx, args)
         except (ValueError, FileNotFoundError) as e:
             return error_output(str(e))
 
@@ -293,6 +310,84 @@ def _recent_jobs(ctx: ToolContext, a: RecentJobsArgs) -> ToolOutput:
     return _json_output(jobs, f"{len(jobs)} jobs, {running} running")
 
 
+# --- settings (read-only) ------------------------------------------------------
+
+
+def _people(ctx: ToolContext) -> tuple[CurrentUser, CurrentUser]:
+    if ctx.real is None or ctx.effective is None:
+        raise ValueError("account information is not available here")
+    return ctx.real, ctx.effective
+
+
+def _admin(ctx: ToolContext) -> AdminScope:
+    if ctx.admin_scope is None:
+        raise ValueError("admin settings are available to admins only")
+    return ctx.admin_scope
+
+
+def _my_account(ctx: ToolContext, _a: NoArgs) -> ToolOutput:
+    real, effective = _people(ctx)
+    with session_scope() as s:
+        overview = settings_overview.account_overview(s, real, effective)
+    return _json_output(overview, overview["active_account"]["email"])
+
+
+def _folder_settings(ctx: ToolContext, a: FolderArgs) -> ToolOutput:
+    with session_scope() as s:
+        result = settings_overview.folder_settings(s, ctx.viewer, a.folder_id)
+    return _json_output(result, result["display_name"])
+
+
+def _sync_credentials(ctx: ToolContext, _a: NoArgs) -> ToolOutput:
+    _real, effective = _people(ctx)
+    with session_scope() as s:
+        rows = settings_overview.sync_credentials(s, effective)
+    return _json_output(rows, f"{len(rows)} credentials")
+
+
+def _admin_overview(ctx: ToolContext, _a: NoArgs) -> ToolOutput:
+    scope = _admin(ctx)
+    _real, effective = _people(ctx)
+    with session_scope() as s:
+        result = settings_overview.admin_overview(s, scope, effective)
+    return _json_output(result, "deployment settings")
+
+
+class AdminUsersArgs(_Args):
+    query: str | None = Field(
+        default=None, description="Case-insensitive substring of email, company or name."
+    )
+    limit: int = Field(default=100, ge=1, le=500)
+
+
+def _admin_users(ctx: ToolContext, a: AdminUsersArgs) -> ToolOutput:
+    scope = _admin(ctx)
+    with session_scope() as s:
+        result = settings_overview.admin_users(s, scope, query=a.query, limit=a.limit)
+    return _json_output(result, f"{result['total']} accounts")
+
+
+class AdminGroupsArgs(_Args):
+    include_members: bool = Field(default=False, description="Also list each group's members.")
+
+
+def _admin_groups(ctx: ToolContext, a: AdminGroupsArgs) -> ToolOutput:
+    scope = _admin(ctx)
+    with session_scope() as s:
+        rows = settings_overview.admin_groups(s, scope, include_members=a.include_members)
+    return _json_output(rows, f"{len(rows)} groups")
+
+
+async def _admin_company_directory(ctx: ToolContext, _a: NoArgs) -> ToolOutput:
+    _admin(ctx)
+    real, _effective = _people(ctx)
+    instances = await settings_overview.admin_company_directory(real.email)
+    if not instances:
+        return _json_output({"note": "No Clerk company directory is enabled."}, "not enabled")
+    users = sum(len(i["users"]) for i in instances)
+    return _json_output(instances, f"{users} directory users")
+
+
 TOOLS: tuple[ToolSpec, ...] = (
     ToolSpec(
         "list_folders",
@@ -402,9 +497,76 @@ TOOLS: tuple[ToolSpec, ...] = (
         RecentJobsArgs,
         _recent_jobs,
     ),
+    ToolSpec(
+        "my_account",
+        "The user's own settings: who they are, whether they are an admin, the "
+        "active account (and whether an admin is viewing as someone else), the "
+        "accounts they can switch between, their groups, their personal MCP API "
+        "keys (names and last use) and the folders they switched off for MCP.",
+        NoArgs,
+        _my_account,
+    ),
+    ToolSpec(
+        "folder_settings",
+        "One folder's settings: owner, path, sharing with the community, whether "
+        "the user can write files, MCP activation, subfolder descriptions, and — "
+        "for the folder's owner — the full share list (audience, groups, people). "
+        "Sync configuration is in folder_sync_detail.",
+        FolderArgs,
+        _folder_settings,
+    ),
+    ToolSpec(
+        "sync_credentials",
+        "The company's reusable sync credentials (Google OAuth clients and service "
+        "accounts): label, kind, whether connected and as whom, who created them and "
+        "how many folders use them. Secrets are never shown.",
+        NoArgs,
+        _sync_credentials,
+    ),
 )
 
-TOOLS_BY_NAME: dict[str, ToolSpec] = {t.name: t for t in TOOLS}
+# Offered only when the real person is an admin (see tools_for).
+ADMIN_TOOLS: tuple[ToolSpec, ...] = (
+    ToolSpec(
+        "admin_overview",
+        "Admin console settings: the admin's own permissions and scope, sign-in "
+        "access (allowed domains/emails, blocked emails, super-admins), sign-in "
+        "providers, company directory (Clerk) instances, NFS / linked-folder roots "
+        "and their health, indexing caps, company API keys, assistant policy and "
+        "the deployment's runtime configuration. Secrets are never shown.",
+        NoArgs,
+        _admin_overview,
+    ),
+    ToolSpec(
+        "admin_users",
+        "Accounts in the admin's scope (one row per account — a person can have "
+        "several): email, company, admin flags, groups, number of folders owned, "
+        "created. Filter with query; a regular admin sees only their companies.",
+        AdminUsersArgs,
+        _admin_users,
+    ),
+    ToolSpec(
+        "admin_groups",
+        "Voitta-native groups with member counts, optionally with their members "
+        "(limited to the admin's scope).",
+        AdminGroupsArgs,
+        _admin_groups,
+    ),
+    ToolSpec(
+        "admin_company_directory",
+        "Live company directory (Clerk): organizations, their members and roles, "
+        "and users with last sign-in, scoped to the admin's companies.",
+        NoArgs,
+        _admin_company_directory,
+    ),
+)
+
+TOOLS_BY_NAME: dict[str, ToolSpec] = {t.name: t for t in (*TOOLS, *ADMIN_TOOLS)}
+
+
+def tools_for(ctx: ToolContext) -> tuple[ToolSpec, ...]:
+    """The tools offered in a turn: admin tools only to admins."""
+    return (*TOOLS, *ADMIN_TOOLS) if ctx.admin_scope is not None else TOOLS
 
 
 def replay_image(ctx: ToolContext, image_id: int, max_size: int) -> ToolImage | None:

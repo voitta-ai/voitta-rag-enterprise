@@ -345,7 +345,7 @@ class AnthropicApiEngine:
             spec = by_name.get(tu["name"])
             if spec is None:
                 return error_output(f"unknown tool {tu['name']!r}")
-            return await asyncio.to_thread(spec.run, req.tool_context, tu.get("input"))
+            return await spec.run(req.tool_context, tu.get("input"))
 
         outputs = await asyncio.gather(*(_one(tu) for tu in tool_uses))
         for tu, out in zip(tool_uses, outputs, strict=True):

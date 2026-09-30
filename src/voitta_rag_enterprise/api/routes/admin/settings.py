@@ -88,31 +88,11 @@ class _AdminSettingsPatchIn(BaseModel):
     clerk_secret_key: str | None = None
 
 
-def _probe_directory(value: str) -> tuple[bool, str]:
-    """Classify an admin-configured root directory (NFS / linked-folder)
-    for the UI status pill."""
-    from pathlib import Path
-
-    if not value:
-        return False, "disabled"
-    p = Path(value)
-    if not p.exists():
-        return False, "missing"
-    if not p.is_dir():
-        return False, "not_a_directory"
-    # Smoke-test read access; iterdir on an unreadable mount throws.
-    try:
-        next(iter(p.iterdir()), None)
-    except (PermissionError, OSError):
-        return False, "unreadable"
-    return True, "ok"
-
-
 def _admin_settings_out() -> AdminSettingsOut:
     nfs_root = admin_store.get_nfs_root()
-    ok, status_str = _probe_directory(nfs_root)
+    ok, status_str = admin_store.probe_directory(nfs_root)
     link_root = admin_store.get_link_root()
-    link_ok, link_status = _probe_directory(link_root)
+    link_ok, link_status = admin_store.probe_directory(link_root)
     return AdminSettingsOut(
         nfs_root=nfs_root,
         nfs_available=ok,
@@ -165,7 +145,7 @@ def update_admin_settings(
             continue
         value = raw.strip()
         if value:
-            ok, status_str = _probe_directory(value)
+            ok, status_str = admin_store.probe_directory(value)
             if not ok:
                 raise HTTPException(
                     status.HTTP_400_BAD_REQUEST,
@@ -299,69 +279,15 @@ def update_admin_settings(
 async def get_clerk_directory(
     me: CurrentUser = Depends(admin_user),
 ) -> dict:
-    """Users + organizations + memberships from every enabled instance.
-
-    Shape: ``{"instances": [{name, live, ok, error, users, organizations}]}``
-    — one entry per enabled instance, fetched live and concurrently (no
-    caching: the admin view is low-traffic and staleness would be more
-    confusing than the ~1 s round-trip). Per-instance fail-soft: an
-    unreachable instance reports ``ok=False`` + its error while the others
-    still render — the UI shows a per-instance warning strip instead of a
-    blank tab. 400 only when NO instance is enabled.
-
-    Scoped: a superadmin sees every directory in full; a regular admin sees
-    only the orgs they administer (role=admin) in each instance and those
-    orgs' members — mirroring the users-list scoping.
+    """Users + organizations + memberships from every enabled instance,
+    scoped to the caller's admin domain — see
+    ``services.admin_scope.scoped_clerk_directory``. 400 only when NO
+    instance is enabled.
     """
-    import asyncio as _asyncio
+    from ....services.admin_scope import scoped_clerk_directory
 
-    from ....services import clerk as clerk_svc
-    from ....services.admin_scope import admin_orgs_from_directory
-    from ....services.admin_store import is_super_admin
-
-    instances = admin_store.enabled_clerk_instances()
-    if not instances:
+    if not admin_store.enabled_clerk_instances():
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST, "No Clerk instance is enabled."
         )
-
-    results = await _asyncio.gather(
-        *(clerk_svc.fetch_directory(str(i["secret_key"])) for i in instances),
-        return_exceptions=True,
-    )
-
-    super_admin = is_super_admin(me.email)
-    out: list[dict] = []
-    for inst, res in zip(instances, results, strict=True):
-        entry: dict = {
-            "name": str(inst["name"]),
-            "live": str(inst["secret_key"]).startswith("sk_live_"),
-            "ok": not isinstance(res, BaseException),
-            "error": str(res) if isinstance(res, BaseException) else "",
-            "users": [],
-            "organizations": [],
-        }
-        if not isinstance(res, BaseException):
-            if super_admin:
-                entry["users"] = res.get("users", [])
-                entry["organizations"] = res.get("organizations", [])
-            else:
-                admin_org_ids, _names = admin_orgs_from_directory(res, me.email)
-                orgs = [
-                    o
-                    for o in res.get("organizations", [])
-                    if o.get("id") in admin_org_ids
-                ]
-                visible_emails = {
-                    (m.get("email") or "").strip().lower()
-                    for o in orgs
-                    for m in o.get("members", [])
-                }
-                entry["organizations"] = orgs
-                entry["users"] = [
-                    u
-                    for u in res.get("users", [])
-                    if (u.get("email") or "").strip().lower() in visible_emails
-                ]
-        out.append(entry)
-    return {"instances": out}
+    return {"instances": await scoped_clerk_directory(me.email)}

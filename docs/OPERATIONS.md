@@ -1797,11 +1797,14 @@ the durable anchors and re-verify specifics against the code.*
 
 A chat window in the SPA (💬, bottom right) that answers questions from the
 index and explains **sync and indexing state** — the part MCP clients can't
-see. It is read-only: it searches, reads and inspects; it never changes
-files, triggers syncs or edits settings.
+see. It also explains settings — the user's account and keys, folder sharing,
+sync credentials and, for admins, the admin console. It is read-only: it
+searches, reads and inspects; it never changes files, triggers syncs or
+edits settings.
 
 Code: `services/assistant/` (backend, see its package docstring),
-`services/retrieval/` + `services/sync_overview.py` (what the tools call),
+`services/retrieval/`, `services/sync_overview.py` and
+`services/settings_overview.py` (what the tools call),
 `api/routes/assistant.py` (REST), `api/assistant_ws.py` (streaming),
 `static/js/assistant/` + `static/js/modals/assistant-settings.js` (UI).
 
@@ -1820,6 +1823,7 @@ flowchart LR
     EA & EB --> T["Tools (read-only)"]
     T --> RET["services/retrieval<br/>search · read · images"]
     T --> SO["services/sync_overview<br/>sync · jobs · failures"]
+    T --> ST["services/settings_overview<br/>account · sharing · admin"]
     TR --> DB[("assistant_conversations<br/>assistant_messages")]
     R --> CR[("assistant_credentials<br/>Fernet-encrypted")]
 ```
@@ -1922,6 +1926,27 @@ libraries are imported lazily.
 | `folder_sync_detail` | one folder: source config (owner), index health, per-type counts, last sync runs |
 | `file_problems` | files in `error` / `unsupported` with reasons |
 | `recent_jobs` | the job queue (same ACL-scoped query as the Jobs panel) |
+| `my_account` | the person, the active account (and impersonation), switchable accounts, groups, personal API keys (names/usage), MCP-disabled folders |
+| `folder_settings` | one folder: owner, path, community sharing, write access, MCP activation, subfolder descriptions; the full share list for its owner |
+| `sync_credentials` | the company's reusable sync credentials (secrets as booleans) |
+| `admin_overview` \* | admin permissions/scope, sign-in access lists, providers, Clerk instances, NFS/link roots, indexing caps, company API keys, assistant policy, runtime config |
+| `admin_users` \* | accounts in the admin's scope, filterable |
+| `admin_groups` \* | groups, optionally with members (scope-filtered) |
+| `admin_company_directory` \* | live Clerk organizations and users in the admin's scope |
+
+\* Admin tools are offered only when the **real** person is an admin
+(person-level flag, as for the admin console; single-user mode counts), and
+are scoped by their resolved `AdminScope` — a regular admin sees only their
+companies. Impersonating someone never grants or removes them: the account
+and folder tools describe the viewed account, the admin tools use the
+admin's own rights.
+
+Settings views copy an explicit **allowlist** of fields
+(`services/settings_overview.py`); no row or admin response model is dumped
+wholesale, because some of them carry plaintext secrets for the admin UI
+(OAuth client secrets, Clerk keys). Secrets never reach the model provider;
+`tests/integration/test_assistant_settings_tools.py` plants every kind of
+secret and asserts none appears in any settings tool's output.
 
 Results over 60 000 characters are truncated with an explicit note. Tool
 output is data: the system prompt tells the model to ignore instructions

@@ -145,7 +145,7 @@ class _ToolBridge:
 
     def _handler(self, spec: ToolSpec) -> Any:
         async def run(args: dict[str, Any]) -> dict[str, Any]:
-            out = await asyncio.to_thread(spec.run, self._ctx, args)
+            out = await spec.run(self._ctx, args)
             self.outputs[_output_key(spec.name, args)] = out
             content: list[dict[str, Any]] = [{"type": "text", "text": out.text}]
             content.extend(

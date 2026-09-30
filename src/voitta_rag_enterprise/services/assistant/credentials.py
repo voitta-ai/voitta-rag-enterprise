@@ -265,3 +265,11 @@ async def probe(cred: ResolvedCredential) -> tuple[ProbeResult, str | None]:
     from .engines.claude_subscription import probe_oauth_token
 
     return await probe_oauth_token(cred.secret)
+
+
+def deployment_configured(db: Session) -> dict[str, bool]:
+    """Which deployment-scope credentials exist (no secrets, no hints)."""
+    return {
+        "deployment_api_key_configured": _deployment_api_key(db) is not None,
+        "subscription_configured": _row(db, "deployment", "", "claude_oauth_token") is not None,
+    }

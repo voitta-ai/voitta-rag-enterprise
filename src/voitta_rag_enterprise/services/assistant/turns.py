@@ -34,6 +34,8 @@ from typing import Any
 
 from ...config import get_settings
 from ...db.database import session_scope
+from ..acl import person_is_admin
+from ..admin_scope import AdminScope, resolve_admin_scope
 from ..retrieval import Viewer
 from . import credentials, store
 from .catalog import EFFORTS, ENGINE_IDS, MODEL_IDS, EngineId
@@ -50,7 +52,7 @@ from .protocol import (
     TurnEnd,
     TurnStart,
 )
-from .tools import TOOLS, ToolContext
+from .tools import ToolContext, tools_for
 from .transcript import Block, context_block, notice_block, text_block, tool_result_block
 
 logger = logging.getLogger(__name__)
@@ -171,6 +173,8 @@ class TurnRunner:
             raise TurnRejected("The message is empty.")
         if len(text) > MAX_PROMPT_CHARS:
             raise TurnRejected(f"The message is longer than {MAX_PROMPT_CHARS} characters.")
+        # Resolved before the lock: it may query the company directory.
+        admin_scope = await _admin_scope_for(ident)
         async with self._lock:
             if req.conversation_id is not None and req.conversation_id in self._active:
                 raise TurnRejected("A reply is still being written in this conversation.")
@@ -179,7 +183,7 @@ class TurnRunner:
                     "The assistant is busy with other conversations. Try again in a moment.",
                     "limit",
                 )
-            prepared = await asyncio.to_thread(self._prepare, ident, req, text)
+            prepared = await asyncio.to_thread(self._prepare, ident, req, text, admin_scope)
             cid = int(prepared.conversation["id"])
             turn = _ActiveTurn(
                 conversation_id=cid,
@@ -199,7 +203,13 @@ class TurnRunner:
         await self._broadcast(turn, TurnStart(cid).to_wire())
         return cid
 
-    def _prepare(self, ident: AssistantIdentity, req: AskRequest, text: str) -> _Prepared:
+    def _prepare(
+        self,
+        ident: AssistantIdentity,
+        req: AskRequest,
+        text: str,
+        admin_scope: AdminScope | None,
+    ) -> _Prepared:
         policy = load_policy()
         if not policy.enabled:
             raise TurnRejected("The assistant is turned off for this deployment.", "unavailable")
@@ -254,6 +264,12 @@ class TurnRunner:
                 store.update_conversation(db, conv, title=first_line[:TITLE_CHARS])
                 announce = True
             history = store.messages(db, conv.id)
+            tool_context = ToolContext(
+                viewer=Viewer(user_id=self._viewer_id(ident), scope="visible"),
+                real=ident.real,
+                effective=ident.effective,
+                admin_scope=admin_scope,
+            )
             request = TurnRequest(
                 conversation_id=conv.id,
                 model=conv.model,
@@ -261,8 +277,8 @@ class TurnRunner:
                 credential=cred,
                 system_prompt=SYSTEM_PROMPT,
                 history=history,
-                tools=TOOLS,
-                tool_context=ToolContext(Viewer(user_id=self._viewer_id(ident), scope="visible")),
+                tools=tools_for(tool_context),
+                tool_context=tool_context,
                 max_tool_rounds=self._max_tool_rounds,
                 sdk_session_id=conv.sdk_session_id,
             )
@@ -442,6 +458,26 @@ def _seal_dangling_tool_uses(db: Any, conv: Any) -> None:
             for b in pending
         ],
     )
+
+
+async def _admin_scope_for(ident: AssistantIdentity) -> AdminScope | None:
+    """The REAL person's administrative domain, or None if not an admin.
+
+    Same rule as the admin console (person-level admin flag, domain from
+    ``resolve_admin_scope``); impersonation never confers it. In single-user
+    mode the one local user administers the whole installation.
+    """
+    if get_settings().single_user:
+        return AdminScope(is_super=True, is_native_admin=True)
+    email = ident.real.email
+
+    def _is_admin() -> bool:
+        with session_scope() as db:
+            return person_is_admin(db, email)
+
+    if not await asyncio.to_thread(_is_admin):
+        return None
+    return await resolve_admin_scope(email)
 
 
 @lru_cache(maxsize=1)

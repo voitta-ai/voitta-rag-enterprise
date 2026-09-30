@@ -257,6 +257,25 @@ def get_link_root() -> str:
     return str(raw) if raw is not None else ""
 
 
+def probe_directory(value: str) -> tuple[bool, str]:
+    """Classify an admin-configured root directory (NFS / linked-folder):
+    ``(available, status)`` with status one of ``disabled`` / ``missing`` /
+    ``not_a_directory`` / ``unreadable`` / ``ok``."""
+    if not value:
+        return False, "disabled"
+    p = Path(value)
+    if not p.exists():
+        return False, "missing"
+    if not p.is_dir():
+        return False, "not_a_directory"
+    # Smoke-test read access; iterdir on an unreadable mount throws.
+    try:
+        next(iter(p.iterdir()), None)
+    except OSError:
+        return False, "unreadable"
+    return True, "ok"
+
+
 def get_native_directory_enabled() -> bool:
     """True when the local users/groups tabs should show (default on)."""
     return bool(load_settings().get("native_directory_enabled", True))

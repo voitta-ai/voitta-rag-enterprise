@@ -67,7 +67,7 @@ class ScriptedEngine:
             await self._stop.wait()
             yield EngineDone("interrupted")
             return
-        out = await asyncio.to_thread(TOOLS_BY_NAME["list_folders"].run, req.tool_context, {})
+        out = await TOOLS_BY_NAME["list_folders"].run(req.tool_context, {})
         yield ToolEnd("t1", out.is_error, out.summary)
         yield Persist("tool", [tool_result_block("t1", [text_block(out.text)], out.is_error)])
         yield TextDelta("m:0", "Hello")
