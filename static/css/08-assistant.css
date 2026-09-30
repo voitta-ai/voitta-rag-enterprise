@@ -423,3 +423,4 @@
 .as-cred-result:empty { display: none; }
 .as-policy-row { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 13px; }
 .modal-body select.as-policy-select { width: auto; min-width: 140px; }
+.modal-body label.check-row.as-policy-toggle { display: inline-flex; width: auto; margin-top: 8px; }

@@ -130,7 +130,8 @@ function policyBlock(cfg) {
     const block = el("div", "as-policy");
     block.append(el("div", "as-cred-label", "Deployment policy"));
 
-    const enabled = el("label", "check-row as-policy-row");
+    // Narrow click target: only the checkbox and its caption toggle it.
+    const enabled = el("label", "check-row as-policy-toggle");
     const box = el("input");
     box.type = "checkbox";
     box.checked = cfg.policy.enabled;
@@ -161,7 +162,19 @@ function policyBlock(cfg) {
             alert(err.message);
         }
     };
-    box.addEventListener("change", () => save({ enabled: box.checked }));
+    box.addEventListener("change", () => {
+        // Switching off hides the assistant for every user — never on a
+        // stray click.
+        if (!box.checked && !confirm(
+            "Turn the assistant off for everyone?\n\n"
+            + "Users lose the chat button until it is turned back on. "
+            + "Super-admins keep the button so they can switch it back.",
+        )) {
+            box.checked = true;
+            return;
+        }
+        save({ enabled: box.checked });
+    });
     model.addEventListener("change", () => save({ default_model: model.value }));
     effort.addEventListener("change", () => save({ default_effort: effort.value }));
     block.append(enabled, defaults);

@@ -63,9 +63,11 @@ function recall(name) {
 // ----- config (loaded by ./config.js) -----------------------------------------
 
 assistantConfig.subscribe((cfg) => {
-    launcher.hidden = !cfg || !cfg.enabled;
+    // Off = hidden for users; super-admins keep the launcher so the
+    // switched-off state is visible and one click away from being undone.
+    launcher.hidden = !cfg || (!cfg.enabled && !cfg.is_admin);
     if (!cfg) return;
-    if (!cfg.enabled && win.isOpen) win.close();
+    if (launcher.hidden && win.isOpen) win.close();
     $("#aw-view").hidden = !cfg.impersonating;
     const banner = $("#aw-banner");
     banner.hidden = !cfg.impersonating;
@@ -83,12 +85,17 @@ function availableEngines() {
 function renderSetupNotice() {
     const cfg = assistantConfig.get();
     const setup = $("#aw-setup");
-    const ready = availableEngines().length > 0;
+    const off = !!cfg && !cfg.enabled;
+    const ready = !off && availableEngines().length > 0;
     setup.hidden = ready || !cfg;
-    $("#aw-setup-text").textContent = ready || !cfg ? "" : (
-        cfg.engines.map((e) => e.reason).filter(Boolean)[0]
-        || "The assistant is not configured yet."
-    );
+    let reason = "";
+    if (off) {
+        reason = "The assistant is turned off for everyone — only super-admins see this button.";
+    } else if (!ready && cfg) {
+        reason = cfg.engines.map((e) => e.reason).filter(Boolean)[0]
+            || "The assistant is not configured yet.";
+    }
+    $("#aw-setup-text").textContent = reason;
     input.disabled = !ready;
     $("#aw-send").disabled = !ready;
 }
