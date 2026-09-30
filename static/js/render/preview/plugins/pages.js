@@ -6,7 +6,7 @@
 //   "layout"  — layout view: blocks grouped by page, with type icons + text
 
 import { api } from "../../../api.js";
-import { registerPlugin } from "../index.js";
+import { previewMessage, registerPlugin } from "../index.js";
 
 const PAGE_EXTS = new Set([
     ".pdf", ".pptx", ".ppt", ".docx", ".doc",
@@ -41,7 +41,7 @@ const plugin = {
             }
         } catch (err) {
             if (signal.aborted) return;
-            container.innerHTML = `<p class="preview-error">${err.message}</p>`;
+            container.replaceChildren(previewMessage(err.message));
         }
     },
 

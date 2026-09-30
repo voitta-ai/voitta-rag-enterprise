@@ -12,7 +12,8 @@ from sqlalchemy.orm import Session
 
 from ...db.models import File, Job
 from ...services import folder_active, job_queue
-from ...services.acl import CurrentUser
+from ...services.acl import CurrentUser, viewer_folder_scope
+from ...services.job_listing import job_payload, recent_visible_jobs
 from ..deps import current_user, db_session
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -41,7 +42,7 @@ class JobOut(BaseModel):
 
 
 def _to_out(j: Job, file_paths: dict[int, str] | None = None) -> JobOut:
-    payload = json.loads(j.payload) if j.payload else {}
+    payload = job_payload(j)
     display = None
     if file_paths is not None:
         fid = payload.get("file_id")
@@ -75,57 +76,15 @@ def recent_jobs(
 ) -> list[JobOut]:
     """Return the recent jobs for the SPA's Jobs panel.
 
-    Composition: every ``running`` job plus the most recent ``limit``
-    jobs by id. The union ensures the row that's actually consuming the
-    worker is always visible — without this, a queue of 800 fresh
-    extracts would push the running job (whose id is older) off the
-    bottom of the panel and the SPA shows nothing as "running" even
-    though something definitely is.
-
-    De-duplication: if a running job already lands in the most-recent
-    window we don't emit it twice. Order: running first (so the
-    bottleneck is at the top), then queued/done by id desc within each
-    bucket — what the user actually wants to see when scanning.
+    Every ``running`` job plus the most recent ``limit`` jobs, running
+    first, restricted to jobs on folders the caller can see (see
+    ``services/job_listing.py`` — the WS snapshot and the assistant use the
+    same query). ``display_path`` is pre-resolved for file-scoped jobs.
     """
-    running = (
-        db.execute(
-            select(Job).where(Job.state == "running").order_by(Job.id.desc())
-        )
-        .scalars()
-        .all()
+    listing = recent_visible_jobs(
+        db, viewer_folder_scope(db, user.id), limit=limit
     )
-    recent = (
-        db.execute(select(Job).order_by(Job.id.desc()).limit(limit))
-        .scalars()
-        .all()
-    )
-    seen: set[int] = set()
-    ordered: list[Job] = []
-    for j in [*running, *recent]:
-        if j.id in seen:
-            continue
-        seen.add(j.id)
-        ordered.append(j)
-
-    # Resolve file_id → rel_path in one query for everything we're
-    # about to ship — beats N round-trips when the user has 30+ rows.
-    file_ids: set[int] = set()
-    for j in ordered:
-        try:
-            payload = json.loads(j.payload) if j.payload else {}
-        except json.JSONDecodeError:
-            continue
-        fid = payload.get("file_id")
-        if isinstance(fid, int):
-            file_ids.add(fid)
-    file_paths: dict[int, str] = {}
-    if file_ids:
-        rows = db.execute(
-            select(File.id, File.rel_path).where(File.id.in_(file_ids))
-        ).all()
-        file_paths = dict(rows)
-
-    return [_to_out(j, file_paths) for j in ordered]
+    return [_to_out(j, listing.file_paths) for j in listing.jobs]
 
 
 class RetryOut(BaseModel):

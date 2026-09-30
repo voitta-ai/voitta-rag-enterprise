@@ -1,12 +1,12 @@
 // Preview plugin: plain text, source code, and Markdown.
 //
-// .md files are rendered as HTML via marked (lazy-loaded from CDN).
-// All other text extensions fall back to a plain <pre>.
-// The CAS-extracted text endpoint is used so the file doesn't need to
-// be on disk (works for Google Drive synced files too).
+// .md files are rendered as sanitised HTML via the shared markdown renderer
+// (indexed files are untrusted input). All other text extensions fall back
+// to a plain <pre>. The CAS-extracted text endpoint is used so the file
+// doesn't need to be on disk (works for Google Drive synced files too).
 
-import { registerPlugin } from "../index.js";
-import { renderMarkdownInto } from "../markdown.js";
+import { previewMessage, registerPlugin } from "../index.js";
+import { renderMarkdownInto } from "../../markdown.js";
 
 const MD_EXTS = new Set([".md", ".markdown", ".mdx"]);
 
@@ -58,7 +58,7 @@ const plugin = {
             }
         } catch (err) {
             if (signal.aborted) return;
-            container.innerHTML = `<p class="preview-error">${err.message}</p>`;
+            container.replaceChildren(previewMessage(err.message));
         }
     },
 

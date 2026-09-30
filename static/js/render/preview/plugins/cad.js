@@ -11,7 +11,7 @@
 //   4. OrbitControls for mouse-rotate / scroll-zoom / right-drag pan
 //   5. ResizeObserver keeps the canvas sized to the container
 
-import { registerPlugin } from "../index.js";
+import { previewMessage, registerPlugin } from "../index.js";
 
 const CAD_EXTS = new Set([".step", ".stp", ".iges", ".igs", ".fcstd"]);
 
@@ -148,7 +148,7 @@ const plugin = {
             _resizeObserver.observe(container);
         } catch (err) {
             if (signal.aborted) return;
-            container.innerHTML = `<p class="preview-error">3D preview failed: ${err.message}</p>`;
+            container.replaceChildren(previewMessage(`3D preview failed: ${err.message}`));
         }
     },
 

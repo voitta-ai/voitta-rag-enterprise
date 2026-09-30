@@ -72,6 +72,16 @@ dependencies = [
     # apt/GPU/EGL setup. Wheel is ~80 MB.
     "cadquery-ocp>=7.7",
     "vtk>=9.3",
+    # In-app assistant (services/assistant). ``anthropic`` drives the API-key
+    # engine; ``claude-agent-sdk`` drives the Claude-subscription engine and
+    # ships its own ``claude`` CLI binary (~215 MB) — both are imported lazily
+    # by their engine module, so neither costs anything until a turn runs.
+    # ``cryptography`` (Fernet) encrypts the stored LLM credentials at rest;
+    # it was already present transitively, declared here because we use it
+    # directly.
+    "anthropic>=1.9",
+    "claude-agent-sdk>=0.2.162",
+    "cryptography>=42",
 ]
 
 [project.optional-dependencies]

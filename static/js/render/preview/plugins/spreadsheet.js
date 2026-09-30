@@ -9,7 +9,7 @@
 // indexing, but here we read the raw file — so apply a render cap to
 // avoid building a 100k-row DOM table.
 
-import { registerPlugin } from "../index.js";
+import { previewMessage, registerPlugin } from "../index.js";
 
 const SHEET_EXTS = new Set([".xlsx", ".xlsm", ".xls", ".ods"]);
 
@@ -50,7 +50,7 @@ const plugin = {
             _renderWorkbook(container, wb);
         } catch (err) {
             if (signal.aborted) return;
-            container.innerHTML = `<p class="preview-error">${err.message}</p>`;
+            container.replaceChildren(previewMessage(err.message));
         }
     },
 

@@ -17,7 +17,6 @@ handler emits one per subscribed topic, then a final ``{"type": "synced"}``.
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import func, select
@@ -26,10 +25,11 @@ from sqlalchemy.orm import Session
 if TYPE_CHECKING:
     from ..services.admin_scope import AdminScope
 
-from ..db.models import File, Folder, FolderSyncSource, Image, Job, User
+from ..db.models import File, Folder, FolderSyncSource, Image, User
 from ..services import folder_active
 from ..services.acl import folder_active_for_user, is_folder_owner, person_is_admin
 from ..services.indexing import file_event_payload
+from ..services.job_listing import recent_visible_jobs
 
 
 def _folders_snapshot(
@@ -100,53 +100,11 @@ def _files_snapshot(
 def _jobs_snapshot(
     db: Session, visible: set[int] | None, limit: int = 50
 ) -> list[dict[str, Any]]:
-    """Recent + running jobs (mirrors ``recent_jobs``), ACL-scoped by folder."""
+    """Recent + running jobs (same query as ``GET /api/jobs/recent``)."""
     from .routes.jobs import _to_out
 
-    running = (
-        db.execute(select(Job).where(Job.state == "running").order_by(Job.id.desc()))
-        .scalars()
-        .all()
-    )
-    recent = (
-        db.execute(select(Job).order_by(Job.id.desc()).limit(limit)).scalars().all()
-    )
-    seen: set[int] = set()
-    ordered: list[Job] = []
-    for j in [*running, *recent]:
-        if j.id in seen:
-            continue
-        seen.add(j.id)
-        # ACL filter: drop jobs whose folder the user can't see. Admin /
-        # single-user (visible is None) see everything.
-        if visible is not None:
-            try:
-                payload = json.loads(j.payload) if j.payload else {}
-            except json.JSONDecodeError:
-                payload = {}
-            fid = folder_active.folder_id_for_payload(db, payload)
-            # Jobs with no resolvable folder (e.g. gc_cas) are global — keep.
-            if fid is not None and fid not in visible:
-                continue
-        ordered.append(j)
-
-    file_ids: set[int] = set()
-    for j in ordered:
-        try:
-            payload = json.loads(j.payload) if j.payload else {}
-        except json.JSONDecodeError:
-            continue
-        fid = payload.get("file_id")
-        if isinstance(fid, int):
-            file_ids.add(fid)
-    file_paths: dict[int, str] = {}
-    if file_ids:
-        file_paths = dict(
-            db.execute(
-                select(File.id, File.rel_path).where(File.id.in_(file_ids))
-            ).all()
-        )
-    return [_to_out(j, file_paths).model_dump() for j in ordered]
+    listing = recent_visible_jobs(db, visible, limit=limit)
+    return [_to_out(j, listing.file_paths).model_dump() for j in listing.jobs]
 
 
 def build_snapshot(

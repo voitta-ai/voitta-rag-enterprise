@@ -9,7 +9,7 @@
 // HTML on the public internet) without a sanitizer dependency.
 
 import { api } from "../../../api.js";
-import { registerPlugin } from "../index.js";
+import { previewMessage, registerPlugin } from "../index.js";
 
 let _abortCtrl = null;
 
@@ -31,7 +31,7 @@ const plugin = {
             container.append(_renderEmail(data));
         } catch (err) {
             if (signal.aborted) return;
-            container.innerHTML = `<p class="preview-error">${err.message}</p>`;
+            container.replaceChildren(previewMessage(err.message));
         }
     },
 

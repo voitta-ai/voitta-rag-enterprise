@@ -21,6 +21,16 @@ export function registerPlugin(plugin) {
     _plugins.push(plugin);
 }
 
+// Build a status paragraph (``preview-error`` / ``preview-hint`` /
+// ``preview-loading``). Text only: these messages carry file names and
+// server error details, which must never be parsed as markup.
+export function previewMessage(text, kind = "error") {
+    const p = document.createElement("p");
+    p.className = `preview-${kind}`;
+    p.textContent = text;
+    return p;
+}
+
 export function renderFilePreview(fileId, opts = {}) {
     const file = files.get().find((f) => f.id === fileId);
     if (!file) return;

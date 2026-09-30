@@ -258,6 +258,12 @@ class Settings(BaseSettings):
     # deployment served over HTTPS. Set False only for local dev over plain
     # http://localhost.
     cookie_secure: bool = True
+    # Extra origins (comma-separated, e.g. ``https://ui.example.com``)
+    # allowed to open the cookie-authenticated WebSockets besides the
+    # server's own origin and ``public_base_url``. Needed only when the SPA
+    # is served from a different host than the API, or a proxy rewrites
+    # the Host header. See api/origin.py.
+    ws_allowed_origins: str = ""
 
     # SQLAlchemy connection pool sizing. Defaults (5 / 10) are SQLAlchemy's
     # baked-in QueuePool defaults — too small for our profile, which races
@@ -354,6 +360,14 @@ class Settings(BaseSettings):
             if d:
                 out.append(d)
         return out
+
+    def ws_allowed_origin_list(self) -> list[str]:
+        """Normalised (lowercase, no trailing slash) extra WS origins."""
+        return [
+            o.strip().rstrip("/").lower()
+            for o in self.ws_allowed_origins.split(",")
+            if o.strip()
+        ]
 
     def super_admin_list(self) -> list[str]:
         """Lowercased emails from VOITTA_SUPER_ADMINS."""

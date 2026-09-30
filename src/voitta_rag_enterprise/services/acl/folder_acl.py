@@ -121,6 +121,19 @@ def visible_folder_ids(session: Session, user_id: int) -> list[int]:
     return sorted(owned | granted | email_shared | group_shared | shared)
 
 
+def viewer_folder_scope(session: Session, user_id: int) -> set[int] | None:
+    """The folder-visibility filter for a viewer, as consumers apply it.
+
+    ``None`` means see-everything and is returned ONLY in single-user mode,
+    where the sole identity owns every folder. Everywhere else this is the
+    :func:`visible_folder_ids` set — admins included (admin status never
+    widens folder visibility).
+    """
+    if get_settings().single_user:
+        return None
+    return set(visible_folder_ids(session, user_id))
+
+
 def mcp_visible_folder_ids(session: Session, user_id: int) -> list[int]:
     """Visible folders minus the user's MCP-search opt-outs.
 

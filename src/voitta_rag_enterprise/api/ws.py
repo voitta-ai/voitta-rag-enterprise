@@ -2,9 +2,10 @@
 
 Flow per connection:
 
-1. **Auth** — the handshake is authenticated from the signed session cookie
-   (same identity as the REST API). Unauthenticated connections are closed with
-   ``4401`` unless single-user mode is on.
+1. **Auth** — a handshake from a foreign ``Origin`` is refused before accept
+   (see ``api/origin.py``). The handshake is authenticated from the signed
+   session cookie (same identity as the REST API). Unauthenticated
+   connections are closed with ``4401`` unless single-user mode is on.
 2. **Subscribe** — the client's first frame is ``{type:"subscribe", topics}``.
 3. **Snapshot** — the server sends the full current state for each subscribed
    topic, scoped to the user's visible folders, then a ``{type:"synced"}``
@@ -39,6 +40,7 @@ from ..services import events
 from ..services.acl import visible_folder_ids
 from ..services.admin_scope import AdminScope, resolve_admin_scope
 from .deps import resolve_ws_user
+from .origin import WS_CLOSE_FORBIDDEN_ORIGIN, websocket_origin_allowed
 from .snapshot import build_snapshot
 
 logger = logging.getLogger(__name__)
@@ -104,6 +106,11 @@ def _authenticate(ws: WebSocket) -> tuple[int | None, bool, set[int] | None] | N
 
 @router.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
+    if not websocket_origin_allowed(ws):
+        # Refused before accept(): the handshake fails with 403 and no
+        # snapshot data is ever built for the foreign page.
+        await ws.close(code=WS_CLOSE_FORBIDDEN_ORIGIN)
+        return
     await ws.accept()
 
     # Off the event loop: _authenticate opens a DB session and runs the

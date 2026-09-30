@@ -70,6 +70,7 @@ from .folder_acl import (
     set_folder_active,
     user_can_see_file,
     user_can_see_folder,
+    viewer_folder_scope,
     visible_folder_ids,
 )
 from .identity import ROOT_EMAIL, CurrentUser, resolve_user_email
@@ -104,5 +105,6 @@ __all__ = [
     "stamp_person_admin",
     "user_can_see_file",
     "user_can_see_folder",
+    "viewer_folder_scope",
     "visible_folder_ids",
 ]
