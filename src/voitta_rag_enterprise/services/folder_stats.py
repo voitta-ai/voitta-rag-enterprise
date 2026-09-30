@@ -48,7 +48,7 @@ from .reconcile import folder_health
 
 logger = logging.getLogger(__name__)
 
-_IN_PROGRESS_STATES = ("extracted", "embedding")
+IN_PROGRESS_STATES = ("extracted", "embedding")
 
 
 def _file_filter(folder_id: int, rel_prefix: str | None):
@@ -127,7 +127,7 @@ def compute_folder_stats(
             # no local bytes) — a subset of unsupported, surfaced separately.
             if (r.error or "").startswith("cloud-only"):
                 files_cloud_only += 1
-        elif state in _IN_PROGRESS_STATES:
+        elif state in IN_PROGRESS_STATES:
             files_in_progress += 1
         else:
             files_pending += 1
@@ -148,7 +148,7 @@ def compute_folder_stats(
             es["error"] += 1
         elif state == "unsupported":
             es["unsupported"] += 1
-        elif state in _IN_PROGRESS_STATES:
+        elif state in IN_PROGRESS_STATES:
             es["in_progress"] += 1
         else:
             es["pending"] += 1
