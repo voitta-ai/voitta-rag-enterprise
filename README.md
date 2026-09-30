@@ -119,6 +119,28 @@ Exposes 12 tools:
 
 ACL identity comes from the `X-User-Name` header.
 
+## In-app assistant
+
+A chat window in the web UI (💬, bottom right) that answers questions from
+your documents — with citations that open the file — and explains **sync and
+indexing state**: which folders failed to sync and why, which files didn't
+index, what the job queue is doing. Markdown, tables, code, mermaid diagrams,
+tool calls and images render inline; the window is movable, resizable and
+remembers its place.
+
+- **Engines:** an Anthropic API key (deployment-wide, or personal per user),
+  or a shared **Claude subscription** usable by super-admins
+  (`claude setup-token`, paste in Settings → Assistant).
+- **Access:** it reads exactly what you can see, and nothing more; it's
+  read-only. While an admin impersonates someone, a Mine / Theirs toggle
+  switches between conversation lists; tools use the impersonated
+  account's access, and the admin's own key pays.
+- **Setup:** Settings → Assistant (credentials encrypted at rest), or set
+  `VOITTA_ASSISTANT_API_KEY`.
+
+Details, security model and troubleshooting:
+[docs/OPERATIONS.md §14](docs/OPERATIONS.md#14-in-app-assistant).
+
 ## CAD support
 
 STEP (`.step` / `.stp`) and FreeCAD native (`.FCStd`) files are indexed into a component tree and rendered on demand:
@@ -184,6 +206,8 @@ All settings carry the `VOITTA_` env-var prefix. See [.env.example](./.env.examp
 | `VOITTA_DEV_USER`            | Authenticate every request as this email (no proxy needed)    |
 | `VOITTA_DISABLE_BACKGROUND`  | Skip watcher + workers (useful for tests)                     |
 | `VOITTA_PUBLIC_BASE_URL`     | Public origin for signed asset URLs (e.g. `https://rag.customer.com`). Set in prod so MCP clients receive absolute URLs; leave empty in local dev. |
+| `VOITTA_ASSISTANT_API_KEY`   | Optional deployment Anthropic API key for the in-app assistant (otherwise set in Settings → Assistant) |
+| `VOITTA_SECRET_KEY`          | At-rest encryption key for stored credentials; auto-generated at `data_dir/.secret_key` — back it up with the DB |
 
 ## Qdrant in Docker (standalone mode)
 

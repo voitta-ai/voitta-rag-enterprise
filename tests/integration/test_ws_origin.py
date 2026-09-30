@@ -28,6 +28,16 @@ def test_foreign_origin_is_refused(client: TestClient) -> None:
     assert exc.value.code == WS_CLOSE_FORBIDDEN_ORIGIN
 
 
+def test_assistant_socket_refuses_foreign_origin(client: TestClient) -> None:
+    with pytest.raises(WebSocketDisconnect) as exc, client.websocket_connect(
+        "/ws/assistant", headers={"origin": "https://evil.example.com"}
+    ) as ws:
+        ws.receive_json()
+    assert exc.value.code == WS_CLOSE_FORBIDDEN_ORIGIN
+    with client.websocket_connect("/ws/assistant", headers={"origin": "http://testserver"}) as ws:
+        assert ws.receive_json()["type"] == "hello"
+
+
 def test_same_origin_is_accepted(client: TestClient) -> None:
     # TestClient sends ``Host: testserver``.
     assert _subscribe(client, {"origin": "http://testserver"})["type"] == "subscribed"

@@ -27,6 +27,7 @@ import "./render/preview/plugins/email.js";
 import "./render/preview/plugins/text.js";
 import "./render/preview/plugins/unsupported.js";
 import "./modals/admin.js";  // self-wires Admin button + admin modal
+import "./modals/assistant-settings.js";  // Settings → Assistant section (live re-render)
 import { ensureAuthenticated } from "./modals/login.js";
 import { setRootInfo } from "./modals/new-folder.js";
 import { setRenameRootInfo } from "./modals/rename-folder.js";  // self-wires #rename-* modal

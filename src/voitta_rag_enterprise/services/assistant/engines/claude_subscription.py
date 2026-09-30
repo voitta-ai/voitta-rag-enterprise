@@ -248,15 +248,15 @@ class ClaudeSubscriptionEngine:
         )
 
         tool_uses: dict[str, tuple[str, Any]] = {}
-        session_announced = False
+        announced: str | None = None
         message_id = "m"
         yield PhaseEvent("thinking")
         await client.query(prompt)
         try:
             async for message in client.receive_response():
                 sid = getattr(message, "session_id", None)
-                if sid and not session_announced:
-                    session_announced = True
+                if sid and sid != announced:
+                    announced = sid
                     yield SdkSession(sid)
                 if isinstance(message, StreamEvent):
                     for event in self._stream_event(message.event, message_id):

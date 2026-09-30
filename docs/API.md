@@ -28,8 +28,9 @@ curl -H "Authorization: Bearer cvk_XXXX:alice@example.com" \
 account (email + company scope) it resolves to.
 
 **Cookie-only surface:** every identity-requiring route under
-`/api/admin/*` and `/api/auth/*` — account switching, key management, the
-whole admin console — rejects API keys with 403 (even an admin's key);
+`/api/admin/*`, `/api/auth/*` and `/api/assistant/*` — account switching,
+key management, the whole admin console, assistant chats and LLM
+credentials — rejects API keys with 403 (even an admin's key);
 manage keys and admin settings in the browser. The public auth endpoints
 (`/api/auth/config`, the Google login/callback pair, `logout`) don't
 consult keys at all. Everything else is fair game.
@@ -152,6 +153,39 @@ curl -H "$AUTH" $BASE/files/1337/text     # extracted markdown
 curl -H "$AUTH" $BASE/files/1337/raw -o original.pdf
 curl -X DELETE -H "$AUTH" $BASE/folders/42/files/1337
 ```
+
+## Jobs
+
+```bash
+# Running jobs first, then the most recent — only jobs on folders you can see
+curl -H "$AUTH" "$BASE/jobs/recent?limit=50"
+```
+
+## Assistant (browser only)
+
+The in-app assistant is session-cookie only — none of this is reachable with
+an API key. It is documented here for completeness; operators see
+[OPERATIONS.md §14](OPERATIONS.md#14-in-app-assistant).
+
+| Route | Purpose |
+|---|---|
+| `GET /api/assistant/config` | switch, engines + availability, models, efforts, credential status (masked) |
+| `PATCH /api/assistant/policy` | super-admin: `{enabled, default_model, default_effort}` |
+| `PUT /api/assistant/credentials/{scope}/{kind}` | store `{secret}`; `scope` = `person` \| `deployment`, `kind` = `anthropic_api_key` \| `claude_oauth_token` |
+| `DELETE /api/assistant/credentials/{scope}/{kind}` | remove |
+| `POST /api/assistant/credentials/{scope}/{kind}/test` | probe → `{result: ok \| auth_failed \| inconclusive, detail}` |
+| `GET /api/assistant/conversations?view=mine\|theirs&archived=false` | list (`theirs` = the impersonated account's list) |
+| `GET /api/assistant/conversations/{id}` | conversation + transcript |
+| `PATCH /api/assistant/conversations/{id}` | `{title?, archived?}` |
+| `DELETE /api/assistant/conversations/{id}` | delete |
+
+Turns stream over **`/ws/assistant`** (same-origin only). Client frames:
+`ask {text, conversation_id?, view?, engine?, model?, effort?, ui_context?}`,
+`watch {conversation_id}`, `stop {conversation_id}`, `ping`. Server frames
+(each with `conversation_id`): `hello`, `conversation`, `turn_start`,
+`phase`, `thinking_delta`, `text_delta`, `text`, `tool_start`, `tool_end`,
+`turn_end {status, error, error_kind, usage}`, `error {message, kind}`.
+Wire format: `services/assistant/protocol.py`.
 
 ## Notes
 

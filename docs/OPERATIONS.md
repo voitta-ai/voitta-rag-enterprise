@@ -2,8 +2,9 @@
 
 > A detailed, diagram-first walkthrough of how the system actually works at
 > runtime: file ingestion, the job queue, the websocket event stream, search,
-> the data model, the locking model, and — in depth — how **admin settings
-> propagate** and how **admin-defined OAuth / sync providers surface to users**.
+> the data model, the locking model, in depth how **admin settings
+> propagate** and how **admin-defined OAuth / sync providers surface to users**,
+> and the in-app **assistant**.
 >
 > Diagrams are [Mermaid](https://mermaid.js.org/). GitHub, VS Code (with the
 > Mermaid extension), and most markdown viewers render them inline.
@@ -23,6 +24,7 @@
 11. [Data model](#11-data-model)
 12. [Locking model](#12-locking-model)
 13. [Logging & observability](#13-logging--observability)
+14. [In-app assistant](#14-in-app-assistant)
 
 ---
 
@@ -448,6 +450,14 @@ call `events.publish(topic, event)`; per-connection `Subscription` inboxes
 buffer and **coalesce** by `(type, id)` so the client sees only the latest
 state per resource. `api/ws.py` authenticates, sends the snapshot, then drains
 the buffer in batches — filtering every batch per-connection by ACL.
+
+Before any of that, a handshake whose `Origin` is not this server's own (or
+`VOITTA_PUBLIC_BASE_URL` / `VOITTA_WS_ALLOWED_ORIGINS`) is refused with
+close code 4403 (`api/origin.py`): the socket authenticates by cookie, and a
+page on a sibling subdomain would otherwise be able to open it as the
+signed-in user. The assistant's `/ws/assistant` uses the same guard (§14).
+The `jobs` snapshot and `GET /api/jobs/recent` share one ACL-scoped query
+(`services/job_listing.py`).
 
 ### Connection lifecycle
 
@@ -1459,6 +1469,8 @@ new connector module + one registry line — no edit to `run_sync`.
 ## 11. Data model
 
 SQLite holds **metadata only**. Content lives in CAS; vectors live in Qdrant.
+The assistant's tables (`assistant_conversations`, `assistant_messages`,
+`assistant_credentials`) are described in [§14.6](#146-storage).
 
 ```mermaid
 erDiagram
@@ -1778,3 +1790,219 @@ unchanged, so nothing was re-indexed (a fast, correct "done" — not a skip).
 *Generated from a source trace of `src/voitta_rag_enterprise/` and `static/js/`.
 Line-level references were accurate at the time of writing; treat file paths as
 the durable anchors and re-verify specifics against the code.*
+
+---
+
+## 14. In-app assistant
+
+A chat window in the SPA (💬, bottom right) that answers questions from the
+index and explains **sync and indexing state** — the part MCP clients can't
+see. It is read-only: it searches, reads and inspects; it never changes
+files, triggers syncs or edits settings.
+
+Code: `services/assistant/` (backend, see its package docstring),
+`services/retrieval/` + `services/sync_overview.py` (what the tools call),
+`api/routes/assistant.py` (REST), `api/assistant_ws.py` (streaming),
+`static/js/assistant/` + `static/js/modals/assistant-settings.js` (UI).
+
+```mermaid
+flowchart LR
+    subgraph Browser
+        W["Chat window<br/>static/js/assistant"]
+        S["Settings → Assistant"]
+    end
+    W -- "ask / watch / stop" --> WS["/ws/assistant<br/>(Origin-guarded, cookie auth)"]
+    W -- "conversations" --> R["/api/assistant/*<br/>(cookie-only REST)"]
+    S -- "credentials · policy" --> R
+    WS --> TR["TurnRunner<br/>(one task per turn)"]
+    TR --> EA["Engine A<br/>Anthropic API + own tool loop"]
+    TR --> EB["Engine B<br/>Claude Agent SDK (subscription)"]
+    EA & EB --> T["Tools (read-only)"]
+    T --> RET["services/retrieval<br/>search · read · images"]
+    T --> SO["services/sync_overview<br/>sync · jobs · failures"]
+    TR --> DB[("assistant_conversations<br/>assistant_messages")]
+    R --> CR[("assistant_credentials<br/>Fernet-encrypted")]
+```
+
+### 14.1 Identity: whose data, who pays
+
+Two identities are kept apart (`services/assistant/identity.py`):
+
+| | real (person typing) | effective (active view) |
+|---|---|---|
+| Recorded as | `author_user_id` on user messages | `acting_user_id` on every message |
+| Tools run with | — | **this account's folder access** |
+| Pays for the turn | **their** personal key, else the deployment key | never |
+| Claude subscription | only if **they** are a super-admin | — |
+
+- **Impersonation.** An admin "viewing as" someone gets a **Mine / Theirs**
+  toggle in the window: *Mine* is the admin's own conversation list,
+  *Theirs* the impersonated account's. Either way tools run with the
+  impersonated account's access (like every other surface during
+  impersonation), and the target's credentials are never used.
+- **Folder scope.** Tools search every folder the account can *see*
+  (`Viewer(scope="visible")`). The per-folder "active in MCP" toggle only
+  limits external MCP clients (`scope="mcp_active"`).
+- **Owner-only details.** Sync configuration, raw sync errors and sync-run
+  history are shown for folders the account owns; for folders shared with
+  it, only status and counts.
+- **Single-user (desktop).** The one local user counts as super-admin.
+
+### 14.2 Credentials
+
+| Credential | Scope | Who manages | Used by |
+|---|---|---|---|
+| Anthropic API key | person (keyed by email) | that person | their own turns |
+| Anthropic API key | deployment | super-admins | everyone without a personal key |
+| `VOITTA_ASSISTANT_API_KEY` | deployment (env, read-only) | operator | fallback when no deployment key is stored |
+| Claude subscription token | deployment only | super-admins | super-admins' turns on the subscription engine |
+
+- Stored in `assistant_credentials`, encrypted with Fernet under
+  `data_dir/.secret_key` (or `VOITTA_SECRET_KEY`), **independent of the
+  session secret**. Back the key file up with the DB. If it is lost or
+  replaced, stored credentials read as "not configured" (logged as a
+  warning) and must be re-entered — nothing crashes.
+- Secrets are write-only over the API: responses carry a masked `hint`
+  (`…abcd`) and verification state, never the value.
+- **Subscription setup:** on any machine with Claude Code, run
+  `claude setup-token`, sign in with the subscription account, and paste
+  the printed `sk-ant-oat…` token into Settings → Assistant. All
+  super-admins share it.
+- **Test** probes the provider (API key: list one model; token: a one-shot
+  tool-less CLI turn). `inconclusive` (network, timeout, CLI missing)
+  leaves the stored state alone. Real turns also stamp
+  `last_verified_at` / `last_error`.
+
+### 14.3 Engines
+
+Engine and model are **pinned per conversation** (replaying one engine's
+history into another would break thinking continuity); effort is chosen per
+question.
+
+**A — Anthropic API** (`engines/anthropic_api.py`): our own streaming tool
+loop over the Messages API. Adaptive thinking with summarized display
+(streamed to the user), `output_config.effort`, prompt caching (breakpoint
+on the fixed system prompt + automatic caching of the conversation), and
+server-side refusal fallbacks (`fallbacks: "default"`) for Opus 5 /
+Fable 5.1. History is replayed verbatim from the transcript; a refused
+answer is discarded rather than stored.
+
+**B — Claude subscription** (`engines/claude_subscription.py`): the Claude
+Agent SDK drives its bundled `claude` CLI, one process per turn, resuming
+the SDK session stored on the conversation. Isolation:
+
+- `CLAUDE_CONFIG_DIR = <data_dir>/assistant/claude` — no host `~/.claude`
+  settings, hooks, memory or logins; the resumable sessions live here.
+  Working directory `<data_dir>/assistant/workspace` (empty).
+- `setting_sources=[]`, strict MCP config, claude.ai connectors off,
+  non-essential traffic (auto-update, telemetry) off.
+- **No built-in tools** (no shell, files or web): only our read-only tools,
+  served in-process as an SDK MCP server; `can_use_tool` denies the rest.
+- The SDK merges the parent environment into the CLI's and can only
+  *override* keys, so every inherited `ANTHROPIC_*` / `CLAUDE*` variable
+  is explicitly blanked — an ambient API key or base URL can't reroute or
+  re-bill the subscription.
+
+**Packaging.** `claude-agent-sdk` ships the CLI inside its wheel (~100 MB
+download, ~240 MB installed): the Docker image grows accordingly; the
+desktop app installs it with the rest of the stack on first run (outside
+the signed bundle, so signing/notarisation is unaffected). Both engines'
+libraries are imported lazily.
+
+### 14.4 Tools
+
+| Tool | Answers |
+|---|---|
+| `list_folders` | folders + counts, or a directory listing |
+| `search`, `search_images` | hybrid chunk search, text→image search |
+| `get_chunk_range`, `get_file` | read around a hit / a short file |
+| `get_chunk_images`, `get_image`, `list_page_images`, `get_page_image`, `get_page_layout` | figures and pages (shown to the model *and* the user) |
+| `resolve_url` | which indexed files came from a URL |
+| `sync_overview` | every folder: source, sync status/errors, last/next sync, in-flight sync, indexing activity, file states |
+| `folder_sync_detail` | one folder: source config (owner), index health, per-type counts, last sync runs |
+| `file_problems` | files in `error` / `unsupported` with reasons |
+| `recent_jobs` | the job queue (same ACL-scoped query as the Jobs panel) |
+
+Results over 60 000 characters are truncated with an explicit note. Tool
+output is data: the system prompt tells the model to ignore instructions
+found in documents.
+
+### 14.5 Turn lifecycle
+
+```mermaid
+sequenceDiagram
+    participant UI as Chat window
+    participant WS as /ws/assistant
+    participant TR as TurnRunner
+    participant E as Engine
+    participant DB as SQLite
+    UI->>WS: ask {text, conversation_id?, view, engine, model, effort, ui_context}
+    WS->>TR: ask()
+    TR->>DB: create conversation (new) · append user message
+    TR-->>UI: conversation · turn_start
+    TR->>E: run(TurnRequest)
+    loop rounds
+        E-->>UI: phase · thinking_delta · text_delta · text · tool_start · tool_end
+        E->>TR: Persist(assistant) / Persist(tool)
+        TR->>DB: append message
+    end
+    E->>TR: EngineDone
+    TR->>DB: seal dangling tool calls · notice row if stopped/failed
+    TR-->>UI: turn_end
+    UI->>UI: reload stored transcript (authoritative)
+```
+
+- A turn is a task owned by the runner, **not** the socket: closing the tab
+  doesn't lose the answer; reopening reloads the transcript and re-watches.
+- One active turn per conversation; at most
+  `VOITTA_ASSISTANT_MAX_CONCURRENT_TURNS` (4) per process; at most
+  `VOITTA_ASSISTANT_MAX_TOOL_ROUNDS` (24) tool rounds; wall-clock bound
+  `VOITTA_ASSISTANT_TURN_TIMEOUT_S` (900 s).
+- **Stop** is cooperative (the engine finishes at a safe point), then a hard
+  cancel after 5 s. Model tool calls left without results are sealed with
+  error results so the transcript stays replayable; a `notice` row records
+  that the turn was stopped or failed (shown in the UI, never sent to a
+  model).
+- Turns are cancelled on app shutdown (each owns an HTTP stream or a CLI
+  subprocess).
+- **Single worker.** Live turn state is in-process; the deployment runs one
+  uvicorn worker (see Dockerfile). Running several workers would split
+  turns and watchers across processes.
+
+### 14.6 Storage
+
+- `assistant_conversations` — owner account (the list it lives in),
+  creator, title, pinned engine/model, SDK session id, archive flag.
+- `assistant_messages` — append-only, one row per message (`user`,
+  `assistant`, `tool`, `notice`), content as engine-neutral blocks
+  (`services/assistant/transcript.py`). Images are stored as references
+  (`image_id` + size) and re-read — and re-checked against the account's
+  current access — when history is replayed; a revoked image becomes a
+  placeholder.
+- `assistant_credentials` — see §14.2.
+- Policy (enabled, default model, default effort) lives in the admin
+  `settings.json` under `assistant_*` keys (super-admins, Settings →
+  Assistant).
+
+### 14.7 Security notes
+
+- `/api/assistant/*` is **session-cookie only** — API keys get 403 (they
+  must not read chats or manage LLM credentials).
+- Both WebSockets refuse a foreign `Origin` before accepting
+  (`api/origin.py`, close code 4403): same origin, `VOITTA_PUBLIC_BASE_URL`
+  or `VOITTA_WS_ALLOWED_ORIGINS` only.
+- All rendered markdown (assistant answers *and* the file preview) goes
+  through DOMPurify (`static/js/render/markdown.js`); mermaid runs with
+  `securityLevel: "strict"` and its SVG is sanitised too.
+
+### 14.8 Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| No 💬 button | Assistant disabled in Settings → Assistant (policy), or `/api/assistant/config` failing — check `app.log`. |
+| "No credential is configured for this engine" | Add a personal or deployment API key (or the subscription token, super-admins). |
+| Subscription option greyed out | Only super-admins can use it; or no token stored. |
+| "Rejected: … OAuth access token is invalid" | Token expired or revoked — run `claude setup-token` again and replace it. |
+| Credentials suddenly "Not set" after a restore | `.secret_key` wasn't restored with the DB (warning in `app.log`); re-enter them. |
+| Subscription conversations fail on every turn after a restore / data wipe | Their SDK sessions lived in `<data_dir>/assistant/claude`, which is gone; start a new conversation. |
+| "The assistant is busy" | `VOITTA_ASSISTANT_MAX_CONCURRENT_TURNS` reached; raise it or retry. |

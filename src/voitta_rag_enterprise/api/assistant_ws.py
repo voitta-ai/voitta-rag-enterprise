@@ -119,7 +119,7 @@ async def assistant_ws(ws: WebSocket, runner: TurnRunner = Depends(get_turn_runn
         while True:
             try:
                 msg = await ws.receive_json()
-            except (ValueError, json.JSONDecodeError):
+            except (ValueError, KeyError, TypeError):  # not a JSON text frame
                 await sink(ErrorEvent("Frames must be JSON objects.").to_wire())
                 continue
             if not isinstance(msg, dict):
