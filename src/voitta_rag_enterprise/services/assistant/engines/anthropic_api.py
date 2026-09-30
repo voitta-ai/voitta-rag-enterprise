@@ -90,6 +90,8 @@ def build_api_messages(history: list[StoredMessage], ctx: ToolContext) -> list[d
     """
     out: list[dict[str, Any]] = []
     for m in history:
+        if m.role == "notice":  # UI/audit only, never model input
+            continue
         if m.role == "assistant":
             out.append({"role": "assistant", "content": m.content})
         elif m.role == "tool":

@@ -34,6 +34,8 @@ import "./modals/settings.js";  // self-wires user-pill click + Settings modal
 import "./modals/share.js";  // self-wires #share-* modal (opened from tree share pills)
 import "./modals/sync/index.js";  // self-wires #btn-sync + sync modal + GD picker
 import "./flows/upload.js";  // self-wires Upload button + file input
+import "./assistant/index.js";  // self-wires the assistant launcher + window
+import { loadAssistantConfig } from "./assistant/config.js";
 import { updateToolbarState } from "./flows/toolbar.js";
 import { activeFolders, connStatus, files, folders, folderStats, jobs, reindexProgress, syncProgress, syncSources } from "./store.js";
 import { addGhostDir } from "./flows/selection.js";
@@ -174,6 +176,7 @@ async function bootstrap() {
     seedGhostDirsFromFolders();
     hideBootOverlay();
     connect();
+    loadAssistantConfig();
     pollStartupReadiness();
 }
 

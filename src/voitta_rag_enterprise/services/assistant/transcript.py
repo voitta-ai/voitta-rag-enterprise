@@ -16,6 +16,11 @@ One ``assistant_messages`` row is one model-facing message; its
     the UI shows the summarized ``thinking`` text.
     ``{"type": "tool_use", "id", "name", "input"}``
 
+``notice`` rows (shown to people, NEVER sent to a model)
+    ``{"type": "notice", "kind": "error" | "interrupted", "text"}`` — how a
+    turn ended when it did not end normally, so a reloaded conversation
+    shows why a question has no (complete) answer.
+
 ``tool`` rows (sent to the model in the user role)
     ``{"type": "tool_result", "tool_use_id", "is_error", "content": [...]}``
     whose content holds ``text`` blocks and ``{"type": "image_ref",
@@ -30,7 +35,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-Role = Literal["user", "assistant", "tool"]
+Role = Literal["user", "assistant", "tool", "notice"]
 Block = dict[str, Any]
 
 
@@ -57,6 +62,10 @@ def tool_result_block(tool_use_id: str, content: list[Block], is_error: bool) ->
         "is_error": is_error,
         "content": content,
     }
+
+
+def notice_block(kind: str, text: str) -> Block:
+    return {"type": "notice", "kind": kind, "text": text}
 
 
 def plain_text(blocks: list[Block]) -> str:

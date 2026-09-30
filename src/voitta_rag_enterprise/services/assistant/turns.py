@@ -51,7 +51,7 @@ from .protocol import (
     TurnStart,
 )
 from .tools import TOOLS, ToolContext
-from .transcript import Block, context_block, text_block, tool_result_block
+from .transcript import Block, context_block, notice_block, text_block, tool_result_block
 
 logger = logging.getLogger(__name__)
 
@@ -366,6 +366,17 @@ class TurnRunner:
             conv = store.get_conversation(db, req.conversation_id)
             if conv is not None:
                 _seal_dangling_tool_uses(db, conv)
+                if done.status == "interrupted":
+                    store.append_message(
+                        db, conv, role="notice", content=[notice_block("interrupted", "Stopped.")]
+                    )
+                elif done.status == "error":
+                    store.append_message(
+                        db,
+                        conv,
+                        role="notice",
+                        content=[notice_block("error", done.error or "The turn failed.")],
+                    )
             if done.status == "done":
                 credentials.record_verification(db, req.credential.credential_id, None)
             elif done.error_kind == "auth":
@@ -402,6 +413,9 @@ class TurnRunner:
     # --- fan-out --------------------------------------------------------
 
     async def _broadcast(self, turn: _ActiveTurn, frame: dict[str, Any]) -> None:
+        # Every frame names its conversation, so a client that switched
+        # conversations mid-turn can drop frames still in flight.
+        frame.setdefault("conversation_id", turn.conversation_id)
         for sub in list(turn.subscribers):
             try:
                 await sub(frame)
@@ -413,7 +427,7 @@ class TurnRunner:
 def _seal_dangling_tool_uses(db: Any, conv: Any) -> None:
     """If the transcript ends in model tool calls without results, append
     error results so the next turn's history is valid."""
-    history = store.messages(db, conv.id)
+    history = [m for m in store.messages(db, conv.id) if m.role != "notice"]
     if not history or history[-1].role != "assistant":
         return
     pending = [b for b in history[-1].content if b.get("type") == "tool_use"]

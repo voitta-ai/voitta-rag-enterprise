@@ -13,6 +13,7 @@
     <link rel="stylesheet" href="/static/css/05-modal.css">
     <link rel="stylesheet" href="/static/css/06-admin.css">
     <link rel="stylesheet" href="/static/css/07-preview.css">
+    <link rel="stylesheet" href="/static/css/08-assistant.css">
 </head>
 <body>
     <!-- Startup banner: shown while the backend is still warming up (loading
@@ -1734,6 +1735,17 @@
                     </table>
                     <p id="company-keys-empty" class="hint" hidden>No company keys yet. Create one above.</p>
                 </div>
+
+                <!-- Assistant: LLM credentials + (super-admins) policy. Rows are
+                     built by modals/assistant-settings.js from /api/assistant/config. -->
+                <section id="assistant-settings" class="assistant-settings" hidden>
+                    <h4>Assistant</h4>
+                    <p class="hint">
+                        The assistant (💬, bottom right) answers questions from your documents and
+                        explains sync and indexing status. Keys are stored encrypted and never shown again.
+                    </p>
+                    <div id="assistant-settings-body"></div>
+                </section>
             </div>
         </div>
     </div>
@@ -1796,6 +1808,58 @@
         ·
         <a href="/LICENSING.md" target="_blank" rel="noopener">Commercial license</a>
     </footer>
+    <!-- In-app assistant (static/js/assistant): a fixed launcher and a floating,
+         movable, resizable chat window. Hidden until /api/assistant/config says
+         the assistant is enabled. -->
+    <button id="assistant-launcher" class="assistant-launcher" type="button" hidden
+            aria-label="Open the assistant" title="Assistant">
+        <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true">
+            <path fill="currentColor" d="M4 4h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-4.3 3.6A.8.8 0 0 1 3.4 21V18H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Zm3 6.2a1.3 1.3 0 1 0 0 2.6 1.3 1.3 0 0 0 0-2.6Zm5 0a1.3 1.3 0 1 0 0 2.6 1.3 1.3 0 0 0 0-2.6Zm5 0a1.3 1.3 0 1 0 0 2.6 1.3 1.3 0 0 0 0-2.6Z"/>
+        </svg>
+    </button>
+    <section id="assistant-window" class="assistant-window" hidden role="dialog" aria-label="Assistant">
+        <header class="aw-head" data-drag-handle>
+            <button id="aw-history" class="aw-icon" type="button" title="Conversations" aria-label="Conversations">☰</button>
+            <div id="aw-title" class="aw-title">Assistant</div>
+            <div id="aw-view" class="aw-view" role="group" aria-label="Conversation list" hidden>
+                <button type="button" data-view="mine" class="is-active" title="Your own conversations">Mine</button>
+                <button type="button" data-view="theirs" title="The conversations of the account you are viewing as">Theirs</button>
+            </div>
+            <button id="aw-new" class="aw-icon" type="button" title="New conversation" aria-label="New conversation">＋</button>
+            <button class="aw-icon" type="button" data-minimise title="Minimise" aria-label="Minimise" aria-expanded="true">–</button>
+            <button id="aw-close" class="aw-icon" type="button" title="Close" aria-label="Close">×</button>
+        </header>
+        <div id="aw-banner" class="aw-banner" hidden></div>
+        <div class="aw-main">
+            <aside id="aw-list" class="aw-list" hidden>
+                <ul id="aw-list-items"></ul>
+                <label class="aw-archived"><input type="checkbox" id="aw-show-archived"> Show archived</label>
+            </aside>
+            <div id="aw-transcript" class="aw-transcript" aria-live="polite"></div>
+        </div>
+        <div id="aw-setup" class="aw-setup" hidden>
+            <span id="aw-setup-text"></span>
+            <button id="aw-setup-open" type="button" class="btn btn-secondary btn-sm">Open settings</button>
+        </div>
+        <footer class="aw-composer">
+            <textarea id="aw-input" rows="2" placeholder="Ask about your documents or sync status…  (Enter to send, Shift+Enter for a new line)"></textarea>
+            <div class="aw-controls">
+                <select id="aw-engine" aria-label="Engine"></select>
+                <select id="aw-model" aria-label="Model"></select>
+                <span id="aw-pinned" class="aw-pinned" hidden></span>
+                <select id="aw-effort" aria-label="Effort"></select>
+                <span class="aw-spacer"></span>
+                <button id="aw-stop" type="button" class="btn btn-secondary btn-sm" hidden>Stop</button>
+                <button id="aw-send" type="button" class="btn btn-primary btn-sm">Send</button>
+            </div>
+        </footer>
+        <div class="aw-grip" data-grip="n"></div><div class="aw-grip" data-grip="s"></div>
+        <div class="aw-grip" data-grip="e"></div><div class="aw-grip" data-grip="w"></div>
+        <div class="aw-grip" data-grip="ne"></div><div class="aw-grip" data-grip="nw"></div>
+        <div class="aw-grip" data-grip="se"></div><div class="aw-grip" data-grip="sw"></div>
+    </section>
+    <div id="aw-lightbox" class="aw-lightbox" hidden><img alt="Image from the assistant"></div>
+
     <!-- Resolve the bare "three" specifier (used by cad.js and the locally
          vendored three.js addons) to our single vendored core build. Must
          precede any module script. Keeps the UI free of external CDNs. -->

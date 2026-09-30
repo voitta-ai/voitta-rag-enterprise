@@ -366,9 +366,10 @@ CREATE TABLE IF NOT EXISTS assistant_conversations (
 CREATE INDEX IF NOT EXISTS idx_assistant_conversations_owner
     ON assistant_conversations(owner_user_id, archived_at, updated_at);
 
--- Append-only transcript, one row per model-facing message: ``user`` (typed
--- by a person), ``assistant`` (model output: text / thinking / tool_use
--- blocks) and ``tool`` (tool results, sent to the model in the user role).
+-- Append-only transcript, one row per message: ``user`` (typed by a person),
+-- ``assistant`` (model output: text / thinking / tool_use blocks), ``tool``
+-- (tool results, sent to the model in the user role) and ``notice`` (how a
+-- turn ended abnormally — shown to people, never sent to a model).
 -- ``content_json`` holds engine-neutral blocks; images are stored as
 -- ``image_ref`` blocks (image id), never inline bytes. ``author_user_id`` is
 -- the real person who typed (user rows); ``acting_user_id`` the identity the
@@ -377,7 +378,7 @@ CREATE TABLE IF NOT EXISTS assistant_messages (
     id               INTEGER PRIMARY KEY,
     conversation_id  INTEGER NOT NULL REFERENCES assistant_conversations(id) ON DELETE CASCADE,
     seq              INTEGER NOT NULL,
-    role             TEXT NOT NULL,            -- 'user' | 'assistant' | 'tool'
+    role             TEXT NOT NULL,            -- 'user' | 'assistant' | 'tool' | 'notice'
     content_json     TEXT NOT NULL,
     author_user_id   INTEGER REFERENCES users(id) ON DELETE SET NULL,
     acting_user_id   INTEGER REFERENCES users(id) ON DELETE SET NULL,

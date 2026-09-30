@@ -81,3 +81,8 @@ export const keysState = createStore([]);
 // the heavy per-folder connector config is intentionally NOT in the global
 // snapshot. A ``null`` value marks a folder whose config was deleted.
 export const syncConfigs = createStore(new Map());
+// In-app assistant configuration (GET /api/assistant/config): switch,
+// engines + availability, models, credential status. null until loaded.
+// Shared by the chat window and the Settings → Assistant section; whoever
+// changes a credential or the policy reloads it here and both re-render.
+export const assistantConfig = createStore(null);

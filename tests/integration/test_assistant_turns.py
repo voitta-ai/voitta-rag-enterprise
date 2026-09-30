@@ -144,9 +144,10 @@ def test_stop_seals_dangling_tool_use(keyed_app: FastAPI) -> None:
             end = _until(ws, "turn_end")[-1]
         assert end["status"] == "interrupted"
         messages = c.get(f"/api/assistant/conversations/{cid}").json()["messages"]
-    assert [m["role"] for m in messages] == ["user", "assistant", "tool"]
-    sealed = messages[-1]["content"][0]
+    assert [m["role"] for m in messages] == ["user", "assistant", "tool", "notice"]
+    sealed = messages[2]["content"][0]
     assert sealed["tool_use_id"] == "t1" and sealed["is_error"] is True
+    assert messages[3]["content"] == [{"type": "notice", "kind": "interrupted", "text": "Stopped."}]
 
 
 def test_rejections(auth_env: None) -> None:

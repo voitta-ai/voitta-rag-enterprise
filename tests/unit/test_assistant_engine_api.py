@@ -232,9 +232,13 @@ def test_replay_renders_context_and_missing_images(env: None) -> None:
             ],
         }], None, 7, None, None, 0),
     ]
+    history.append(StoredMessage(
+        4, 4, "notice", [{"type": "notice", "kind": "error", "text": "boom"}], None, 7, None, None, 0,
+    ))
     # Image 999 doesn't exist: replay degrades to a text placeholder.
     messages = build_api_messages(history, ToolContext(Viewer(user_id=None)))
     assert messages[0]["content"][0]["text"] == "<screen_context>\nfolder 'Docs'\n</screen_context>"
     assert messages[2]["content"][0]["content"][1] == {
         "type": "text", "text": "[image no longer available]",
     }
+    assert len(messages) == 3  # the notice row never reaches the model

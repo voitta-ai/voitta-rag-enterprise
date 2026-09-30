@@ -9,6 +9,7 @@ Two families:
 * **Engine directives** (``Persist``, ``SdkSession``) never reach a socket:
   the TurnRunner consumes them to write the transcript.
 
+Every frame broadcast for a turn also carries ``conversation_id``.
 Client → server frames are documented on ``api/assistant_ws.py``.
 """
 

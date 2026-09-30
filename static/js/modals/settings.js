@@ -1,4 +1,5 @@
-// User settings modal — personal API keys + (admins only) company keys.
+// User settings modal — personal API keys, (admins only) company keys, and
+// the assistant's LLM credentials (modals/assistant-settings.js).
 //
 // Each key is shown once at creation; the reveal banner renders the token
 // and ready-made Claude / Claude CLI snippets, each with its own copy
@@ -14,11 +15,14 @@
 
 import { api } from "../api.js";
 import { keysState, me } from "../store.js";
+import { refreshAssistantSettings } from "./assistant-settings.js";
 import { refreshMe } from "./login.js";
 
 const $ = (sel) => document.querySelector(sel);
 
-export function openSettings() {
+// ``section: "assistant"`` scrolls straight to the assistant settings (the
+// chat window's "set up" link).
+export function openSettings({ section } = {}) {
     wireKeysStore();
     $("#settings-backdrop").hidden = false;
     $("#key-reveal").hidden = true;
@@ -36,6 +40,9 @@ export function openSettings() {
     // admin) also queries Clerk live. Chained so loadCompanyKeys sees the
     // just-provisioned account scope.
     refreshMe().finally(() => loadCompanyKeys());
+    refreshAssistantSettings().then(() => {
+        if (section === "assistant") $("#assistant-settings").scrollIntoView({ block: "start" });
+    });
 }
 
 // ----- MCP connection snippets -----
@@ -193,7 +200,7 @@ async function deleteCompanyKey(k) {
 
 // ----- Module-load wiring -----
 
-$("#user-pill").addEventListener("click", openSettings);
+$("#user-pill").addEventListener("click", () => openSettings());
 $("#settings-close").addEventListener("click", closeSettings);
 $("#settings-backdrop").addEventListener("click", (e) => {
     if (e.target.id === "settings-backdrop") closeSettings();

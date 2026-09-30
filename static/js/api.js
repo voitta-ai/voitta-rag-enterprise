@@ -305,4 +305,20 @@ export const api = {
 
     // Account switch — pick which (email, company) account is active.
     switchAccount: (accountId) => req("POST", `/api/auth/account/${accountId}`),
+
+    // --- In-app assistant (cookie-only; turns stream over /ws/assistant) ---
+    assistantConfig: () => req("GET", "/api/assistant/config"),
+    assistantPolicy: (patch) => req("PATCH", "/api/assistant/policy", patch),
+    assistantPutCredential: (scope, kind, secret) =>
+        req("PUT", `/api/assistant/credentials/${scope}/${kind}`, { secret }),
+    assistantDeleteCredential: (scope, kind) =>
+        req("DELETE", `/api/assistant/credentials/${scope}/${kind}`),
+    assistantTestCredential: (scope, kind) =>
+        req("POST", `/api/assistant/credentials/${scope}/${kind}/test`),
+    assistantConversations: (view, archived = false) =>
+        req("GET", `/api/assistant/conversations?view=${view}&archived=${archived}`),
+    assistantConversation: (id) => req("GET", `/api/assistant/conversations/${id}`),
+    assistantUpdateConversation: (id, patch) =>
+        req("PATCH", `/api/assistant/conversations/${id}`, patch),
+    assistantDeleteConversation: (id) => req("DELETE", `/api/assistant/conversations/${id}`),
 };
