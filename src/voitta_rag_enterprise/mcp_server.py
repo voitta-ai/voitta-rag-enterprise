@@ -1,15 +1,17 @@
 """MCP server.
 
 Exposes the same data the HTTP API does, but as MCP tools that an LLM agent
-can call.
+can call. The tools are thin wrappers: retrieval logic and its folder ACL
+live in ``services/retrieval`` (shared with the in-app assistant); this
+module owns MCP transport, authentication and the tool descriptions.
 
 Authentication
 --------------
 Clients authenticate with a personal API key minted from the SPA's Settings
 panel and presented as ``Authorization: Bearer vk_…``. The middleware
-resolves that token to a user, sets the resolved email on a ContextVar that
-every tool reads through ``_resolved_user_id``, and bumps ``last_used_at``.
-A request with a missing or invalid bearer is rejected with 401.
+resolves that token to an account, sets it on a ContextVar that every tool
+reads through ``_viewer``, and bumps ``last_used_at``. A request with a
+missing or invalid bearer is rejected with 401.
 
 The ``VOITTA_SINGLE_USER`` and ``VOITTA_DEV_USER`` env modes still bypass
 authentication: those are local-dev shortcuts and the bearer requirement
@@ -23,45 +25,26 @@ Run standalone::
 
 from __future__ import annotations
 
-import base64
-import json
 import logging
-import re
 from contextvars import ContextVar
-from functools import lru_cache
 
 from fastmcp import FastMCP
-from pydantic import BaseModel, Field
-from sqlalchemy import select
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from .cas import store as cas_store
 from .config import get_settings
 from .db.database import init_db, session_scope
-from .db.models import Chunk, ChunkImageLink, File, Folder, Image
-from .services.acl import (
-    ROOT_EMAIL,
-    get_or_create_user,
-    mcp_visible_folder_ids,
-    user_can_see_folder,
-    visible_folder_ids,
-)
-from .services.embedding import (
-    get_image_embedder,
-    get_sparse_embedder,
-    get_text_embedder,
-)
-from .services.file_classify import source_kind as classify_source_kind
-from .services.vector_store import (
-    SearchHit,
-)
-from .services.vector_store import (
-    search_chunks as vs_search_chunks,
-)
-from .services.vector_store import (
-    search_images as vs_search_images,
+from .services import retrieval
+from .services.acl import get_or_create_user
+from .services.retrieval import (
+    ChunkInfo,
+    EntryInfo,
+    FileInfo,
+    FolderInfo,
+    ImageInfo,
+    PageImageInfo,
+    Viewer,
 )
 
 logger = logging.getLogger(__name__)
@@ -138,232 +121,37 @@ naming, file organisation, and search quality.
 mcp = FastMCP("voitta-rag-enterprise", instructions=_INSTRUCTIONS)
 
 
-def _resolved_user() -> str:
-    """Mirror the HTTP ACL resolver.
+def _viewer() -> Viewer:
+    """Resolve the calling ACCOUNT into a retrieval :class:`Viewer`.
 
     Priority — first match wins:
 
-    1. ``VOITTA_SINGLE_USER`` → ``root@localhost`` (local dev)
-    2. ``VOITTA_DEV_USER`` → that email (local dev)
-    3. ContextVar set by ``BearerAuthMiddleware`` from a verified API key
-    4. ``"anonymous"`` (only reachable via direct in-process tool calls;
-       network requests get rejected by the middleware before reaching here)
+    1. ``VOITTA_SINGLE_USER`` → unrestricted (the sole identity owns all)
+    2. ``VOITTA_DEV_USER`` → that email's Personal account (created on
+       first call)
+    3. the account id ``BearerAuthMiddleware`` put on the ContextVar — the
+       verified ``ApiKey.user_id``, never an email lookup (one email may
+       own several account rows)
+    4. unrestricted — reachable only by direct in-process tool calls;
+       network requests without a valid bearer are rejected by the
+       middleware before any tool runs
+
+    Scope is ``"mcp_active"``: the user's per-folder MCP opt-outs apply.
     """
     s = get_settings()
     if s.single_user:
-        return ROOT_EMAIL
-    if s.dev_user:
-        return s.dev_user
-    ctx = _current_user.get()
-    return ctx[0] if ctx else "anonymous"
-
-
-def _resolved_user_id() -> int | None:
-    """Resolve the caller's ACCOUNT id (users.id) for visibility filters.
-
-    Bearer path: the id comes straight from the verified ApiKey.user_id via
-    the ContextVar — no email lookup (an email may own several account rows).
-    Dev-user path: the Personal account row, created on first call.
-    Returns ``None`` when single-user mode is on — the search-time ACL filter
-    becomes a no-op.
-    """
-    s = get_settings()
-    if s.single_user:
-        return None
-    # Same priority as _resolved_user: dev-mode shortcut first, then the
-    # bearer-verified account from the ContextVar.
+        return Viewer(user_id=None)
     if s.dev_user:
         with session_scope() as db:
-            return get_or_create_user(db, s.dev_user).id
+            return Viewer(user_id=get_or_create_user(db, s.dev_user).id)
     ctx = _current_user.get()
-    return ctx[1] if ctx is not None else None
-
-
-def _require_visible_file(s, file_id: int, user_id: int | None) -> File:
-    """Load a file the caller is allowed to see, or raise ``ValueError``.
-
-    Authorization is folder-scoped: a file is reachable only when its
-    folder is visible to ``user_id`` (owned, ACL-granted, community-shared).
-    This is the single seam EVERY id-taking tool routes through — without
-    it, a bearer caller could read any file/chunk/image/asset in the
-    deployment by enumerating integer ids, exactly the way ``search`` is
-    prevented from leaking across folders.
-
-    ``user_id is None`` is single-user mode (the search-filter no-op): all
-    files visible. The "not found" message is identical whether the row is
-    missing or ACL-hidden, so foreign ids aren't probeable.
-    """
-    f = s.get(File, file_id)
-    if f is None or (
-        user_id is not None and not user_can_see_folder(s, f.folder_id, user_id)
-    ):
-        raise ValueError(f"File {file_id} not found")
-    return f
+    return Viewer(user_id=ctx[1] if ctx is not None else None)
 
 
 # ---------------------------------------------------------------------------
-# Pydantic schemas — mirror the HTTP responses but trimmed for LLM friendliness
-# ---------------------------------------------------------------------------
-
-
-class FolderInfo(BaseModel):
-    id: int
-    path: str
-    display_name: str
-    source_type: str
-    files_total: int
-    files_indexed: int
-    # True when this folder is currently included in the caller's MCP search
-    # (i.e. they haven't toggled it off in Settings). Always True in single-
-    # user / dev-user modes.
-    active: bool = True
-    # True when the folder is shared globally (owner toggled the switch).
-    shared: bool = False
-
-
-class EntryInfo(BaseModel):
-    """A single entry returned when ``list_indexed_folders`` is called with a
-    non-empty ``prefix`` — i.e. when the tool is being used as a directory
-    listing rather than a roots listing."""
-
-    # ``"folder"`` for a (sub)directory, ``"file"`` for an indexed file.
-    kind: str
-    # Last path segment (the filename or subdir name).
-    name: str
-    # Full virtual path from the storage root, e.g. ``"MyDocs/sub/file.pdf"``.
-    # Folder entries end with ``/``.
-    path: str
-    # Containing top-level folder id, so callers can pivot to other tools
-    # (search with folder_ids=[…], get_file, …) without a second lookup.
-    folder_id: int
-    # File-only fields — None for folder entries.
-    file_id: int | None = None
-    state: str | None = None
-    size_bytes: int | None = None
-    source_url: str | None = None
-    source_kind: str | None = None
-
-
-class FileInfo(BaseModel):
-    id: int
-    folder_id: int
-    rel_path: str
-    state: str
-    # Source URL set by the sync connectors (Google Drive deep-link,
-    # GitHub raw URL, …). None for files indexed from a local path.
-    source_url: str | None = None
-    # Unix epoch seconds of the last successful indexing pass. None
-    # for files that have never reached state='indexed'.
-    last_indexed_at: int | None = None
-    # Coarse classifier for an LLM that wants to branch on what kind of
-    # source this is — ``"google_doc"`` / ``"google_sheet"`` /
-    # ``"google_slides"`` / ``"google_form"`` / ``"google_drawing"`` for
-    # Drive exports (classified by source_url), and ``"pdf"`` / ``"docx"``
-    # / ``"pptx"`` / ``"xlsx"`` / ``"ipynb"`` / ``"markdown"`` / ``"text"``
-    # / ``"html"`` / ``"image"`` / ``"other"`` for everything else
-    # (classified by extension). See ``services/file_classify.py`` for
-    # the full table.
-    source_kind: str = "other"
-
-
-# Field-presence policy across every MCP response model: declared
-# optional fields always appear on the wire with their declared value
-# (``null``/empty for unknowns). No custom serializer strips them. The
-# JSON schema FastMCP advertises matches the wire format byte-for-byte,
-# so client-side structured-content validators don't have to special-case
-# "absent vs null". Adding a new field means giving it a default — never
-# a serializer.
-
-
-class ChunkInfo(BaseModel):
-    # ``"chunk"`` for a document chunk; ``"folder_card"`` for a synthetic
-    # folder/subfolder hit (name + optional description matched the query).
-    # A folder_card has NO file: ``file_id`` is null, ``chunk_id`` is 0 and
-    # ``file_path`` holds the subfolder path inside the folder ('' = the
-    # folder root). Do not call get_file / get_chunk_range on it — instead
-    # scope a follow-up search with folder_ids=[folder_id].
-    kind: str = "chunk"
-    chunk_id: int
-    # Null only on folder_card hits (see ``kind``); always an int for chunks.
-    file_id: int | None
-    # Owning folder — set on every hit so callers can pivot to
-    # search(folder_ids=[…]) without a lookup.
-    folder_id: int | None = None
-    file_path: str
-    chunk_index: int
-    text: str
-    # Image ids whose extracted figure overlaps this chunk's page span.
-    # Empty list for non-PDF chunks (only the PDF pipeline links chunks
-    # to figures); the field is always emitted.
-    nearby_image_ids: list[int] = Field(default_factory=list)
-    # Search hit score (dense + sparse RRF). None on chunk-range / get-file
-    # responses where there's no ranking context.
-    score: float | None = None
-    # Page anchoring + layout summary, attached at index time. ``page``
-    # is the chunk's primary (start-anchored) page; ``pages`` is every
-    # page the chunk touches. ``layout`` is the per-page summary dict
-    # (``layout_kind``, ``layout_has_image``/``_table``, ``layout_n_*``,
-    # …) — mirror of what search filters can match on. All None / empty
-    # for chunks from non-PDF parsers (text/code/markdown/...).
-    page: int | None = None
-    pages: list[int] = Field(default_factory=list)
-    layout: dict | None = None
-    # File-level provenance, mirrored onto every chunk hit so an LLM can
-    # deep-link to the canonical source (Google doc URL, GitHub raw URL,
-    # …) without a follow-up ``get_file`` call. ``source_kind`` is the
-    # same machine classifier carried on ``FileInfo``.
-    source_url: str | None = None
-    source_kind: str = "other"
-
-
-class ImageInfo(BaseModel):
-    image_id: int
-    file_id: int
-    file_path: str
-    image_cas_id: str
-    # PDF page number this figure sits on. None for figures from non-PDF
-    # parsers (DOCX/PPTX images, standalone uploads) and for search hits
-    # where the indexer hasn't stored a page reference.
-    page: int | None = None
-    # Pixel dimensions + mime are stored on the Image DB row; search
-    # payloads don't carry them, so they're None on search hits and
-    # populated on metadata-direct paths (get_chunk_images, list_page_images).
-    width: int | None = None
-    height: int | None = None
-    mime: str | None = None
-    # 'figure' (cropped extract) or 'page_render' (full-page raster).
-    # search_images / get_chunk_images return only figures; page renders
-    # are surfaced via list_page_images / get_page_image.
-    kind: str = "figure"
-    # Search hit score. None on non-search paths.
-    score: float | None = None
-    # Per-page layout summary for the page this image sits on. None for
-    # images that don't come from the PDF pipeline.
-    layout: dict | None = None
-    # File-level provenance — see ChunkInfo for the rationale.
-    source_url: str | None = None
-    source_kind: str = "other"
-
-
-class PageImageInfo(BaseModel):
-    """Catalog entry for a per-page render. Bytes are fetched separately."""
-
-    image_id: int
-    file_id: int
-    page: int
-    # Width / height / mime are stored on the Image row in DB; these
-    # endpoints read from there, so the values are normally populated.
-    # Kept nullable to cover legacy rows pre-dating the metadata write.
-    width: int | None = None
-    height: int | None = None
-    mime: str | None = None
-    # File-level provenance — see ChunkInfo.
-    source_url: str | None = None
-    source_kind: str = "other"
-
-
-# ---------------------------------------------------------------------------
-# Tools
+# Tools — thin wrappers over services.retrieval. The docstrings are the tool
+# descriptions MCP clients show their LLM; the logic (and the folder ACL)
+# lives in the retrieval package.
 # ---------------------------------------------------------------------------
 
 
@@ -396,147 +184,7 @@ def list_indexed_folders(
 
     :param prefix: virtual path to list. ``None`` / empty → roots.
     """
-    settings = get_settings()
-    user_id = _resolved_user_id()
-    show_all = settings.single_user
-    cleaned = (prefix or "").strip().strip("/")
-    with session_scope() as s:
-        if show_all or user_id is None:
-            visible_ids: set[int] = {
-                f.id for f in s.execute(select(Folder)).scalars()
-            }
-            active_ids = visible_ids
-        else:
-            visible_ids = set(visible_folder_ids(s, user_id))
-            active_ids = set(mcp_visible_folder_ids(s, user_id))
-
-        if not cleaned:
-            out: list[FolderInfo] = []
-            for f in s.execute(select(Folder).order_by(Folder.id)).scalars():
-                if f.id not in visible_ids:
-                    continue
-                total = (
-                    s.execute(
-                        select(File).where(
-                            File.folder_id == f.id, File.state != "deleted"
-                        )
-                    )
-                    .scalars()
-                    .all()
-                )
-                indexed = [x for x in total if x.state == "indexed"]
-                out.append(
-                    FolderInfo(
-                        id=f.id,
-                        path=f.path,
-                        display_name=f.display_name,
-                        source_type=f.source_type,
-                        files_total=len(total),
-                        files_indexed=len(indexed),
-                        active=f.id in active_ids,
-                        shared=bool(f.shared),
-                    )
-                )
-            return out
-
-        head, _, tail = cleaned.partition("/")
-        # Resolve the top-level segment against visible folders by
-        # display_name. Falls back to numeric id for unambiguous addressing
-        # when two folders share a display_name.
-        candidates = [
-            f
-            for f in s.execute(select(Folder).order_by(Folder.id)).scalars()
-            if f.id in visible_ids and f.display_name == head
-        ]
-        if not candidates and head.isdigit():
-            f = s.get(Folder, int(head))
-            if f is not None and f.id in visible_ids:
-                candidates = [f]
-        if not candidates:
-            return []
-        folder = candidates[0]
-
-        sub_prefix = tail  # rel-path within the folder; "" means root
-        like_pat = f"{sub_prefix}/%" if sub_prefix else "%"
-
-        rows = (
-            s.execute(
-                select(File).where(
-                    File.folder_id == folder.id,
-                    File.state != "deleted",
-                    File.rel_path.like(like_pat),
-                    ~File.rel_path.like("%.voitta.meta"),
-                )
-            )
-            .scalars()
-            .all()
-        )
-
-        dirs: dict[str, None] = {}
-        files: list[File] = []
-        depth = len(sub_prefix.split("/")) if sub_prefix else 0
-        for r in rows:
-            parts = r.rel_path.split("/")
-            if sub_prefix and parts[:depth] != sub_prefix.split("/"):
-                continue
-            remainder = parts[depth:]
-            if not remainder:
-                continue
-            head_seg = remainder[0]
-            if head_seg.startswith("."):
-                continue
-            if len(remainder) == 1:
-                if any(p.startswith(".") for p in parts):
-                    continue
-                files.append(r)
-            else:
-                if any(p.startswith(".") for p in parts[:depth + 1]):
-                    continue
-                dirs.setdefault(head_seg, None)
-
-        base = f"{folder.display_name}/{sub_prefix}".rstrip("/")
-        entries: list[EntryInfo] = []
-        for name in sorted(dirs.keys()):
-            entries.append(
-                EntryInfo(
-                    kind="folder",
-                    name=name,
-                    path=f"{base}/{name}/",
-                    folder_id=folder.id,
-                )
-            )
-        for f in sorted(files, key=lambda x: x.rel_path):
-            name = f.rel_path.split("/")[-1]
-            entries.append(
-                EntryInfo(
-                    kind="file",
-                    name=name,
-                    path=f"{base}/{name}",
-                    folder_id=folder.id,
-                    file_id=f.id,
-                    state=f.state,
-                    size_bytes=f.size_bytes,
-                    source_url=f.source_url,
-                    source_kind=classify_source_kind(f),
-                )
-            )
-        return entries
-
-
-def _mcp_search_folder_filter(
-    s, user_id: int | None, requested: list[int] | None
-) -> list[int] | None:
-    """Same shape as the REST helper but uses ``mcp_visible_folder_ids`` so
-    the user's per-folder ``active`` toggle is enforced."""
-    if get_settings().single_user or user_id is None:
-        return requested
-    active = set(mcp_visible_folder_ids(s, user_id))
-    if not active:
-        return [-1]
-    if requested is None:
-        return sorted(active)
-    intersect = [fid for fid in requested if fid in active]
-    return intersect or [-1]
+    return retrieval.list_indexed_folders(_viewer(), prefix)
 
 
 @mcp.tool()
@@ -557,19 +205,7 @@ def search(
     :param folder_ids: restrict search to these folder ids
     :param limit: max hits (1..100)
     """
-    limit = max(1, min(limit, 100))
-    text_emb = get_text_embedder()
-    sparse_emb = get_sparse_embedder()
-    user_id = _resolved_user_id()
-    with session_scope() as s:
-        effective = _mcp_search_folder_filter(s, user_id, folder_ids)
-        hits = vs_search_chunks(
-            dense=text_emb.embed_query(query),
-            sparse=sparse_emb.embed_query(query),
-            limit=limit,
-            folder_ids=effective,
-        )
-        return [_chunk_from_hit(h, session=s) for h in hits]
+    return retrieval.search(_viewer(), query, folder_ids, limit)
 
 
 @mcp.tool()
@@ -579,17 +215,7 @@ def search_images(
     limit: int = 20,
 ) -> list[ImageInfo]:
     """Cross-modal text→image search via the image embedder's text encoder."""
-    limit = max(1, min(limit, 100))
-    image_emb = get_image_embedder()
-    user_id = _resolved_user_id()
-    with session_scope() as s:
-        effective = _mcp_search_folder_filter(s, user_id, folder_ids)
-        hits = vs_search_images(
-            vector=image_emb.embed_text(query),
-            limit=limit,
-            folder_ids=effective,
-        )
-        return [_image_from_hit(h, session=s) for h in hits]
+    return retrieval.search_images(_viewer(), query, folder_ids, limit)
 
 
 @mcp.tool()
@@ -625,19 +251,7 @@ def get_file(file_id: int) -> dict:
     If you'd skim it as prose to write a summary, ``get_file`` /
     ``get_chunk_range`` are the right call.
     """
-    user_id = _resolved_user_id()
-    with session_scope() as s:
-        f = _require_visible_file(s, file_id, user_id)
-        info = _file_info(f)
-        cas_id = f.file_cas_id
-
-    text = ""
-    if cas_id:
-        try:
-            text = cas_store.read_file_blob(cas_id, "text.md").decode("utf-8")
-        except FileNotFoundError:
-            text = ""
-    return {"file": info.model_dump(), "text": text}
+    return retrieval.get_file(_viewer(), file_id)
 
 
 @mcp.tool()
@@ -664,78 +278,7 @@ def get_chunk_range(
     Python script can iterate the file without round-tripping the
     bytes through context.
     """
-    from .services.indexing import _load_char_to_page, _load_layout_summaries
-    from .services.layout import pages_for_range, primary_page_for_range
-
-    # Internal aliases — the public params are ``start`` / ``end`` (matching
-    # the documented API and what MCP clients send); the query below reads
-    # these clamped values.
-    start_index = max(0, start)
-    end_index = min(end, start_index + 500)
-    if end_index <= start_index:
-        return []
-    user_id = _resolved_user_id()
-    with session_scope() as s:
-        f = _require_visible_file(s, file_id, user_id)
-        file_cas_id = f.file_cas_id
-        rel_path = f.rel_path
-        f_source_url = f.source_url
-        f_source_kind = classify_source_kind(f)
-        rows = list(
-            s.execute(
-                select(Chunk)
-                .where(
-                    Chunk.file_id == file_id,
-                    Chunk.chunk_index >= start_index,
-                    Chunk.chunk_index < end_index,
-                )
-                .order_by(Chunk.chunk_index)
-            ).scalars()
-        )
-        chunk_data = [
-            (
-                c.id,
-                c.chunk_index,
-                c.text,
-                c.char_start,
-                c.char_end,
-                _nearby_image_ids(s, c.id),
-            )
-            for c in rows
-        ]
-
-    char_to_page = _load_char_to_page(file_cas_id)
-    layout_summaries = _load_layout_summaries(file_cas_id)
-    out: list[ChunkInfo] = []
-    for cid, idx, text, c_start, c_end, nearby in chunk_data:
-        primary = (
-            primary_page_for_range(char_to_page, c_start or 0, c_end or 0)
-            if char_to_page
-            else None
-        )
-        pages = (
-            pages_for_range(
-                char_to_page, c_start or 0, c_end or (c_start or 0) + 1
-            )
-            if char_to_page
-            else []
-        )
-        out.append(
-            ChunkInfo(
-                chunk_id=cid,
-                file_id=file_id,
-                file_path=rel_path,
-                chunk_index=idx,
-                text=text,
-                nearby_image_ids=nearby,
-                page=primary,
-                pages=pages,
-                layout=layout_summaries.get(primary) if primary else None,
-                source_url=f_source_url,
-                source_kind=f_source_kind,
-            )
-        )
-    return out
+    return retrieval.get_chunk_range(_viewer(), file_id, start, end)
 
 
 @mcp.tool()
@@ -762,217 +305,7 @@ def get_chunk_images(chunk_id: int) -> list[ImageInfo]:
     Page renders are not linked — fetch them via ``list_page_images`` /
     ``get_page_image`` instead.
     """
-    user_id = _resolved_user_id()
-    with session_scope() as s:
-        chunk = s.get(Chunk, chunk_id)
-        if chunk is None:
-            raise ValueError(f"Chunk {chunk_id} not found")
-        # Folder-scope the chunk via its owning file (cross-file image
-        # refs below resolve to siblings in the SAME folder, so this one
-        # gate covers them too).
-        file = _require_visible_file(s, chunk.file_id, user_id)
-        chunk_text = chunk.text or ""
-
-        # (1) Intra-file links — the original path. ``score`` carries
-        # the chunk-image distance so the caller can prefer the
-        # tightest crops.
-        intra_rows = list(
-            s.execute(
-                select(Image, ChunkImageLink.distance)
-                .join(ChunkImageLink, ChunkImageLink.image_id == Image.id)
-                .where(ChunkImageLink.chunk_id == chunk_id)
-                .order_by(ChunkImageLink.distance)
-            )
-        )
-        out: list[ImageInfo] = []
-        seen_image_ids: set[int] = set()
-        intra_url, intra_kind = _file_provenance(s, chunk.file_id)
-        for img, distance in intra_rows:
-            seen_image_ids.add(img.id)
-            out.append(
-                ImageInfo(
-                    image_id=img.id,
-                    file_id=img.file_id,
-                    file_path=file.rel_path if file else "",
-                    image_cas_id=img.image_cas_id,
-                    page=img.page,
-                    width=img.width,
-                    height=img.height,
-                    mime=img.mime,
-                    kind=img.kind,
-                    score=float(distance),
-                    source_url=intra_url,
-                    source_kind=intra_kind,
-                )
-            )
-
-        # (2) Cross-file markdown image references within this chunk's
-        # text. Only runs when the chunk actually contains a
-        # ``![...](...)`` token — cheap probe avoids work on the common
-        # PDF/DOCX path.
-        if file is not None and "![" in chunk_text:
-            for img, target in _resolve_image_refs(s, file, chunk_text):
-                if img.id in seen_image_ids:
-                    continue
-                seen_image_ids.add(img.id)
-                out.append(_image_info_for_ref(s, img, target, score=0.0))
-
-        # (3) File-level fallback. When the chunk produced nothing from
-        # paths (1) and (2), surface the file's other inline images.
-        # Rationale: a Google Doc with 21 chunks and 3 inline images
-        # only has the ``![](...)`` line in 3 chunks; without this
-        # fallback the other 18 chunks return ``[]`` even though the
-        # document has figures the LLM might want to look at. Marked
-        # with ``score=None`` so the caller can distinguish "directly
-        # referenced by this chunk" (score=0) from "elsewhere in this
-        # file" (score=None) from "intra-file linked with distance"
-        # (score=float).
-        if file is not None and not out:
-            for img, target in _file_image_refs(s, file):
-                if img.id in seen_image_ids:
-                    continue
-                seen_image_ids.add(img.id)
-                out.append(_image_info_for_ref(s, img, target, score=None))
-        return out
-
-
-def _image_info_for_ref(session, img: Image, target: File, *, score: float | None) -> ImageInfo:
-    """Build an ImageInfo for a cross-file referenced image.
-
-    The image lives on ``target`` File row (a sibling of the chunk's
-    file); the caller resolves provenance against ``target`` so the
-    response carries the target's URL/kind, not the referencing file's.
-    """
-    t_url, t_kind = _file_provenance(session, target.id)
-    return ImageInfo(
-        image_id=img.id,
-        file_id=img.file_id,
-        file_path=target.rel_path,
-        image_cas_id=img.image_cas_id,
-        page=img.page,
-        width=img.width,
-        height=img.height,
-        mime=img.mime,
-        kind=img.kind,
-        score=score,
-        source_url=t_url,
-        source_kind=t_kind,
-    )
-
-
-# Markdown image-syntax: ``![alt](path)``. We only care about the path;
-# alt text is discarded. URLs (``http(s)://...``) skipped — the linker
-# is for local sibling files written by the Drive connector, not for
-# arbitrary remote images that the LLM can't fetch through this server.
-_MD_IMAGE_REF = re.compile(r"!\[[^\]]*\]\(([^)\s]+)\)")
-
-
-def _resolve_image_refs(
-    session, owner_file: File, text: str
-) -> list[tuple[Image, File]]:
-    """Resolve every ``![alt](rel/path.png)`` in ``text`` to sibling Image rows.
-
-    Walks markdown image references in document order, resolves each
-    against ``owner_file``'s parent directory (Markdown's usual rule),
-    looks up the matching File row in the same folder, and returns its
-    figure-kind Image rows.
-
-    ``text`` can be either a chunk's body (called from
-    :func:`get_chunk_images`) or the file's whole markdown
-    (:func:`_file_image_refs`); the function doesn't care which.
-
-    Returns ``[]`` when no references resolve — when a reference is
-    a remote URL, walks above the folder root, or names a file that
-    isn't indexed yet (target File row absent, or zero figure rows).
-
-    De-duplicated by target file_id so a doc referencing the same
-    image twice yields one entry.
-    """
-    from pathlib import PurePosixPath
-
-    parent = PurePosixPath(owner_file.rel_path).parent
-    seen_files: set[int] = set()
-    out: list[tuple[Image, File]] = []
-    for raw_ref in _MD_IMAGE_REF.findall(text):
-        # Skip remote URLs — only local sibling refs resolve.
-        if raw_ref.startswith(("http://", "https://", "//", "data:")):
-            continue
-        try:
-            joined = (parent / raw_ref).as_posix()
-        except (ValueError, OSError):
-            continue
-        # Normalize ``a/./b`` and ``a/../b``; reject ``..`` escapes
-        # that would walk above the folder root.
-        target_rel = PurePosixPath(joined)
-        parts = []
-        for p in target_rel.parts:
-            if p == "..":
-                if not parts:
-                    parts = None
-                    break
-                parts.pop()
-            elif p in ("", "."):
-                continue
-            else:
-                parts.append(p)
-        if parts is None:
-            continue
-        target_rel_path = "/".join(parts)
-        if not target_rel_path:
-            continue
-        target = session.execute(
-            select(File).where(
-                File.folder_id == owner_file.folder_id,
-                File.rel_path == target_rel_path,
-            )
-        ).scalar_one_or_none()
-        if target is None or target.id in seen_files:
-            continue
-        seen_files.add(target.id)
-        images = list(
-            session.execute(
-                select(Image)
-                .where(Image.file_id == target.id, Image.kind == "figure")
-                .order_by(Image.image_index)
-            ).scalars()
-        )
-        for img in images:
-            out.append((img, target))
-    return out
-
-
-@lru_cache(maxsize=128)
-def _read_cas_text(cas_id: str) -> str:
-    """Cached read of a file's stored markdown.
-
-    Multiple chunk-image lookups against the same Workspace document
-    re-read the same CAS blob; cache by sha. Returns empty string for
-    a missing blob — the resolver just produces no results.
-    """
-    try:
-        raw = cas_store.read_file_blob(cas_id, "text.md")
-    except FileNotFoundError:
-        return ""
-    return raw.decode("utf-8", errors="replace")
-
-
-def _file_image_refs(session, file: File) -> list[tuple[Image, File]]:
-    """Resolve every image reference in ``file``'s stored markdown.
-
-    Lifts the resolver from per-chunk to per-file: scans the file's
-    full text once and returns every sibling-image reference. Used as
-    a fallback when a chunk's own text has no image markdown but the
-    file does (e.g. a 21-chunk Doc with 3 inline images: only 3 chunks
-    carry the ``![](...)`` line, the rest get the same images via this
-    file-level fallback). Also feeds ``list_page_images`` for
-    Workspace files that have no PDF-style page renders.
-    """
-    if file.file_cas_id is None:
-        return []
-    text = _read_cas_text(file.file_cas_id)
-    if not text:
-        return []
-    return _resolve_image_refs(session, file, text)
+    return retrieval.get_chunk_images(_viewer(), chunk_id)
 
 
 @mcp.tool()
@@ -989,26 +322,7 @@ def get_image(image_id: int, max_size: int = 420) -> dict:
     (e.g. 1024) when the detail actually matters. Pass ``0`` to skip
     resizing entirely and get the original bytes/mime.
     """
-    user_id = _resolved_user_id()
-    with session_scope() as s:
-        img = s.get(Image, image_id)
-        if img is None:
-            raise ValueError(f"Image {image_id} not found")
-        # Folder-scope via the image's owning file — an image is reachable
-        # only when its file's folder is visible to the caller.
-        _require_visible_file(s, img.file_id, user_id)
-        cas_id = img.image_cas_id
-        mime = img.mime or "application/octet-stream"
-    try:
-        data = cas_store.read_image_blob(cas_id)
-    except FileNotFoundError as e:
-        raise ValueError(f"Image bytes missing for {image_id}") from e
-    data, mime = _resize_for_response(data, mime, max_size)
-    return {
-        "image_id": image_id,
-        "mime": mime,
-        "data_base64": base64.b64encode(data).decode("ascii"),
-    }
+    return retrieval.get_image(_viewer(), image_id, max_size)
 
 
 @mcp.tool()
@@ -1034,57 +348,7 @@ def list_page_images(file_id: int) -> list[PageImageInfo]:
     bytes. Returns ``[]`` for files that produce neither — a vanilla
     markdown file with no image refs, an unindexed file, etc.
     """
-    user_id = _resolved_user_id()
-    with session_scope() as s:
-        _require_visible_file(s, file_id, user_id)
-        source_url, source_kind = _file_provenance(s, file_id)
-        # (1) PDF page-renders path
-        rows = list(
-            s.execute(
-                select(Image)
-                .where(Image.file_id == file_id, Image.kind == "page_render")
-                .order_by(Image.page, Image.image_index)
-            ).scalars()
-        )
-        if rows:
-            return [
-                PageImageInfo(
-                    image_id=img.id,
-                    file_id=img.file_id,
-                    page=img.page or 0,
-                    width=img.width,
-                    height=img.height,
-                    mime=img.mime,
-                    source_url=source_url,
-                    source_kind=source_kind,
-                )
-                for img in rows
-            ]
-
-        # (2) Cross-file referenced images. ``page`` is synthetic: it's
-        # the 1-indexed appearance order in the markdown, not a real
-        # paginator output. Workspace files don't have a page concept
-        # anyway, and the order is stable across re-renders because the
-        # Drive connector writes refs in slide/section order.
-        f = s.get(File, file_id)
-        if f is None:
-            return []
-        out: list[PageImageInfo] = []
-        for i, (img, target) in enumerate(_file_image_refs(s, f), start=1):
-            t_url, t_kind = _file_provenance(s, target.id)
-            out.append(
-                PageImageInfo(
-                    image_id=img.id,
-                    file_id=img.file_id,
-                    page=i,
-                    width=img.width,
-                    height=img.height,
-                    mime=img.mime,
-                    source_url=t_url,
-                    source_kind=t_kind,
-                )
-            )
-        return out
+    return retrieval.list_page_images(_viewer(), file_id)
 
 
 @mcp.tool()
@@ -1114,47 +378,7 @@ def get_page_image(
     indexed before layout capture was added, or for non-PDF files. Set
     ``include_layout=False`` to skip the read + JSON parse.
     """
-    user_id = _resolved_user_id()
-    with session_scope() as s:
-        _require_visible_file(s, file_id, user_id)
-        img = s.execute(
-            select(Image)
-            .where(
-                Image.file_id == file_id,
-                Image.kind == "page_render",
-                Image.page == page,
-            )
-            .limit(1)
-        ).scalar_one_or_none()
-        if img is None:
-            raise ValueError(
-                f"No page render for file_id={file_id} page={page}"
-            )
-        image_id = img.id
-        cas_id = img.image_cas_id
-        mime = img.mime or "image/webp"
-        file_cas_id = None
-        if include_layout:
-            file = s.get(File, file_id)
-            file_cas_id = file.file_cas_id if file else None
-    try:
-        data = cas_store.read_image_blob(cas_id)
-    except FileNotFoundError as e:
-        raise ValueError(
-            f"Page-render bytes missing for file_id={file_id} page={page}"
-        ) from e
-    data, mime = _resize_for_response(data, mime, max_size)
-    layout: list[dict] = []
-    if include_layout and file_cas_id:
-        layout = _layout_for_page(file_cas_id, page)
-    return {
-        "image_id": image_id,
-        "file_id": file_id,
-        "page": page,
-        "mime": mime,
-        "data_base64": base64.b64encode(data).decode("ascii"),
-        "layout": layout,
-    }
+    return retrieval.get_page_image(_viewer(), file_id, page, max_size, include_layout)
 
 
 @mcp.tool()
@@ -1173,13 +397,7 @@ def get_page_layout(file_id: int, page: int) -> list[dict]:
     ``text`` for text/title blocks, and ``img_path`` for image/table
     blocks. Other fields are passed through as-is.
     """
-    user_id = _resolved_user_id()
-    with session_scope() as s:
-        file = _require_visible_file(s, file_id, user_id)
-        file_cas_id = file.file_cas_id
-    if not file_cas_id:
-        return []
-    return _layout_for_page(file_cas_id, page)
+    return retrieval.get_page_layout(_viewer(), file_id, page)
 
 
 @mcp.tool()
@@ -1215,274 +433,118 @@ def get_workbook(file_id: int) -> dict:
     by the SpreadsheetExporter. Raises if the file isn't a
     Sheets-derived markdown or the xlsx isn't on disk.
     """
-    from pathlib import Path
-
-    from .db.models import Folder
-
-    user_id = _resolved_user_id()
-    with session_scope() as s:
-        f = _require_visible_file(s, file_id, user_id)
-        rel_path = Path(f.rel_path)
-        folder = s.get(Folder, f.folder_id)
-        if folder is None:
-            raise ValueError(f"File {file_id} has no folder")
-        folder_path = Path(folder.path)
-
-    # Per-sheet md path: ``<some-dir>/<workbook stem>/NN-<sheet>.md``.
-    # Workbook xlsx: ``.voitta_workbooks/<some-dir>/<workbook stem>.xlsx``.
-    if rel_path.suffix.lower() != ".md" or rel_path.parent == Path(""):
-        raise ValueError(
-            f"File {file_id} ({rel_path}) is not a Sheets-derived markdown file"
-        )
-    workbook_rel = rel_path.parent  # e.g. "MyFolder/Q4 Plan"
-    xlsx_path = folder_path / ".voitta_workbooks" / workbook_rel.with_suffix(".xlsx")
-    if not xlsx_path.exists():
-        raise FileNotFoundError(
-            f"Workbook xlsx not found at {xlsx_path}. The folder may need to be "
-            f"re-synced — pre-exporter syncs didn't write the .voitta_workbooks "
-            f"sidecar."
-        )
-
-    data = xlsx_path.read_bytes()
-    return {
-        "file_id": file_id,
-        "filename": xlsx_path.name,
-        "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "data_base64": base64.b64encode(data).decode("ascii"),
-        "size_bytes": len(data),
-    }
+    return retrieval.get_workbook(_viewer(), file_id)
 
 
 @mcp.tool()
 def resolve_url(url: str) -> list[FileInfo]:
     """Reverse-lookup an external URL (set by sync connectors) → matching files."""
-    user_id = _resolved_user_id()
-    with session_scope() as s:
-        rows = list(
-            s.execute(select(File).where(File.source_url == url)).scalars()
-        )
-        if not rows:
-            # Fallback: prefix match (handles fragment-bearing URLs).
-            rows = list(
-                s.execute(
-                    select(File).where(
-                        File.source_url.is_not(None),
-                        File.source_url == url.split("#", 1)[0],
-                    )
-                ).scalars()
-            )
-        # Folder-scope the results — a URL match must not reveal files in
-        # folders the caller can't see (id/URL enumeration guard).
-        return [
-            _file_info(f)
-            for f in rows
-            if user_id is None or user_can_see_folder(s, f.folder_id, user_id)
-        ]
+    return retrieval.resolve_url(_viewer(), url)
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+@mcp.tool()
+def list_assets(file_id: int) -> list[dict]:
+    """List the on-demand assets a file exposes.
 
+    Two sources feed this list:
 
-def _file_info(file: File) -> FileInfo:
-    """Build a FileInfo with the classifier-derived ``source_kind`` filled in.
+    * **Synthetic, always present** — ``asset_type="original"``: serve
+      the file's source bytes (PDF/DOCX/XLSX/STEP/…) via a signed URL.
+      This is the escape hatch when a caller needs the raw format and
+      not the Voitta markdown extract that :func:`get_file` returns.
+      Use it when you want to load a file into a downstream Python
+      pipeline (pandas, openpyxl, pypdf, custom parser).
 
-    Centralized so adding a new field to the wire model is a single-site
-    change. The classifier is cheap (string-prefix match + dict lookup);
-    don't bother caching.
+    * **Parser-declared** — CAD component projections, xlsx chart
+      renders, data queries, page re-renders. The on-disk
+      ``on_demand_assets.json`` (written by parsers at index time)
+      enumerates these. Each entry names a ``slug`` (within-file
+      target — component name, sheet name) and a ``params_schema``
+      fragment so the LLM can construct valid ``params``.
+
+    Returns at least the synthetic ``original`` entry for every
+    indexed file; empty list only when the file isn't yet indexed.
     """
-    return FileInfo(
-        id=file.id,
-        folder_id=file.folder_id,
-        rel_path=file.rel_path,
-        state=file.state,
-        source_url=file.source_url,
-        last_indexed_at=file.last_indexed_at,
-        source_kind=classify_source_kind(file),
-    )
+    return retrieval.list_assets(_viewer(), file_id)
 
 
-def _file_provenance(session, file_id: int | None) -> tuple[str | None, str]:
-    """Fetch ``(source_url, source_kind)`` for ``file_id`` in one query.
+@mcp.tool()
+def request_asset(
+    file_id: int,
+    asset_type: str,
+    slug: str | None = None,
+    params: dict | None = None,
+) -> dict:
+    """Request an on-demand derived view of a file.
 
-    Used by chunk/image hit builders to stamp file-level provenance
-    onto every wire row. Returns ``(None, "other")`` when the file row
-    is missing (e.g. stale Qdrant payload after a file deletion that
-    Qdrant hasn't propagated yet).
+    Two response shapes — exactly one is populated:
+
+    * ``inline``: structured data the LLM consumes directly (rows from
+      a query, summary statistics). No URL involved.
+    * ``urls``: variant name → signed URL. URLs are HMAC-signed,
+      short-lived (~1 hour TTL by default); the URL itself is the
+      credential, no headers needed. ``expires_at`` accompanies.
+
+    **For URLs: chain with ``fetch_to_python_storage``.** The signed
+    URL doesn't reach the LLM's reasoning context — the LLM passes it
+    straight to ``fetch_to_python_storage(url=..., name=...)`` to
+    pull the bytes into ``python_storage``, then processes the
+    resulting handle with ``run_compute``. The bytes themselves
+    never enter context.
+
+    Canonical "give me the source file" pattern (3 calls):
+
+        asset = request_asset(file_id=N, asset_type="original")
+        snap  = fetch_to_python_storage(
+                    url=asset["urls"]["file"],
+                    name="<filename from get_file/search>",
+                )
+        run_compute(code=f"rec = ctx.snapshot({snap['handle']!r}); ...")
+
+    Common ``asset_type`` values
+    ----------------------------
+
+    * ``"original"`` — file's **source bytes** (PDF / DOCX / XLSX /
+      STEP / image / whatever was indexed). Single URL under
+      ``urls["file"]``. No ``slug`` or ``params``. Available on
+      every indexed file. Use this anytime you want to *process*
+      the file rather than read its markdown extract.
+
+    * ``"md"`` — the parser's normalised **markdown extract**, served
+      as ``text/markdown`` via ``urls["md"]``. Same content
+      ``get_file`` returns, but as a fetchable URL — chain into
+      ``fetch_to_python_storage`` → ``run_compute`` to do bulk
+      regex / dataframe / NLP work over a long DOCX/XLSX/PPTX
+      without piping the text through tool-result context.
+      No ``slug``, no ``params``. Available whenever indexing
+      produced a ``text.md`` blob (PDF, DOCX, XLSX, PPTX, ipynb,
+      plain text, and Google Workspace files synced into the
+      voitta-rag-enterprise index). Use ``original`` instead when
+      you need the source format (custom OCP, openpyxl, layout-
+      preserving parser, …).
+
+    * ``"cad_projection"`` — render four PNG views (front / top /
+      side / iso) of a STEP/FCStd subcomponent. Requires ``slug``
+      naming the component. Optional ``params={"size": 320}``.
+
+    * ``"cad_mesh"`` — export a STEP / IGES / FCStd file as a binary
+      glTF (``.glb``, mime ``model/gltf-binary``) suitable for
+      ``three.js`` ``GLTFLoader`` / web viewers. Single URL under
+      ``urls["mesh"]``. The scene contains one named node per
+      component, so a viewer can list / hide / colour parts by
+      ``node.name``. Without ``slug`` the whole assembly is
+      exported; with a ``slug`` from ``cad_projection``, only that
+      component. Optional ``params={"linear_deflection": 0.5}``
+      controls tessellation tolerance in millimetres.
+
+    * Future / parser-specific: ``list_assets(file_id)`` is the
+      source of truth for what's available for a given file.
+
+    Use :func:`list_assets` first to discover ``asset_type`` values
+    and their ``params_schema``. Invalid params raise ``ValueError``
+    with the offending field; unknown ``asset_type`` raises too.
     """
-    if file_id is None:
-        return (None, "other")
-    file = session.get(File, file_id)
-    if file is None:
-        return (None, "other")
-    return (file.source_url, classify_source_kind(file))
-
-
-def _chunk_from_hit(h: SearchHit, session=None) -> ChunkInfo:
-    p = h.payload
-    if p.get("kind") == "folder_card":
-        # Synthetic folder/subfolder hit — no file behind it. ``file_path``
-        # carries the subpath inside the folder ('' = root); the card text
-        # already spells out the folder name + description.
-        return ChunkInfo(
-            kind="folder_card",
-            chunk_id=0,
-            file_id=None,
-            folder_id=p.get("folder_id"),
-            file_path=str(p.get("subpath", "")),
-            chunk_index=0,
-            text=str(p.get("text", "")),
-            score=h.score,
-            source_kind="folder",
-        )
-    file_id = int(p["file_id"])
-    source_url, source_kind = (None, "other")
-    if session is not None:
-        source_url, source_kind = _file_provenance(session, file_id)
-    return ChunkInfo(
-        chunk_id=int(p.get("chunk_id", h.id)),
-        file_id=file_id,
-        folder_id=p.get("folder_id"),
-        file_path=str(p.get("file_path", "")),
-        chunk_index=int(p.get("chunk_index", 0)),
-        text=str(p.get("text", "")),
-        nearby_image_ids=list(p.get("nearby_image_ids") or []),
-        score=h.score,
-        page=p.get("page"),
-        pages=list(p.get("pages") or []),
-        layout=_layout_from_payload(p),
-        source_url=source_url,
-        source_kind=source_kind,
-    )
-
-
-def _image_from_hit(h: SearchHit, session=None) -> ImageInfo:
-    """Build an ImageInfo from a Qdrant search hit. ``width`` / ``height``
-    / ``mime`` are deliberately not populated: they live on the Image DB
-    row, not in the Qdrant payload, and the search path doesn't read the
-    DB. Callers that need them resolve via ``get_chunk_images`` /
-    ``list_page_images`` — both of which read the DB and populate."""
-    p = h.payload
-    file_id = int((p.get("file_ids") or [0])[0])
-    source_url, source_kind = (None, "other")
-    if session is not None:
-        source_url, source_kind = _file_provenance(session, file_id)
-    return ImageInfo(
-        image_id=int(p.get("image_id", h.id)),
-        file_id=file_id,
-        file_path=str(p.get("file_path", "")),
-        image_cas_id=str(p.get("image_cas_id", "")),
-        page=p.get("page"),
-        score=h.score,
-        layout=_layout_from_payload(p),
-        source_url=source_url,
-        source_kind=source_kind,
-    )
-
-
-def _layout_from_payload(payload: dict) -> dict | None:
-    """Re-collect the flat ``layout_*`` fields from a Qdrant payload back
-    into a single dict for the LLM-facing schema.
-
-    The indexer flattens ``layout_summary`` into top-level payload keys
-    (one Qdrant payload index per scalar — see vector_store._chunk_payload)
-    so each is independently filterable. The LLM doesn't filter, it
-    reads, so a wrapped dict keeps the response surface tidy. Returns
-    ``None`` when no layout fields are present (chunk indexed before
-    the layout pipeline shipped, or non-PDF parser).
-    """
-    layout = {k: v for k, v in payload.items() if k.startswith("layout_")}
-    return layout or None
-
-
-def _nearby_image_ids(session, chunk_id: int) -> list[int]:
-    return [
-        link.image_id
-        for link in session.execute(
-            select(ChunkImageLink).where(ChunkImageLink.chunk_id == chunk_id)
-        )
-        .scalars()
-        .all()
-    ]
-
-
-@lru_cache(maxsize=64)
-def _load_layout_blocks(file_cas_id: str) -> tuple[dict, ...]:
-    """Read + parse a file's stored ``page_layout.json`` once per CAS sha.
-
-    LRU-cached so a sweep over a 150-page document costs one JSON parse
-    total. Tuple-of-dicts (immutable container) is what makes the cache
-    safe to share across threads — callers index into it but don't
-    mutate. Returns ``()`` when the file has no layout (older index, or
-    a non-PDF parser).
-    """
-    try:
-        raw = cas_store.read_file_blob(file_cas_id, "page_layout.json")
-    except FileNotFoundError:
-        return ()
-    try:
-        data = json.loads(raw)
-    except (TypeError, ValueError):
-        logger.warning("page_layout.json unparseable for cas=%s", file_cas_id)
-        return ()
-    if not isinstance(data, list):
-        return ()
-    return tuple(b for b in data if isinstance(b, dict))
-
-
-def _layout_for_page(file_cas_id: str, page: int) -> list[dict]:
-    """Filter the cached layout list down to blocks on ``page``."""
-    return [b for b in _load_layout_blocks(file_cas_id) if b.get("page") == page]
-
-
-def _resize_for_response(
-    data: bytes, mime: str, max_size: int
-) -> tuple[bytes, str]:
-    """Downscale ``data`` so its long edge is at most ``max_size`` px.
-
-    No-op fast paths:
-      * ``max_size <= 0`` — caller wants the raw blob.
-      * source already fits — return original bytes/mime unchanged.
-
-    Otherwise: decode, LANCZOS-resize preserving aspect ratio, re-encode
-    as WebP at quality 75 (matches the storage default for page renders
-    so the format change is invisible for that case; figures get a small
-    quality hit in exchange for a much smaller payload). Decode failures
-    fall back to the original bytes — better to over-deliver pixels than
-    drop the response.
-    """
-    if max_size <= 0:
-        return data, mime
-    try:
-        import io
-
-        from PIL import Image as PILImage
-
-        with PILImage.open(io.BytesIO(data)) as img:
-            long_edge = max(img.width, img.height)
-            if long_edge <= max_size:
-                return data, mime
-            scale = max_size / long_edge
-            new_size = (
-                max(1, int(round(img.width * scale))),
-                max(1, int(round(img.height * scale))),
-            )
-            # WebP handles RGB/RGBA natively; collapse anything else
-            # (palette, grayscale, CMYK) to one of those before resize.
-            mode = img.mode
-            if mode not in ("RGB", "RGBA"):
-                target_mode = "RGBA" if mode in ("LA", "PA", "P") and (
-                    "transparency" in img.info or mode in ("LA", "PA")
-                ) else "RGB"
-                img = img.convert(target_mode)
-            resized = img.resize(new_size, PILImage.LANCZOS)
-            buf = io.BytesIO()
-            resized.save(buf, format="WEBP", quality=75, method=6)
-            return buf.getvalue(), "image/webp"
-    except Exception as e:
-        logger.warning("resize_for_response failed (max_size=%d): %s", max_size, e)
-        return data, mime
+    return retrieval.request_asset(_viewer(), file_id, asset_type, slug, params)
 
 
 # ---------------------------------------------------------------------------
@@ -1573,180 +635,6 @@ def _unauthorized(detail: str) -> JSONResponse:
 
 
 # ---------------------------------------------------------------------------
-# On-demand assets — universal channel for derived views of files.
-# ---------------------------------------------------------------------------
-
-
-@mcp.tool()
-def list_assets(file_id: int) -> list[dict]:
-    """List the on-demand assets a file exposes.
-
-    Two sources feed this list:
-
-    * **Synthetic, always present** — ``asset_type="original"``: serve
-      the file's source bytes (PDF/DOCX/XLSX/STEP/…) via a signed URL.
-      This is the escape hatch when a caller needs the raw format and
-      not the Voitta markdown extract that :func:`get_file` returns.
-      Use it when you want to load a file into a downstream Python
-      pipeline (pandas, openpyxl, pypdf, custom parser).
-
-    * **Parser-declared** — CAD component projections, xlsx chart
-      renders, data queries, page re-renders. The on-disk
-      ``on_demand_assets.json`` (written by parsers at index time)
-      enumerates these. Each entry names a ``slug`` (within-file
-      target — component name, sheet name) and a ``params_schema``
-      fragment so the LLM can construct valid ``params``.
-
-    Returns at least the synthetic ``original`` entry for every
-    indexed file; empty list only when the file isn't yet indexed.
-    """
-    from .services import asset_handlers as _ah
-    from .services import cad_mesh as _cm
-    from .services import markdown_extract as _md
-    from .services import original_file as _orig
-
-    user_id = _resolved_user_id()
-    with session_scope() as s:
-        f = _require_visible_file(s, file_id, user_id)
-        cas_id = f.file_cas_id
-        rel_path = f.rel_path
-    out: list[dict] = []
-    # Synthetic "original" spec first — common case for the LLM is
-    # "give me the bytes", so listing it at the top reduces the
-    # need to scroll past parser-specific entries.
-    out.append(_orig.spec_for(file_id, rel_path).as_dict())
-    # Synthetic "md" spec — the parser's text.md extract, served as
-    # a signed URL so the LLM can pipe it into run_compute via
-    # python_storage instead of pulling it through tool context.
-    # Only emitted when the CAS blob actually exists (skip image-
-    # only / pre-indexing files).
-    md_spec = _md.spec_for(file_id, cas_id, rel_path)
-    if md_spec is not None:
-        out.append(md_spec.as_dict())
-    # Synthetic "cad_mesh" spec for CAD files — a whole-file GLB
-    # export consumable by three.js / web viewers. The same handler
-    # also accepts a slug to export a single component (using the
-    # slugs the parser writes for ``cad_projection``); the per-
-    # component variant isn't emitted as its own list_assets entry
-    # because the menu would balloon — the LLM can reuse the
-    # cad_projection slugs.
-    if _cm.is_cad_file(rel_path):
-        out.append(_cm.spec_for(file_id, rel_path).as_dict())
-    out.extend(spec.as_dict() for spec in _ah.load_assets_for_file(cas_id))
-    return out
-
-
-@mcp.tool()
-def request_asset(
-    file_id: int,
-    asset_type: str,
-    slug: str | None = None,
-    params: dict | None = None,
-) -> dict:
-    """Request an on-demand derived view of a file.
-
-    Two response shapes — exactly one is populated:
-
-    * ``inline``: structured data the LLM consumes directly (rows from
-      a query, summary statistics). No URL involved.
-    * ``urls``: variant name → signed URL. URLs are HMAC-signed,
-      short-lived (~1 hour TTL by default); the URL itself is the
-      credential, no headers needed. ``expires_at`` accompanies.
-
-    **For URLs: chain with ``fetch_to_python_storage``.** The signed
-    URL doesn't reach the LLM's reasoning context — the LLM passes it
-    straight to ``fetch_to_python_storage(url=..., name=...)`` to
-    pull the bytes into ``python_storage``, then processes the
-    resulting handle with ``run_compute``. The bytes themselves
-    never enter context.
-
-    Canonical "give me the source file" pattern (3 calls):
-
-        asset = request_asset(file_id=N, asset_type="original")
-        snap  = fetch_to_python_storage(
-                    url=asset["urls"]["file"],
-                    name="<filename from get_file/search>",
-                )
-        run_compute(code=f"rec = ctx.snapshot({snap['handle']!r}); ...")
-
-    Common ``asset_type`` values
-    ----------------------------
-
-    * ``"original"`` — file's **source bytes** (PDF / DOCX / XLSX /
-      STEP / image / whatever was indexed). Single URL under
-      ``urls["file"]``. No ``slug`` or ``params``. Available on
-      every indexed file. Use this anytime you want to *process*
-      the file rather than read its markdown extract.
-
-    * ``"md"`` — the parser's normalised **markdown extract**, served
-      as ``text/markdown`` via ``urls["md"]``. Same content
-      ``get_file`` returns, but as a fetchable URL — chain into
-      ``fetch_to_python_storage`` → ``run_compute`` to do bulk
-      regex / dataframe / NLP work over a long DOCX/XLSX/PPTX
-      without piping the text through tool-result context.
-      No ``slug``, no ``params``. Available whenever indexing
-      produced a ``text.md`` blob (PDF, DOCX, XLSX, PPTX, ipynb,
-      plain text, and Google Workspace files synced into the
-      voitta-rag-enterprise index). Use ``original`` instead when
-      you need the source format (custom OCP, openpyxl, layout-
-      preserving parser, …).
-
-    * ``"cad_projection"`` — render four PNG views (front / top /
-      side / iso) of a STEP/FCStd subcomponent. Requires ``slug``
-      naming the component. Optional ``params={"size": 320}``.
-
-    * ``"cad_mesh"`` — export a STEP / IGES / FCStd file as a binary
-      glTF (``.glb``, mime ``model/gltf-binary``) suitable for
-      ``three.js`` ``GLTFLoader`` / web viewers. Single URL under
-      ``urls["mesh"]``. The scene contains one named node per
-      component, so a viewer can list / hide / colour parts by
-      ``node.name``. Without ``slug`` the whole assembly is
-      exported; with a ``slug`` from ``cad_projection``, only that
-      component. Optional ``params={"linear_deflection": 0.5}``
-      controls tessellation tolerance in millimetres.
-
-    * Future / parser-specific: ``list_assets(file_id)`` is the
-      source of truth for what's available for a given file.
-
-    Use :func:`list_assets` first to discover ``asset_type`` values
-    and their ``params_schema``. Invalid params raise ``ValueError``
-    with the offending field; unknown ``asset_type`` raises too.
-    """
-    from .services import asset_handlers as _ah
-
-    try:
-        handler = _ah.get_handler(asset_type)
-    except KeyError as e:
-        raise ValueError(f"unknown asset_type: {asset_type!r}") from e
-
-    raw_params = dict(params or {})
-    # Hand off to the handler's own validation. Handlers raise
-    # ValueError on bad input; that surfaces to the LLM verbatim.
-    validated = handler.validate_params(raw_params)
-
-    user_id = _resolved_user_id()
-    # Authorize BEFORE minting — the returned URL is HMAC-signed and IS the
-    # credential (the /api/assets endpoint carries no identity auth), so a
-    # caller who can't see the file must never receive a URL for it.
-    with session_scope() as s:
-        _require_visible_file(s, file_id, user_id)
-    response = handler.request(
-        file_id=file_id,
-        slug=slug,
-        params=validated,
-        user_id=user_id,
-    )
-    out: dict = {"asset_type": response.asset_type}
-    if response.inline is not None:
-        out["inline"] = response.inline
-    if response.urls is not None:
-        out["urls"] = response.urls
-        if response.expires_at is not None:
-            out["expires_at"] = response.expires_at
-    return out
-
-
-# ---------------------------------------------------------------------------
 # Standalone runner
 # ---------------------------------------------------------------------------
 
@@ -1765,10 +653,12 @@ def build_app(transport: str = "streamable-http", path: str | None = None):
     # imports these (for the HTTP /api/assets/{token} route);
     # registering twice is idempotent (asset_handlers.register
     # short-circuits when the same instance re-registers).
-    from .services import cad_render  # noqa: F401
-    from .services import original_file  # noqa: F401
-    from .services import cad_mesh  # noqa: F401
-    from .services import markdown_extract  # noqa: F401
+    from .services import (
+        cad_mesh,  # noqa: F401
+        cad_render,  # noqa: F401
+        markdown_extract,  # noqa: F401
+        original_file,  # noqa: F401
+    )
 
     app = mcp.http_app(transport=transport, stateless_http=True, path=path)
     app.add_middleware(BearerAuthMiddleware)

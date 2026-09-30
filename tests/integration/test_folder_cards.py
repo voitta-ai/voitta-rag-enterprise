@@ -354,7 +354,7 @@ def test_rest_search_returns_folder_card(app, client, tmp_path: Path) -> None:
 
 
 def test_mcp_chunk_from_hit_handles_folder_card(env) -> None:
-    from voitta_rag_enterprise.mcp_server import _chunk_from_hit
+    from voitta_rag_enterprise.services.retrieval import chunk_from_hit
     from voitta_rag_enterprise.services.vector_store import SearchHit
 
     hit = SearchHit(
@@ -368,7 +368,7 @@ def test_mcp_chunk_from_hit_handles_folder_card(env) -> None:
             "text": "Folder: Quarterly Financials\nPath: Quarterly Financials / 2024 / Q3",
         },
     )
-    info = _chunk_from_hit(hit)
+    info = chunk_from_hit(hit)
     assert info.kind == "folder_card"
     assert info.file_id is None
     assert info.folder_id == 7
