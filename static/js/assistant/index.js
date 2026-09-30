@@ -116,14 +116,19 @@ function renderPickers() {
     const cfg = assistantConfig.get();
     if (!cfg) return;
     const pinned = state.current != null;
+    // Compact labels in the closed pickers; full names in the tooltips.
     const engines = cfg.engines.map((e) => ({
-        id: e.id, label: e.label, disabled: !e.available, title: e.reason || "",
+        id: e.id, label: e.short, disabled: !e.available, title: e.reason || e.label,
     }));
     fillSelect($("#aw-engine"), engines, recall("engine") || availableEngines()[0]?.id);
-    fillSelect($("#aw-model"), cfg.models, recall("model") || cfg.policy.default_model);
+    fillSelect(
+        $("#aw-model"),
+        cfg.models.map((m) => ({ id: m.id, label: m.short, title: m.label })),
+        recall("model") || cfg.policy.default_model,
+    );
     fillSelect(
         $("#aw-effort"),
-        cfg.efforts.map((e) => ({ id: e, label: `effort: ${e}` })),
+        cfg.efforts.map((e) => ({ id: e, label: e, title: `Reasoning effort: ${e}` })),
         recall("effort") || cfg.policy.default_effort,
     );
     $("#aw-engine").hidden = pinned || engines.length < 2;
@@ -133,7 +138,9 @@ function renderPickers() {
     if (pinned) {
         const engine = cfg.engines.find((e) => e.id === state.current.engine);
         const model = cfg.models.find((m) => m.id === state.current.model);
-        label.textContent = `${model?.label || state.current.model} · ${engine?.label || state.current.engine}`;
+        label.textContent = `${model?.short || state.current.model} · ${engine?.short || state.current.engine}`;
+        label.title = `This conversation runs on ${model?.label || state.current.model} `
+            + `via ${engine?.label || state.current.engine}`;
     }
 }
 

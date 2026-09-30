@@ -1821,6 +1821,12 @@
         <header class="aw-head" data-drag-handle>
             <button id="aw-history" class="aw-icon" type="button" title="Conversations" aria-label="Conversations">☰</button>
             <div id="aw-title" class="aw-title">Assistant</div>
+            <div class="aw-pickers">
+                <select id="aw-engine" aria-label="Engine"></select>
+                <select id="aw-model" aria-label="Model"></select>
+                <span id="aw-pinned" class="aw-pinned" hidden></span>
+                <select id="aw-effort" aria-label="Reasoning effort" title="Reasoning effort"></select>
+            </div>
             <div id="aw-view" class="aw-view" role="group" aria-label="Conversation list" hidden>
                 <button type="button" data-view="mine" class="is-active" title="Your own conversations">Mine</button>
                 <button type="button" data-view="theirs" title="The conversations of the account you are viewing as">Theirs</button>
@@ -1843,15 +1849,12 @@
         </div>
         <footer class="aw-composer">
             <textarea id="aw-input" rows="2" placeholder="Ask about your documents or sync status…  (Enter to send, Shift+Enter for a new line)"></textarea>
-            <div class="aw-controls">
-                <select id="aw-engine" aria-label="Engine"></select>
-                <select id="aw-model" aria-label="Model"></select>
-                <span id="aw-pinned" class="aw-pinned" hidden></span>
-                <select id="aw-effort" aria-label="Effort"></select>
-                <span class="aw-spacer"></span>
-                <button id="aw-stop" type="button" class="btn btn-secondary btn-sm" hidden>Stop</button>
-                <button id="aw-send" type="button" class="btn btn-primary btn-sm">Send</button>
-            </div>
+            <button id="aw-send" type="button" class="aw-action" title="Send (Enter)" aria-label="Send">
+                <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11l9.5-5.5z"/></svg>
+            </button>
+            <button id="aw-stop" type="button" class="aw-action aw-action-stop" title="Stop" aria-label="Stop" hidden>
+                <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="3.5" width="9" height="9" rx="1.5"/></svg>
+            </button>
         </footer>
         <div class="aw-grip" data-grip="n"></div><div class="aw-grip" data-grip="s"></div>
         <div class="aw-grip" data-grip="e"></div><div class="aw-grip" data-grip="w"></div>

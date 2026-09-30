@@ -22,6 +22,7 @@ from ...services.assistant.catalog import (
     EFFORTS,
     ENGINE_IDS,
     ENGINE_LABELS,
+    ENGINE_SHORT_LABELS,
     MODELS,
     CredentialKind,
     EngineId,
@@ -71,7 +72,13 @@ def get_config(
     for engine in ENGINE_IDS:
         available, reason = engine_availability(db, ident, engine)
         engines.append(
-            {"id": engine, "label": ENGINE_LABELS[engine], "available": available, "reason": reason}
+            {
+                "id": engine,
+                "label": ENGINE_LABELS[engine],
+                "short": ENGINE_SHORT_LABELS[engine],
+                "available": available,
+                "reason": reason,
+            }
         )
     return {
         "enabled": policy.enabled,
@@ -80,7 +87,7 @@ def get_config(
         "real": {"id": ident.real.id, "email": ident.real.email},
         "effective": {"id": ident.effective.id, "email": ident.effective.email},
         "policy": policy.as_dict(),
-        "models": [{"id": m.id, "label": m.label} for m in MODELS],
+        "models": [{"id": m.id, "label": m.label, "short": m.short} for m in MODELS],
         "efforts": list(EFFORTS),
         "engines": engines,
         "credentials": credentials.status(db, ident),

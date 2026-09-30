@@ -45,7 +45,8 @@
 .assistant-window.is-minimised .aw-composer,
 .assistant-window.is-minimised .aw-banner,
 .assistant-window.is-minimised .aw-setup,
-.assistant-window.is-minimised .aw-grip { display: none; }
+.assistant-window.is-minimised .aw-grip,
+.assistant-window.is-minimised .aw-pickers { display: none; }
 
 .aw-head {
     display: flex;
@@ -195,14 +196,13 @@
 .aw-setup span { flex: 1; }
 
 .aw-composer {
+    position: relative;
     flex: 0 0 auto;
     border-top: 1px solid var(--color-border-light);
     padding: 8px 10px 10px;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
 }
 .aw-composer textarea {
+    display: block;
     width: 100%;
     resize: none;
     border: 1px solid var(--color-border);
@@ -210,22 +210,67 @@
     background: var(--color-bg);
     color: var(--color-text-primary);
     font: 13px/1.45 var(--font);
-    padding: 8px 10px;
+    /* Right padding keeps text clear of the send / stop button. */
+    padding: 8px 34px 8px 10px;
     max-height: 180px;
 }
 .aw-composer textarea:focus { outline: 2px solid var(--color-accent); outline-offset: -1px; }
-.aw-controls { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.aw-controls select {
-    font-size: 11px;
-    padding: 2px 4px;
-    border: 1px solid var(--color-border);
+
+/* Send / stop: a small icon inside the textarea's bottom-right corner. */
+.aw-action {
+    position: absolute;
+    right: 16px;
+    bottom: 16px;
+    width: 24px;
+    height: 24px;
+    padding: 4px;
+    border: none;
     border-radius: var(--radius-sm);
-    background: var(--color-bg);
-    color: var(--color-text-secondary);
-    max-width: 150px;
+    background: transparent;
+    color: var(--color-accent);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
 }
-.aw-pinned { font-size: 11px; color: var(--color-text-tertiary); }
-.aw-spacer { flex: 1; }
+.aw-action svg { width: 16px; height: 16px; fill: currentColor; }
+.aw-action:hover:not(:disabled) { background: var(--color-bg-hover); }
+.aw-action:disabled { color: var(--color-text-tertiary); cursor: default; }
+.aw-action-stop { color: var(--color-text-secondary); }
+.aw-action-stop:hover { color: var(--color-error); }
+
+/* Engine / model / effort pickers, compact, in the header. */
+.aw-pickers {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: 0 0 auto;
+}
+.aw-pickers select {
+    /* Sized to the selected option (where supported), with a small chevron
+       instead of the native one — the header has little room. */
+    appearance: none;
+    field-sizing: content;
+    font-size: 11px;
+    height: 22px;
+    padding: 0 14px 0 5px;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    background: transparent url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 5'%3E%3Cpath d='M.5.5 4 4 7.5.5' fill='none' stroke='%238e8e93' stroke-width='1.2'/%3E%3C/svg%3E") no-repeat right 4px center / 7px 5px;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+}
+.aw-pickers select option { background: var(--color-bg-elevated); color: var(--color-text-primary); }
+.aw-pickers select:hover,
+.aw-pickers select:focus { border-color: var(--color-border); color: var(--color-text-primary); }
+.aw-pinned {
+    font-size: 11px;
+    color: var(--color-text-tertiary);
+    white-space: nowrap;
+    max-width: 150px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
 
 /* Resize grips: thin edges, small corners. */
 .aw-grip { position: absolute; z-index: 3; }
