@@ -73,7 +73,7 @@ async def _bearer_user(request: Request, db: Session, bearer: str) -> CurrentUse
     super-admin stamping are deliberately bypassed.
     """
     # Lazy imports — both route modules import this module at top level.
-    from .routes.api_keys import identity_for_token
+    from .routes.api_keys import commit_best_effort, identity_for_token
     from .routes.company_keys import (
         USER_EMAIL_HEADER,
         is_company_bearer,
@@ -93,7 +93,7 @@ async def _bearer_user(request: Request, db: Session, bearer: str) -> CurrentUse
             )
     else:
         identity = identity_for_token(db, bearer)
-        db.commit()  # persist the last_used_at bump
+        commit_best_effort(db)  # persist the last_used_at bump (non-fatal)
         if identity is None:
             raise HTTPException(
                 status.HTTP_401_UNAUTHORIZED,

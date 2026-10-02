@@ -38,6 +38,7 @@ import time
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from ...db.database import session_scope
@@ -45,7 +46,7 @@ from ...db.models import CompanyApiKey, User
 from ...services import admin_store
 from ...services.acl import CurrentUser, get_or_create_user, person_is_admin
 from ..deps import current_user, db_session
-from .api_keys import MAX_KEY_NAME_LEN, _hash_token
+from .api_keys import MAX_KEY_NAME_LEN, _hash_token, last_used_is_stale
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +109,7 @@ async def resolve_company_identity(
         if key is None:
             return None
         key_id, company_id, company_name = key.id, key.company_id, key.company_name
+        key_last_used = key.last_used_at
 
     if not await _email_in_scope(email, company_id):
         logger.warning(
@@ -117,10 +119,21 @@ async def resolve_company_identity(
 
     with session_scope() as db:
         user = get_or_create_user(db, email, company_id, company_name)
-        row = db.get(CompanyApiKey, key_id)
-        if row is not None:
-            row.last_used_at = int(time.time())
-        return (email, user.id)
+        user_id = user.id
+
+    # ``last_used_at`` is bookkeeping: write it only when stale and in its own
+    # transaction, so a locked DB (indexer busy) can't turn an otherwise-valid
+    # authenticated request into a 500.
+    now = int(time.time())
+    if last_used_is_stale(key_last_used, now):
+        try:
+            with session_scope() as db:
+                row = db.get(CompanyApiKey, key_id)
+                if row is not None:
+                    row.last_used_at = now
+        except OperationalError as e:
+            logger.warning("company key last_used_at bump skipped (db busy): %s", e.orig)
+    return (email, user_id)
 
 
 async def _email_in_scope(email: str, company_id: str) -> bool:

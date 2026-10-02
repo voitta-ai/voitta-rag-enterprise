@@ -577,7 +577,7 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
 
         # Imported lazily to avoid a circular import at module load time
         # (auth routes depend on db.models which may not yet be ready).
-        from .api.routes.api_keys import identity_for_token
+        from .api.routes.api_keys import commit_best_effort, identity_for_token
         from .api.routes.company_keys import (
             USER_EMAIL_HEADER,
             is_company_bearer,
@@ -603,7 +603,7 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
                 # minted under; that, not the email, drives every visibility
                 # filter. None covers both invalid tokens and orphaned keys.
                 identity = identity_for_token(db, bearer)
-                db.commit()
+                commit_best_effort(db)
 
             if identity is None:
                 return _unauthorized("Invalid or revoked API key")

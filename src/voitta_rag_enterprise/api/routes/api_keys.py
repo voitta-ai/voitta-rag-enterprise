@@ -21,6 +21,7 @@ import time
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from ...db.database import session_scope
@@ -55,6 +56,35 @@ def mint_token() -> tuple[str, str, str]:
     return token, prefix, _hash_token(token)
 
 
+# ``last_used_at`` is a UI nicety ("when was this key last used"), not a
+# security control. It used to be written on EVERY authenticated request, which
+# made each API-key GET take the SQLite write lock — and fail with a 500
+# ("database is locked") whenever the indexer held it. Now it is only written
+# when the stored value is older than this, so the common request is read-only,
+# and a lock on the rare write is tolerated (see ``commit_best_effort``).
+LAST_USED_GRANULARITY_S = 60
+
+
+def last_used_is_stale(prev: int | None, now: int | None = None) -> bool:
+    """True if ``last_used_at`` should be refreshed (never set, or old enough)."""
+    now = int(time.time()) if now is None else now
+    return prev is None or now - prev >= LAST_USED_GRANULARITY_S
+
+
+def commit_best_effort(db: Session) -> None:
+    """Commit a ``last_used_at`` bump; a busy DB must never fail the request.
+
+    Only ``OperationalError`` (e.g. ``database is locked``) is swallowed, and
+    the session is rolled back so it stays usable. The bump is simply retried
+    on a later request.
+    """
+    try:
+        db.commit()
+    except OperationalError as e:
+        db.rollback()
+        logger.warning("last_used_at bump skipped (db busy): %s", e.orig)
+
+
 def verify_token(db: Session, token: str) -> ApiKey | None:
     """Look up an API key by its plaintext token; bump ``last_used_at``.
 
@@ -69,7 +99,9 @@ def verify_token(db: Session, token: str) -> ApiKey | None:
     ).scalar_one_or_none()
     if key is None:
         return None
-    key.last_used_at = int(time.time())
+    now = int(time.time())
+    if last_used_is_stale(key.last_used_at, now):
+        key.last_used_at = now
     return key
 
 
