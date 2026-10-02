@@ -18,6 +18,7 @@ from ....services.sync.github import (
     encode_branches_field,
     git_touch_scope,
     list_remote_branches,
+    validate_ssh_private_key,
 )
 from ...deps import current_user, db_session
 from . import registry
@@ -107,6 +108,11 @@ def apply_config(
             f"Invalid auth_method: {cfg.auth_method!r}",
         )
 
+    if cfg.auth_method == "ssh" and cfg.ssh_key:
+        problem = validate_ssh_private_key(cfg.ssh_key)
+        if problem:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, problem)
+
     src = existing or FolderSyncSource(folder_id=folder_id, source_type="github")
     # Switching from a different source clears its credentials.
     if existing is not None and existing.source_type != "github":
@@ -167,6 +173,11 @@ def list_branches(
     the actual sync uses. See ``_sync_sync`` which already reads ``gh_token``.
     """
     check_owner(folder_id, db, user)
+    # Only a freshly pasted key needs checking; a saved one was validated on save.
+    if body.auth_method in ("ssh", "") and body.ssh_key:
+        problem = validate_ssh_private_key(body.ssh_key)
+        if problem:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, problem)
     saved = db.get(FolderSyncSource, folder_id)
     saved_gh = saved if (saved and saved.source_type == "github") else None
     auth = GitAuth(

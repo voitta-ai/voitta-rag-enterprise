@@ -186,6 +186,12 @@ async def _run_sync_inner(folder_id: int) -> None:
         "sync done folder=%s in %.1fs: %s", folder_path, elapsed, stats.as_dict()
     )
 
+    if stats.errors:
+        logger.warning(
+            "sync finished with %d error(s) folder=%s: %s",
+            len(stats.errors), folder_path, "; ".join(stats.errors)[:2000],
+        )
+
     with session_scope() as s3:
         from ...db.models import FolderSyncSource
 

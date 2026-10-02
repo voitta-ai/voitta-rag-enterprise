@@ -315,6 +315,77 @@ class GitSyncStats:
         }
 
 
+_PUBKEY_PREFIXES = ("ssh-", "ecdsa-", "sk-ssh-", "sk-ecdsa-")
+
+
+def validate_ssh_private_key(text: str) -> str | None:
+    """Return a human-readable problem with a pasted SSH key, or ``None`` if ok.
+
+    Catches the common paste mistakes *before* they surface as ssh's opaque
+    ``Load key …: error in libcrypto`` at sync time: a **public** key
+    (``ssh-rsa AAAA…``) pasted instead of the private one, a truncated/mangled
+    body, or a passphrase-protected key (sync runs ssh with ``BatchMode=yes``,
+    which cannot prompt for a passphrase).
+    """
+    key = (text or "").strip()
+    if not key:
+        return None
+    if key.startswith(_PUBKEY_PREFIXES):
+        return (
+            "That is an SSH PUBLIC key (ssh-… AAAA…). Paste the matching PRIVATE "
+            "key instead — the file without the .pub extension, starting with "
+            "'-----BEGIN OPENSSH PRIVATE KEY-----'. The public key is the one "
+            "you register in Bitbucket/GitHub."
+        )
+    if "-----BEGIN " not in key or "PRIVATE KEY-----" not in key:
+        return (
+            "Not a recognised SSH private key. Paste the whole private key "
+            "including the '-----BEGIN … PRIVATE KEY-----' and "
+            "'-----END … PRIVATE KEY-----' lines."
+        )
+    if "-----END " not in key:
+        return "The private key looks truncated: the '-----END … PRIVATE KEY-----' line is missing."
+    if "ENCRYPTED" in key:
+        return (
+            "This private key is passphrase-protected, which sync cannot use. "
+            "Use a key without a passphrase, or choose 'SSH agent' auth and "
+            "load the key with ssh-add."
+        )
+    # Final authority: let OpenSSH parse it (catches mangled bodies and
+    # passphrase-protected OpenSSH-format keys, whose header isn't marked).
+    keyfile = tempfile.NamedTemporaryFile(  # noqa: SIM115
+        mode="w", suffix=".key", delete=False
+    )
+    try:
+        keyfile.write(key + "\n")
+        keyfile.close()
+        os.chmod(keyfile.name, 0o600)
+        try:
+            proc = subprocess.run(
+                ["ssh-keygen", "-y", "-P", "", "-f", keyfile.name],
+                capture_output=True, text=True, timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None  # no ssh-keygen here; don't block on it
+        if proc.returncode != 0:
+            err = (proc.stderr or "").lower()
+            if "passphrase" in err:
+                return (
+                    "This private key is passphrase-protected, which sync cannot "
+                    "use. Use a key without a passphrase, or choose 'SSH agent' "
+                    "auth and load the key with ssh-add."
+                )
+            return (
+                "OpenSSH could not read this private key — it is likely "
+                "mangled (line breaks lost, truncated, or extra characters). "
+                "Re-copy the whole key file."
+            )
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(keyfile.name)
+    return None
+
+
 def _safe_name(name: str) -> str:
     """Sanitize a branch name or commit subject for use as a filesystem path
     component. Forward slashes become ``--`` so ``feature/x`` round-trips.
@@ -1024,11 +1095,19 @@ class GitHubConnector(SyncConnector):
         mirror_dir = folder_root / ".git-repo"
         _ensure_mirror(mirror_dir, repo_url, auth)
 
+        stats = GitSyncStats()
+        # Branches whose fetch failed: their local ref (if any) is stale, so
+        # they must not be materialized and reported as a successful sync.
+        fetch_failed: set[str] = set()
+
         if all_branches:
             rc, _, err = _fetch_refs(
                 mirror_dir, ["+refs/heads/*:refs/remotes/origin/*"], auth
             )
             if rc != 0:
+                logger.error(
+                    "git fetch failed for %s: %s", repo_url, _clean_git_stderr(err)
+                )
                 raise RuntimeError(f"git fetch failed: {_clean_git_stderr(err)}")
             selected = _local_branches(mirror_dir)
             if not selected:
@@ -1051,8 +1130,23 @@ class GitHubConnector(SyncConnector):
                     _clean_git_stderr(err)[:200],
                 )
                 for b in selected:
-                    _fetch_refs(
+                    brc, _, berr = _fetch_refs(
                         mirror_dir, [f"+refs/heads/{b}:refs/remotes/origin/{b}"], auth
+                    )
+                    if brc != 0:
+                        detail = _clean_git_stderr(berr)
+                        logger.error(
+                            "git fetch failed for %s branch %s: %s",
+                            repo_url, b, detail,
+                        )
+                        stats.errors.append(f"{b}: git fetch failed: {detail}")
+                        fetch_failed.add(b)
+                if len(fetch_failed) == len(selected):
+                    # Nothing new could be pulled at all (auth, network, bad
+                    # URL…). Fail the job rather than "succeed" on stale refs.
+                    raise RuntimeError(
+                        "git fetch failed: "
+                        + _clean_git_stderr(err)
                     )
 
         logger.info(
@@ -1062,7 +1156,6 @@ class GitHubConnector(SyncConnector):
             extended,
         )
 
-        stats = GitSyncStats()
         branches_dir = folder_root / "branches"
         branches_dir.mkdir(parents=True, exist_ok=True)
         commits_dir = folder_root / "commits"
@@ -1078,6 +1171,11 @@ class GitHubConnector(SyncConnector):
         for branch in selected:
             safe = _safe_name(branch)
             branch_root = branches_dir / safe
+            if branch in fetch_failed:
+                # Already reported above; keep the existing (stale) tree on
+                # disk untouched and don't prune its commit files.
+                all_commit_dumps_clean = False
+                continue
             if not _ref_exists(mirror_dir, branch):
                 # Selected but absent on the remote (e.g. deleted since, or the
                 # per-branch fallback fetch above couldn't get it).
