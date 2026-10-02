@@ -139,6 +139,10 @@ EXPOSE 8000
 # Single uvicorn worker — the app's queue + GPU lock assume one writer.
 # Indexing parallelism lives inside the asyncio worker pool, not in
 # uvicorn-level forking.
+# --timeout-graceful-shutdown 5: in-flight requests get 5s after SIGTERM, then
+# are cancelled, so the lifespan teardown (workers, watcher, Qdrant) completes
+# inside `docker stop`'s default 10s grace instead of being SIGKILLed.
 CMD ["python", "-m", "uvicorn", "voitta_rag_enterprise.main:app", \
      "--host", "0.0.0.0", "--port", "8000", \
-     "--ws-ping-interval", "30", "--ws-ping-timeout", "90"]
+     "--ws-ping-interval", "30", "--ws-ping-timeout", "90", \
+     "--timeout-graceful-shutdown", "5"]

@@ -32,7 +32,11 @@ install:
 # default 20s timeout was killing the connection on perfectly healthy
 # but busy servers. 90s is generous; if a real network problem hits,
 # the client's reconnect logic still kicks in within ~30s.
-UVICORN_FLAGS := --host 0.0.0.0 --port "$${VOITTA_PORT:-8000}" --ws-ping-interval 30 --ws-ping-timeout 90
+# --timeout-graceful-shutdown: on SIGTERM, wait at most 5s for in-flight
+# requests before cancelling them, so the app's own teardown (workers,
+# watcher, Qdrant sidecar) always runs — and finishes inside Docker's 10s
+# stop grace. Without it a slow request at shutdown delayed exit indefinitely.
+UVICORN_FLAGS := --host 0.0.0.0 --port "$${VOITTA_PORT:-8000}" --ws-ping-interval 30 --ws-ping-timeout 90 --timeout-graceful-shutdown 5
 
 run:
 	@$(DOTENV) \
