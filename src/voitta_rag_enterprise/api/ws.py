@@ -27,6 +27,7 @@ the DB) before filtering the next batch.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 
@@ -326,39 +327,76 @@ async def _pump(ws: WebSocket, sub: events.Subscription) -> None:
     leak). Revocation via unshare/ungrant fully propagates on the next
     reconnect snapshot.
     """
-    while ws.client_state == WebSocketState.CONNECTED:
-        try:
-            await sub.wait(timeout=IDLE_TIMEOUT)
-        except asyncio.CancelledError:
-            return
-        before = await _refresh_acl_if_stale(sub)
-        drained = sub.drain(max_events=MAX_BATCH)
-        # ``allowed`` is the union of pre/post-refresh visible folders, or None
-        # for admin/single-user (no folder filtering). Topic scoping for the
-        # admin/keys planes is applied regardless of folder visibility.
-        allowed = None if sub.visible is None else sub.visible | (before or set())
-        events_out = [e for e in drained if _deliverable(e, sub, allowed)]
-        # ``admin.invalidated`` is a rebuild SIGNAL, not a forwardable frame:
-        # each admin connection answers it by re-sending its own scoped
-        # ``admin.snapshot``. Collapse any number of signals in this drain
-        # into one rebuild.
-        needs_admin_refresh = (
-            sub.is_admin
-            and "admin" in sub.topics
-            and any(e.get("type") == "admin.invalidated" for e in events_out)
-        )
-        events_out = [e for e in events_out if e.get("type") != "admin.invalidated"]
-        try:
-            if events_out:
-                payload = (
-                    events_out[0]
-                    if len(events_out) == 1
-                    else {"type": "batch", "events": events_out}
+    # The client sends nothing after ``subscribe``, so without a reader nobody
+    # ever calls ``receive()`` — and Starlette only learns of a close through
+    # ``receive()``. ``client_state`` then stays CONNECTED forever and this loop
+    # idles on IDLE_TIMEOUT indefinitely: a dropped tab leaks its handler and
+    # subscription, and on SIGTERM uvicorn closes the socket (1012) but waits
+    # forever for this task, so lifespan shutdown never runs ("Waiting for
+    # background tasks to complete"). Watch for the disconnect concurrently.
+    closed = asyncio.create_task(_wait_disconnect(ws))
+    try:
+        while ws.client_state == WebSocketState.CONNECTED and not closed.done():
+            waiter = asyncio.create_task(sub.wait(timeout=IDLE_TIMEOUT))
+            try:
+                await asyncio.wait(
+                    {waiter, closed}, return_when=asyncio.FIRST_COMPLETED
                 )
-                # send_text + json.dumps so we control framing and avoid
-                # starlette's default helper which dumps every event.
-                await ws.send_text(json.dumps(payload))
-            if needs_admin_refresh:
-                await _send_admin_frame(ws, sub)
-        except (WebSocketDisconnect, RuntimeError):
+            except asyncio.CancelledError:
+                waiter.cancel()
+                return
+            if closed.done():
+                waiter.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await waiter
+                return
+            if not await _forward(ws, sub):
+                return
+    finally:
+        closed.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await closed
+
+
+async def _wait_disconnect(ws: WebSocket) -> None:
+    """Consume (and ignore) client frames until the socket closes."""
+    while True:
+        message = await ws.receive()
+        if message["type"] == "websocket.disconnect":
             return
+
+
+async def _forward(ws: WebSocket, sub: events.Subscription) -> bool:
+    """Drain, filter and send one batch. ``False`` once the socket is gone."""
+    before = await _refresh_acl_if_stale(sub)
+    drained = sub.drain(max_events=MAX_BATCH)
+    # ``allowed`` is the union of pre/post-refresh visible folders, or None
+    # for admin/single-user (no folder filtering). Topic scoping for the
+    # admin/keys planes is applied regardless of folder visibility.
+    allowed = None if sub.visible is None else sub.visible | (before or set())
+    events_out = [e for e in drained if _deliverable(e, sub, allowed)]
+    # ``admin.invalidated`` is a rebuild SIGNAL, not a forwardable frame:
+    # each admin connection answers it by re-sending its own scoped
+    # ``admin.snapshot``. Collapse any number of signals in this drain
+    # into one rebuild.
+    needs_admin_refresh = (
+        sub.is_admin
+        and "admin" in sub.topics
+        and any(e.get("type") == "admin.invalidated" for e in events_out)
+    )
+    events_out = [e for e in events_out if e.get("type") != "admin.invalidated"]
+    try:
+        if events_out:
+            payload = (
+                events_out[0]
+                if len(events_out) == 1
+                else {"type": "batch", "events": events_out}
+            )
+            # send_text + json.dumps so we control framing and avoid
+            # starlette's default helper which dumps every event.
+            await ws.send_text(json.dumps(payload))
+        if needs_admin_refresh:
+            await _send_admin_frame(ws, sub)
+    except (WebSocketDisconnect, RuntimeError):
+        return False
+    return True
