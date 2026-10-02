@@ -32,6 +32,7 @@ def build_default_registry() -> ParserRegistry:
     from .cad_fcstd_parser import CadFCStdParser
     from .cad_step_parser import CadStepParser
     from .docx_parser import DocxParser
+    from .epub_parser import EpubParser
     from .image_parser import ImageFileParser
     from .ipynb_parser import IpynbParser
     from .pdf_parser import PdfParser
@@ -49,6 +50,7 @@ def build_default_registry() -> ParserRegistry:
     r.register(TextParser())
     r.register(PdfParser())
     r.register(DocxParser())
+    r.register(EpubParser())
     r.register(PptxParser())
     r.register(XlsxParser())
     r.register(SvgParser())
