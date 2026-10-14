@@ -599,6 +599,12 @@ class _MineruDaemon:
             # setdefault: an operator's explicit env override still wins.
             env.setdefault("MINERU_MIN_BATCH_INFERENCE_SIZE", "1")   # 2.x
             env.setdefault("MINERU_PROCESSING_WINDOW_SIZE", "1")     # 3.x
+        # Shared GPU: cap the VRAM MinerU plans its batches for (it otherwise
+        # assumes the whole card and OOMs beside other GPU tenants).
+        # setdefault: an explicit MINERU_VIRTUAL_VRAM_SIZE in the env wins.
+        vram_gb = get_settings().mineru_vram_gb
+        if vram_gb > 0:
+            env.setdefault("MINERU_VIRTUAL_VRAM_SIZE", str(vram_gb))
         self._proc = subprocess.Popen(
             [sys.executable, "-m", "voitta_rag_enterprise.services.parsers._mineru_subprocess"],
             stdin=subprocess.PIPE,

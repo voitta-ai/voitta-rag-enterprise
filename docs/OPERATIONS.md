@@ -239,6 +239,15 @@ file's stored `error` includes the **subprocess traceback tail** (the raise
 site with the actual path/message — `repr()` of an `OSError` alone drops the
 filename), and the full traceback lands in `logs/indexing.log`.
 
+> **Shared GPU → `CUDA out of memory`.** MinerU sizes its inference batches
+> from the card's *total* memory (logged as `GPU Memory: 24 GB, Batch Ratio: 8`
+> in `indexing.log`), not what is free. When other services hold most of the
+> GPU, larger PDFs fail with `torch.OutOfMemoryError` and park as `error`. Set
+> `VOITTA_MINERU_VRAM_GB` to the memory MinerU can actually use (e.g. `6` →
+> batch ratio 2; passed to the subprocess as `MINERU_VIRTUAL_VRAM_SIZE`),
+> restart, then reindex the folder with *errors only*. Default `0` keeps
+> MinerU's auto-detection, which is right for a dedicated GPU.
+
 > **Lazy OCR models.** MinerU downloads some models on first *need*, not at
 > install — e.g. the seal/stamp detection model fetches the first time a page
 > contains a seal. Offline (or on a flaky link) that surfaces as

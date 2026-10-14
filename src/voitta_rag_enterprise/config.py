@@ -194,6 +194,13 @@ class Settings(BaseSettings):
     pdf_render_pages: bool = True
     pdf_page_render_long_edge_px: int = 1024
     pdf_page_render_webp_quality: int = 75
+    # GPU memory (GB) MinerU should assume it has. MinerU sizes its inference
+    # batches from the card's TOTAL memory (24 GB -> batch ratio 8), which
+    # OOMs when the GPU is shared with other services. A positive value is
+    # passed to the MinerU subprocess as MINERU_VIRTUAL_VRAM_SIZE (e.g. 6 ->
+    # batch ratio 2: slower, but fits beside other GPU tenants). 0 = let
+    # MinerU auto-detect (right for a dedicated GPU).
+    mineru_vram_gb: int = 0
     # Test override: when true, the PDF parser returns a deterministic stub
     # without invoking MinerU. Used by the test suite to keep runs fast.
     use_fake_pdf_parser: bool = False
