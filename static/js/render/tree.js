@@ -472,8 +472,8 @@ function updateRootSwitches(li, folder) {
     }
     setIfChanged(li._activeSwitch, "checked", !!folder.active);
     const activeTitle = folder.active
-        ? "MCP search includes this folder. Click to exclude."
-        : "MCP search excludes this folder. Click to include.";
+        ? "Included in AI search — assistants connected to Voitta can find this folder's content. Click to exclude it."
+        : "Excluded from AI search — assistants connected to Voitta cannot see this folder. Click to include it.";
     if (r.slot1.title !== activeTitle) r.slot1.title = activeTitle;
 
     // SHARE column (slot2) — one of three mutually-exclusive occupants:
@@ -491,6 +491,7 @@ function updateRootSwitches(li, folder) {
     li._ownerId = canImpersonate ? folder.owner_id : null;
     const mode = (folder.owned && !_me?.single_user) ? "pill"
         : canImpersonate ? "imp"
+        : (!folder.owned && !_me?.single_user) ? "guest"
         : "spacer";
 
     if (li._slot2Mode !== mode) {
@@ -519,6 +520,15 @@ function updateRootSwitches(li, folder) {
         } else if (mode === "imp") {
             el = r.impBtn;
             r.impBtn.hidden = false;
+        } else if (mode === "guest") {
+            // Non-owned folder: a muted, non-interactive marker explaining
+            // why this row has no share pill (feedback: its absence read as
+            // a bug rather than "not yours to share").
+            const chip = document.createElement("span");
+            chip.className = "share-chip-guest";
+            chip.textContent = "Shared";
+            chip.title = "Shared with you by its owner — only the owner can change who has access.";
+            el = chip;
         } else {
             const spacer = document.createElement("span");
             spacer.className = "folder-switch";
@@ -537,18 +547,21 @@ function updateRootSwitches(li, folder) {
         // (groups / people); a green pill also carries the targeted counts.
         const g = folder.share_groups || 0;
         const p = folder.share_people || 0;
-        const targeted = [g ? `${g}g` : "", p ? `${p}p` : ""].filter(Boolean).join("·");
+        const gTxt = g ? `${g} group${g === 1 ? "" : "s"}` : "";
+        const pTxt = p ? `${p} ${p === 1 ? "person" : "people"}` : "";
+        const targetedLong = [gTxt, pTxt].filter(Boolean).join(" and ");
+        const targeted = [g ? `${g} grp` : "", p ? `${p} ppl` : ""].filter(Boolean).join("·");
         let text, cls, title;
         if (folder.shared) {
             const aud = _me?.company_id ? "Org" : "All";
-            text = targeted ? `${aud}·${targeted}` : aud;
+            text = targeted ? `${aud} +${g + p}` : aud;
             cls = "share-pill share-pill-audience";
-            title = "Shared with " + (_me?.company_id ? "your organization" : "all native users")
-                + (targeted ? ` plus ${targeted}` : "") + ". Click to configure.";
+            title = "Shared with " + (_me?.company_id ? "your whole organization" : "all native users")
+                + (targetedLong ? `, plus ${targetedLong}` : "") + ". Click to configure.";
         } else if (targeted) {
             text = targeted;
             cls = "share-pill share-pill-targeted";
-            title = `Shared with ${g ? g + " group(s)" : ""}${g && p ? " and " : ""}${p ? p + " people" : ""}. Click to configure.`;
+            title = `Shared with ${targetedLong}. Click to configure.`;
         } else {
             text = "Private";
             cls = "share-pill share-pill-private";

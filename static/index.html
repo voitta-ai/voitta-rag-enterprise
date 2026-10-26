@@ -516,8 +516,8 @@
                         <span class="num">Files</span>
                         <span class="num">Indexed</span>
                         <span>Status</span>
-                        <span class="center" title="Include in MCP search">Search</span>
-                        <span class="center" title="Share with everyone">Share</span>
+                        <span class="center" title="Which folders AI assistants connected to Voitta (over MCP) can search">Search</span>
+                        <span class="center" title="Who can see each folder — click a pill to change sharing">Share</span>
                     </div>
                     <ul id="folder-list" class="tree"></ul>
                 </section>
@@ -586,17 +586,17 @@
                                 <span id="folder-sync-badge" class="badge" hidden style="background:#10b981;color:#fff;"></span>
                             </div>
                             <div class="kv-grid">
-                                <span class="k">Files</span><span class="v" id="kv-files">–</span>
-                                <span class="k">Indexed</span><span class="v" id="kv-indexed">–</span>
-                                <span class="k">Errors</span><span class="v" id="kv-errors">–</span>
-                                <span class="k">Unsupported</span><span class="v" id="kv-unsupported">–</span>
-                                <span class="k" id="kv-cloud-only-k" hidden>Cloud-only</span><span class="v" id="kv-cloud-only" hidden>–</span>
-                                <span class="k">In progress</span><span class="v" id="kv-in-progress">–</span>
-                                <span class="k">Pending</span><span class="v" id="kv-pending">–</span>
-                                <span class="k">Total size</span><span class="v" id="kv-bytes">–</span>
-                                <span class="k">Chunks</span><span class="v" id="kv-chunks">–</span>
-                                <span class="k">Images</span><span class="v" id="kv-images">–</span>
-                                <span class="k">Unique images</span><span class="v" id="kv-images-unique">–</span>
+                                <span class="k" title="All files found in this folder, including ones not indexed yet">Files</span><span class="v" id="kv-files">–</span>
+                                <span class="k" title="Files parsed successfully — their content is searchable">Indexed</span><span class="v" id="kv-indexed">–</span>
+                                <span class="k" title="Files that failed to parse or index — the Jobs tab has the details">Errors</span><span class="v" id="kv-errors">–</span>
+                                <span class="k" title="File types Voitta cannot index — the files stay in the folder but aren't searchable">Unsupported</span><span class="v" id="kv-unsupported">–</span>
+                                <span class="k" id="kv-cloud-only-k" title="Files that exist in the cloud source but have no downloadable content here" hidden>Cloud-only</span><span class="v" id="kv-cloud-only" hidden>–</span>
+                                <span class="k" title="Files being parsed and indexed right now">In progress</span><span class="v" id="kv-in-progress">–</span>
+                                <span class="k" title="Files queued and waiting to be indexed">Pending</span><span class="v" id="kv-pending">–</span>
+                                <span class="k" title="Combined size of all files in this folder">Total size</span><span class="v" id="kv-bytes">–</span>
+                                <span class="k" title="Searchable text segments — each document is split into chunks for retrieval">Chunks</span><span class="v" id="kv-chunks">–</span>
+                                <span class="k" title="Images extracted from documents and indexed for visual search">Images</span><span class="v" id="kv-images">–</span>
+                                <span class="k" title="Distinct images after de-duplication — repeated logos and headers count once">Unique images</span><span class="v" id="kv-images-unique">–</span>
                             </div>
                             <table class="stats-table" id="ext-table" hidden>
                                 <thead>
@@ -609,8 +609,9 @@
                                 <tbody id="ext-tbody"></tbody>
                             </table>
 
-                            <p id="upload-target-hint" class="hint" hidden>
-                                Uploads go to <code id="upload-target">/</code>
+                            <p id="upload-target-hint" class="hint" hidden
+                               title="Where the Upload buttons (and drag &amp; drop) put new files — select a subfolder to upload into it instead">
+                                New uploads land in <code id="upload-target">/</code>
                             </p>
                         </div>
                     </div>
@@ -667,11 +668,16 @@
                             <h3>
                                 Recent jobs
                                 <span class="header-actions-inline">
-                                    <button id="btn-retry-all" class="btn-text">Retry failed</button>
-                                    <button id="btn-clear-failed" class="btn-text">Clear</button>
+                                    <button id="btn-retry-all" class="btn-text" title="Put every failed job back in the queue">Retry failed</button>
+                                    <button id="btn-clear-failed" class="btn-text" title="Delete failed-job records from this list — your files are not touched">Clear</button>
                                     <button id="btn-kill-all" class="btn-text" title="Stop the running job and drop everything queued">Kill</button>
                                 </span>
                             </h3>
+                            <p class="hint">
+                                Background work on your folders — parsing, indexing and
+                                sync runs. Everything here happens automatically; use
+                                this tab to check progress or retry a failure.
+                            </p>
                             <ul id="jobs" class="job-rows"></ul>
                         </div>
                     </div>
@@ -1558,6 +1564,11 @@
                             <button id="share-email-add" class="btn btn-secondary">+ Add</button>
                         </div>
                         <ul id="share-people-list" class="share-list"></ul>
+                        <p class="hint">
+                            Access applies immediately — no notification email is sent;
+                            the folder simply appears in their Voitta. An address
+                            without an account yet gets access on first sign-in.
+                        </p>
                     </div>
                 </div>
                 <p id="share-error" class="hint share-error" hidden></p>

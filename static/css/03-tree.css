@@ -545,3 +545,21 @@
     color: var(--color-accent);
     border-color: var(--color-accent);
 }
+/* SHARE column marker on a folder someone else shared with you: same
+   geometry as a pill so the column stays aligned, but borderless and
+   inert — it explains, it doesn't invite a click. */
+.share-chip-guest {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    height: 18px;
+    width: 100%;
+    font: 500 11px/1 var(--font);
+    letter-spacing: 0.01em;
+    white-space: nowrap;
+    color: var(--color-text-secondary);
+    opacity: 0.7;
+    cursor: help;
+}

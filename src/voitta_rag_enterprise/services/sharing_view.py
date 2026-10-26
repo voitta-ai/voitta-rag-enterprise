@@ -33,6 +33,10 @@ class GroupShareOut(BaseModel):
     id: int
     name: str
     member_count: int
+    # Member display labels (display_name, falling back to email), deduped
+    # across a person's accounts — shown in the share modal so "Marketing
+    # (3)" answers "who are those 3?" without a trip to the admin console.
+    members: list[str] = []
 
 
 class PersonShareOut(BaseModel):
@@ -76,6 +80,21 @@ def audience_for_owner(db: Session, folder: Folder) -> AudienceOut:
     )
 
 
+def group_member_labels(db: Session, group_ids: list[int]) -> dict[int, list[str]]:
+    """Group id → sorted member display labels (display_name or email)."""
+    if not group_ids:
+        return {}
+    rows = db.execute(
+        select(UserGroup.group_id, User.display_name, User.email)
+        .join(User, User.id == UserGroup.user_id)
+        .where(UserGroup.group_id.in_(group_ids))
+    ).all()
+    labels: dict[int, set[str]] = {}
+    for gid, name, email in rows:
+        labels.setdefault(gid, set()).add((name or "").strip() or email)
+    return {gid: sorted(ls, key=str.lower) for gid, ls in labels.items()}
+
+
 def group_shares(db: Session, folder_id: int) -> list[GroupShareOut]:
     rows = db.execute(
         select(Group, func.count(UserGroup.user_id))
@@ -85,8 +104,15 @@ def group_shares(db: Session, folder_id: int) -> list[GroupShareOut]:
         .group_by(Group.id)
         .order_by(Group.name)
     ).all()
+    members = group_member_labels(db, [g.id for g, _ in rows])
     return [
-        GroupShareOut(id=g.id, name=g.name, member_count=int(n)) for g, n in rows
+        GroupShareOut(
+            id=g.id,
+            name=g.name,
+            member_count=int(n),
+            members=members.get(g.id, []),
+        )
+        for g, n in rows
     ]
 
 
