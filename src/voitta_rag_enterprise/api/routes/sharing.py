@@ -54,6 +54,7 @@ from .folders import (
     _require_owner,
     _sync_source_kind,
     _to_folder_out,
+    owner_label,
     share_counts_for_folder,
 )
 
@@ -93,6 +94,7 @@ def _push_folder_update(db: Session, folder: Folder, user: CurrentUser) -> None:
         owned=True,
         active=folder_active_for_user(db, folder.id, user.id),
         share_counts=share_counts_for_folder(db, folder.id),
+        owner_name=owner_label(db, folder.owner_id),
     )
     # ``owned``/``writable``/``active`` are per-viewer — this event goes to
     # every subscriber, and the client merges fields over its store, so

@@ -88,13 +88,55 @@ let _folderFilter = "";
 
 export function setFolderFilter(q) { _folderFilter = q; }
 
-// The search box filters what the list shows: folders by name at the top
-// level, the open folder's entries by name inside one.
+// ----- Root ordering --------------------------------------------------------
+// User-picked, persisted per browser. Falls back to name A–Z (the old
+// implicit by-id order read as random). id is the tiebreak so equal keys
+// keep a stable order across renders.
+const _SORT_KEY = "voitta.folder-sort";
+const _SORTS = {
+    "name-asc": (a, b) =>
+        a.display_name.localeCompare(b.display_name, undefined, { sensitivity: "base" }) || a.id - b.id,
+    "name-desc": (a, b) =>
+        b.display_name.localeCompare(a.display_name, undefined, { sensitivity: "base" }) || b.id - a.id,
+    "created-desc": (a, b) => (b.created_at || 0) - (a.created_at || 0) || b.id - a.id,
+    "created-asc": (a, b) => (a.created_at || 0) - (b.created_at || 0) || a.id - b.id,
+};
+let _folderSort = "name-asc";
+try {
+    const saved = localStorage.getItem(_SORT_KEY);
+    if (saved && _SORTS[saved]) _folderSort = saved;
+} catch { /* private mode / blocked storage — keep the default */ }
+
+export function getFolderSort() { return _folderSort; }
+
+export function setFolderSort(v) {
+    if (!_SORTS[v]) return;
+    _folderSort = v;
+    try { localStorage.setItem(_SORT_KEY, v); } catch { /* best-effort */ }
+}
+
+// The search box filters what the list shows. Inside an open folder the
+// current level's entries are matched by name (renderFolderContents). At
+// the top level it matches folder names AND paths inside them (subfolders
+// and file names ride on rel_path): a folder whose own name misses but
+// whose contents hit is shown with its subtree pruned to the matches.
 export function renderFoldersFiltered() {
     const q = _folderFilter.trim().toLowerCase();
     const inFolder = getLocation().folderId !== null;
-    const list = q && !inFolder ? folders.get().filter((f) => f.display_name.toLowerCase().includes(q)) : folders.get();
-    renderFolders(list);
+    if (!q || inFolder) {
+        renderFolders(folders.get());
+        return;
+    }
+    const allFiles = files.get();
+    const matched = new Set();
+    for (const f of folders.get()) {
+        if (f.display_name.toLowerCase().includes(q)) matched.add(f.id);
+    }
+    for (const file of allFiles) {
+        if (matched.has(file.folder_id) || file.state === "deleted") continue;
+        if (file.rel_path.toLowerCase().includes(q)) matched.add(file.folder_id);
+    }
+    renderFolders(folders.get().filter((f) => matched.has(f.id)));
 }
 
 const rowCache = new Map();
@@ -529,11 +571,11 @@ function updateRootSwitches(li, folder) {
         } else if (mode === "guest") {
             // Non-owned folder: a muted, non-interactive marker explaining
             // why this row has no share pill (feedback: its absence read as
-            // a bug rather than "not yours to share").
+            // a bug rather than "not yours to share"). Title is set below —
+            // it names the owner, which can arrive after the chip exists.
             const chip = document.createElement("span");
             chip.className = "share-chip-guest";
             chip.textContent = "Shared";
-            chip.title = "Shared with you by its owner — only the owner can change who has access.";
             el = chip;
         } else {
             const spacer = document.createElement("span");
@@ -576,6 +618,10 @@ function updateRootSwitches(li, folder) {
         if (li._sharePillLabel.textContent !== text) li._sharePillLabel.textContent = text;
         if (li._sharePill.className !== cls) li._sharePill.className = cls;
         if (li._sharePill.title !== title) li._sharePill.title = title;
+    } else if (mode === "guest") {
+        const who = folder.owner_name ? `by ${folder.owner_name}` : "by its owner";
+        const t = `Shared with you ${who} — only the owner can change who has access.`;
+        if (r.slot2.title !== t) r.slot2.title = t;
     }
 }
 
@@ -794,7 +840,7 @@ export function renderFolders(list) {
         if (connStatus.get() === "connected") leaveMissingLocation();
     }
     renderBreadcrumb(null, "");
-    const sorted = [...list].sort((a, b) => a.id - b.id);
+    const sorted = [...list].sort(_SORTS[_folderSort] || _SORTS["name-asc"]);
     if (sorted.length === 0) {
         // An empty list is ambiguous: either the folder snapshot hasn't
         // landed yet (initial load / slow network) or the user genuinely
@@ -825,8 +871,19 @@ export function renderFolders(list) {
     const targetRows = [];
     const seenKeys = new Set();
 
+    const q = _folderFilter.trim().toLowerCase();
     for (const folder of sorted) {
-        const folderFiles = allFiles.filter((x) => x.folder_id === folder.id);
+        let folderFiles = allFiles.filter((x) => x.folder_id === folder.id);
+        // During a search, a folder whose own name misses the query is in
+        // the list because its CONTENTS matched — prune the subtree to the
+        // matching paths and auto-open it so the hits are visible. Bounded,
+        // so a broad query can't explode a huge folder into the DOM.
+        let forceOpen = false;
+        if (q && !folder.display_name.toLowerCase().includes(q)) {
+            folderFiles = folderFiles.filter((x) =>
+                x.rel_path.toLowerCase().includes(q));
+            forceOpen = folderFiles.length > 0 && folderFiles.length <= 200;
+        }
         const tree = buildTree(folderFiles, folder.id);
         const syncStatus =
             syncMap.get(folder.id)?.sync_status ?? folder.sync_status ?? "idle";
@@ -841,6 +898,7 @@ export function renderFolders(list) {
             isRoot: true,
             folderActive: activeFolderSet.has(folder.id),
             folderSyncing: syncStatus === "syncing",
+            forceOpen,
         });
     }
     reconcileChildren(ul, targetRows, seenKeys, rowCache);
@@ -901,7 +959,7 @@ function renderBreadcrumb(folder, relDir) {
     const key = folder ? `${folder.id}:${folder.display_name}:${relDir}` : "";
     nav.closest(".folder-list-container")?.classList.toggle("in-folder", !!folder);
     const search = $("#folder-search");
-    if (search) search.placeholder = folder ? "Search this folder…" : "Search folders…";
+    if (search) search.placeholder = folder ? "Search this folder…" : "Search folders & files…";
     if (key === _crumbKey) return;
     _crumbKey = key;
 
@@ -935,12 +993,12 @@ function renderBreadcrumb(folder, relDir) {
     nav.replaceChildren(...parts);
 }
 
-function emitTreeRow({ targetRows, seenKeys, folder, node, relDir, displayName, depth, isRoot, folderActive, folderSyncing }) {
+function emitTreeRow({ targetRows, seenKeys, folder, node, relDir, displayName, depth, isRoot, folderActive, folderSyncing, forceOpen }) {
     // Sync is a folder-level operation — only the root row wears "syncing";
     // child dirs keep their file-state pills.
     const summary = summariseSubtree(node, !!folderActive, isRoot && !!folderSyncing);
     const hasChildren = node.dirs.size > 0 || node.files.length > 0;
-    const isOpen = isExpanded(folder.id, relDir);
+    const isOpen = !!forceOpen || isExpanded(folder.id, relDir);
     // Dir/root row counts as "selected" only when no file is selected.
     // Otherwise clicking a file inside this dir would highlight both the
     // file row and its parent dir row, which looks like two competing
@@ -986,6 +1044,7 @@ function emitChildRows({ targetRows, seenKeys, folder, node, relDir, depth, fold
             depth,
             isRoot: false,
             folderActive,
+            forceOpen,
         });
     }
     const fileCanDelete = !!(folder.writable) && (folder.sync_source_kind || "regular") === "regular";
