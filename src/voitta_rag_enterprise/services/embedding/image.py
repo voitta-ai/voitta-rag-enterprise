@@ -27,6 +27,9 @@ logger = logging.getLogger(__name__)
 
 FAKE_DIM = 64
 
+# SigLIP's text tower is trained on exactly this many tokens.
+_TEXT_MAX_TOKENS = 64
+
 
 class FakeImageEmbedder(ImageEmbedder):
     """Deterministic image+text embedder. Hash-based, same input → same vector."""
@@ -133,7 +136,18 @@ class SiglipImageEmbedder(ImageEmbedder):
         import torch
 
         processor, model = self._ensure_loaded()
-        inputs = processor(text=[text], return_tensors="pt", padding=True)
+        # SigLIP / SigLIP-2 were trained on text padded to exactly 64 tokens
+        # and pool the LAST token; ``padding=True`` (pad to the longest in
+        # the batch, i.e. no padding for one query) puts a content token in
+        # that slot and the query vector lands nowhere near the image space —
+        # live image search was near-random until this was fixed.
+        inputs = processor(
+            text=[text],
+            return_tensors="pt",
+            padding="max_length",
+            max_length=_TEXT_MAX_TOKENS,
+            truncation=True,
+        )
         with gpu_lock("siglip.embed_text"), torch.no_grad():
             features = _as_tensor(model.get_text_features(**inputs))
             features = features / features.norm(dim=-1, keepdim=True)
