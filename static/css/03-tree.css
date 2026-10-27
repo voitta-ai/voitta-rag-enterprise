@@ -355,8 +355,19 @@
     justify-content: center;
     border-radius: var(--radius-sm);
     color: var(--color-text-secondary);
-    font-size: 10px;
+    /* The ▸ text glyph rendered as a near-invisible dot at this size; the
+       chevron is drawn instead (the text stays for no-CSS fallback). */
+    font-size: 0;
     transition: transform 120ms ease;
+}
+.tree-row .chevron::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    margin-left: -2px;
+    border-right: 1.5px solid currentColor;
+    border-bottom: 1.5px solid currentColor;
+    transform: rotate(-45deg);
 }
 .tree-row .chevron:not(.leaf):hover {
     background: var(--color-bg-hover);
