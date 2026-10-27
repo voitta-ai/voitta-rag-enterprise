@@ -210,6 +210,10 @@ def main() -> int:
     os.environ.setdefault("VOITTA_DATA_DIR", str(user / "data"))
     os.environ.setdefault("VOITTA_ROOT_PATH", str(root_files))
     os.environ.setdefault("VOITTA_QDRANT_MODE", "managed")
+    # Desktop default embedding profile: e5 + SigLIP (fast on CPU / MPS; the
+    # gemma2 profile's speed on Apple Silicon is unmeasured). A DEFAULT, not
+    # VOITTA_EMBEDDING_PROFILE: a user who migrates to gemma2 stays there.
+    os.environ.setdefault("VOITTA_DEFAULT_EMBEDDING_PROFILE", "e5-siglip")
     os.environ.setdefault("VOITTA_QDRANT_BINARY", str(user_prefix / "bin" / "qdrant"))
     static_dir = res / "static"
     if static_dir.is_dir():

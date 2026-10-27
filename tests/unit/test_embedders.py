@@ -15,6 +15,19 @@ from voitta_rag_enterprise.services.embedding.sparse import FakeSparseEmbedder
 from voitta_rag_enterprise.services.embedding.text import FakeTextEmbedder
 
 
+@pytest.fixture(autouse=True)
+def _pinned_profile(env: None):
+    """No database here: pin the profile instead of resolving it. These
+    tests cover the e5-siglip fakes; gemma2 has its own tests below.
+    (Depends on ``env`` so the pin lands after env's cache reset.)"""
+    from voitta_rag_enterprise.services.embedding import profiles
+
+    profiles.pin("e5-siglip")
+    yield
+    profiles.reset_profile_cache()
+
+
+
 def test_factory_returns_fake_in_test_env(env: None) -> None:
     assert isinstance(get_text_embedder(), FakeTextEmbedder)
     assert isinstance(get_sparse_embedder(), FakeSparseEmbedder)
@@ -104,3 +117,23 @@ def test_siglip_query_is_padded_to_the_trained_length() -> None:
         }
     ]
     assert vec == [0.5, 0.5, 0.5, 0.5]
+
+
+def test_gemma2_shares_one_embedder_for_text_and_images() -> None:
+    from voitta_rag_enterprise.services.embedding import profiles, reset_embedder_caches
+    from voitta_rag_enterprise.services.embedding.gemma import FakeGemmaEmbedder
+
+    reset_embedder_caches()
+    profiles.pin("gemma2")
+    text, image = get_text_embedder(), get_image_embedder()
+    assert text is image
+    assert isinstance(text, FakeGemmaEmbedder)
+    # One space: an image-search query is exactly the text-search query.
+    assert image.embed_text("revenue by quarter") == text.embed_query("revenue by quarter")
+
+
+def test_e5_siglip_keeps_two_embedders() -> None:
+    text, image = get_text_embedder(), get_image_embedder()
+    assert text is not image
+    assert isinstance(text, FakeTextEmbedder)
+    assert isinstance(image, FakeImageEmbedder)

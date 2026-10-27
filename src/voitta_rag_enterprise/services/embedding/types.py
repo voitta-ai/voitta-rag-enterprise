@@ -16,7 +16,12 @@ class TextEmbedder(Protocol):
     @property
     def dim(self) -> int: ...
 
-    def embed_documents(self, texts: list[str]) -> list[list[float]]: ...
+    def embed_documents(
+        self, texts: list[str], titles: list[str] | None = None
+    ) -> list[list[float]]:
+        """``titles[i]`` names where ``texts[i]`` came from (the file's
+        rel_path). Models with a title slot use it; others ignore it."""
+        ...
 
     def embed_query(self, text: str) -> list[float]: ...
 

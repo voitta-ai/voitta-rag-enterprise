@@ -380,6 +380,13 @@ def create_app() -> FastAPI:
             from .services.qdrant_process import start_managed_qdrant
 
             start_managed_qdrant()
+        # Resolve the embedding profile before anything can index or search.
+        # A profile chosen explicitly against collections another profile
+        # built raises ProfileMismatchError here and aborts startup, rather
+        # than writing one model's vectors into another model's space.
+        from .services.embedding.profiles import resolve as resolve_embedding_profile
+
+        resolve_embedding_profile()
         events.install_loop(asyncio.get_running_loop())
         _seed_users()
         _seed_auth_providers()

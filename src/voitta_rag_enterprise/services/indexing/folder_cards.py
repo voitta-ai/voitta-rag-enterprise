@@ -3,7 +3,7 @@
 A *folder card* is a synthetic point in the Qdrant ``chunks`` collection
 (``kind='folder_card'``) whose text is the folder's display name, the
 subfolder path words, and the optional user-written description from
-``folder_dir_meta``. Cards ride the same hybrid (e5 + BM25, RRF-fused)
+``folder_dir_meta``. Cards ride the same hybrid (dense + BM25, RRF-fused)
 search as document chunks, so one query hits content and folder names
 alike; the ``folder_id`` payload keeps the existing ACL filter working
 unchanged.
@@ -28,6 +28,7 @@ from ...config import get_settings
 from ...db.database import session_scope
 from ...db.models import File, Folder, FolderDirMeta
 from ...logging_config import bind_context
+from ..embedding.profiles import active as active_profile
 from .common import logger
 
 # Namespace for the deterministic card point ids: uuid5(ns, f"{folder_id}:{subpath}").
@@ -51,7 +52,7 @@ def card_text(display_name: str, subpath: str, description: str) -> str:
     """Human/embedder-facing card body.
 
     The path words are the searchable "name" signal; the description (when
-    present) adds the semantic meat. e5 + BM25 both see one plain-text blob.
+    present) adds the semantic meat. Dense and BM25 both see one plain-text blob.
     """
     lines = [f"Folder: {display_name}"]
     if subpath:
@@ -173,7 +174,7 @@ def rebuild_cards_for_folder(folder_id: int) -> dict | None:
             for p in vector_store.list_folder_cards(folder_id)
         }
         wanted = {
-            sp: (text, settings.dense_version, settings.sparse_version)
+            sp: (text, active_profile().dense_version, settings.sparse_version)
             for sp, text in desired.items()
         }
         if existing == wanted:
@@ -197,7 +198,7 @@ def rebuild_cards_for_folder(folder_id: int) -> dict | None:
                 text=text,
                 dense=dense,
                 sparse=sparse,
-                dense_model_version=settings.dense_version,
+                dense_model_version=active_profile().dense_version,
                 sparse_model_version=settings.sparse_version,
                 allowed_users=allowed_users,
             )

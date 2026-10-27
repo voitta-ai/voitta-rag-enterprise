@@ -115,7 +115,7 @@ def test_folder_health_out_of_sync_when_qdrant_wiped(
     # data dir is wiped or the path is changed.
     def _drop():
         client = vector_store.get_client()
-        client.delete_collection(vector_store.CHUNKS)
+        client.delete_collection(vector_store.chunks_collection())
 
     vector_store.run_on_qdrant(_drop)
 
@@ -146,7 +146,7 @@ def test_log_startup_warnings_emits_warning_per_out_of_sync_folder(
 
     def _drop():
         client = vector_store.get_client()
-        client.delete_collection(vector_store.CHUNKS)
+        client.delete_collection(vector_store.chunks_collection())
 
     vector_store.run_on_qdrant(_drop)
 

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import math
 
+import pytest
+
 from voitta_rag_enterprise.services import vector_store as vs
 from voitta_rag_enterprise.services.embedding import SparseVector
 from voitta_rag_enterprise.services.vector_store import (
@@ -17,6 +19,17 @@ from voitta_rag_enterprise.services.vector_store import (
     delete_chunks_for_files,
     replace_chunks_for_file,
 )
+
+
+@pytest.fixture(autouse=True)
+def _pinned_profile():
+    """These tests exercise embedder / vector-store mechanics with no
+    database; pin the profile instead of resolving it from SQLite + Qdrant."""
+    from voitta_rag_enterprise.services.embedding import profiles
+
+    profiles.pin("gemma2")
+    yield
+    profiles.reset_profile_cache()
 
 
 class _FakeClient:

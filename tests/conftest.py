@@ -11,8 +11,19 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--embedding-profile",
+        choices=("gemma2", "e5-siglip"),
+        default=None,
+        help="Install-default embedding profile for the run (default: the app's own).",
+    )
+
+
 @pytest.fixture
-def env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None]:
+def env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, request: pytest.FixtureRequest
+) -> Iterator[None]:
     """Isolate every test from the host environment.
 
     Strips ``VOITTA_*`` vars, points ``VOITTA_DATA_DIR`` at a per-test tmp dir,
@@ -41,6 +52,9 @@ def env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None]:
     monkeypatch.setenv("VOITTA_DISABLE_BACKGROUND", "true")
     monkeypatch.setenv("VOITTA_USE_FAKE_EMBEDDERS", "true")
     monkeypatch.setenv("VOITTA_USE_FAKE_PDF_PARSER", "true")
+    # Run the suite under either profile: pytest --embedding-profile e5-siglip
+    if profile := request.config.getoption("--embedding-profile"):
+        monkeypatch.setenv("VOITTA_DEFAULT_EMBEDDING_PROFILE", profile)
     reset_settings_cache()
     reset_engine_cache()
     reset_embedder_caches()

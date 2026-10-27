@@ -101,7 +101,7 @@ def test_embed_text_writes_qdrant_chunks(env: None, tmp_path: Path) -> None:
     asyncio.run(run_embed_text({"file_id": file_id}))
 
     client = vector_store.get_client()
-    res, _ = client.scroll(vector_store.CHUNKS, limit=100, with_payload=True)
+    res, _ = client.scroll(vector_store.chunks_collection(), limit=100, with_payload=True)
     assert len(res) >= 1
     for p in res:
         assert p.payload["file_id"] == file_id
@@ -127,7 +127,7 @@ def test_embed_image_dedups_by_cas(env: None, tmp_path: Path) -> None:
             asyncio.run(run_embed_image({"image_id": img.id}))
 
     client = vector_store.get_client()
-    res, _ = client.scroll(vector_store.IMAGES, limit=100, with_payload=True)
+    res, _ = client.scroll(vector_store.images_collection(), limit=100, with_payload=True)
     assert len(res) == 1  # single point for the shared SHA
     point = res[0]
     assert sorted(point.payload["file_ids"]) == sorted([a_id, b_id])

@@ -224,7 +224,7 @@ def test_grant_existing_qdrant_payload_carries_allowed_users(env: None, tmp_path
         _seed_authed(app, client, tmp_path / "src", {"a.md": "alpha beta"}, "alice@x")
         client_q = vector_store.get_client()
         res, _ = client_q.scroll(
-            vector_store.CHUNKS, limit=100, with_payload=True
+            vector_store.chunks_collection(), limit=100, with_payload=True
         )
     assert len(res) >= 1
     with session_scope() as s:

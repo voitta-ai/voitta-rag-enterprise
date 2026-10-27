@@ -6,7 +6,7 @@ installer has work to do. Three phase rows are displayed vertically, matching
 
   Phase 0 — Python packages   (lazy pip install of the heavy ML/server stack)
   Phase 1 — Search engine     (download the managed Qdrant binary)
-  Phase 2 — AI models         (prewarm the e5 / SigLIP embedders)
+  Phase 2 — AI models         (prewarm the embedding models)
 
 A scrolling log below the rows streams the raw pip / download output so the
 user can see exactly what is happening.

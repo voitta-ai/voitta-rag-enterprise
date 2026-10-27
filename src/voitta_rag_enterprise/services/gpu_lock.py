@@ -4,8 +4,8 @@ Every code path that runs inference on the GPU must enter :func:`gpu_lock`.
 That includes:
 
 * MinerU (PDF layout / OCR / formula / table models)
-* SigLIP image+text encoder (real ``embed_image`` / ``embed_text``)
-* E5 dense text encoder (real ``embed_documents`` / ``embed_query``)
+* the embedding models of the active profile: EmbeddingGemma-2 (text and
+  images, one model) or e5-base-v2 + SigLIP-2 (real ``embed_*`` calls)
 
 Sparse BM25 is CPU-only and does not acquire this lock.
 
@@ -36,7 +36,7 @@ _GPU_LOCK = threading.Lock()
 def gpu_lock(label: str):
     """Acquire the global GPU mutex for the duration of the block.
 
-    ``label`` is a short tag (``"siglip.embed_image"``, ``"mineru.parse"``)
+    ``label`` is a short tag (``"gemma.embed_images"``, ``"mineru.parse"``)
     used in the queue/hold-time log line. Keep it under ~30 chars.
     """
     queued_at = time.perf_counter()

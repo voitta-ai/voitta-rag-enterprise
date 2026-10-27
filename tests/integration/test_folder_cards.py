@@ -386,7 +386,7 @@ def test_reembed_stale_scan_handles_cards(env, tmp_path: Path) -> None:
     from scripts.reembed_stale import _scan_for_stale
 
     stale = _scan_for_stale(
-        vs.CHUNKS,
+        vs.chunks_collection(),
         ["dense_model_version", "sparse_model_version"],
         {
             "dense_model_version": "next-model@2",

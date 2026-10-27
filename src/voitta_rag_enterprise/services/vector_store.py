@@ -1,10 +1,12 @@
 """Qdrant adapter — collection bootstrap, upserts, search.
 
-Two collections:
+Two collections per embedding profile (names from
+``services/embedding/profiles.py``: ``chunks__gemma2`` / ``images__gemma2``,
+or the historical ``chunks`` / ``images`` for e5-siglip):
 
-- ``chunks`` — named vectors ``dense`` (e5-base-v2) and ``sparse`` (BM25),
-  RRF-fused at query time.
-- ``images`` — single SigLIP-2 vector, searchable by text or image.
+- chunks — named vectors ``dense`` (the profile's text model) and ``sparse``
+  (BM25), RRF-fused at query time.
+- images — a single ``image`` vector, searchable by text or image.
 
 Payload carries ``file_id`` / ``folder_id`` / ``chunk_index``
 (or ``image_index``) plus ``allowed_users`` for the search-time ACL filter.
@@ -44,8 +46,21 @@ _META_PAYLOAD_INDEXES: tuple[tuple[str, str], ...] = tuple(
 
 logger = logging.getLogger(__name__)
 
-CHUNKS = "chunks"
-IMAGES = "images"
+_QDRANT_THREAD_PREFIX = "qdrant-worker"
+
+
+def chunks_collection() -> str:
+    """The active embedding profile's chunk collection."""
+    from .embedding.profiles import active
+
+    return active().chunks_collection
+
+
+def images_collection() -> str:
+    """The active embedding profile's image collection."""
+    from .embedding.profiles import active
+
+    return active().images_collection
 
 _client: QdrantClient | None = None
 _lock = threading.Lock()
@@ -61,7 +76,7 @@ def _ensure_executor() -> ThreadPoolExecutor:
     global _executor
     if _executor is None:
         _executor = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="qdrant-worker"
+            max_workers=1, thread_name_prefix=_QDRANT_THREAD_PREFIX
         )
     return _executor
 
@@ -69,8 +84,12 @@ def _ensure_executor() -> ThreadPoolExecutor:
 def run_on_qdrant(fn) -> Any:
     """Run ``fn()`` on the dedicated Qdrant thread; return its result.
 
-    Reraises any exception from ``fn`` in the calling thread.
+    Reraises any exception from ``fn`` in the calling thread. Re-entrant:
+    called from the Qdrant thread itself it runs ``fn`` inline — submitting
+    would queue behind the caller on the one-worker pool and deadlock.
     """
+    if threading.current_thread().name.startswith(_QDRANT_THREAD_PREFIX):
+        return fn()
     return _ensure_executor().submit(fn).result()
 
 
@@ -158,15 +177,20 @@ _ensured_collections: set[str] = set()
 
 
 def ensure_chunks_collection(text_dim: int) -> None:
-    """Idempotent — only the chunks (text) collection."""
-    if CHUNKS in _ensured_collections:
+    """Idempotent — only the active profile's chunks (text) collection."""
+    from .embedding.profiles import active, record_collection
+
+    prof = active()
+    name = prof.chunks_collection
+    if name in _ensured_collections:
         return
 
-    def _do() -> None:
+    def _do() -> bool:
         client = get_client()
-        if not _collection_exists(client, CHUNKS):
+        created = False
+        if not _collection_exists(client, name):
             client.create_collection(
-                CHUNKS,
+                name,
                 vectors_config={
                     "dense": qm.VectorParams(size=text_dim, distance=qm.Distance.COSINE),
                 },
@@ -174,32 +198,100 @@ def ensure_chunks_collection(text_dim: int) -> None:
                     "sparse": qm.SparseVectorParams(),
                 },
             )
-            logger.info("created qdrant collection: %s (dense dim=%d)", CHUNKS, text_dim)
-        _ensure_payload_indexes(client, CHUNKS, _CHUNK_PAYLOAD_INDEXES)
+            created = True
+            logger.info("created qdrant collection: %s (dense dim=%d)", name, text_dim)
+        _ensure_payload_indexes(client, name, _CHUNK_PAYLOAD_INDEXES)
+        return created
 
-    run_on_qdrant(_do)
-    _ensured_collections.add(CHUNKS)
+    if run_on_qdrant(_do):
+        record_collection(name, prof, dim=text_dim, kind="chunks")
+    _ensured_collections.add(name)
 
 
 def ensure_images_collection(image_dim: int) -> None:
-    """Idempotent — only the images collection."""
-    if IMAGES in _ensured_collections:
+    """Idempotent — only the active profile's images collection."""
+    from .embedding.profiles import active, record_collection
+
+    prof = active()
+    name = prof.images_collection
+    if name in _ensured_collections:
         return
 
-    def _do() -> None:
+    def _do() -> bool:
         client = get_client()
-        if not _collection_exists(client, IMAGES):
+        created = False
+        if not _collection_exists(client, name):
             client.create_collection(
-                IMAGES,
+                name,
                 vectors_config={
                     "image": qm.VectorParams(size=image_dim, distance=qm.Distance.COSINE),
                 },
             )
-            logger.info("created qdrant collection: %s (dim=%d)", IMAGES, image_dim)
-        _ensure_payload_indexes(client, IMAGES, _IMAGE_PAYLOAD_INDEXES)
+            created = True
+            logger.info("created qdrant collection: %s (dim=%d)", name, image_dim)
+        _ensure_payload_indexes(client, name, _IMAGE_PAYLOAD_INDEXES)
+        return created
 
-    run_on_qdrant(_do)
-    _ensured_collections.add(IMAGES)
+    if run_on_qdrant(_do):
+        record_collection(name, prof, dim=image_dim, kind="images")
+    _ensured_collections.add(name)
+
+
+def collection_dims(names: list[str]) -> dict[str, int]:
+    """Vector size of each existing collection in ``names`` (absent ones omitted)."""
+
+    def _do() -> dict[str, int]:
+        client = get_client()
+        out: dict[str, int] = {}
+        for name in names:
+            if not _collection_exists(client, name):
+                continue
+            vectors = client.get_collection(name).config.params.vectors
+            params = next(iter(vectors.values())) if isinstance(vectors, dict) else vectors
+            out[name] = int(params.size)
+        return out
+
+    return run_on_qdrant(_do)
+
+
+def scan_payload_fields(collection: str, fields: list[str]) -> list[dict[str, Any]]:
+    """Every point's ``fields`` (payload subset, no vectors); ``[]`` if the
+    collection is absent. Used by maintenance passes that diff Qdrant
+    against SQL; fetching only the needed keys keeps a 2M-point scan cheap
+    (see ``_delete_orphans_for_collection``)."""
+
+    def _do() -> list[dict[str, Any]]:
+        client = get_client()
+        if not _collection_exists(client, collection):
+            return []
+        out: list[dict[str, Any]] = []
+        offset = None
+        while True:
+            points, offset = client.scroll(
+                collection,
+                limit=1024,
+                offset=offset,
+                with_payload=qm.PayloadSelectorInclude(include=fields),
+                with_vectors=False,
+            )
+            out.extend(dict(p.payload or {}) for p in points)
+            if offset is None:
+                return out
+
+    return run_on_qdrant(_do)
+
+
+def collection_point_counts(names: list[str]) -> dict[str, int]:
+    """Exact point count of each collection in ``names`` (0 when absent)."""
+
+    def _do() -> dict[str, int]:
+        client = get_client()
+        return {
+            name: client.count(name, exact=True).count if _collection_exists(client, name) else 0
+            for name in names
+        }
+
+    return run_on_qdrant(_do)
 
 
 # Payload indexes wanted on each collection. ``page`` + the ``layout_*``
@@ -428,7 +520,7 @@ def replace_chunks_for_file(file_id: int, points: list[ChunkPoint]) -> None:
     def _do() -> None:
         client = get_client()
         client.delete(
-            CHUNKS,
+            chunks_collection(),
             points_selector=qm.FilterSelector(
                 filter=qm.Filter(
                     must=[
@@ -464,7 +556,7 @@ def replace_chunks_for_file(file_id: int, points: list[ChunkPoint]) -> None:
         last_start = ((len(structs) - 1) // _UPSERT_BATCH_POINTS) * _UPSERT_BATCH_POINTS
         for start in range(0, len(structs), _UPSERT_BATCH_POINTS):
             client.upsert(
-                CHUNKS,
+                chunks_collection(),
                 points=structs[start : start + _UPSERT_BATCH_POINTS],
                 wait=(start == last_start),
             )
@@ -478,7 +570,7 @@ def find_image_point_by_cas(image_cas_id: str) -> dict[str, Any] | None:
     def _do() -> dict[str, Any] | None:
         client = get_client()
         res, _ = client.scroll(
-            IMAGES,
+            images_collection(),
             scroll_filter=qm.Filter(
                 must=[
                     qm.FieldCondition(
@@ -502,7 +594,7 @@ def add_file_to_image_point(point_id: int, file_id: int) -> None:
 
     def _do() -> None:
         client = get_client()
-        existing = client.retrieve(IMAGES, ids=[point_id], with_payload=True)
+        existing = client.retrieve(images_collection(), ids=[point_id], with_payload=True)
         if not existing:
             return
         payload = dict(existing[0].payload or {})
@@ -510,7 +602,7 @@ def add_file_to_image_point(point_id: int, file_id: int) -> None:
         if file_id not in file_ids:
             file_ids.append(file_id)
             client.set_payload(
-                IMAGES, payload={"file_ids": file_ids}, points=[point_id]
+                images_collection(), payload={"file_ids": file_ids}, points=[point_id]
             )
 
     run_on_qdrant(_do)
@@ -520,7 +612,7 @@ def upsert_image_point(point: ImagePoint, file_ids: list[int]) -> None:
     def _do() -> None:
         client = get_client()
         client.upsert(
-            IMAGES,
+            images_collection(),
             points=[
                 qm.PointStruct(
                     id=point.point_id,
@@ -597,10 +689,10 @@ def remove_file_from_image_points(file_id: int) -> list[int]:
 
     def _do() -> list[int]:
         client = get_client()
-        if not client.collection_exists(IMAGES):
+        if not client.collection_exists(images_collection()):
             return []
         res, _ = client.scroll(
-            IMAGES,
+            images_collection(),
             scroll_filter=qm.Filter(
                 must=[
                     qm.FieldCondition(key="file_ids", match=qm.MatchValue(value=file_id))
@@ -614,9 +706,9 @@ def remove_file_from_image_points(file_id: int) -> list[int]:
             payload = dict(p.payload or {})
             file_ids = [fid for fid in (payload.get("file_ids") or []) if fid != file_id]
             if file_ids:
-                client.set_payload(IMAGES, payload={"file_ids": file_ids}, points=[p.id])
+                client.set_payload(images_collection(), payload={"file_ids": file_ids}, points=[p.id])
             else:
-                client.delete(IMAGES, points_selector=qm.PointIdsList(points=[p.id]))
+                client.delete(images_collection(), points_selector=qm.PointIdsList(points=[p.id]))
                 deleted.append(p.id)
         return deleted
 
@@ -701,7 +793,7 @@ def delete_orphan_image_points(known_image_ids: set[int]) -> int:
     count of deleted points. Safe to run at startup or on demand;
     idempotent on subsequent runs.
     """
-    return _delete_orphans_for_collection(IMAGES, "image_id", known_image_ids)
+    return _delete_orphans_for_collection(images_collection(), "image_id", known_image_ids)
 
 
 def delete_orphan_chunk_points(known_chunk_ids: set[int]) -> int:
@@ -717,16 +809,16 @@ def delete_orphan_chunk_points(known_chunk_ids: set[int]) -> int:
 
     Returns the count of deleted points. Idempotent on subsequent runs.
     """
-    return _delete_orphans_for_collection(CHUNKS, "chunk_id", known_chunk_ids)
+    return _delete_orphans_for_collection(chunks_collection(), "chunk_id", known_chunk_ids)
 
 
 def delete_chunks_for_file(file_id: int) -> None:
     def _do() -> None:
         client = get_client()
-        if not client.collection_exists(CHUNKS):
+        if not client.collection_exists(chunks_collection()):
             return
         client.delete(
-            CHUNKS,
+            chunks_collection(),
             points_selector=qm.FilterSelector(
                 filter=qm.Filter(
                     must=[
@@ -761,12 +853,12 @@ def delete_chunks_for_files(file_ids: list[int]) -> None:
 
     def _do() -> None:
         client = get_client()
-        if not client.collection_exists(CHUNKS):
+        if not client.collection_exists(chunks_collection()):
             return
         for start in range(0, len(file_ids), _DELETE_FILTER_BATCH):
             batch = file_ids[start : start + _DELETE_FILTER_BATCH]
             client.delete(
-                CHUNKS,
+                chunks_collection(),
                 points_selector=qm.FilterSelector(
                     filter=qm.Filter(
                         must=[
@@ -796,10 +888,10 @@ def delete_chunks_for_folder(folder_id: int) -> None:
 
     def _do() -> None:
         client = get_client()
-        if not client.collection_exists(CHUNKS):
+        if not client.collection_exists(chunks_collection()):
             return
         client.delete(
-            CHUNKS,
+            chunks_collection(),
             points_selector=qm.FilterSelector(
                 filter=qm.Filter(
                     must=[
@@ -839,10 +931,10 @@ def list_folder_cards(folder_id: int) -> list[dict[str, Any]]:
 
     def _do() -> list[dict[str, Any]]:
         client = get_client()
-        if not client.collection_exists(CHUNKS):
+        if not client.collection_exists(chunks_collection()):
             return []
         res, _ = client.scroll(
-            CHUNKS,
+            chunks_collection(),
             scroll_filter=_folder_cards_filter(folder_id),
             limit=10_000,
             with_payload=True,
@@ -862,7 +954,7 @@ def replace_cards_for_folder(folder_id: int, points: list[FolderCardPoint]) -> N
     def _do() -> None:
         client = get_client()
         client.delete(
-            CHUNKS,
+            chunks_collection(),
             points_selector=qm.FilterSelector(filter=_folder_cards_filter(folder_id)),
         )
         if not points:
@@ -892,7 +984,7 @@ def replace_cards_for_folder(folder_id: int, points: list[FolderCardPoint]) -> N
         last_start = ((len(structs) - 1) // _UPSERT_BATCH_POINTS) * _UPSERT_BATCH_POINTS
         for start in range(0, len(structs), _UPSERT_BATCH_POINTS):
             client.upsert(
-                CHUNKS,
+                chunks_collection(),
                 points=structs[start : start + _UPSERT_BATCH_POINTS],
                 wait=(start == last_start),
             )
@@ -905,10 +997,10 @@ def delete_cards_for_folder(folder_id: int) -> None:
 
     def _do() -> None:
         client = get_client()
-        if not client.collection_exists(CHUNKS):
+        if not client.collection_exists(chunks_collection()):
             return
         client.delete(
-            CHUNKS,
+            chunks_collection(),
             points_selector=qm.FilterSelector(filter=_folder_cards_filter(folder_id)),
         )
 
@@ -926,13 +1018,13 @@ def sweep_orphan_folder_cards(live_folder_ids: set[int]) -> int:
 
     def _do() -> int:
         client = get_client()
-        if not client.collection_exists(CHUNKS):
+        if not client.collection_exists(chunks_collection()):
             return 0
         deleted = 0
         offset = None
         while True:
             res, offset = client.scroll(
-                CHUNKS,
+                chunks_collection(),
                 scroll_filter=qm.Filter(
                     must=[
                         qm.FieldCondition(
@@ -953,7 +1045,7 @@ def sweep_orphan_folder_cards(live_folder_ids: set[int]) -> int:
             ]
             if stale_ids:
                 client.delete(
-                    CHUNKS, points_selector=qm.PointIdsList(points=stale_ids)
+                    chunks_collection(), points_selector=qm.PointIdsList(points=stale_ids)
                 )
                 deleted += len(stale_ids)
             if offset is None:
@@ -982,12 +1074,12 @@ def remove_files_from_image_points(file_ids: list[int]) -> int:
 
     def _do() -> int:
         client = get_client()
-        if not client.collection_exists(IMAGES):
+        if not client.collection_exists(images_collection()):
             return 0
         # ``MatchAny`` on an array field matches points whose array contains
         # at least one of the listed values — exactly what we want.
         res, _ = client.scroll(
-            IMAGES,
+            images_collection(),
             scroll_filter=qm.Filter(
                 must=[qm.FieldCondition(key="file_ids", match=qm.MatchAny(any=list(target)))]
             ),
@@ -1000,11 +1092,11 @@ def remove_files_from_image_points(file_ids: list[int]) -> int:
             payload = dict(p.payload or {})
             remaining = [fid for fid in (payload.get("file_ids") or []) if fid not in target]
             if remaining:
-                client.set_payload(IMAGES, payload={"file_ids": remaining}, points=[p.id])
+                client.set_payload(images_collection(), payload={"file_ids": remaining}, points=[p.id])
             else:
                 to_delete.append(p.id)
         if to_delete:
-            client.delete(IMAGES, points_selector=qm.PointIdsList(points=to_delete))
+            client.delete(images_collection(), points_selector=qm.PointIdsList(points=to_delete))
             deleted = len(to_delete)
         return deleted
 
@@ -1030,10 +1122,14 @@ def search_chunks(
     """Hybrid dense + sparse search over the ``chunks`` collection (RRF-fused)."""
     flt = _build_filter(folder_ids=folder_ids, allowed_user_id=allowed_user_id)
 
+    name = chunks_collection()
+
     def _do() -> tuple[list[Any], list[Any]]:
         client = get_client()
+        if not _collection_exists(client, name):
+            return [], []  # nothing indexed yet: no hits, not an error
         dense_resp = client.query_points(
-            CHUNKS,
+            name,
             query=dense,
             using="dense",
             limit=limit,
@@ -1043,7 +1139,7 @@ def search_chunks(
         sparse_points: list[Any] = []
         if sparse.indices:
             sparse_resp = client.query_points(
-                CHUNKS,
+                name,
                 query=qm.SparseVector(indices=sparse.indices, values=sparse.values),
                 using="sparse",
                 limit=limit,
@@ -1067,10 +1163,14 @@ def search_images(
 ) -> list[SearchHit]:
     flt = _build_filter(folder_ids=folder_ids, allowed_user_id=allowed_user_id)
 
+    name = images_collection()
+
     def _do() -> list[Any]:
         client = get_client()
+        if not _collection_exists(client, name):
+            return []  # no image indexed yet: no hits, not an error
         resp = client.query_points(
-            IMAGES,
+            name,
             query=vector,
             using="image",
             limit=limit,

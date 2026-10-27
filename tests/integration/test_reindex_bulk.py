@@ -102,7 +102,7 @@ def test_reindex_bulk_wipe_clears_chunks_and_images(env: None, tmp_path: Path) -
         assert chunks_before, "extract should have produced chunks"
         # And Qdrant should have at least one point for this folder.
         points_before = vector_store.count_points_for_folder(
-            vector_store.CHUNKS, fid
+            vector_store.chunks_collection(), fid
         )
         assert points_before >= 1
 
@@ -128,7 +128,7 @@ def test_reindex_bulk_wipe_clears_chunks_and_images(env: None, tmp_path: Path) -
     assert all(f.file_cas_id is None for f in files_after)
 
     # Qdrant chunk points for the folder: also gone in a single bulk call.
-    points_after = vector_store.count_points_for_folder(vector_store.CHUNKS, fid)
+    points_after = vector_store.count_points_for_folder(vector_store.chunks_collection(), fid)
     assert points_after == 0
 
 

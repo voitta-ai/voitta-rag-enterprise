@@ -70,7 +70,7 @@ def folder_health(db: Session, folder: Folder) -> FolderHealth:
         )
     ).scalar_one() or 0
     points = vector_store.count_points_for_folder(
-        vector_store.CHUNKS, folder.id
+        vector_store.chunks_collection(), folder.id
     )
     return FolderHealth(
         folder_id=folder.id,

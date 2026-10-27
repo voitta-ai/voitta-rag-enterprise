@@ -24,7 +24,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
 import ssl
 import subprocess
 import sys
@@ -294,14 +293,22 @@ def _prewarm_models(reporter: InstallReporter, phase: int) -> None:
     # Setting the env here also persists into the server thread (same process)
     # so its own first-query model pulls verify correctly.
     _ensure_ca_env()
-    reporter.log(">>> warming embedders (e5 · SigLIP)")
+    reporter.log(">>> warming embedders")
     try:
-        # Importing + touching the factory triggers the lazy HF downloads the
-        # server would otherwise do on the first query.
-        from voitta_rag_enterprise.services.embedding import factory  # noqa: PLC0415
+        # Download the weights the server would otherwise fetch on its first
+        # query. Only download: resolving the profile needs the database
+        # (not there yet), and pinning one would bypass the server's startup
+        # check in this same process.
+        from huggingface_hub import snapshot_download  # noqa: PLC0415
 
-        emb = factory.get_text_embedder()
-        emb.embed_query("warmup")
+        from voitta_rag_enterprise.config import get_settings  # noqa: PLC0415
+        from voitta_rag_enterprise.services.embedding.profiles import profile  # noqa: PLC0415
+
+        s = get_settings()
+        p = profile(s.embedding_profile or s.default_embedding_profile)
+        for repo in dict.fromkeys((p.dense_model, p.image_model)):
+            reporter.log(f"    {repo}")
+            snapshot_download(repo)
     except Exception as exc:  # noqa: BLE001 — never fail install on prewarm
         # Best-effort: models download lazily on first use if this is skipped.
         reporter.log(f"!!! model prewarm skipped: {type(exc).__name__}: {exc}")

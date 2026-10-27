@@ -159,7 +159,7 @@ def test_source_meta_reaches_chunk_and_image_payloads(env: None, tmp_path: Path)
             lambda: vs.get_client().scroll(coll, limit=50, with_payload=True)
         )[0]
 
-    chunks = scroll(vs.CHUNKS)
+    chunks = scroll(vs.chunks_collection())
     assert chunks, "expected chunk points"
     cp = chunks[0].payload
     assert cp["meta_owner_email"] == "roman@x.com"
@@ -170,7 +170,7 @@ def test_source_meta_reaches_chunk_and_image_payloads(env: None, tmp_path: Path)
     assert cp["meta_uploaded_ts"] > 0           # File.added_at
     assert "meta_editor_name" not in cp          # null-omitted
 
-    imgs = scroll(vs.IMAGES)
+    imgs = scroll(vs.images_collection())
     assert imgs, "expected image points"
     assert imgs[0].payload["meta_owner_email"] == "roman@x.com"
     assert imgs[0].payload["meta_created_ts"] == 1_700_000_000
@@ -181,7 +181,7 @@ def test_source_meta_reaches_chunk_and_image_payloads(env: None, tmp_path: Path)
         flt = qm.Filter(must=[qm.FieldCondition(
             key="meta_modified_ts", range=qm.Range(gte=threshold))])
         return len(vs.run_on_qdrant(
-            lambda: vs.get_client().scroll(vs.CHUNKS, scroll_filter=flt, limit=50)
+            lambda: vs.get_client().scroll(vs.chunks_collection(), scroll_filter=flt, limit=50)
         )[0])
     assert count_ge(1_700_000_000) == len(chunks)
     assert count_ge(1_700_500_001) == 0

@@ -29,11 +29,13 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+from voitta_rag_enterprise.services.embedding.profiles import ALL_COLLECTIONS
+
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger("remap")
 
-# Both collections we maintain. Keep in sync with vector_store.CHUNKS / IMAGES.
-COLLECTIONS = ["chunks", "images"]
+# Every collection any embedding profile uses; missing ones are skipped.
+COLLECTIONS = list(ALL_COLLECTIONS)
 
 
 def main() -> int:

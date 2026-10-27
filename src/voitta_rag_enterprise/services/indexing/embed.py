@@ -1,13 +1,14 @@
 """Text + image embed pipelines and their worker handlers.
 
-Runs the SigLIP/e5 forward passes, upserts Qdrant points, and decrements the
-per-file pending-embed counter. Invoked both by the job queue (``embed_text`` /
+Runs the active embedding profile's forward passes, upserts Qdrant points
+into its collections, and decrements the per-file pending-embed counter. Invoked both by the job queue (``embed_text`` /
 ``embed_image``) and inline from ``extract``.
 """
 
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 
 from sqlalchemy import select
 
@@ -15,6 +16,7 @@ from ...config import get_settings
 from ...db.database import session_scope
 from ...db.models import Chunk, ChunkImageLink, File, Image
 from ...logging_config import bind_context
+from ..embedding.profiles import active as active_profile
 from .accounting import _decrement_pending_embeds
 from .common import (
     _format_exception,
@@ -96,219 +98,283 @@ async def run_embed_image(payload: dict) -> None:
 
 
 def _embed_text_sync(file_id: int, round_token: int | None = None) -> None:
+    with bind_context(file_id=file_id, round=round_token):
+        logger.info("embed_text begin")
+        n = embed_file_chunks(file_id, round_token=round_token)
+        if n is None:
+            return
+        _decrement_pending_embeds(file_id, round_token)
+        logger.info("embed_text done: points=%d", n)
+
+
+def embed_file_chunks(file_id: int, *, round_token: int | None = None) -> int | None:
+    """Embed every stored chunk of a file into the active profile's chunk
+    collection, replacing the file's points there. Returns the number of
+    points written, or ``None`` if the file is gone or ``round_token`` is
+    stale. No job bookkeeping: the ``embed_text`` job and the profile
+    migration both call this."""
     from .. import vector_store
     from ..acl import allowed_user_ids_for_file
     from ..embedding import get_sparse_embedder, get_text_embedder
     from ..layout import pages_for_range, primary_page_for_range
 
-    with bind_context(file_id=file_id, round=round_token):
-        logger.info("embed_text begin")
-        settings = get_settings()
-        with _stage("embed_text.load_chunks"), session_scope() as s:
-            file = s.get(File, file_id)
-            if file is None:
-                logger.info("embed_text abort: file gone")
-                return
-            if round_token is not None and file.embed_round != round_token:
-                logger.info(
-                    "embed_text abort: stale round (job=%s file=%s)",
-                    round_token,
-                    file.embed_round,
-                )
-                return
-            chunks = list(
-                s.execute(
-                    select(Chunk)
-                    .where(Chunk.file_id == file_id)
-                    .order_by(Chunk.chunk_index)
-                ).scalars()
+    settings = get_settings()
+    with _stage("embed_text.load_chunks"), session_scope() as s:
+        file = s.get(File, file_id)
+        if file is None:
+            logger.info("embed_text abort: file gone")
+            return None
+        if round_token is not None and file.embed_round != round_token:
+            logger.info(
+                "embed_text abort: stale round (job=%s file=%s)",
+                round_token,
+                file.embed_round,
             )
-            chunk_data = [
-                (
-                    c.id,
-                    c.text,
-                    c.chunk_index,
-                    _nearby_image_ids(s, c.id),
-                    c.char_start,
-                    c.char_end,
-                )
-                for c in chunks
-            ]
-            folder_id = file.folder_id
-            rel_path = file.rel_path
-            source_url = file.source_url
-            tab = file.tab
-            file_cas_id = file.file_cas_id
-            file_source_meta = file.source_meta
-            file_added_at = file.added_at
-            file_mtime_ns = file.mtime_ns
-            allowed_users = allowed_user_ids_for_file(s, file_id)
-
-        char_to_page = _load_char_to_page(file_cas_id)
-        layout_summaries = _load_layout_summaries(file_cas_id)
-
-        meta_payload = _build_meta_payload(
-            source_meta=file_source_meta,
-            source_url=source_url,
-            added_at=file_added_at,
-            mtime_ns=file_mtime_ns,
+            return None
+        chunks = list(
+            s.execute(
+                select(Chunk)
+                .where(Chunk.file_id == file_id)
+                .order_by(Chunk.chunk_index)
+            ).scalars()
         )
+        chunk_data = [
+            (
+                c.id,
+                c.text,
+                c.chunk_index,
+                _nearby_image_ids(s, c.id),
+                c.char_start,
+                c.char_end,
+            )
+            for c in chunks
+        ]
+        folder_id = file.folder_id
+        rel_path = file.rel_path
+        source_url = file.source_url
+        tab = file.tab
+        file_cas_id = file.file_cas_id
+        file_source_meta = file.source_meta
+        file_added_at = file.added_at
+        file_mtime_ns = file.mtime_ns
+        allowed_users = allowed_user_ids_for_file(s, file_id)
 
-        text_emb = get_text_embedder()
-        sparse_emb = get_sparse_embedder()
-        with _stage("embed_text.ensure_collection"):
-            vector_store.ensure_chunks_collection(text_dim=text_emb.dim)
+    char_to_page = _load_char_to_page(file_cas_id)
+    layout_summaries = _load_layout_summaries(file_cas_id)
 
-        if chunk_data:
-            texts = [t for _, t, _, _, _, _ in chunk_data]
-            # Embed in batches and emit per-batch progress — a big spreadsheet
-            # (1000s of chunks) is otherwise a single multi-minute call that
-            # shows zero movement. Each batch acquires gpu_lock independently,
-            # which also lets search interleave between batches.
-            with _stage("embed_text.dense", count=len(texts)):
-                denses, sparses = [], []
-                total = len(texts)
-                for i in range(0, total, _EMBED_PROGRESS_BATCH):
-                    batch = texts[i : i + _EMBED_PROGRESS_BATCH]
-                    denses.extend(text_emb.embed_documents(batch))
-                    sparses.extend(sparse_emb.embed_documents(batch))
-                    _publish_job_progress(
-                        "embed_text", min(i + _EMBED_PROGRESS_BATCH, total), total
-                    )
-            points: list = []
-            for (cid, text, idx, nearby, c_start, c_end), dense, sparse in zip(
-                chunk_data, denses, sparses, strict=True
-            ):
-                primary_page = (
-                    primary_page_for_range(char_to_page, c_start or 0, c_end or 0)
-                    if char_to_page
-                    else None
-                )
-                pages = (
-                    pages_for_range(
-                        char_to_page, c_start or 0, c_end or (c_start or 0) + 1
-                    )
-                    if char_to_page
-                    else []
-                )
-                summary = layout_summaries.get(primary_page) if primary_page else None
-                points.append(
-                    vector_store.ChunkPoint(
-                        chunk_id=cid,
-                        file_id=file_id,
-                        folder_id=folder_id,
-                        file_path=rel_path,
-                        chunk_index=idx,
-                        text=text,
-                        dense=dense,
-                        sparse=sparse,
-                        nearby_image_ids=nearby,
-                        source_url=source_url,
-                        tab=tab,
-                        dense_model_version=settings.dense_version,
-                        sparse_model_version=settings.sparse_version,
-                        allowed_users=allowed_users,
-                        char_start=c_start,
-                        char_end=c_end,
-                        page=primary_page,
-                        pages=pages,
-                        layout_summary=summary,
-                        meta_payload=meta_payload,
-                    )
-                )
-        else:
-            points = []
+    meta_payload = _build_meta_payload(
+        source_meta=file_source_meta,
+        source_url=source_url,
+        added_at=file_added_at,
+        mtime_ns=file_mtime_ns,
+    )
 
-        with _stage("embed_text.upsert", count=len(points)):
-            vector_store.replace_chunks_for_file(file_id, points)
-        _decrement_pending_embeds(file_id, round_token)
-        logger.info("embed_text done: points=%d", len(points))
+    text_emb = get_text_embedder()
+    sparse_emb = get_sparse_embedder()
+    with _stage("embed_text.ensure_collection"):
+        vector_store.ensure_chunks_collection(text_dim=text_emb.dim)
+
+    if chunk_data:
+        texts = [t for _, t, _, _, _, _ in chunk_data]
+        # Embed in batches and emit per-batch progress — a big spreadsheet
+        # (1000s of chunks) is otherwise a single multi-minute call that
+        # shows zero movement. Each batch acquires gpu_lock independently,
+        # which also lets search interleave between batches.
+        with _stage("embed_text.dense", count=len(texts)):
+            denses, sparses = [], []
+            total = len(texts)
+            for i in range(0, total, _EMBED_PROGRESS_BATCH):
+                batch = texts[i : i + _EMBED_PROGRESS_BATCH]
+                denses.extend(text_emb.embed_documents(batch, [rel_path] * len(batch)))
+                sparses.extend(sparse_emb.embed_documents(batch))
+                _publish_job_progress(
+                    "embed_text", min(i + _EMBED_PROGRESS_BATCH, total), total
+                )
+        points: list = []
+        for (cid, text, idx, nearby, c_start, c_end), dense, sparse in zip(
+            chunk_data, denses, sparses, strict=True
+        ):
+            primary_page = (
+                primary_page_for_range(char_to_page, c_start or 0, c_end or 0)
+                if char_to_page
+                else None
+            )
+            pages = (
+                pages_for_range(
+                    char_to_page, c_start or 0, c_end or (c_start or 0) + 1
+                )
+                if char_to_page
+                else []
+            )
+            summary = layout_summaries.get(primary_page) if primary_page else None
+            points.append(
+                vector_store.ChunkPoint(
+                    chunk_id=cid,
+                    file_id=file_id,
+                    folder_id=folder_id,
+                    file_path=rel_path,
+                    chunk_index=idx,
+                    text=text,
+                    dense=dense,
+                    sparse=sparse,
+                    nearby_image_ids=nearby,
+                    source_url=source_url,
+                    tab=tab,
+                    dense_model_version=active_profile().dense_version,
+                    sparse_model_version=settings.sparse_version,
+                    allowed_users=allowed_users,
+                    char_start=c_start,
+                    char_end=c_end,
+                    page=primary_page,
+                    pages=pages,
+                    layout_summary=summary,
+                    meta_payload=meta_payload,
+                )
+            )
+    else:
+        points = []
+
+    with _stage("embed_text.upsert", count=len(points)):
+        vector_store.replace_chunks_for_file(file_id, points)
+    return len(points)
 
 
 def _embed_image_sync(image_id: int, round_token: int | None = None) -> None:
-    from ...cas import store as cas_store
-    from .. import vector_store
-    from ..acl import allowed_user_ids_for_file
-    from ..embedding import get_image_embedder
-
     with bind_context(image_id=image_id, round=round_token):
         logger.info("embed_image begin")
-        settings = get_settings()
-        with _stage("embed_image.load"), session_scope() as s:
-            image = s.get(Image, image_id)
-            if image is None:
-                logger.info("embed_image abort: image gone")
-                return
-            file_id = image.file_id
-            cas_id = image.image_cas_id
-            anchor = image.anchor_chunk
-            page = image.page
-            file = s.get(File, file_id)
-            if file is None:
-                logger.info("embed_image abort: parent file gone")
-                return
-            if round_token is not None and file.embed_round != round_token:
-                logger.info(
-                    "embed_image abort: stale round (job=%s file=%s)",
-                    round_token,
-                    file.embed_round,
-                )
-                return
-            folder_id = file.folder_id
-            rel_path = file.rel_path
-            file_cas_id = file.file_cas_id
-            file_source_meta = file.source_meta
-            file_source_url = file.source_url
-            file_added_at = file.added_at
-            file_mtime_ns = file.mtime_ns
-            allowed_users = allowed_user_ids_for_file(s, file_id)
+        target = load_image_target(image_id, round_token=round_token)
+        if target is None:
+            return
+    with bind_context(image_id=image_id, file_id=target.file_id):
+        embed_image_targets([target])
+        _decrement_pending_embeds(target.file_id, round_token)
 
-        layout_summaries = _load_layout_summaries(file_cas_id)
-        layout_summary = layout_summaries.get(page) if page is not None else None
-        meta_payload = _build_meta_payload(
-            source_meta=file_source_meta,
-            source_url=file_source_url,
-            added_at=file_added_at,
-            mtime_ns=file_mtime_ns,
+
+@dataclass(frozen=True)
+class ImageTarget:
+    """Everything needed to write one image's point, read from SQL + CAS."""
+
+    image_id: int
+    file_id: int
+    cas_id: str
+    folder_id: int
+    rel_path: str
+    anchor: int | None
+    page: int | None
+    allowed_users: list[int]
+    layout_summary: dict | None
+    meta_payload: dict | None
+
+
+def load_image_target(image_id: int, *, round_token: int | None = None) -> ImageTarget | None:
+    """Read an image's point inputs. ``None`` if the image or its file is
+    gone, or ``round_token`` is stale."""
+    from ..acl import allowed_user_ids_for_file
+
+    with _stage("embed_image.load"), session_scope() as s:
+        image = s.get(Image, image_id)
+        if image is None:
+            logger.info("embed_image abort: image gone")
+            return None
+        file = s.get(File, image.file_id)
+        if file is None:
+            logger.info("embed_image abort: parent file gone")
+            return None
+        if round_token is not None and file.embed_round != round_token:
+            logger.info(
+                "embed_image abort: stale round (job=%s file=%s)",
+                round_token,
+                file.embed_round,
+            )
+            return None
+        page = image.page
+        target = dict(
+            image_id=image_id,
+            file_id=image.file_id,
+            cas_id=image.image_cas_id,
+            folder_id=file.folder_id,
+            rel_path=file.rel_path,
+            anchor=image.anchor_chunk,
+            page=page,
+            allowed_users=allowed_user_ids_for_file(s, image.file_id),
+            meta_payload=_build_meta_payload(
+                source_meta=file.source_meta,
+                source_url=file.source_url,
+                added_at=file.added_at,
+                mtime_ns=file.mtime_ns,
+            ),
         )
+        file_cas_id = file.file_cas_id
+    layout_summary = _load_layout_summaries(file_cas_id).get(page) if page is not None else None
+    return ImageTarget(layout_summary=layout_summary, **target)
 
-    with bind_context(image_id=image_id, file_id=file_id):
-        image_emb = get_image_embedder()
-        with _stage("embed_image.ensure_collection"):
-            vector_store.ensure_images_collection(image_dim=image_emb.dim)
 
+def embed_image_targets(targets: list[ImageTarget]) -> int:
+    """Write each target's point into the active profile's image collection.
+
+    Images are deduplicated by content (CAS id): a target whose image is
+    already embedded only adds its file to that point. The rest are
+    embedded — in one batch when the embedder supports it (the profile
+    migration passes many targets; the ``embed_image`` job passes one).
+    Returns the number of images actually embedded.
+    """
+    from ...cas import store as cas_store
+    from .. import vector_store
+    from ..embedding import get_image_embedder
+
+    image_emb = get_image_embedder()
+    with _stage("embed_image.ensure_collection"):
+        vector_store.ensure_images_collection(image_dim=image_emb.dim)
+
+    fresh: dict[str, list[ImageTarget]] = {}
+    for t in targets:
+        if t.cas_id in fresh:
+            fresh[t.cas_id].append(t)
+            continue
         with _stage("embed_image.find_existing"):
-            existing = vector_store.find_image_point_by_cas(cas_id)
+            existing = vector_store.find_image_point_by_cas(t.cas_id)
         if existing is not None:
             with _stage("embed_image.attach_existing"):
-                vector_store.add_file_to_image_point(existing["id"], file_id)
-            logger.info("embed_image dedup: reused cas=%s", cas_id)
+                vector_store.add_file_to_image_point(existing["id"], t.file_id)
+            logger.info("embed_image dedup: reused cas=%s", t.cas_id)
         else:
-            with _stage("embed_image.read_blob"):
-                data = cas_store.read_image_blob(cas_id)
-            with _stage("embed_image.encode", bytes=len(data)):
-                vec = image_emb.embed_image(data)
-            with _stage("embed_image.upsert"):
-                vector_store.upsert_image_point(
-                    vector_store.ImagePoint(
-                        point_id=image_id,
-                        image_cas_id=cas_id,
-                        file_id=file_id,
-                        folder_id=folder_id,
-                        file_path=rel_path,
-                        anchor_chunk=anchor,
-                        page=page,
-                        image=vec,
-                        image_model_version=settings.image_version,
-                        allowed_users=allowed_users,
-                        layout_summary=layout_summary,
-                        meta_payload=meta_payload,
-                    ),
-                    file_ids=[file_id],
-                )
-            logger.info("embed_image done: cas=%s", cas_id)
+            fresh[t.cas_id] = [t]
+    if not fresh:
+        return 0
 
-        _decrement_pending_embeds(file_id, round_token)
+    firsts = [group[0] for group in fresh.values()]
+    with _stage("embed_image.read_blob", count=len(firsts)):
+        blobs = [cas_store.read_image_blob(t.cas_id) for t in firsts]
+    with _stage("embed_image.encode", count=len(blobs), bytes=sum(map(len, blobs))):
+        batch = getattr(image_emb, "embed_images", None)
+        vecs = batch(blobs) if batch else [image_emb.embed_image(b) for b in blobs]
+
+    version = active_profile().image_version
+    for t, vec in zip(firsts, vecs, strict=True):
+        with _stage("embed_image.upsert"):
+            vector_store.upsert_image_point(
+                vector_store.ImagePoint(
+                    point_id=t.image_id,
+                    image_cas_id=t.cas_id,
+                    file_id=t.file_id,
+                    folder_id=t.folder_id,
+                    file_path=t.rel_path,
+                    anchor_chunk=t.anchor,
+                    page=t.page,
+                    image=vec,
+                    image_model_version=version,
+                    allowed_users=t.allowed_users,
+                    layout_summary=t.layout_summary,
+                    meta_payload=t.meta_payload,
+                ),
+                file_ids=[t.file_id],
+            )
+        logger.info("embed_image done: cas=%s", t.cas_id)
+        # Same image again within this batch: attach, as the dedup above
+        # would have had the first one already been written.
+        for dup in fresh[t.cas_id][1:]:
+            vector_store.add_file_to_image_point(t.image_id, dup.file_id)
+    return len(firsts)
 
 
 def _mark_file_error_for_image(image_id: int, message: str) -> None:

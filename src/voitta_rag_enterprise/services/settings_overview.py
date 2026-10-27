@@ -64,9 +64,7 @@ _RUNTIME_FIELDS = (
     "root_path",
     "data_dir",
     "qdrant_mode",
-    "dense_model",
     "sparse_model",
-    "image_model",
     "max_file_bytes",
     "pdf_parse_method",
     "pdf_parse_tier",
@@ -226,7 +224,27 @@ def _runtime() -> dict[str, Any]:
     for name in ("root_path", "data_dir"):
         out[name] = str(out[name]) if out[name] is not None else None
     out["workers"] = s.resolved_workers()
+    out["embedding"] = _embedding_overview()
     out["google_sign_in_configured"] = s.google_auth_enabled
+    return out
+
+
+def _embedding_overview() -> dict[str, Any]:
+    from .embedding.profiles import resolve
+
+    r = resolve()
+    p = r.profile
+    out: dict[str, Any] = {
+        "profile": p.name,
+        "source": r.source,
+        "dense_model": p.dense_model,
+        "image_model": p.image_model,
+        "collections": [p.chunks_collection, p.images_collection],
+    }
+    if r.source == "adopted":
+        # An upgraded install still on the legacy profile: say so, and how
+        # to move (the settings overview is where an admin looks).
+        out["notice"] = f"running the legacy profile. {r.note}"
     return out
 
 

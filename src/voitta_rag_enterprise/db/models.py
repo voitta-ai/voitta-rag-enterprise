@@ -478,6 +478,29 @@ class AuthProvider(Base):
     updated_at: Mapped[int] = mapped_column(default=_now_s)
 
 
+class CollectionMeta(Base):
+    """Which embedding profile built a Qdrant collection (see schema.sql)."""
+
+    __tablename__ = "collection_meta"
+
+    collection_name: Mapped[str] = mapped_column(primary_key=True)
+    profile: Mapped[str]
+    dense_model: Mapped[str | None] = mapped_column(default=None)
+    image_model: Mapped[str | None] = mapped_column(default=None)
+    dim: Mapped[int]
+    created_at: Mapped[int] = mapped_column(default=_now_s)
+
+
+class AppSetting(Base):
+    """Deployment-wide persisted setting (see schema.sql)."""
+
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(primary_key=True)
+    value: Mapped[str]
+    updated_at: Mapped[int] = mapped_column(default=_now_s)
+
+
 class Job(Base):
     __tablename__ = "jobs"
 

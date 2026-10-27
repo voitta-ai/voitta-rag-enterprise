@@ -407,3 +407,28 @@ CREATE TABLE IF NOT EXISTS assistant_credentials (
     last_error        TEXT,
     UNIQUE (scope, scope_key, kind)
 );
+
+-- Which embedding profile built each Qdrant collection (Qdrant itself has no
+-- per-collection metadata). Written when the app creates a collection;
+-- pre-profile installs get their unsuffixed 'chunks' / 'images' rows
+-- backfilled as 'e5-siglip' at startup. The startup check refuses to run a
+-- profile against collections recorded under a different one, so vectors
+-- from one model never land in another model's space. See
+-- services/embedding/profiles.py.
+CREATE TABLE IF NOT EXISTS collection_meta (
+    collection_name TEXT PRIMARY KEY,
+    profile         TEXT NOT NULL,
+    dense_model     TEXT,                -- NULL on image collections
+    image_model     TEXT,                -- NULL on chunk collections
+    dim             INTEGER NOT NULL,
+    created_at      INTEGER NOT NULL
+);
+
+-- Deployment-wide key/value settings that must survive restarts without an
+-- .env edit. Today: 'embedding_profile', written by
+-- scripts/migrate_embedding_profile.py when a migration completes.
+CREATE TABLE IF NOT EXISTS app_settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);

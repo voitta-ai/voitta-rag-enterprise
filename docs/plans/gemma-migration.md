@@ -1,6 +1,6 @@
 # EmbeddingGemma-2 migration
 
-Status: plan, agreed 2026-10-27. Nothing below has been built yet.
+Status: implemented on branch `gemma` (on top of `mineru4`), 2026-10-27. See "Implementation notes" at the end for what was decided while building and where it differs from the plan.
 
 ## Decision
 
@@ -254,9 +254,55 @@ the 82k figures on the 3090, likely somewhat faster than the measured RTX 5070 n
 
 ## Open items
 
-- [ ] Title-slot result (rel_path vs none) — fill in after the moon run.
-- [ ] 560-vision-token image result — check `~/emb-bench/img/emb/gemma560.npy` exists before
-      re-running; decide whether 280 stays the default.
-- [ ] MinerU 4 quality gate outcome decides between resolution 1 and 2 above.
+- [x] Title-slot result: `title: {rel_path}` wins, see below. Shipped.
+- [x] 560 vision tokens beat 280, see below. Shipped as the default.
+- [x] MinerU 4 passed its gate ([mineru4-conversion.md](mineru4-conversion.md)): resolution 1.
 - [ ] Desktop: confirm e5-siglip remains the default there, and that `gemma2` is selectable for
       users with Apple Silicon (speed unmeasured on MPS; measure before advertising).
+
+## Implementation notes (2026-10-27)
+
+### Measured while building
+
+- **Title slot.** Same 268 own-folder queries and harness as the evaluation. MRR@10 at the
+  deployed 1:1 fusion: `title: none` 56.6, `title: {rel_path}` 59.5, **+3.0 [+0.6, +5.3]**
+  (56 queries better, 32 worse). Dense alone +7.1 [+3.6, +10.6]. By domain: code +10.0
+  [+5.9, +14.4], business −2.3 [−6.0, +1.3], papers −0.2 [−4.0, +3.4]. Shipped `rel_path`.
+  (The absolute numbers differ from the table above, which used the audited labels; the
+  comparison is paired on identical labels.)
+- **Vision tokens.** 20,000 figures, 654 queries: 560 tokens 82.3 MRR@10 vs 280 tokens 76.5,
+  **+5.8 [+3.8, +8.0]** (100 better, 40 worse), at 2.4x the time (2,461 s vs 1,011 s for
+  20k images, 8 vs 20 img/s) and 2.26 vs 2.16 GB peak. Shipped 560, batch 8.
+- **Parity.** The app's `GemmaEmbedder` reproduces the benchmark vectors: passages with
+  titles, queries, image queries and images at 560 tokens all at cosine ≥ 0.9999 against the
+  stored evaluation vectors; batched and single-image encodes agree; the fixed SigLIP query
+  matches the padded harness at 1.0000. transformers 5.21 / sentence-transformers 6.2.
+- **Bug found by the parity run:** sentence-transformers keeps one `max_seq_length` per
+  model, so the 512-token passage cap truncated image inputs (560 vision tokens + template)
+  and the processor raised. The cap is now set per call under `gpu_lock`; an opt-in test
+  (`tests/integration/test_real_embedders.py`) guards it.
+
+### Differences from the plan
+
+- The persisted profile lives in a new `app_settings` table (key `embedding_profile`), not a
+  `settings` table (none existed).
+- A mismatch **aborts startup** instead of starting with indexing and search disabled: the
+  message names both ways out, and nothing can write to the wrong space.
+- A migration marks itself in progress (`app_settings.embedding_migration`); while set, an
+  app restart never adopts the half-filled profile. Not in the plan; needed because the
+  default-profile rule would otherwise pick it up.
+- The migration reuses the indexer's own code: `embed_text`/`embed_image` were split into a
+  job wrapper and a shared core (`embed_file_chunks`, `embed_image_targets`), so payloads are
+  built in one place. It diffs SQL against the target each pass (chunk ids, image file
+  attachments, model versions) and repeats until a pass finds nothing to do.
+- "Embed the query once per request" applies to `POST /api/search` (chunks + images in one
+  request). MCP `search` / `search_images` and the assistant's tools are separate calls.
+- MCP instructions are profile-neutral (the server is built at import, before a profile is
+  resolved).
+- Docker bakes in the profiles listed in the `PREWARM_PROFILES` build arg (default `gemma2`).
+- The desktop launcher sets `VOITTA_DEFAULT_EMBEDDING_PROFILE=e5-siglip` (a default, so a
+  desktop user who migrates stays migrated), not `VOITTA_EMBEDDING_PROFILE`.
+- Fixed on the way: `/api/search` returned 500 when a collection did not exist yet (fresh
+  install, or images mode before the first image); it now returns no hits.
+- Fixed on the way: `test_tampered_signature_rejected` was flaky — it flipped the last
+  base64url character of an HMAC, whose padding bits decode away.

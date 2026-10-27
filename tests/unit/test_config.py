@@ -7,13 +7,19 @@ from pathlib import Path
 import pytest
 
 
-def test_defaults_apply(env: None) -> None:
-    from voitta_rag_enterprise.config import get_settings
+def test_defaults_apply(env: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    from voitta_rag_enterprise.config import get_settings, reset_settings_cache
 
+    # --embedding-profile sets this for the whole run; the defaults are the
+    # app's own, so measure without it.
+    monkeypatch.delenv("VOITTA_DEFAULT_EMBEDDING_PROFILE", raising=False)
+    reset_settings_cache()
     s = get_settings()
     assert s.port == 8000
     assert s.mcp_port == 8001
-    assert s.dense_model == "intfloat/e5-base-v2"
+    assert s.embedding_profile is None
+    assert s.default_embedding_profile == "gemma2"
+    assert s.dense_model is None  # profile decides
     assert s.sparse_model == "Qdrant/bm25"
     assert s.nearby_radius == 2
     assert s.single_user is False

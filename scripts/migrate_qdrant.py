@@ -21,7 +21,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.http import models as qm
 
 from voitta_rag_enterprise.config import get_settings
-from voitta_rag_enterprise.services.vector_store import CHUNKS, IMAGES
+from voitta_rag_enterprise.services.embedding.profiles import ALL_COLLECTIONS
 
 try:
     from tqdm import tqdm
@@ -140,7 +140,7 @@ def main() -> None:
     dst = QdrantClient(url=target_url)
 
     src_collections = {c.name for c in src.get_collections().collections}
-    to_migrate = [n for n in (CHUNKS, IMAGES) if n in src_collections]
+    to_migrate = [n for n in ALL_COLLECTIONS if n in src_collections]
 
     if not to_migrate:
         print(f"No collections found in source ({source_path}). Nothing to do.")

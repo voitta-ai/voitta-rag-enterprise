@@ -55,13 +55,13 @@ def _point_ids_for_file(file_id: int) -> set[int]:
 
     def _do() -> set[int]:
         client = vs.get_client()
-        if not client.collection_exists(vs.CHUNKS):
+        if not client.collection_exists(vs.chunks_collection()):
             return set()
         out: set[int] = set()
         offset = None
         while True:
             points, offset = client.scroll(
-                vs.CHUNKS,
+                vs.chunks_collection(),
                 scroll_filter=vs.qm.Filter(
                     must=[
                         vs.qm.FieldCondition(

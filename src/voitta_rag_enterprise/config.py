@@ -115,13 +115,22 @@ class Settings(BaseSettings):
     # embeds from competing with extract.
     workers: int | None = None
 
-    # Embedding models + version stamps
-    dense_model: str = "intfloat/e5-base-v2"
+    # Embedding profile (services/embedding/profiles.py): "gemma2" embeds
+    # text and images with EmbeddingGemma-2; "e5-siglip" uses e5-base-v2 +
+    # SigLIP-2. Unset = the profile a completed migration recorded, else
+    # ``default_embedding_profile`` (the desktop launcher sets e5-siglip).
+    # Setting it explicitly against collections built by the other profile
+    # makes the app refuse to start instead of mixing vector spaces.
+    embedding_profile: Literal["gemma2", "e5-siglip"] | None = None
+    default_embedding_profile: Literal["gemma2", "e5-siglip"] = "gemma2"
+    # Optional overrides of the active profile's models / version stamps
+    # (None = the profile's own). Under gemma2 one model serves both.
+    dense_model: str | None = None
+    image_model: str | None = None
+    dense_version: str | None = None
+    image_version: str | None = None
     sparse_model: str = "Qdrant/bm25"
-    image_model: str = "google/siglip2-base-patch16-224"
-    dense_version: str = "e5-base-v2@1"
     sparse_version: str = "bm25@1"
-    image_version: str = "siglip2-base@1"
 
     # Indexing
     nearby_radius: int = 2

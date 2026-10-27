@@ -16,7 +16,21 @@
 
 from __future__ import annotations
 
+import pytest
+
 from voitta_rag_enterprise.services import vector_store as vs
+
+
+@pytest.fixture(autouse=True)
+def _pinned_profile():
+    """These tests exercise embedder / vector-store mechanics with no
+    database; pin the profile instead of resolving it from SQLite + Qdrant."""
+    from voitta_rag_enterprise.services.embedding import profiles
+
+    profiles.pin("gemma2")
+    yield
+    profiles.reset_profile_cache()
+
 
 
 class _CountingClient:
@@ -63,8 +77,8 @@ def test_ensure_chunks_cached_per_process(monkeypatch) -> None:
 def test_ensure_images_cached_independently(monkeypatch) -> None:
     fake = _fresh_fake(monkeypatch)
     vs.ensure_images_collection(image_dim=8)
-    assert vs.IMAGES in vs._ensured_collections
-    assert vs.CHUNKS not in vs._ensured_collections  # per-collection keying
+    assert vs.images_collection() in vs._ensured_collections
+    assert vs.chunks_collection() not in vs._ensured_collections  # per-collection keying
     calls = fake.get_collection_calls
     vs.ensure_images_collection(image_dim=8)
     assert fake.get_collection_calls == calls
@@ -73,7 +87,7 @@ def test_ensure_images_cached_independently(monkeypatch) -> None:
 def test_reset_client_cache_rearms_ensure(monkeypatch) -> None:
     fake = _fresh_fake(monkeypatch)
     vs.ensure_chunks_collection(text_dim=8)
-    assert vs.CHUNKS in vs._ensured_collections
+    assert vs.chunks_collection() in vs._ensured_collections
     vs.reset_client_cache()
     assert not vs._ensured_collections
     # Re-arm with a fresh fake (reset tore down the worker executor; the
@@ -97,7 +111,7 @@ def test_ensure_not_cached_on_failure(monkeypatch) -> None:
         vs.ensure_chunks_collection(text_dim=8)
     except RuntimeError:
         pass
-    assert vs.CHUNKS not in vs._ensured_collections
+    assert vs.chunks_collection() not in vs._ensured_collections
     monkeypatch.setattr(vs, "get_client", lambda: fake)
     vs.ensure_chunks_collection(text_dim=8)
     assert fake.get_collection_calls == 1

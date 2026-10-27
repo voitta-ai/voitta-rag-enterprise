@@ -1,11 +1,18 @@
-"""Cached factories returning the configured embedders."""
+"""Cached factories returning the active profile's embedders.
+
+Under a unified profile (``gemma2``) ``get_text_embedder()`` and
+``get_image_embedder()`` return the SAME instance: one model, loaded once,
+one vector space for text and images.
+"""
 
 from __future__ import annotations
 
 import logging
 
 from ...config import get_settings
+from .gemma import FakeGemmaEmbedder, GemmaEmbedder
 from .image import FakeImageEmbedder, SiglipImageEmbedder
+from .profiles import active, reset_profile_cache
 from .sparse import Bm25SparseEmbedder, FakeSparseEmbedder
 from .text import E5TextEmbedder, FakeTextEmbedder
 from .types import ImageEmbedder, SparseEmbedder, TextEmbedder
@@ -39,16 +46,20 @@ def get_image_embedder() -> ImageEmbedder:
 
 
 def reset_embedder_caches() -> None:
-    global _text, _sparse, _image
-    _text = _sparse = _image = None
+    """Drop cached embedders and the resolved profile (tests, profile switch)."""
+    global _text, _sparse, _image, _shared
+    _text = _sparse = _image = _shared = None
+    reset_profile_cache()
 
 
 def _build_text_embedder() -> TextEmbedder:
-    settings = get_settings()
-    if settings.use_fake_embedders:
+    prof = active()
+    if prof.unified:
+        return _unified()
+    if get_settings().use_fake_embedders:
         return FakeTextEmbedder()
     try:
-        return E5TextEmbedder(settings.dense_model)
+        return E5TextEmbedder(prof.dense_model)
     except ImportError as e:
         logger.warning("dense embedder unavailable (%s) — using fake", e)
         return FakeTextEmbedder()
@@ -66,11 +77,27 @@ def _build_sparse_embedder() -> SparseEmbedder:
 
 
 def _build_image_embedder() -> ImageEmbedder:
-    settings = get_settings()
-    if settings.use_fake_embedders:
+    prof = active()
+    if prof.unified:
+        return _unified()
+    if get_settings().use_fake_embedders:
         return FakeImageEmbedder()
     try:
-        return SiglipImageEmbedder(settings.image_model)
+        return SiglipImageEmbedder(prof.image_model)
     except ImportError as e:
         logger.warning("image embedder unavailable (%s) — using fake", e)
         return FakeImageEmbedder()
+
+
+_shared: GemmaEmbedder | FakeGemmaEmbedder | None = None
+
+
+def _unified() -> GemmaEmbedder | FakeGemmaEmbedder:
+    """The one text+image embedder of a unified profile."""
+    global _shared
+    if _shared is None:
+        if get_settings().use_fake_embedders:
+            _shared = FakeGemmaEmbedder()
+        else:
+            _shared = GemmaEmbedder(active().dense_model)
+    return _shared

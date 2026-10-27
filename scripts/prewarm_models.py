@@ -7,9 +7,10 @@ embedders look up at runtime.
 
 Targets:
 
-- Dense text embedder — sentence-transformers ``intfloat/e5-base-v2``
+- The dense + image models of each profile in ``PREWARM_PROFILES``
+  (default ``gemma2``: EmbeddingGemma-2 for both; ``e5-siglip``: e5-base-v2 +
+  SigLIP-2)
 - Sparse text embedder — fastembed ``Qdrant/bm25``
-- Image embedder — transformers ``google/siglip2-base-patch16-224``
 - MinerU ``basic``-tier weights (layout, OCR, formula, table; Torch and
   ONNX backends) into ``$MINERU_HOME/models``, via MinerU's own CLI
 
@@ -28,12 +29,28 @@ logging.basicConfig(level=logging.INFO, format="prewarm: %(message)s")
 log = logging.getLogger(__name__)
 
 
-def _dense() -> None:
-    name = os.environ.get("VOITTA_DENSE_MODEL", "intfloat/e5-base-v2")
-    log.info("loading dense embedder %s", name)
+def _profile_models(name: str) -> None:
+    """Download one embedding profile's dense + image models."""
+    from voitta_rag_enterprise.services.embedding.profiles import profile
+
+    p = profile(name)
+    if p.unified:
+        # EmbeddingGemma-2 loads through sentence-transformers; the audio
+        # tower is skipped at runtime, but its weights ship in the same file.
+        log.info("loading %s model %s", name, p.dense_model)
+        from sentence_transformers import SentenceTransformer
+
+        SentenceTransformer(p.dense_model, config_kwargs={"audio_config": None})
+        return
+    log.info("loading %s dense model %s", name, p.dense_model)
     from sentence_transformers import SentenceTransformer
 
-    SentenceTransformer(name)
+    SentenceTransformer(p.dense_model)
+    log.info("loading %s image model %s", name, p.image_model)
+    from transformers import AutoModel, AutoProcessor
+
+    AutoProcessor.from_pretrained(p.image_model)
+    AutoModel.from_pretrained(p.image_model)
 
 
 def _sparse() -> None:
@@ -42,15 +59,6 @@ def _sparse() -> None:
     from fastembed import SparseTextEmbedding
 
     SparseTextEmbedding(model_name=name)
-
-
-def _image() -> None:
-    name = os.environ.get("VOITTA_IMAGE_MODEL", "google/siglip2-base-patch16-224")
-    log.info("loading image embedder %s", name)
-    from transformers import AutoModel, AutoProcessor
-
-    AutoProcessor.from_pretrained(name)
-    AutoModel.from_pretrained(name)
 
 
 def _mineru() -> None:
@@ -69,9 +77,12 @@ def _mineru() -> None:
 
 
 def main() -> int:
-    _dense()
+    # PREWARM_PROFILES (comma-separated) picks which embedding profiles'
+    # weights to bake in. New installs need only gemma2; an image for an
+    # existing e5-siglip deployment that will migrate needs both.
+    for name in os.environ.get("PREWARM_PROFILES", "gemma2").split(","):
+        _profile_models(name.strip())
     _sparse()
-    _image()
     _mineru()
     log.info("done")
     return 0

@@ -62,9 +62,13 @@ def main() -> None:
         shutil.rmtree(images_dir)
         logger.info("removed %s", images_dir)
 
+    # Only the active profile's collections: another profile's collections
+    # (kept for rollback after a migration) are not this rebuild's to drop.
+    collections = (vector_store.chunks_collection(), vector_store.images_collection())
+
     def _drop_qdrant() -> None:
         client = vector_store.get_client()
-        for name in (vector_store.CHUNKS, vector_store.IMAGES):
+        for name in collections:
             try:
                 client.delete_collection(name)
                 logger.info("dropped qdrant collection: %s", name)

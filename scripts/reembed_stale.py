@@ -19,6 +19,7 @@ import logging
 from voitta_rag_enterprise.config import get_settings
 from voitta_rag_enterprise.db.database import init_db, session_scope
 from voitta_rag_enterprise.services import job_queue, vector_store
+from voitta_rag_enterprise.services.embedding.profiles import active as active_profile
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +58,7 @@ def _scan_for_stale(collection: str, version_keys: list[str], expected: dict[str
                     # per-folder rebuild_folder_cards job (the rebuilder's
                     # change detection sees the version bump and re-embeds).
                     stale.add(("folder_cards", int(payload["folder_id"])))
-                elif collection == vector_store.CHUNKS:
+                elif collection == vector_store.chunks_collection():
                     stale.add(("file", int(payload["file_id"])))
                 else:
                     stale.add(("image", int(payload["image_id"])))
@@ -74,18 +75,20 @@ def main() -> None:
     settings = get_settings()
     init_db()
 
+    prof = active_profile()
+    logger.info("embedding profile: %s", prof.name)
     stale_text = _scan_for_stale(
-        vector_store.CHUNKS,
+        vector_store.chunks_collection(),
         ["dense_model_version", "sparse_model_version"],
         {
-            "dense_model_version": settings.dense_version,
+            "dense_model_version": prof.dense_version,
             "sparse_model_version": settings.sparse_version,
         },
     )
     stale_images = _scan_for_stale(
-        vector_store.IMAGES,
+        vector_store.images_collection(),
         ["image_model_version"],
-        {"image_model_version": settings.image_version},
+        {"image_model_version": prof.image_version},
     )
 
     text_files = {tid for kind, tid in stale_text if kind == "file"}

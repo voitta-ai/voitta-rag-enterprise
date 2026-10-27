@@ -74,8 +74,9 @@ def search(
 ) -> SearchOut:
     folder_ids = _resolve_folder_ids(db, user.id, body.folder_ids)
     out = SearchOut()
+    text_emb = get_text_embedder()
+    dense: list[float] | None = None
     if "chunks" in body.modes:
-        text_emb = get_text_embedder()
         sparse_emb = get_sparse_embedder()
         dense = text_emb.embed_query(body.query)
         sparse = sparse_emb.embed_query(body.query)
@@ -88,7 +89,12 @@ def search(
         out.chunks = [Hit(id=h.id, score=h.score, payload=h.payload) for h in hits]
     if "images" in body.modes:
         image_emb = get_image_embedder()
-        vec = image_emb.embed_text(body.query)
+        # Under a unified profile (gemma2) text and image search share one
+        # embedder and one query encoding: reuse the vector, embed once.
+        if dense is not None and image_emb is text_emb:
+            vec = dense
+        else:
+            vec = image_emb.embed_text(body.query)
         hits = search_images(
             vector=vec,
             limit=body.limit,

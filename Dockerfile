@@ -96,8 +96,12 @@ COPY static ./static
 # Stage 2 — warm: pre-fetch model weights into HF_HOME and MINERU_HOME
 # ---------------------------------------------------------------------------
 FROM base AS warm
+# Embedding profiles whose weights to bake in. An image for an existing
+# e5-siglip deployment that will migrate needs both:
+#   docker build --build-arg PREWARM_PROFILES=gemma2,e5-siglip .
+ARG PREWARM_PROFILES=gemma2
 COPY scripts/prewarm_models.py /tmp/prewarm.py
-RUN python /tmp/prewarm.py && rm /tmp/prewarm.py
+RUN PREWARM_PROFILES=${PREWARM_PROFILES} python /tmp/prewarm.py && rm /tmp/prewarm.py
 
 # ---------------------------------------------------------------------------
 # Stage 3 — runtime: drop build tooling, run as non-root

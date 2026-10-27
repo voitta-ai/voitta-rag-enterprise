@@ -61,8 +61,8 @@ _current_user: ContextVar[tuple[str, int] | None] = ContextVar(
 
 _INSTRUCTIONS = """
 You are connected to Voitta RAG Enterprise — a filesystem-driven RAG index with
-hybrid text search (e5-base-v2 dense + BM25 sparse, RRF-fused) and cross-modal
-image search (SigLIP-2).
+hybrid text search (dense embeddings + BM25 sparse, RRF-fused) and cross-modal
+image search (text → image, in the same embedding model's space).
 
 ## Recommended workflow
 
@@ -110,7 +110,7 @@ image search (SigLIP-2).
   they explicitly ask. You may mention that a relevant folder is inactive and
   offer to include it.
 
-- **Scope image search.** `search_images` searches the SigLIP-2 collection
+- **Scope image search.** `search_images` searches the image collection
   separately from text chunks — run it in parallel with `search` when the query
   is likely to have a visual answer (charts, diagrams, photos, slides).
 

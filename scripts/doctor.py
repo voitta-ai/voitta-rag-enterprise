@@ -50,9 +50,8 @@ def main() -> int:
     print(f"  port             : {settings.port}")
     print(f"  mcp_port         : {settings.mcp_port}")
     print(f"  workers          : {settings.resolved_workers()}")
-    print(f"  dense_model      : {settings.dense_model} ({settings.dense_version})")
+    print(f"  embed_profile    : {settings.embedding_profile or '(resolved below)'}")
     print(f"  sparse_model     : {settings.sparse_model} ({settings.sparse_version})")
-    print(f"  image_model      : {settings.image_model} ({settings.image_version})")
     print(f"  use_fake_embed   : {settings.use_fake_embedders}")
     if settings.single_user:
         print("  auth             : single-user (root)")
@@ -116,14 +115,28 @@ def main() -> int:
         _fail(f"qdrant error: {e}")
         failures += 1
 
+    _section("Embedding profile")
+    try:
+        from voitta_rag_enterprise.services.embedding.profiles import resolve
+
+        res = resolve()
+        prof = res.profile
+        _ok(f"{prof.name} ({res.source}){' — ' + res.note if res.note else ''}")
+        print(f"  dense_model      : {prof.dense_model} ({prof.dense_version})")
+        print(f"  image_model      : {prof.image_model} ({prof.image_version})")
+        print(f"  collections      : {prof.chunks_collection}, {prof.images_collection}")
+    except Exception as e:
+        _fail(f"embedding profile: {e}")
+        failures += 1
+
     _section("Embedders")
     if settings.use_fake_embedders:
         _warn("VOITTA_USE_FAKE_EMBEDDERS=true — real models not loaded")
     else:
         for label, fn in [
-            ("dense (e5)", _check_dense),
+            ("dense (text)", _check_dense),
             ("sparse (BM25)", _check_sparse),
-            ("image (CLIP/SigLIP)", _check_image),
+            ("image", _check_image),
         ]:
             try:
                 fn()

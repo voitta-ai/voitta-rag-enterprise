@@ -50,16 +50,17 @@ dependencies = [
     # regex-strip fallback, but declaring it here means they get faithful
     # markdown (headings, bold, lists, tables) instead of the lossy fallback.
     "markdownify>=0.13",
-    # Real text embedder backbone (e5-base-v2 via SentenceTransformer).
+    # Real embedder backbone: EmbeddingGemma-2 (gemma2 profile) and
+    # e5-base-v2 (e5-siglip) both load through SentenceTransformer.
     # ``transformers`` and ``torch`` arrive transitively via mineru[torch],
     # so adding this here is essentially a no-op install-size-wise — but
     # it keeps prod deploys from breaking the moment someone unsets
     # VOITTA_USE_FAKE_EMBEDDERS. Dev and CI use the fake embedder env var
     # and pay the install cost without ever loading the model.
-    # transformers 5 (MinerU 4 requires >=5.10.1); sentence-transformers 6 is
-    # the line that supports it.
+    # transformers >=5.18 for EmbeddingGemma-2 (MinerU 4 needs >=5.10.1);
+    # sentence-transformers 6 is the line that supports transformers 5.
     "sentence-transformers>=6.1",
-    "transformers>=5.10.1,<6",
+    "transformers>=5.18,<6",
     "tree-sitter-language-pack>=1.8",
     # CAD: STEP / STP file parsing + on-demand rendering.
     #

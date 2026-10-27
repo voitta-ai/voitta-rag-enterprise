@@ -5,7 +5,7 @@ Filesystem-driven RAG with first-class image support, content-addressable extrac
 ## TL;DR
 
 - Register a folder. The watcher picks up changes; a job queue extracts text + images into a content-addressable store on disk; embeddings land in Qdrant.
-- **Two Qdrant collections:** `chunks` (e5-base-v2 dense + Qdrant BM25 sparse, RRF-fused) and `images` (SigLIP-2 image vector — searchable by text *or* image).
+- **Two Qdrant collections:** chunks (dense + Qdrant BM25 sparse, RRF-fused) and images (searchable by text *or* image). By default one model, EmbeddingGemma-2, embeds text and images into one space; the `e5-siglip` profile (e5-base-v2 + SigLIP-2) remains available — see [Embedding profiles](#embedding-profiles).
 - **Image ↔ chunk linkage:** every image carries an anchor chunk; chunks within radius `N` get a `nearby_image` link with chunk-index distance.
 - **No manual sync/embed buttons.** Re-indexing is whole-file on any change.
 - **SQLite stores metadata only.** Extracted text and images live in `cas/<sha>/...`.
@@ -103,7 +103,18 @@ unset VOITTA_USE_FAKE_EMBEDDERS
 make dev
 ```
 
-The dense (`intfloat/e5-base-v2`), sparse (`Qdrant/bm25`), and image (`google/siglip2-base-patch16-224`) models download lazily on first use.
+The models download lazily on first use: `google/embeddinggemma-2` (text and images, 1.5 GB) under the default `gemma2` profile, or `intfloat/e5-base-v2` + `google/siglip2-base-patch16-224` under `e5-siglip`; plus `Qdrant/bm25` for keyword search either way.
+
+### Embedding profiles
+
+| Profile | Text | Images | Collections | Default for |
+|---|---|---|---|---|
+| `gemma2` | EmbeddingGemma-2 | EmbeddingGemma-2 (same model, one vector space) | `chunks__gemma2`, `images__gemma2` | server and Docker installs |
+| `e5-siglip` | e5-base-v2 | SigLIP-2 | `chunks`, `images` | the desktop app; installs indexed before profiles existed |
+
+Measured on our own folders: text MRR@10 +6.4 over e5 at the deployed fusion (+12.1 after a blinded audit of missing relevance labels); image search 82.3 vs 48.3 MRR@10 for SigLIP-2. The price is indexing speed on an RTX 5070: 128 vs 466 chunks/s for text, 8 vs 222 images/s. Measurements and method: [docs/plans/gemma-migration.md](docs/plans/gemma-migration.md).
+
+The active profile is `VOITTA_EMBEDDING_PROFILE` if set, else the one a completed migration recorded, else the install default (`VOITTA_DEFAULT_EMBEDDING_PROFILE`). An install that already holds `e5-siglip` data keeps running it after upgrading and says so in the settings overview. The app refuses to start when a profile is set explicitly against another profile's data, so one model's vectors never land in another model's collection. To move an existing install, see "Switching embedding profile" in [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 ## MCP server
 
@@ -341,7 +352,7 @@ The runtime shape is described below; the Terraform module that provisions it is
 
 ### Compute: pick the right CPU family
 
-Embedding (e5-base, SigLIP-2, fastembed BM25) and PDF parsing (MinerU layout/OCR) are matmul-heavy. CPU choice changes throughput by 2–4× even before considering GPUs.
+Embedding (EmbeddingGemma-2, or e5-base + SigLIP-2; fastembed BM25) and PDF parsing (MinerU layout/OCR) are matmul-heavy. CPU choice changes throughput by 2–4× even before considering GPUs.
 
 | Family    | Silicon                | AVX-512 | AMX¹ | Notes                                  |
 |-----------|------------------------|:-------:|:----:|----------------------------------------|
@@ -422,7 +433,7 @@ Built by GitHub Actions on tag and published to GHCR. Customers consume it by ta
 
 - Base: `python:3.12-slim` + apt deps for MinerU/OpenCV (`libgl1`, `libglib2.0-0`, cairo, poppler, fonts — `libgl1` provides the `libGL.so.1` OpenCV `dlopen`s; missing it makes every PDF fail to extract) and headless CAD rendering (`libegl1`, `libgl1-mesa-dri`, `libosmesa6` — the EGL + Mesa Gallium llvmpipe path VTK uses when no GPU is attached). The full list lives in the [Dockerfile](./Dockerfile); native installs must install the same packages (see the Quickstart system-dependencies note).
 - Python deps: `cadquery-ocp` for OpenCASCADE 7.x bindings (~500 MB wheel) and `vtk` for the offscreen renderer (~80 MB wheel) ship in core — no extras flag.
-- Models baked into the image at build time: e5-base, SigLIP-2, fastembed BM25, and MinerU's `basic`-tier weights (Torch and ONNX backends, under `/opt/mineru`). This makes the image ~6–8 GB but gives instant cold-start and works in egress-restricted environments.
+- Models baked into the image at build time: the embedding profiles in the `PREWARM_PROFILES` build arg (default `gemma2`; add `e5-siglip` for an install that will migrate from it), fastembed BM25, and MinerU's `basic`-tier weights (Torch and ONNX backends, under `/opt/mineru`). This makes the image ~6–8 GB but gives instant cold-start and works in egress-restricted environments.
 - Pinned by version tag (`v0.x.y`); the customer's tfvars references a specific tag.
 
 The local terminal flow (`make dev`) is unaffected by any of this — it doesn't use Docker, doesn't pull weights, and doesn't go through Google OAuth (it uses `VOITTA_DEV_USER`).
@@ -462,8 +473,8 @@ The index uses two search collections:
 
 | Collection | Model | What it's good at |
 |---|---|---|
-| `chunks` | e5-base-v2 (dense) + BM25 (sparse), RRF-fused | Semantic similarity + exact keyword matching |
-| `images` | SigLIP-2 (image + text encoder) | Visual search — find charts, diagrams, photos |
+| chunks | EmbeddingGemma-2 (dense; e5-base-v2 under `e5-siglip`) + BM25 (sparse), RRF-fused | Semantic similarity + exact keyword matching |
+| images | EmbeddingGemma-2 (SigLIP-2 under `e5-siglip`) | Visual search — find charts, diagrams, photos |
 
 Practical implications:
 

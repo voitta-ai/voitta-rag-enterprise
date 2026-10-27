@@ -26,7 +26,9 @@ class FakeTextEmbedder(TextEmbedder):
     def dim(self) -> int:
         return FAKE_DIM
 
-    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+    def embed_documents(
+        self, texts: list[str], titles: list[str] | None = None
+    ) -> list[list[float]]:
         return [self._vec(t) for t in texts]
 
     def embed_query(self, text: str) -> list[float]:
@@ -83,7 +85,10 @@ class E5TextEmbedder(TextEmbedder):
         )
         return int(getter())
 
-    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+    def embed_documents(
+        self, texts: list[str], titles: list[str] | None = None
+    ) -> list[list[float]]:
+        # e5 has no title slot; ``passage: <text>`` is its trained format.
         model = self._load_under_gpu_lock()
         prefixed = [f"passage: {t}" for t in texts]
         with gpu_lock("e5.embed_documents"):

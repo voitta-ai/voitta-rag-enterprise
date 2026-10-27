@@ -640,7 +640,7 @@ def test_re_extract_replaces_image_points_in_qdrant(
 
     # The old point must be gone, not lingering.
     client = vector_store.get_client()
-    res = client.retrieve(vector_store.IMAGES, ids=[old_image_id])
+    res = client.retrieve(vector_store.images_collection(), ids=[old_image_id])
     assert res == [], f"orphan point at old image_id={old_image_id} still present"
 
 
@@ -702,7 +702,7 @@ def test_delete_orphan_chunk_points_removes_stale_rows(
 
     # Sanity: there's at least one Qdrant chunk point.
     client = vector_store.get_client()
-    pre = client.count(vector_store.CHUNKS).count
+    pre = client.count(vector_store.chunks_collection()).count
     assert pre >= 1
 
     # Drop every Chunk DB row directly — Qdrant points remain.

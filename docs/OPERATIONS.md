@@ -101,9 +101,78 @@ flowchart TB
   re-runs the full extract → chunk → embed pipeline against the new bytes.
 - **SQLite stores metadata only.** Extracted text and image bytes live in
   content-addressed `cas/` blobs (refcounted, GC-swept by `cas/gc.py`).
-- **Two Qdrant collections**: `chunks` (dense e5-base-v2 + sparse BM25,
-  RRF-fused) and `images` (SigLIP-2, searchable by text *or* image). Each
-  point carries an `allowed_users` payload for the ACL filter.
+- **Two Qdrant collections per embedding profile**: chunks (dense + sparse
+  BM25, RRF-fused) and images (searchable by text *or* image). The default
+  `gemma2` profile embeds both with EmbeddingGemma-2 into `chunks__gemma2` /
+  `images__gemma2`; `e5-siglip` (e5-base-v2 + SigLIP-2) uses the historical
+  `chunks` / `images`. See "Embedding profiles" below. Each point carries an
+  `allowed_users` payload for the ACL filter.
+
+### Embedding profiles
+
+`services/embedding/profiles.py` defines two profiles; the active one decides
+the models, the version stamps written into payloads, and the collection names.
+
+| Profile | Text | Images | Collections |
+|---|---|---|---|
+| `gemma2` | EmbeddingGemma-2 (`title: {rel_path} \| text: …`, 512 tokens) | EmbeddingGemma-2, 560 vision tokens, same model instance | `chunks__gemma2`, `images__gemma2` |
+| `e5-siglip` | e5-base-v2 (`passage: …`) | SigLIP-2 base (queries padded to 64 tokens) | `chunks`, `images` |
+
+**Resolution at startup** (first match wins): `VOITTA_EMBEDDING_PROFILE` →
+the `embedding_profile` row in SQLite `app_settings` (written by a completed
+migration) → `VOITTA_DEFAULT_EMBEDDING_PROFILE` (`gemma2`; the desktop
+launcher sets `e5-siglip`). The startup log line and the settings overview
+(`embedding` block) show the result and where it came from.
+
+**Safety check.** All three models emit 768-d vectors, so Qdrant would accept
+one model's vectors into another's collection without complaint. SQLite
+`collection_meta` records which profile built each collection (pre-profile
+`chunks` / `images` are backfilled as `e5-siglip` on first start). Then:
+
+- defaulted profile, but only the other profile's collections hold data →
+  the app **adopts** that profile (an upgraded install keeps working) and the
+  settings overview says "running the legacy profile";
+- explicitly chosen profile (env or `app_settings`) whose collections are
+  empty while the other's hold data, or that a migration is still filling →
+  `ProfileMismatchError`, **startup aborts** with both ways out in the message.
+
+`gpu_lock`, orphan sweeps, `reembed_stale.py` and `rebuild_index.py` act on
+the active profile's collections only.
+
+### Switching embedding profile
+
+`scripts/migrate_embedding_profile.py` re-embeds from what is already stored —
+chunk text in SQL, image blobs in the CAS — so nothing is re-parsed.
+
+```bash
+python scripts/migrate_embedding_profile.py --to gemma2 --dry-run   # counts + time estimate
+python scripts/migrate_embedding_profile.py --to gemma2             # fill chunks__gemma2 / images__gemma2
+# restart the app: it now resolves gemma2 from app_settings
+python scripts/migrate_embedding_profile.py --to gemma2             # catch-up, idempotent
+python scripts/migrate_embedding_profile.py --to gemma2 --drop-old  # later: delete chunks / images
+```
+
+- Runs beside the live app only with standalone Qdrant (`VOITTA_QDRANT_URL`,
+  the server / Docker setup). With embedded or managed Qdrant (the desktop
+  default) the store belongs to one process: stop the app first. It writes
+  only the target collections and takes `gpu_lock` per batch.
+- While it runs, `app_settings.embedding_migration` marks the target as in
+  progress: an app restart stays on the old profile, and forcing the target
+  with `VOITTA_EMBEDDING_PROFILE` aborts startup.
+- Resumable: each pass diffs SQL against the target (chunk ids per file,
+  image CAS ids per file, model versions) and embeds only the difference.
+  Passes repeat until one finds nothing to do, so files the app re-indexed
+  meanwhile are picked up. Then it records the profile and clears the mark.
+- Rollback before completion: stop it. After completion: set
+  `VOITTA_EMBEDDING_PROFILE=e5-siglip` (old collections are kept until
+  `--drop-old`).
+- Throughput on an RTX 5070: 128 chunks/s and 8 images/s for `gemma2`,
+  about 2 h per million chunks plus 3.5 h per 100k images.
+- `VOITTA_EMBEDDING_PROFILE` in the environment overrides the recorded
+  profile; the script warns if it is set to something else.
+- Docker images bake in only `PREWARM_PROFILES` (default `gemma2`); build
+  with `--build-arg PREWARM_PROFILES=gemma2,e5-siglip` for an install that
+  serves `e5-siglip` until it migrates.
 
 ### Qdrant runtime modes
 
@@ -191,9 +260,9 @@ sequenceDiagram
         IX->>C: chunk(markdown) → ChunkInfo[]
         IX->>IX: commit_indexing (txn):<br/>replace chunks/images, CAS refcounts,<br/>ChunkImageLink within nearby radius
         Note over IX: File → extracted · pending_embeds = (1 if chunks) + n_images
-        IX->>E: embed text (dense e5 + sparse BM25) [gpu_lock]
+        IX->>E: embed text (dense + sparse BM25) [gpu_lock]
         IX->>QD: replace_chunks_for_file (batches of 256)
-        IX->>E: embed each image (SigLIP-2) [gpu_lock]
+        IX->>E: embed each image [gpu_lock]
         IX->>QD: upsert image points (CAS-dedup via file_ids[])
         IX->>IX: decrement pending_embeds → 0 ⇒ File = indexed
     end
@@ -224,7 +293,7 @@ Most stages are wrapped in a `_stage()` context manager for timing/logging
 | 8 | `chunk` | ✓ | Chunking registry → `ChunkInfo[]` |
 | 9 | `commit_indexing` | ✓ | Txn: replace chunks/images, refcounts, `ChunkImageLink` |
 | 10 | `embed_text_inline` | ✓ | Dense + sparse vectors → `chunks` collection (if any chunks) |
-| 11 | `embed_image_inline` | ✓ | SigLIP-2 vectors → `images` collection, per-image (failures non-fatal) |
+| 11 | `embed_image_inline` | ✓ | image vectors → the profile's image collection, per-image (failures non-fatal) |
 
 ### PDF parsing: the MinerU daemon
 
@@ -725,9 +794,12 @@ stages ([ws.js](../static/js/ws.js),
 
 ## 6. Search query path
 
-`POST /api/search` embeds the query three ways, resolves the visible-folder
-ACL filter, then queries both Qdrant collections and RRF-fuses the chunk
-results.
+`POST /api/search` embeds the query (dense + sparse, plus the image-side
+vector under `e5-siglip`; under `gemma2` the dense query vector IS the
+image query, embedded once), resolves the visible-folder ACL filter, then
+queries both of the profile's Qdrant collections and RRF-fuses the chunk
+results. A collection that does not exist yet (nothing indexed) yields no
+hits rather than an error.
 
 ```mermaid
 sequenceDiagram
@@ -741,8 +813,8 @@ sequenceDiagram
     U->>S: POST /api/search {query, modes, folder_ids, limit}
     S->>ACL: _resolve_folder_ids(user, requested)
     Note over ACL: multi-user: intersect requested ∩ visible<br/>empty ⇒ [-1] (Qdrant short-circuit)
-    S->>E: embed_query → dense (e5) + sparse (BM25)
-    S->>E: embed_text → image vector (SigLIP-2)
+    S->>E: embed_query → dense + sparse (BM25)
+    S->>E: embed_text → image vector (e5-siglip only; gemma2 reuses dense)
     par chunks
         S->>QD: search_chunks(dense, sparse, folder_ids)
         QD->>QD: dense query + sparse query
@@ -1708,8 +1780,8 @@ flowchart TB
     subgraph gpu["gpu_lock (threading.Lock)"]
         direction TB
         MIN["MinerU PDF parse"]
-        SIG["SigLIP image+text embed"]
-        E5["e5 dense text embed"]
+        SIG["image embed (Gemma or SigLIP)"]
+        E5["text embed (Gemma or e5)"]
         SRCH["search query embed<br/>(serialized vs indexing)"]
     end
 
@@ -1725,7 +1797,7 @@ flowchart TB
 | Lock | Protects | Why |
 |------|----------|-----|
 | `_EXTRACT_LOCK` | the whole extract pipeline + `wipe_file_data` | PyMuPDF/cairo/Pillow C decoders corrupt the heap under parallelism; also prevents a `/reindex` wipe (REST thread) from racing an in-flight extract (worker thread) |
-| `gpu_lock` | every model inference (MinerU, SigLIP, e5) | serializes GPU work, including search-query embeds vs. indexing, so they don't collide on the device |
+| `gpu_lock` | every model inference (MinerU, the embedding models) | serializes GPU work, including search-query embeds vs. indexing, so they don't collide on the device |
 | Qdrant worker thread | all Qdrant I/O | QdrantLocal's SQLite connection is pinned to its creating thread; routing every call through one worker keeps it thread-safe |
 
 The default worker pool size is **1**, so two workers can't collide in the
