@@ -56,7 +56,11 @@ def test_tampered_signature_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
         file_id=1, asset_type="x", slug=None, params=None, user_id=None
     )
     payload_b64, sig_b64 = token.split(".", 1)
-    bad_sig = sig_b64[:-1] + ("Z" if sig_b64[-1] != "Z" else "Y")
+    # Tamper the FIRST character: the last base64url character of a 32-byte
+    # HMAC carries 2 padding bits that decoding discards, so flipping it
+    # could leave the decoded signature unchanged (an intermittent pass of
+    # the forged token, i.e. a flaky test).
+    bad_sig = ("B" if sig_b64[0] != "B" else "C") + sig_b64[1:]
     with pytest.raises(signed_assets.InvalidAssetToken):
         signed_assets.verify_token(f"{payload_b64}.{bad_sig}")
 
