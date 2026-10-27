@@ -9,7 +9,7 @@ import { api } from "../api.js";
 import { renderFolders } from "../render/tree.js";
 import { closeModal, openModal } from "../modals/new-folder.js";
 import { openRenameModal } from "../modals/rename-folder.js";
-import { addGhostDir, expand, getSelectedFileId, getSelectedFolderId, getSelectedRelDir, removeGhostDir, setSelection } from "./selection.js";
+import { addGhostDir, expand, getLocation, getSelectedFileId, getSelectedFolderId, getSelectedRelDir, openLocation, removeGhostDir, setSelection } from "./selection.js";
 import { scheduleFullRender } from "../render/render-loop.js";
 import { files, folders, jobs } from "../store.js";
 
@@ -258,13 +258,21 @@ $("#btn-remove").addEventListener("click", async () => {
             files.update((list) => list.filter(
                 (f) => f.folder_id !== folderId || (f.rel_path !== relDir && !f.rel_path.startsWith(prefix))
             ));
-            setSelection(folderId, "");
-            scheduleFullRender();
+            // The deleted directory is normally the open one: go up to
+            // its parent (replacing the history entry for the gone dir).
+            const loc = getLocation();
+            if (loc.folderId === folderId && (loc.relDir === relDir || loc.relDir.startsWith(prefix))) {
+                const slash = relDir.lastIndexOf("/");
+                openLocation(folderId, slash >= 0 ? relDir.slice(0, slash) : "", { history: "replace" });
+            } else {
+                setSelection(folderId, "");
+                scheduleFullRender();
+            }
         } else {
             // Delete the top-level folder.
             if (!confirm(`Delete folder "${folder.display_name}"?\n\nThe folder and all its files will be permanently removed from disk.`)) return;
             await api.deleteFolder(folderId);
-            setSelection(null, "");
+            openLocation(null, "", { history: "replace" });
         }
     } catch (err) {
         alert(err.message);

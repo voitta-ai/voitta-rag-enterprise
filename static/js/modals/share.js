@@ -125,15 +125,19 @@ function renderGroups(sharing) {
             buildRow({
                 glyph: "◆",
                 label: g.name,
-                detail: `${g.member_count} member${g.member_count === 1 ? "" : "s"}`,
+                detail: memberSummary(g),
+                title: (g.members || []).join(", "),
                 onRemove: () => apply(() => api.unshareGroup(_folderId, g.id)),
             }),
         );
     }
 
-    // Pick-list: org groups not already granted.
+    // Pick-list: org groups not already granted. + Add stays disabled
+    // until a real group is chosen (it looked like a dead "new group"
+    // button when clicking it with the placeholder did nothing).
     const sel = $("#share-group-select");
     const grantedIds = new Set(sharing.groups.map((g) => g.id));
+    $("#share-group-add").disabled = true;
     ensureGroupsCache()
         .then((all) => {
             sel.replaceChildren();
@@ -147,11 +151,23 @@ function renderGroups(sharing) {
             for (const g of opts) {
                 const o = document.createElement("option");
                 o.value = String(g.id);
-                o.textContent = `${g.name} (${g.member_count})`;
+                o.textContent = `${g.name} — ${memberSummary(g)}`;
+                o.title = (g.members || []).join(", ");
                 sel.append(o);
             }
         })
         .catch((err) => showError(err.message));
+}
+
+// "ana, bo +3 more" — names when the server sends them, count otherwise.
+function memberSummary(g) {
+    const names = g.members || [];
+    if (!names.length) {
+        return `${g.member_count} member${g.member_count === 1 ? "" : "s"}`;
+    }
+    const shown = names.slice(0, 2).join(", ");
+    const extra = names.length - 2;
+    return extra > 0 ? `${shown} +${extra} more` : shown;
 }
 
 function renderPeople(people) {
@@ -173,9 +189,10 @@ function renderPeople(people) {
     }
 }
 
-function buildRow({ glyph, label, detail, pending, onRemove }) {
+function buildRow({ glyph, label, detail, pending, title, onRemove }) {
     const li = document.createElement("li");
     li.className = "share-row" + (pending ? " share-row-pending" : "");
+    if (title) li.title = title;
     const g = document.createElement("span");
     g.className = "share-row-glyph";
     g.textContent = glyph;
@@ -227,6 +244,9 @@ $("#share-group-add").addEventListener("click", () => {
     const v = $("#share-group-select").value;
     if (!v) return;
     apply(() => api.shareToGroup(_folderId, Number(v)));
+});
+$("#share-group-select").addEventListener("change", () => {
+    $("#share-group-add").disabled = !$("#share-group-select").value;
 });
 
 function addEmail() {

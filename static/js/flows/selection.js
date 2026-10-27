@@ -109,3 +109,57 @@ export function selectNode(folderId, relDir, fileId = null) {
     _selectedArtifact = null;
     scheduleFullRender();
 }
+
+// ---------------------------------------------------------------------------
+// Location — which folder the list is showing
+// ---------------------------------------------------------------------------
+//
+// The folder list shows one location at a time: all folders (folderId
+// null), or the contents of one folder / subdirectory, with a breadcrumb
+// back up. Clicking a folder row opens it; the chevron expands it in
+// place. Each move is a browser-history entry, so Back / Forward walk the
+// path. Opening a location also selects it, so the sidebar shows its
+// details.
+
+let _locFolderId = null;
+let _locRelDir = "";
+
+export function getLocation() {
+    return { folderId: _locFolderId, relDir: _locRelDir };
+}
+
+function _setLocation(folderId, relDir, history) {
+    const same = folderId === _locFolderId && relDir === _locRelDir;
+    _locFolderId = folderId;
+    _locRelDir = folderId === null ? "" : relDir;
+    const state = { voittaLocation: { folderId: _locFolderId, relDir: _locRelDir } };
+    if (history === "push" && !same) window.history.pushState(state, "");
+    else if (history === "replace") window.history.replaceState(state, "");
+}
+
+// ``history``: "push" (a user move — Back returns here), "replace" (the
+// current location is gone, e.g. it was deleted) or "none" (restoring an
+// entry on Back / Forward).
+export function openLocation(folderId, relDir = "", { history = "push" } = {}) {
+    _setLocation(folderId, relDir, history);
+    selectNode(_locFolderId, _locRelDir);
+}
+
+// Show a file's directory with the file selected (e.g. a citation link).
+export function openFileLocation(folderId, relDir, fileId) {
+    _setLocation(folderId, relDir, "push");
+    selectNode(folderId, relDir, fileId);
+}
+
+// The open folder disappeared (deleted, or access revoked): back to all
+// folders. Called from inside a render, so it neither selects nor schedules.
+export function leaveMissingLocation() {
+    const gone = _locFolderId;
+    _setLocation(null, "", "replace");
+    if (_selectedFolderId === gone) setSelection(null, "");
+}
+
+// Rewrite the initial history entry so Back to it lands on "all folders".
+export function initLocationHistory() {
+    _setLocation(null, "", "replace");
+}

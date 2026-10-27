@@ -43,7 +43,12 @@ from ...services.acl import (
     accounts_for_email,
     folder_active_for_user,
 )
-from ...services.sharing_view import GroupShareOut, SharingOut, sharing_view
+from ...services.sharing_view import (
+    GroupShareOut,
+    SharingOut,
+    group_member_labels,
+    sharing_view,
+)
 from ..deps import current_user, db_session
 from .folders import (
     _require_owner,
@@ -214,8 +219,8 @@ def list_groups(
 ) -> list[GroupShareOut]:
     """Group pick-list for the share modal (any signed-in user).
 
-    Names + member counts only; membership editing stays in the admin
-    console (``/api/admin/groups``).
+    Names, member counts and member display labels; membership editing
+    stays in the admin console (``/api/admin/groups``).
     """
     rows = db.execute(
         select(Group, func.count(UserGroup.user_id))
@@ -223,6 +228,13 @@ def list_groups(
         .group_by(Group.id)
         .order_by(Group.name)
     ).all()
+    members = group_member_labels(db, [g.id for g, _ in rows])
     return [
-        GroupShareOut(id=g.id, name=g.name, member_count=int(n)) for g, n in rows
+        GroupShareOut(
+            id=g.id,
+            name=g.name,
+            member_count=int(n),
+            members=members.get(g.id, []),
+        )
+        for g, n in rows
     ]

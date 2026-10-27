@@ -39,7 +39,7 @@ import "./assistant/index.js";  // self-wires the assistant launcher + window
 import { loadAssistantConfig } from "./assistant/config.js";
 import { updateToolbarState } from "./flows/toolbar.js";
 import { activeFolders, connStatus, files, folders, folderStats, jobs, reindexProgress, syncProgress, syncSources } from "./store.js";
-import { addGhostDir } from "./flows/selection.js";
+import { addGhostDir, initLocationHistory, openLocation } from "./flows/selection.js";
 import { connect } from "./ws.js";
 
 const $ = (sel) => document.querySelector(sel);
@@ -228,6 +228,14 @@ function seedGhostDirsFromFolders() {
         }
     });
 }
+
+// ----- Folder navigation: Back / Forward walk the folder path -----
+
+initLocationHistory();
+window.addEventListener("popstate", (e) => {
+    const loc = e.state?.voittaLocation;
+    openLocation(loc ? loc.folderId : null, loc ? loc.relDir : "", { history: "none" });
+});
 
 // ----- Folder search -----
 

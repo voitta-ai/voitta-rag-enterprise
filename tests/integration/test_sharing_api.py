@@ -142,11 +142,15 @@ def test_group_share_lifecycle(client: TestClient, app, tmp_path: Path) -> None:
     # Pick-list is visible to any signed-in user.
     r = client.get("/api/groups")
     assert r.status_code == 200
-    assert r.json() == [{"id": gid, "name": "eng", "member_count": 1}]
+    assert r.json() == [
+        {"id": gid, "name": "eng", "member_count": 1, "members": ["member@x"]}
+    ]
 
     r = client.post(f"/api/folders/{fid}/sharing/group", json={"group_id": gid})
     assert r.status_code == 200, r.text
-    assert r.json()["groups"] == [{"id": gid, "name": "eng", "member_count": 1}]
+    assert r.json()["groups"] == [
+        {"id": gid, "name": "eng", "member_count": 1, "members": ["member@x"]}
+    ]
 
     # Member now sees the folder.
     auth_as(app, "member@x")
