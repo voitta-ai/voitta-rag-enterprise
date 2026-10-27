@@ -54,6 +54,42 @@
     z-index: 1;
 }
 .tree-head .num { text-align: right; }
+/* Search / Share are per-folder settings: blank inside an open folder,
+   where every row is a subdirectory or file. */
+.folder-list-container.in-folder .tree-head .folder-only { visibility: hidden; }
+
+/* Breadcrumb above the column headers: the path to the open folder. */
+.tree-breadcrumb {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 2px;
+    padding: 8px calc(var(--tree-pad-x) - 6px);
+    border-bottom: 1px solid var(--color-border-light);
+    font-size: 13px;
+    flex-shrink: 0;
+    min-width: 0;
+}
+.tree-breadcrumb .crumb {
+    border: 0;
+    background: none;
+    padding: 2px 6px;
+    border-radius: var(--radius-sm);
+    color: var(--color-accent);
+    font: inherit;
+    cursor: pointer;
+    max-width: 260px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.tree-breadcrumb .crumb:hover { background: var(--color-bg-hover); text-decoration: underline; }
+.tree-breadcrumb .crumb[aria-current] {
+    color: var(--color-text-primary);
+    font-weight: 600;
+}
+.tree-breadcrumb .crumb[aria-current]:hover { text-decoration: none; }
+.tree-breadcrumb .crumb-sep { color: var(--color-text-secondary); }
 .tree-head .center { text-align: center; }
 
 .tree {
@@ -249,6 +285,12 @@
 }
 .tree-row:last-child { border-bottom: none; }
 .tree-row:hover { background: var(--color-bg-hover); }
+.tree-row.tree-row-empty {
+    grid-template-columns: 1fr;
+    color: var(--color-text-secondary);
+    cursor: default;
+}
+.tree-row.tree-row-empty:hover { background: none; }
 .tree-delete-btn {
     position: absolute;
     right: var(--tree-pad-x);
@@ -303,12 +345,22 @@
 /* Legacy indent span — unused since depth moved to label padding-left.
    Kept hidden in case any cached JS still emits it. */
 .tree-row .indent { display: none; }
+/* The chevron expands / collapses in place (clicking the row opens it
+   instead), so it gets a real hit target rather than a 10px glyph. */
 .tree-row .chevron {
-    width: 14px;
-    text-align: center;
+    flex: 0 0 18px;
+    height: 18px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-sm);
     color: var(--color-text-secondary);
     font-size: 10px;
     transition: transform 120ms ease;
+}
+.tree-row .chevron:not(.leaf):hover {
+    background: var(--color-bg-hover);
+    color: var(--color-text-primary);
 }
 .tree-row .chevron.open { transform: rotate(90deg); }
 .tree-row .chevron.leaf { visibility: hidden; }

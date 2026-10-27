@@ -58,12 +58,15 @@ function _applyLockBadge(glyphSpan, on) {
     }
 }
 import {
+    getLocation,
     getSelectedArtifact,
     getSelectedFileId,
     getSelectedFolderId,
     getSelectedRelDir,
     isExpanded,
     isFileExpanded,
+    leaveMissingLocation,
+    openLocation,
     removeGhostDir,
     selectArtifact,
     selectNode,
@@ -85,9 +88,12 @@ let _folderFilter = "";
 
 export function setFolderFilter(q) { _folderFilter = q; }
 
+// The search box filters what the list shows: folders by name at the top
+// level, the open folder's entries by name inside one.
 export function renderFoldersFiltered() {
     const q = _folderFilter.trim().toLowerCase();
-    const list = q ? folders.get().filter((f) => f.display_name.toLowerCase().includes(q)) : folders.get();
+    const inFolder = getLocation().folderId !== null;
+    const list = q && !inFolder ? folders.get().filter((f) => f.display_name.toLowerCase().includes(q)) : folders.get();
     renderFolders(list);
 }
 
@@ -392,7 +398,7 @@ function onRowClick(e) {
         }
         selectNode(Number(li.dataset.folderId), li.dataset.relDir || "", fileId);
     } else {
-        selectNode(Number(li.dataset.folderId), li.dataset.relDir || "");
+        openLocation(Number(li.dataset.folderId), li.dataset.relDir || "");
     }
 }
 
@@ -775,6 +781,19 @@ function ensureLoadingRow() {
 
 export function renderFolders(list) {
     const ul = $("#folder-list");
+    const loc = getLocation();
+    if (loc.folderId !== null) {
+        const folder = folders.get().find((f) => f.id === loc.folderId);
+        if (folder) {
+            renderBreadcrumb(folder, loc.relDir);
+            renderFolderContents(ul, folder, loc.relDir);
+            return;
+        }
+        // Only trust "gone" once the baseline snapshot is in; before that
+        // the store is merely not loaded yet.
+        if (connStatus.get() === "connected") leaveMissingLocation();
+    }
+    renderBreadcrumb(null, "");
     const sorted = [...list].sort((a, b) => a.id - b.id);
     if (sorted.length === 0) {
         // An empty list is ambiguous: either the folder snapshot hasn't
@@ -827,6 +846,95 @@ export function renderFolders(list) {
     reconcileChildren(ul, targetRows, seenKeys, rowCache);
 }
 
+// The open folder's contents: its subdirectories and files at depth 0,
+// each expandable in place.
+function renderFolderContents(ul, folder, relDir) {
+    rowCache.delete("empty");
+    rowCache.delete("loading");
+    const folderFiles = files.get().filter((x) => x.folder_id === folder.id);
+    let node = buildTree(folderFiles, folder.id);
+    for (const part of relDir.split("/").filter(Boolean)) {
+        node = node?.dirs.get(part);
+    }
+    const q = _folderFilter.trim().toLowerCase();
+    const targetRows = [];
+    const seenKeys = new Set();
+    if (node) {
+        emitChildRows({
+            targetRows,
+            seenKeys,
+            folder,
+            node,
+            relDir,
+            depth: 0,
+            folderActive: activeFolders.get().has(folder.id),
+            match: q ? (name) => name.toLowerCase().includes(q) : null,
+        });
+    }
+    if (targetRows.length === 0) {
+        // Also covers a subdirectory deleted from elsewhere while open.
+        const row = ensureFolderEmptyRow(q ? "Nothing in this folder matches the search." : "This folder is empty.");
+        targetRows.push(row);
+        seenKeys.add("folder-empty");
+    }
+    reconcileChildren(ul, targetRows, seenKeys, rowCache);
+}
+
+function ensureFolderEmptyRow(text) {
+    let el = rowCache.get("folder-empty");
+    if (!el) {
+        el = document.createElement("li");
+        el.className = "tree-row tree-row-empty";
+        rowCache.set("folder-empty", el);
+    }
+    setIfChanged(el, "textContent", text);
+    return el;
+}
+
+// "All folders › Folder › sub › dir" above the list; every crumb opens its
+// location. Rebuilt only when the location (or the folder's name) changes.
+let _crumbKey = null;
+
+function renderBreadcrumb(folder, relDir) {
+    const nav = $("#tree-breadcrumb");
+    if (!nav) return;
+    const key = folder ? `${folder.id}:${folder.display_name}:${relDir}` : "";
+    nav.closest(".folder-list-container")?.classList.toggle("in-folder", !!folder);
+    const search = $("#folder-search");
+    if (search) search.placeholder = folder ? "Search this folder…" : "Search folders…";
+    if (key === _crumbKey) return;
+    _crumbKey = key;
+
+    const crumbs = [{ label: "All folders", folderId: null, relDir: "" }];
+    if (folder) {
+        crumbs.push({ label: folder.display_name, folderId: folder.id, relDir: "" });
+        let acc = "";
+        for (const part of relDir.split("/").filter(Boolean)) {
+            acc = acc ? `${acc}/${part}` : part;
+            crumbs.push({ label: part, folderId: folder.id, relDir: acc });
+        }
+    }
+    const parts = [];
+    crumbs.forEach((c, i) => {
+        if (i > 0) {
+            const sep = document.createElement("span");
+            sep.className = "crumb-sep";
+            sep.textContent = "›";
+            sep.setAttribute("aria-hidden", "true");
+            parts.push(sep);
+        }
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "crumb";
+        btn.textContent = c.label;
+        btn.title = c.folderId === null ? "Show all folders" : (c.relDir || c.label);
+        if (i === crumbs.length - 1) btn.setAttribute("aria-current", "location");
+        btn.addEventListener("click", () => openLocation(c.folderId, c.relDir));
+        parts.push(btn);
+    });
+    nav.replaceChildren(...parts);
+}
+
 function emitTreeRow({ targetRows, seenKeys, folder, node, relDir, displayName, depth, isRoot, folderActive, folderSyncing }) {
     // Sync is a folder-level operation — only the root row wears "syncing";
     // child dirs keep their file-state pills.
@@ -860,7 +968,14 @@ function emitTreeRow({ targetRows, seenKeys, folder, node, relDir, displayName, 
     seenKeys.add(cacheKey);
 
     if (!isOpen) return;
+    emitChildRows({ targetRows, seenKeys, folder, node, relDir, depth: depth + 1, folderActive });
+}
+
+// The subdirectories and files directly under ``node`` (plus whatever of
+// them is expanded), at ``depth``. ``match`` optionally filters them by name.
+function emitChildRows({ targetRows, seenKeys, folder, node, relDir, depth, folderActive, match = null }) {
     for (const [name, child] of [...node.dirs.entries()].sort()) {
+        if (match && !match(name)) continue;
         emitTreeRow({
             targetRows,
             seenKeys,
@@ -868,13 +983,14 @@ function emitTreeRow({ targetRows, seenKeys, folder, node, relDir, displayName, 
             node: child,
             relDir: relDir ? `${relDir}/${name}` : name,
             displayName: name,
-            depth: depth + 1,
+            depth,
             isRoot: false,
             folderActive,
         });
     }
     const fileCanDelete = !!(folder.writable) && (folder.sync_source_kind || "regular") === "regular";
     for (const f of [...node.files].sort((a, b) => a.rel_path.localeCompare(b.rel_path))) {
+        if (match && !match(f.rel_path.slice(f.rel_path.lastIndexOf("/") + 1))) continue;
         const fkey = `file:${f.id}`;
         let fli = rowCache.get(fkey);
         if (!fli) {
@@ -886,7 +1002,7 @@ function emitTreeRow({ targetRows, seenKeys, folder, node, relDir, displayName, 
         const slashIdx = f.rel_path.lastIndexOf("/");
         fli.dataset.relDir = slashIdx >= 0 ? f.rel_path.slice(0, slashIdx) : "";
         fli._canDelete = fileCanDelete;
-        updateFileRow(fli, { file: f, depth: depth + 1 });
+        updateFileRow(fli, { file: f, depth });
         targetRows.push(fli);
         seenKeys.add(fkey);
 
@@ -905,7 +1021,7 @@ function emitTreeRow({ targetRows, seenKeys, folder, node, relDir, displayName, 
                 if (!ali) { ali = buildArtifactSummaryRow(f.id, "images"); rowCache.set(akey, ali); }
                 ali.dataset.folderId = String(folder.id);
                 ali.dataset.relDir = fli.dataset.relDir;
-                updateArtifactSummaryRow(ali, { file: f, type: "images", count: imgLoading ? null : imgs.length, depth: depth + 2 });
+                updateArtifactSummaryRow(ali, { file: f, type: "images", count: imgLoading ? null : imgs.length, depth: depth + 1 });
                 targetRows.push(ali);
                 seenKeys.add(akey);
             }
@@ -918,7 +1034,7 @@ function emitTreeRow({ targetRows, seenKeys, folder, node, relDir, displayName, 
                 if (!ali) { ali = buildArtifactSummaryRow(f.id, "layout"); rowCache.set(akey, ali); }
                 ali.dataset.folderId = String(folder.id);
                 ali.dataset.relDir = fli.dataset.relDir;
-                updateArtifactSummaryRow(ali, { file: f, type: "layout", count: layoutLoading ? null : blocks.length, depth: depth + 2 });
+                updateArtifactSummaryRow(ali, { file: f, type: "layout", count: layoutLoading ? null : blocks.length, depth: depth + 1 });
                 targetRows.push(ali);
                 seenKeys.add(akey);
             }
@@ -936,7 +1052,7 @@ function emitTreeRow({ targetRows, seenKeys, folder, node, relDir, displayName, 
                 if (!ali) { ali = buildArtifactEmptyRow(f.id); rowCache.set(akey, ali); }
                 ali.dataset.folderId = String(folder.id);
                 ali.dataset.relDir = fli.dataset.relDir;
-                updateArtifactEmptyRow(ali, { depth: depth + 2 });
+                updateArtifactEmptyRow(ali, { depth: depth + 1 });
                 targetRows.push(ali);
                 seenKeys.add(akey);
             }

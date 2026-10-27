@@ -509,6 +509,9 @@
 
             <div class="browser-layout">
                 <section class="folder-list-container">
+                    <!-- Where the list is: "All folders", or the path to the
+                         open folder. Every crumb is clickable (tree.js). -->
+                    <nav id="tree-breadcrumb" class="tree-breadcrumb" aria-label="Folder path"></nav>
                     <!-- Column headers. Stay pinned at the top of the
                          container; only the <ul> below scrolls. -->
                     <div class="tree-head" role="row">
@@ -516,8 +519,8 @@
                         <span class="num">Files</span>
                         <span class="num">Indexed</span>
                         <span>Status</span>
-                        <span class="center" title="Which folders AI assistants connected to Voitta (over MCP) can search">Search</span>
-                        <span class="center" title="Who can see each folder — click a pill to change sharing">Share</span>
+                        <span class="center folder-only" title="Which folders AI assistants connected to Voitta (over MCP) can search">Search</span>
+                        <span class="center folder-only" title="Who can see each folder — click a pill to change sharing">Share</span>
                     </div>
                     <ul id="folder-list" class="tree"></ul>
                 </section>
@@ -548,7 +551,7 @@
                     <div id="tab-pane-details" class="sidebar-tab-pane" role="tabpanel"
                          aria-labelledby="tab-btn-details">
                         <div class="sidebar-section sidebar-empty" id="sidebar-empty">
-                            <p class="hint-large">Select a folder to see details.</p>
+                            <p class="hint-large">Open a folder to see its details.</p>
                         </div>
 
                         <!-- File preview pane — shown when a file row is clicked. -->

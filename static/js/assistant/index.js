@@ -11,7 +11,7 @@
 // the person typing is always recorded as the author.
 
 import { api } from "../api.js";
-import { expand, getSelectedFileId, getSelectedFolderId, selectNode } from "../flows/selection.js";
+import { getSelectedFileId, getSelectedFolderId, openFileLocation } from "../flows/selection.js";
 import { openSettings } from "../modals/settings.js";
 import { assistantConfig, files, folders } from "../store.js";
 import { AssistantSocket } from "./socket.js";
@@ -424,15 +424,8 @@ function revealFile(fileId) {
         transcript.notice("That file isn't in your current view.", "muted");
         return;
     }
-    const parts = file.rel_path.split("/");
-    parts.pop();
-    let dir = "";
-    expand(file.folder_id, "");
-    for (const p of parts) {
-        dir = dir ? `${dir}/${p}` : p;
-        expand(file.folder_id, dir);
-    }
-    selectNode(file.folder_id, parts.join("/"), file.id);
+    const slash = file.rel_path.lastIndexOf("/");
+    openFileLocation(file.folder_id, slash >= 0 ? file.rel_path.slice(0, slash) : "", file.id);
 }
 
 function openLightbox(imageId) {
