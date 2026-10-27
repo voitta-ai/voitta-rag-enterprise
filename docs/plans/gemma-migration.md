@@ -240,6 +240,29 @@ refused" from saturn today (reachable, nothing listening), so no firewall change
 - Upload a PDF; it parses and indexes (exercises MinerU under the new transformers).
 - `nvidia-smi` steady state under 12 GB with nori-demos still running.
 
+### Acceptance results (2026-10-27)
+
+Scale migration on moon: an eval install built from the benchmark corpus (13 folders, 5,793
+text files, 141,598 chunks, 20,000 figures; SQL + CAS only), first embedded as `e5-siglip`,
+then moved with `migrate_embedding_profile.py --to gemma2` (bulk with the app able to run,
+then `--finish`). Scored through the live `POST /api/search` (top-20 dense + top-20 BM25, RRF,
+as deployed); paired bootstrap 95 % CI.
+
+| | e5-siglip | gemma2 | delta |
+| --- | --- | --- | --- |
+| Text, 268 own-folder queries, MRR@10 | 51.8 | 58.3 | **+6.5 [+2.0, +11.2]** (101 better, 55 worse) |
+| Images, 654 queries, MRR@10 | 48.3 | 82.6 | **+34.3 [+30.8, +37.9]** (317 better, 45 worse) |
+
+- e5 images 48.3 equals the benchmark's correctly padded SigLIP: the padding fix works live.
+- Gemma images 82.6 vs benchmark 82.3 (560 vision tokens); text 58.3 vs ~59.6 expected from
+  the benchmark (+6.4 model, +3.0 rel_path title) — within noise.
+- Migration time on the RTX 5070: text 22 min (141,598 chunks, ~109/s), figures 41 min
+  (20,000, ~8/s); `--finish` 5 s. The e5 index of the same data took 47 min.
+- No failed items. Steady-state VRAM with nori-demos, the gemma.voitta.ai app and the eval
+  app all loaded: 3.7 GB of 12 GB.
+- The startup guard fired as designed when the eval app inherited the gemma deployment's
+  `.env` (`VOITTA_EMBEDDING_PROFILE=gemma2` against data recorded as `e5-siglip`).
+
 ### Rollback
 
 Stop the screen session and the `qdrant-gemma` container; delete the DNS record and the nginx
