@@ -1,12 +1,35 @@
 # MinerU 4 conversion
 
-Status: plan, 2026-10-27. Not started. Prerequisite for the default `gemma2` embedding profile
+Status: implemented on branch `mineru4` (2026-10-27); see "Step 1 results" for what the verify
+run found and how it changed the plan. Prerequisite for the default `gemma2` embedding profile
 ([gemma-migration.md](gemma-migration.md)) because MinerU 3 pins `transformers<5` and
 EmbeddingGemma-2 needs `transformers>=5.18`.
 
 Facts below about MinerU 4 were read from the 4.0.12 release (2026-10-11), its PyPI metadata and
 its `master` source and docs on 2026-10-27. Items marked **verify** were not confirmed against a
 running install and must be checked in step 1 before any code is written against them.
+
+## Step 1 results (verify run, moon, `mineru[torch]==4.0.12`, docvortex 0.6.5, torch 2.14.1+cu130)
+
+| Verify item | Result |
+| --- | --- |
+| Saved files, keys, `img_path`, bbox | `save()` writes `markdown.md`, `middle_json.json`, `structured_content.json`, `model_output.json`, `images/page_{idx}_{type}_{n}.jpg`. Content-list `img_path` from the reloaded saved middle JSON is `images/...`; from the unsaved result it is a `data:image/jpeg;base64,...` URI (confirmed). bbox ints 0-1000. Headings are `text` + `text_level`. A chart comes out as `type: "chart"` with `chart_caption`. Tables render as pipe tables in the markdown. `FileBasedDataWriter` is `mineru.parser.writer.FileBasedDataWriter`. |
+| `page_range` → absolute `page_idx` | Confirmed: `"2-3"` yields `page_idx` 1 and 2; `"3-9"` on a 3-page file yields page 3 only. |
+| Model singleton | Second `parse()` 0.45 s vs 4.5 s first. |
+| Password-protected PDF | **Not a `MineruError`**: a raw `pypdfium2.PdfiumError` with `err_code == 4` (`FPDF_ERR_PASSWORD`). A corrupt file is `err_code == 3`. The daemon maps these PDFium load codes onto MinerU's vocabulary (`file_encrypted`, `file_corrupted`); `_ENCRYPTED_PDF_RE` is gone. A truncated PDF is usually repaired by PDFium, not rejected. |
+| `image_analysis=True` on `basic` | Accepted and ignored; we pass `False`. |
+| Render workers | **Correction:** MinerU passes the render thread count and timeout to docvortex explicitly, from its own `MINERU_PDF_RENDER_THREADS` (default 3) and `MINERU_PDF_RENDER_TIMEOUT` (300); `DOCVORTEX_PDF_RENDER_THREADS/TIMEOUT` are ignored on this path. Only `DOCVORTEX_PDF_RENDER_BACKEND` is read from the docvortex name. The daemon sets the `MINERU_*` pair. Spawned render workers re-import `__main__`, so the daemon's `__main__` guard stays. |
+| `python -m mineru.kit.main` | Works (`--version`, `models download/verify`). |
+| Models | Download on first use, per model (a 3-page fixture pulled 227 MB of the 854 MB torch set). `small_backend=auto` resolves to torch when a GPU is visible, ONNX on CPU; the ONNX set is another 819 MB. Docker prewarm fetches both. |
+| Logging | A host loguru sink survives `parse()`. MinerU runs only in the daemon, whose loguru goes to stderr and is drained into `indexing.log` as before. |
+| Dependencies | `pip install -e .` resolves cleanly with **no constraints file** (typer 0.27, setuptools 84, pypdfium2 5.14, huggingface-hub 1.33); `constraints.txt` is deleted. MinerU 4 does not pull OpenCV. `docvortex` has macOS wheels only for macOS 14+ (the desktop app's `min_os_version` is already 14.0). New sdist-only dependency: `jieba` (pre-wheeled in `build_app.sh` like `pylatexenc`). |
+| Embedders on transformers 5.21 / sentence-transformers 6.2 | e5-base-v2 vectors bit-identical to transformers 4.57.6; SigLIP-2 image vectors cos >= 0.99998. No re-embedding needed. |
+| VLM tiers | Not offered: `pdf_parse_tier` is `Literal["flash", "basic"]`. Enabling `standard`/`advanced` needs VLM endpoint config, which is code anyway. |
+
+Found while testing (also present in the 3.x code): after a watchdog kill, `Popen.poll()` reported
+the dying CUDA process as alive (it was unreaped, or the watchdog thread was still inside
+`wait()`), so the next file was written into the corpse and failed with "broken pipe". The
+daemon now joins the watchdog and reaps the process whenever its pipe closes.
 
 ## Why convert
 

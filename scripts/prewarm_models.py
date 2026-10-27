@@ -10,7 +10,8 @@ Targets:
 - Dense text embedder — sentence-transformers ``intfloat/e5-base-v2``
 - Sparse text embedder — fastembed ``Qdrant/bm25``
 - Image embedder — transformers ``google/siglip2-base-patch16-224``
-- MinerU pipeline weights (layout + OCR), via the bundled CLI
+- MinerU ``basic``-tier weights (layout, OCR, formula, table; Torch and
+  ONNX backends) into ``$MINERU_HOME/models``, via MinerU's own CLI
 
 Each step is wrapped so a single network blip can be retried without
 re-running the whole build.
@@ -53,14 +54,18 @@ def _image() -> None:
 
 
 def _mineru() -> None:
-    log.info("downloading MinerU pipeline models")
-    # ``mineru-models-download`` is the supported way to pre-fetch the
-    # layout + OCR weights from HuggingFace. Pipeline-only is enough for
-    # the parse path we use; VLM weights are >10GB and unused here.
-    subprocess.run(
-        ["mineru-models-download", "-s", "huggingface", "-m", "pipeline"],
-        check=True,
-    )
+    source = os.environ.get("MINERU_MODEL_SOURCE", "huggingface")
+    log.info("downloading MinerU basic-tier models from %s", source)
+    # ``python -m mineru.kit.main`` rather than the ``mineru-kit`` console
+    # script, so this works from any interpreter that has mineru installed.
+    # Basic tier only: the VLM tiers' weights are many GB and unused here.
+    # Both small-model backends: MinerU picks torch when it sees a GPU and
+    # ONNX on CPU, and the build host cannot know which the runtime has.
+    kit = [sys.executable, "-m", "mineru.kit.main", "models"]
+    for backend in ("torch", "onnx"):
+        tier = ["--tier", "basic", "--small-backend", backend]
+        subprocess.run([*kit, "download", *tier, "--source", source], check=True)
+        subprocess.run([*kit, "verify", *tier], check=True)
 
 
 def main() -> int:

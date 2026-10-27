@@ -452,6 +452,9 @@ class LayoutBlock(BaseModel):
     page: int
     type: str
     text: str | None = None
+    # Set on headings: MinerU emits a heading as a ``text`` block with an int
+    # ``text_level`` (1 = top level), not as a separate type.
+    text_level: int | None = None
 
 
 @router.get("/{file_id}/layout", response_model=list[LayoutBlock])
@@ -484,5 +487,8 @@ def get_file_layout(
         text = blk.get("text") or None
         if isinstance(text, str):
             text = text[:120].strip() or None
-        out.append(LayoutBlock(page=page, type=btype, text=text))
+        level = blk.get("text_level")
+        if not isinstance(level, int) or isinstance(level, bool):
+            level = None
+        out.append(LayoutBlock(page=page, type=btype, text=text, text_level=level))
     return out

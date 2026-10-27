@@ -184,34 +184,43 @@ if ! ls "$WHEELS"/rumps-*.whl >/dev/null 2>&1; then
 fi
 
 # ---------------------------------------------------------------------------
-# 5b. Pre-build the pylatexenc wheel into the bundled wheelhouse.
-#     pylatexenc is sdist-only on PyPI, and the first-run installer runs pip
-#     in-process inside the frozen .app, where pip's build-isolation can't
-#     spawn an interpreter (sys.executable is the Briefcase stub) — so a
-#     runtime sdist->wheel build dies with a misleading missing-output.json
-#     OSError (mineru pulls pylatexenc transitively). Build the wheel here,
-#     where isolation works, and ship it under resources/wheels so first-run
-#     pip installs it via --find-links instead of building. The spec is read
-#     from the generated lock so the shipped wheel can never drift from the
-#     version we pin.
+# 5b. Pre-build wheels for the sdist-only packages in the lock into the
+#     bundled wheelhouse. The first-run installer runs pip in-process inside
+#     the frozen .app, where pip's build-isolation can't spawn an interpreter
+#     (sys.executable is the Briefcase stub) — so a runtime sdist->wheel
+#     build dies with a misleading missing-output.json OSError. Both of these
+#     arrive transitively via mineru (pylatexenc for formula rendering, jieba
+#     for its tokenizer). Build the wheels here, where isolation works, and
+#     ship them under resources/wheels so first-run pip installs them via
+#     --find-links instead of building. Each spec is read from the generated
+#     lock so a shipped wheel can never drift from the version we pin.
 # ---------------------------------------------------------------------------
 RES_WHEELS="$RES/wheels"
 rm -rf "$RES_WHEELS"; mkdir -p "$RES_WHEELS"
-PYLATEX_SPEC=$(grep -E '^pylatexenc==' "$RES/requirements-lock.txt" | head -1)
-[ -n "$PYLATEX_SPEC" ] || { echo "[build_app] ERROR: pylatexenc not pinned in lock — unexpected" >&2; exit 1; }
-echo "[build_app] building $PYLATEX_SPEC wheel…"
-SD="$RES_WHEELS/sdist"; mkdir -p "$SD"
-"$VENV/bin/pip" download --no-binary :all: --no-deps -d "$SD" "$PYLATEX_SPEC" -q
-SRC="$SD/src_$$"; mkdir -p "$SRC"
-tar -xzf "$SD"/pylatexenc-*.tar.gz -C "$SRC" --strip-components=1
-"$PY" -m build --wheel --outdir "$RES_WHEELS" "$SRC" -q
-rm -rf "$SD"
+_prebuild_wheel_from_lock() {  # $1 = distribution name as pinned in the lock
+  local spec sd src
+  spec=$(grep -E "^$1==" "$RES/requirements-lock.txt" | head -1)
+  [ -n "$spec" ] || { echo "[build_app] ERROR: $1 not pinned in lock — unexpected" >&2; exit 1; }
+  echo "[build_app] building $spec wheel…"
+  sd="$RES_WHEELS/sdist"; mkdir -p "$sd"
+  "$VENV/bin/pip" download --no-binary :all: --no-deps -d "$sd" "$spec" -q
+  src="$sd/src_$$"; mkdir -p "$src"
+  tar -xzf "$sd"/"$1"-*.tar.gz -C "$src" --strip-components=1
+  "$PY" -m build --wheel --outdir "$RES_WHEELS" "$src" -q
+  rm -rf "$sd"
+}
+_prebuild_wheel_from_lock pylatexenc
+_prebuild_wheel_from_lock jieba
 
 # Guardrail: any package that is sdist-only on PyPI must be pre-wheeled above,
 # or the frozen-app first-run installer will try (and fail) to build it. We
-# can't cheaply probe all ~769 pins against PyPI on every build, so the known
-# sdist-only deps are tracked explicitly here. If you add another sdist-only
-# dependency, pre-build its wheel above and add a line below.
+# can't cheaply probe all ~800 pins against PyPI on every build, so the known
+# sdist-only deps are tracked explicitly here. To re-derive the list after a
+# dependency change, run a binary-only dry run of the lock, e.g.
+#   MACOSX_DEPLOYMENT_TARGET=14.0 uv pip install --dry-run --only-binary :all: \
+#     --python-platform aarch64-apple-darwin --python-version 3.12 --no-deps \
+#     -r src/voitta_rag_desktop/resources/requirements-lock.txt --target /tmp/x
+# and add every package it rejects above and below.
 _require_wheel() {  # $1 = wheelhouse dir, $2 = distribution name
   ls "$1"/"$2"-*.whl >/dev/null 2>&1 || {
     echo "[build_app] ERROR: sdist-only package '$2' has no pre-built wheel in" \
@@ -221,6 +230,7 @@ _require_wheel() {  # $1 = wheelhouse dir, $2 = distribution name
 }
 _require_wheel "$WHEELS" rumps
 _require_wheel "$RES_WHEELS" pylatexenc
+_require_wheel "$RES_WHEELS" jieba
 
 # ---------------------------------------------------------------------------
 # 6. Stage the SPA into the bundle resources

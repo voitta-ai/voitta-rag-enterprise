@@ -39,6 +39,7 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DEFAULT_TIMEOUT=300 \
     PIP_RETRIES=10 \
     HF_HOME=/opt/hf-cache \
+    MINERU_HOME=/opt/mineru \
     MINERU_MODEL_SOURCE=huggingface
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -78,14 +79,13 @@ WORKDIR /app
 # Install Python deps in a separate layer from the app source so iterating
 # on the source doesn't bust the dep cache. ``ml`` extras pulls in
 # sentence-transformers + transformers; ``dev`` is intentionally NOT here.
-COPY pyproject.toml README.md constraints.txt ./
+COPY pyproject.toml README.md ./
 COPY src ./src
-# ``-c constraints.txt`` pins three packages whose newest releases conflict with
-# the resolved set (see constraints.txt). The default resolver is used on
-# purpose: switching the dependency to mineru[pipeline] (from mineru[all])
-# removed the vllm GPU stack that was driving pip into ResolutionTooDeep, so the
-# correct resolver converges without the legacy fallback.
-RUN pip install -c constraints.txt -e ".[ml]"
+# No constraints file: the pins it carried (pypdfium2 for MinerU 3's pdftext,
+# typer and setuptools caps) are obsolete with MinerU 4, and pip resolves the
+# graph cleanly on its own. Depending on mineru[torch] (not mineru[all]) keeps
+# the VLM engine stacks out of the graph.
+RUN pip install -e ".[ml]"
 
 # SPA assets — copied after pip install so iterating on UI doesn't bust
 # the dep cache. ``main.py`` only registers the root route when this dir
@@ -93,7 +93,7 @@ RUN pip install -c constraints.txt -e ".[ml]"
 COPY static ./static
 
 # ---------------------------------------------------------------------------
-# Stage 2 — warm: pre-fetch model weights into HF_HOME
+# Stage 2 — warm: pre-fetch model weights into HF_HOME and MINERU_HOME
 # ---------------------------------------------------------------------------
 FROM base AS warm
 COPY scripts/prewarm_models.py /tmp/prewarm.py
@@ -104,15 +104,12 @@ RUN python /tmp/prewarm.py && rm /tmp/prewarm.py
 # ---------------------------------------------------------------------------
 FROM base AS runtime
 
-# Pull the warmed model cache from the previous stage. HF_HOME points at
-# /opt/hf-cache, so transformers, sentence-transformers, fastembed, and
-# MinerU all land there — single cache root, no need to chase ~/.cache.
+# Pull the warmed model caches from the previous stage. HF_HOME points at
+# /opt/hf-cache (transformers, sentence-transformers, fastembed); MinerU
+# keeps its own weights under $MINERU_HOME/models (/opt/mineru), set in the
+# base stage so the warm stage and the runtime agree on the location.
 COPY --from=warm /opt/hf-cache /opt/hf-cache
-
-# MinerU writes its config to ~/mineru.json at warm time (HOME=/root).
-# Carry that file over to the runtime user's home so MinerU finds the
-# pre-warmed weights instead of re-downloading on first parse.
-COPY --from=warm /root/mineru.json /tmp/mineru.json
+COPY --from=warm /opt/mineru /opt/mineru
 
 # Strip the toolchain we only needed for pip-installing native wheels.
 # ``git`` stays — the GitHub sync feature shells out to ``git ls-remote``
@@ -125,8 +122,7 @@ RUN apt-get purge -y build-essential \
 # predictable when an operator chowns the volume out of band.
 RUN useradd --uid 1000 --create-home --shell /bin/bash voitta \
     && mkdir -p /data \
-    && mv /tmp/mineru.json /home/voitta/mineru.json \
-    && chown -R voitta:voitta /data /opt/hf-cache /home/voitta
+    && chown -R voitta:voitta /data /opt/hf-cache /opt/mineru /home/voitta
 USER voitta
 ENV HF_HOME=/opt/hf-cache \
     HOME=/home/voitta \

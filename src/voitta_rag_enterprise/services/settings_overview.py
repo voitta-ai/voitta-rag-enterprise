@@ -69,7 +69,7 @@ _RUNTIME_FIELDS = (
     "image_model",
     "max_file_bytes",
     "pdf_parse_method",
-    "pdf_lang",
+    "pdf_parse_tier",
     "pdf_render_pages",
     "cloud_materialize_on_index",
     "session_max_age_seconds",

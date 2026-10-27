@@ -17,9 +17,10 @@ from voitta_rag_enterprise.services.layout import (
 
 
 def _txt(text: str, bbox: list[float], level: int | None = None) -> dict:
-    """A MinerU-shaped text block. ``level`` non-None marks it as a title."""
+    """A MinerU-shaped text block. ``level`` non-None makes it a heading:
+    MinerU emits headings as ``type: "text"`` with ``text_level`` set."""
     blk: dict = {
-        "type": "title" if level is not None else "text",
+        "type": "text",
         "text": text,
         "bbox": bbox,
         "page_idx": 0,
@@ -171,6 +172,41 @@ def test_summaries_by_page_groups_correctly() -> None:
     assert set(by_page.keys()) == {1, 2}
     assert by_page[1]["layout_n_image"] == 1
     assert by_page[2]["layout_n_image"] == 0
+
+
+def test_summaries_by_page_uses_per_mille_page() -> None:
+    """Bboxes are per-mille, so ratios are against a 1000x1000 page even when
+    no block reaches the page edge (the old max-bbox inference would have
+    called this chart 100 % of the page)."""
+    layout = [{"type": "chart", "page": 1, "bbox": [250, 250, 750, 750]}]
+    s = summaries_by_page(layout)[1]
+    assert s["layout_n_image"] == 1
+    assert s["layout_image_area_ratio"] == 0.25
+
+
+def test_summary_counts_mineru4_block_types() -> None:
+    """chart counts as an image; list and code as body text; a text block
+    with text_level is a title; page_footnote is page furniture."""
+    blocks = [
+        {"type": "chart", "bbox": [100, 100, 900, 400], "page_idx": 0},
+        {"type": "list", "list_items": ["one", "two"], "bbox": [100, 420, 900, 500], "page_idx": 0},
+        {"type": "code", "code_body": "x = 1", "bbox": [100, 510, 900, 560], "page_idx": 0},
+        {"type": "text", "text": "Heading", "text_level": 2, "bbox": [100, 40, 600, 80], "page_idx": 0},
+        {"type": "page_footnote", "text": "1. A note.", "bbox": [100, 950, 600, 970], "page_idx": 0},
+    ]
+    s = compute_page_layout_summary(blocks, 1000, 1000)
+    assert s["layout_n_image"] == 1
+    assert s["layout_n_text"] == 2
+    assert s["layout_n_title"] == 1
+    assert s["layout_max_text_level"] == 2
+    assert s["layout_n_page_number"] == 1
+
+
+def test_bool_text_level_is_not_a_title() -> None:
+    blk = {"type": "text", "text": "x", "text_level": True, "bbox": [0, 0, 10, 10]}
+    s = compute_page_layout_summary([blk], 1000, 1000)
+    assert s["layout_n_title"] == 0
+    assert s["layout_n_text"] == 1
 
 
 # ---------------------------------------------------------------------------

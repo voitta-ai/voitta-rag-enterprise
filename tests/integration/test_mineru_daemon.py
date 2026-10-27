@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from voitta_rag_enterprise.services.parsers import pdf_parser
+from voitta_rag_enterprise.services.parsers.base import UnsupportedDocumentError
 from voitta_rag_enterprise.services.parsers.pdf_parser import (
     _MineruDaemon,
     reset_mineru_daemon_for_tests,
@@ -86,6 +87,7 @@ def _patch_daemon(monkeypatch: pytest.MonkeyPatch, stub: Path) -> _MineruDaemon:
             stderr=subprocess.PIPE,
             bufsize=1,
             text=True,
+            start_new_session=True,  # as the real _spawn does
         )
         daemon._stderr_thread = threading.Thread(
             target=daemon._drain_stderr,
@@ -100,17 +102,21 @@ def _patch_daemon(monkeypatch: pytest.MonkeyPatch, stub: Path) -> _MineruDaemon:
     return daemon
 
 
+def _parse(daemon: _MineruDaemon, tmp_path: Path, pdf: str, *, timeout_s: int, page_range: str = "") -> None:
+    daemon.parse(
+        pdf_path=Path(pdf),
+        page_range=page_range,
+        out_dir=tmp_path / "out",
+        tier="basic",
+        parse_mode="auto",
+        timeout_s=timeout_s,
+    )
+
+
 def test_healthy_round_trip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     stub = _write_stub(tmp_path, "def handle(req): return {'status': 'ok'}")
     daemon = _patch_daemon(monkeypatch, stub)
-    daemon.parse(
-        bucket_path=Path("/some/file.pdf"),
-        out_root=tmp_path / "out",
-        method="auto",
-        lang="en",
-        pdf_name="file",
-        timeout_s=5,
-    )
+    _parse(daemon, tmp_path, "/some/file.pdf", timeout_s=5)
     # Implicitly: no exception raised.
 
 
@@ -121,14 +127,7 @@ def test_error_response_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     )
     daemon = _patch_daemon(monkeypatch, stub)
     with pytest.raises(RuntimeError, match="MinerU error: boom"):
-        daemon.parse(
-            bucket_path=Path("/some/file.pdf"),
-            out_root=tmp_path / "out",
-            method="auto",
-            lang="en",
-            pdf_name="file",
-            timeout_s=5,
-        )
+        _parse(daemon, tmp_path, "/some/file.pdf", timeout_s=5)
 
 
 def test_timeout_kills_subprocess_and_raises(
@@ -144,14 +143,7 @@ def test_timeout_kills_subprocess_and_raises(
     )
     daemon = _patch_daemon(monkeypatch, stub)
     with pytest.raises(TimeoutError, match="exceeded 1s"):
-        daemon.parse(
-            bucket_path=Path("/some/file.pdf"),
-            out_root=tmp_path / "out",
-            method="auto",
-            lang="en",
-            pdf_name="file",
-            timeout_s=1,
-        )
+        _parse(daemon, tmp_path, "/some/file.pdf", timeout_s=1)
     # The subprocess must actually be dead now — otherwise we'd leak a
     # process per timeout.
     assert daemon._proc is not None
@@ -172,26 +164,116 @@ def test_subsequent_call_respawns_after_kill(
 
     daemon = _patch_daemon(monkeypatch, bad)
     with pytest.raises(TimeoutError):
-        daemon.parse(
-            bucket_path=Path("/x.pdf"),
-            out_root=tmp_path / "out",
-            method="auto",
-            lang="en",
-            pdf_name="x",
-            timeout_s=1,
-        )
+        _parse(daemon, tmp_path, "/x.pdf", timeout_s=1)
 
     # Re-patch with the good stub — emulates "next iteration of the worker
     # loop, fresh subprocess will load successfully".
     _patch_daemon(monkeypatch, good)
-    daemon.parse(
-        bucket_path=Path("/y.pdf"),
-        out_root=tmp_path / "out",
-        method="auto",
-        lang="en",
-        pdf_name="y",
-        timeout_s=5,
+    _parse(daemon, tmp_path, "/y.pdf", timeout_s=5)
+
+
+def test_request_carries_the_documented_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stub echoes the request into a file; the daemon must send exactly
+    the schema ``_mineru_subprocess`` documents."""
+    seen = tmp_path / "seen.json"
+    stub = _write_stub(
+        tmp_path,
+        f"def handle(req):\n    open({str(seen)!r}, 'w').write(json.dumps(req))\n    return {{'status': 'ok'}}",
     )
+    daemon = _patch_daemon(monkeypatch, stub)
+    _parse(daemon, tmp_path, "/docs/report.pdf", timeout_s=5, page_range="21-40")
+    import json
+
+    assert json.loads(seen.read_text()) == {
+        "pdf_path": "/docs/report.pdf",
+        "page_range": "21-40",
+        "out_dir": str(tmp_path / "out"),
+        "tier": "basic",
+        "parse_mode": "auto",
+    }
+
+
+def test_encrypted_code_raises_unsupported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``code: file_encrypted`` parks the file as unsupported, not an error."""
+    stub = _write_stub(
+        tmp_path,
+        "def handle(req): return {'status': 'error', 'code': 'file_encrypted', "
+        "'detail': 'PdfiumError(...)', 'traceback': ''}",
+    )
+    daemon = _patch_daemon(monkeypatch, stub)
+    with pytest.raises(UnsupportedDocumentError, match="password-protected"):
+        _parse(daemon, tmp_path, "/locked.pdf", timeout_s=5)
+
+
+def test_other_error_codes_are_errors_and_name_the_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stub = _write_stub(
+        tmp_path,
+        "def handle(req): return {'status': 'error', 'code': 'file_corrupted', "
+        "'detail': 'PdfiumError(Data format error)', 'traceback': 'tb'}",
+    )
+    daemon = _patch_daemon(monkeypatch, stub)
+    with pytest.raises(RuntimeError, match=r"MinerU error \[file_corrupted\]"):
+        _parse(daemon, tmp_path, "/broken.pdf", timeout_s=5)
+
+
+def test_timeout_message_names_the_page_range(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stub = _write_stub(tmp_path, "def handle(req):\n    time.sleep(60)\n    return None")
+    daemon = _patch_daemon(monkeypatch, stub)
+    with pytest.raises(TimeoutError, match="big.pdf pages 41-60"):
+        _parse(daemon, tmp_path, "/big.pdf", timeout_s=1, page_range="41-60")
+
+
+def test_timeout_is_prompt_when_a_grandchild_holds_the_pipe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MinerU's spawn render workers inherit the daemon's stdio. Killing only
+    the daemon left a worker holding the response pipe, so readline() did not
+    return until the worker exited — the watchdog no longer bounded the parse.
+    The kill takes the whole process group."""
+    import time
+
+    stub = _write_stub(
+        tmp_path,
+        "import subprocess\n"
+        "def handle(req):\n"
+        "    subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+        "    time.sleep(60)\n",
+    )
+    daemon = _patch_daemon(monkeypatch, stub)
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        _parse(daemon, tmp_path, "/stuck.pdf", timeout_s=1)
+    assert time.monotonic() - started < 10
+
+
+def test_parse_timeout_change_respawns_the_daemon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The render timeout is fixed at spawn, so a changed pdf_parse_timeout_s
+    must restart the (idle) daemon before the next request."""
+    from voitta_rag_enterprise.services import indexing_caps
+
+    stub = _write_stub(tmp_path, "import os\ndef handle(req): return {'status': 'ok', 'pid': os.getpid()}")
+    daemon = _patch_daemon(monkeypatch, stub)
+    caps = [indexing_caps.IndexingCaps(pdf_parse_timeout_s=600)]
+    monkeypatch.setattr(pdf_parser, "get_caps", lambda: caps[0])
+    daemon._render_timeout = pdf_parser._render_timeout_s()
+    _parse(daemon, tmp_path, "/a.pdf", timeout_s=5)
+    first = daemon._proc.pid
+    _parse(daemon, tmp_path, "/b.pdf", timeout_s=5)
+    assert daemon._proc.pid == first  # unchanged budget: same warm daemon
+
+    caps[0] = indexing_caps.IndexingCaps(pdf_parse_timeout_s=100)
+    _parse(daemon, tmp_path, "/c.pdf", timeout_s=5)
+    assert daemon._proc.pid != first
 
 
 def test_settings_carry_default_timeout() -> None:

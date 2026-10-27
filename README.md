@@ -326,7 +326,7 @@ docker compose up -d --build     # rebuild + recreate after a code/dep change
 
 ### First-run indexing notes
 
-- **PDFs/images** use MinerU. If you built the full image the models are baked in; if you're running a stripped image they download (~1 GB) into the cache on the **first** PDF, so that one is slow. **Text/Markdown/Office** files need no models and index immediately.
+- **PDFs/images** use MinerU. If you built the full image the models are baked in; otherwise they download (~0.9 GB, into `~/.mineru/models`) on the **first** PDF that needs each one, so the first few are slow. To fetch them up front: `python -m mineru.kit.main models download --tier basic --source huggingface`. **Text/Markdown/Office** files need no models and index immediately.
 - **No GPU?** On Docker Desktop (incl. macOS) there's no GPU passthrough, so MinerU runs **CPU-only** — layout/OCR on large PDFs is minutes-per-document, not seconds. This is environmental, not a fault. A GPU host (or the GCP deploy) is far faster.
 
 ### Scaling Qdrant
@@ -422,7 +422,7 @@ Built by GitHub Actions on tag and published to GHCR. Customers consume it by ta
 
 - Base: `python:3.12-slim` + apt deps for MinerU/OpenCV (`libgl1`, `libglib2.0-0`, cairo, poppler, fonts — `libgl1` provides the `libGL.so.1` OpenCV `dlopen`s; missing it makes every PDF fail to extract) and headless CAD rendering (`libegl1`, `libgl1-mesa-dri`, `libosmesa6` — the EGL + Mesa Gallium llvmpipe path VTK uses when no GPU is attached). The full list lives in the [Dockerfile](./Dockerfile); native installs must install the same packages (see the Quickstart system-dependencies note).
 - Python deps: `cadquery-ocp` for OpenCASCADE 7.x bindings (~500 MB wheel) and `vtk` for the offscreen renderer (~80 MB wheel) ship in core — no extras flag.
-- Models baked into the image at build time: e5-base, SigLIP-2, fastembed BM25, and MinerU's pipeline weights. This makes the image ~6–8 GB but gives instant cold-start and works in egress-restricted environments.
+- Models baked into the image at build time: e5-base, SigLIP-2, fastembed BM25, and MinerU's `basic`-tier weights (Torch and ONNX backends, under `/opt/mineru`). This makes the image ~6–8 GB but gives instant cold-start and works in egress-restricted environments.
 - Pinned by version tag (`v0.x.y`); the customer's tfvars references a specific tag.
 
 The local terminal flow (`make dev`) is unaffected by any of this — it doesn't use Docker, doesn't pull weights, and doesn't go through Google OAuth (it uses `VOITTA_DEV_USER`).

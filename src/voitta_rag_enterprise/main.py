@@ -513,6 +513,11 @@ def create_app() -> FastAPI:
                         await app.state.stats_flusher_task
                 if hasattr(app.state, "workers"):
                     await app.state.workers.stop()
+                # The MinerU daemon lives in its own process group; stop it
+                # explicitly so an in-flight parse can't outlive the app.
+                from .services.parsers.pdf_parser import stop_mineru_daemon
+
+                stop_mineru_daemon()
                 # ``watcher`` may be None when it failed to start (degraded
                 # mode) — uninstall the default either way.
                 if getattr(app.state, "watcher", None) is not None:

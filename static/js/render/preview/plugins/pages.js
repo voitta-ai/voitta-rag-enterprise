@@ -128,16 +128,25 @@ async function _mountImageGallery(container, file, signal) {
 // Layout view mode
 // ---------------------------------------------------------------------------
 
+// Keyed by MinerU block type. Headings are ``text`` blocks with a
+// ``text_level`` and get the "title" look (see _layoutKind).
 const _LAYOUT_ICONS = {
     title: "T",
     text: "¶",
+    list: "•",
+    code: "{}",
     table: "⊞",
     image: "🖼",
+    chart: "📊",
     equation: "∑",
     header: "H",
     page_number: "#",
     page_footnote: "†",
 };
+
+function _layoutKind(blk) {
+    return blk.type === "text" && Number.isInteger(blk.text_level) ? "title" : blk.type;
+}
 
 async function _mountLayoutView(container, file, signal) {
     const blocks = await api.fileLayout(file.id);
@@ -166,12 +175,13 @@ async function _mountLayoutView(container, file, signal) {
         section.append(header);
 
         for (const blk of pageBlocks) {
+            const kind = _layoutKind(blk);
             const row = document.createElement("div");
-            row.className = `layout-block layout-block-${blk.type}`;
+            row.className = `layout-block layout-block-${kind}`;
 
             const icon = document.createElement("span");
             icon.className = "layout-block-icon";
-            icon.textContent = _LAYOUT_ICONS[blk.type] || "·";
+            icon.textContent = _LAYOUT_ICONS[kind] || "·";
 
             const text = document.createElement("span");
             text.className = "layout-block-text";

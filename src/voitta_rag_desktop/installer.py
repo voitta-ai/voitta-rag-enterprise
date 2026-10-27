@@ -26,6 +26,7 @@ import json
 import os
 import shutil
 import ssl
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -304,6 +305,23 @@ def _prewarm_models(reporter: InstallReporter, phase: int) -> None:
     except Exception as exc:  # noqa: BLE001 — never fail install on prewarm
         # Best-effort: models download lazily on first use if this is skipped.
         reporter.log(f"!!! model prewarm skipped: {type(exc).__name__}: {exc}")
+    reporter.log(">>> downloading PDF parser models (MinerU basic tier)")
+    try:
+        # MinerU's own CLI, run as ``-m`` through the app stub (which acts as
+        # an interpreter for -m/-c, see __main__._maybe_run_as_interpreter) —
+        # the same way the parser daemon itself is launched. No
+        # --small-backend: MinerU resolves "auto" the same way here as in the
+        # daemon (torch on Apple Silicon/MPS), so the parser finds exactly
+        # these weights.
+        rc = subprocess.run(
+            [sys.executable, "-m", "mineru.kit.main", "models", "download",
+             "--tier", "basic", "--source", "huggingface"],
+            check=False,
+        ).returncode
+        if rc != 0:
+            reporter.log(f"!!! MinerU model download rc={rc}; they download on the first PDF instead")
+    except Exception as exc:  # noqa: BLE001 — never fail install on prewarm
+        reporter.log(f"!!! MinerU model download skipped: {type(exc).__name__}: {exc}")
 
 
 # ---------------------------------------------------------------------------

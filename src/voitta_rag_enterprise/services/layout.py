@@ -3,9 +3,10 @@
 The PDF parser hands us:
 
 * ``page_layout`` — one dict per block, each carrying at least
-  ``page`` and ``type``; PDFs from MinerU also include ``bbox`` (PDF
-  points, top-left origin), ``text`` for text/title blocks, and
-  ``text_level`` for headings.
+  ``page`` and ``type``; PDFs from MinerU also include ``bbox`` (integer
+  per-mille of the page on both axes, top-left origin — see
+  ``BBOX_SCALE``) and ``text`` for text blocks. Headings are ``text``
+  blocks with an int ``text_level``; MinerU has no separate title type.
 * ``char_to_page`` — sparse ``(char_offset, page)`` anchors that say
   "from this offset onward, content is on this page until the next
   anchor."
@@ -33,14 +34,28 @@ from collections.abc import Iterable
 # ---------------------------------------------------------------------------
 
 
-_TEXT_TYPES = ("text",)
-_TITLE_TYPES = ("title",)
-_IMAGE_TYPES = ("image",)
+# Page-layout bboxes are per-mille of the page, so every page is
+# BBOX_SCALE x BBOX_SCALE in bbox units regardless of its physical size.
+BBOX_SCALE = 1000
+
+# Body-text blocks. A ``text`` block with an int ``text_level`` is a
+# heading and is counted as a title instead.
+_TEXT_TYPES = ("text", "list", "code")
+_IMAGE_TYPES = ("image", "chart")
 _TABLE_TYPES = ("table",)
 _EQUATION_TYPES = ("equation",)
 # MinerU also emits a few low-signal block types we count separately:
 _HEADER_TYPES = ("header",)
 _PAGE_NUMBER_TYPES = ("page_number", "page_footnote")
+
+
+def _is_title(blk: dict) -> bool:
+    level = blk.get("text_level")
+    return (
+        blk.get("type") == "text"
+        and isinstance(level, int)
+        and not isinstance(level, bool)
+    )
 
 
 def compute_page_layout_summary(
@@ -88,19 +103,17 @@ def compute_page_layout_summary(
             inferred_w = max(inferred_w, float(bbox[2]))
             inferred_h = max(inferred_h, float(bbox[3]))
 
-        if btype in _TEXT_TYPES:
-            n_text += 1
-            text_area += area
-            if x0 is not None:
-                text_x_starts.append(x0)
-        elif btype in _TITLE_TYPES:
+        if _is_title(blk):
             n_title += 1
             text_area += area
             if x0 is not None:
                 text_x_starts.append(x0)
-            level = blk.get("text_level")
-            if isinstance(level, int):
-                max_text_level = max(max_text_level, level)
+            max_text_level = max(max_text_level, blk["text_level"])
+        elif btype in _TEXT_TYPES:
+            n_text += 1
+            text_area += area
+            if x0 is not None:
+                text_x_starts.append(x0)
         elif btype in _IMAGE_TYPES:
             n_image += 1
             image_area += area
@@ -156,7 +169,8 @@ def summaries_by_page(page_layout: list[dict]) -> dict[int, dict]:
     ``primary_page`` for each chunk/image. Pages with no blocks are
     absent from the result; consumers should treat missing entries as
     "no layout info" and either skip the layout fields or attach a
-    default summary.
+    default summary. Bboxes are per-mille, so the page is a fixed
+    ``BBOX_SCALE`` square rather than inferred from the blocks.
     """
     grouped: dict[int, list[dict]] = {}
     for blk in page_layout:
@@ -166,7 +180,10 @@ def summaries_by_page(page_layout: list[dict]) -> dict[int, dict]:
         if not isinstance(page, int):
             continue
         grouped.setdefault(page, []).append(blk)
-    return {p: compute_page_layout_summary(blocks) for p, blocks in grouped.items()}
+    return {
+        p: compute_page_layout_summary(blocks, BBOX_SCALE, BBOX_SCALE)
+        for p, blocks in grouped.items()
+    }
 
 
 # ---------------------------------------------------------------------------

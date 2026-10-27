@@ -228,32 +228,85 @@ Most stages are wrapped in a `_stage()` context manager for timing/logging
 
 ### PDF parsing: the MinerU daemon
 
-PDFs parse in a **long-lived MinerU subprocess** (`_MineruDaemon` in
-[parsers/pdf_parser.py](../src/voitta_rag_enterprise/services/parsers/pdf_parser.py)):
-the first parse pays the ~5 s import + model load, later parses reuse the warm
-process, and a watchdog hard-kills it after `pdf_parse_timeout_s` (default
-600 s; the file parks as `error`, the queue moves on). PDFs over ~24 pages are
-split into **buckets of `pdf_pages_per_bucket`** (default 20) and parsed
-bucket-by-bucket under `gpu_lock`, then merged. On a subprocess failure the
-file's stored `error` includes the **subprocess traceback tail** (the raise
-site with the actual path/message — `repr()` of an `OSError` alone drops the
-filename), and the full traceback lands in `logs/indexing.log`.
+PDFs parse in a **long-lived MinerU 4 subprocess** (`_MineruDaemon` in
+[parsers/pdf_parser.py](../src/voitta_rag_enterprise/services/parsers/pdf_parser.py),
+worker in `_mineru_subprocess.py`): the first parse pays the import + model
+load (a few seconds), later parses reuse the warm process, and a watchdog
+hard-kills it after `pdf_parse_timeout_s` (default 600 s; the file parks as
+`error`, the queue moves on, and the next file gets a fresh daemon). PDFs over
+~24 pages are parsed in **buckets of `pdf_pages_per_bucket`** (default 20) —
+one daemon request per page range on the original file — under `gpu_lock`,
+then merged. On a subprocess failure the file's stored `error` names MinerU's
+error code where it has one (`MinerU error [file_corrupted]: …`) and includes
+the **subprocess traceback tail**; the full traceback lands in
+`logs/indexing.log`. A password-protected PDF parks as `unsupported`, not
+`error`.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `VOITTA_PDF_PARSE_TIER` | `basic` | MinerU tier. `basic`: layout, OCR, formula and table models, no VLM (~0.9 GB of weights; CUDA, Apple MPS or CPU). `flash`: the PDF's own text layer only, no models — fast, but scanned pages come out empty. |
+| `VOITTA_PDF_PARSE_METHOD` | `auto` | MinerU `parse_mode`: `auto` (text layer where usable, OCR elsewhere), `txt`, `ocr`. |
+| `VOITTA_PDF_PAGES_PER_BUCKET` / `VOITTA_PDF_PARSE_TIMEOUT_S` | 20 / 600 | Bucket size and per-bucket watchdog (also admin-tunable). |
+| `VOITTA_MINERU_VRAM_GB` | 0 | Shared-GPU cap, see below. |
+
+There is no OCR-language setting: MinerU 4 uses its multilingual model.
+`VOITTA_PDF_LANG` is ignored (a warning is logged if it is still set).
+
+**Models and config.** MinerU keeps its weights under `$MINERU_HOME/models`
+(default `~/.mineru/models`; the Docker image sets `MINERU_HOME=/opt/mineru`)
+and its optional config in `$MINERU_HOME/config.yaml` — not `~/mineru.json`,
+which MinerU 4 does not read. Weights download on first use; to fetch them
+ahead of time (or check them):
+
+```bash
+python -m mineru.kit.main models download --tier basic --source huggingface
+python -m mineru.kit.main models verify --tier basic
+```
+
+MinerU picks its small-model backend itself: Torch when it sees a GPU, ONNX on
+CPU (`MINERU_MODEL_SMALL_BACKEND=torch|onnx` overrides). The Docker image
+bakes both.
+
+**Environment the daemon sets** (each with `setdefault`, so an explicit value
+in the environment wins): `MINERU_PDF_RENDER_THREADS=1` (page rendering runs
+in one spawn-started worker process — a bucket never needs more),
+`MINERU_PDF_RENDER_TIMEOUT` (MinerU's 300 s, or 80 % of
+`pdf_parse_timeout_s` if that is lower, so a stuck render fails as a MinerU
+error before the watchdog fires; changing the parse timeout in the admin UI
+restarts the idle daemon so this follows), `MINERU_PROCESSING_WINDOW_SIZE=1`
+on macOS (page-at-a-time keeps MPS memory flat), and
+`MINERU_VIRTUAL_VRAM_SIZE` from `VOITTA_MINERU_VRAM_GB`.
+
+The daemon runs in **its own process group** with its render workers; the
+watchdog, a job cancel and app shutdown kill the whole group, and the daemon
+kills itself if the app process disappears. It answers on a private pipe, so
+anything a library prints to stdout goes to the log instead of the protocol.
 
 > **Shared GPU → `CUDA out of memory`.** MinerU sizes its inference batches
-> from the card's *total* memory (logged as `GPU Memory: 24 GB, Batch Ratio: 8`
-> in `indexing.log`), not what is free. When other services hold most of the
-> GPU, larger PDFs fail with `torch.OutOfMemoryError` and park as `error`. Set
-> `VOITTA_MINERU_VRAM_GB` to the memory MinerU can actually use (e.g. `6` →
-> batch ratio 2; passed to the subprocess as `MINERU_VIRTUAL_VRAM_SIZE`),
-> restart, then reindex the folder with *errors only*. Default `0` keeps
-> MinerU's auto-detection, which is right for a dedicated GPU.
+> from the card's *total* memory, not what is free. When other services hold
+> most of the GPU, larger PDFs fail with `torch.OutOfMemoryError` and park as
+> `error`. Set `VOITTA_MINERU_VRAM_GB` to the memory MinerU can actually use
+> (e.g. `6`; passed to the subprocess as `MINERU_VIRTUAL_VRAM_SIZE`), restart,
+> then reindex the folder with *errors only*. Default `0` keeps MinerU's
+> auto-detection, which is right for a dedicated GPU.
 
-> **Lazy OCR models.** MinerU downloads some models on first *need*, not at
-> install — e.g. the seal/stamp detection model fetches the first time a page
-> contains a seal. Offline (or on a flaky link) that surfaces as
-> `FileNotFoundError: …/paddleocr_torch/seal_PP-OCRv4_det_server_infer.pth` —
-> the fix is to retry the file once online; the model caches permanently under
-> `~/.cache/huggingface/hub`.
+> **Lazy models.** MinerU downloads each model on first *need*, not all at
+> once — a server that has only parsed text PDFs may not have the formula or
+> table models yet. Offline that surfaces as a model-not-found error on the
+> first PDF that needs one; run the `models download` command above while
+> online.
+
+**Layout blocks** (`page_layout.json`, `get_page_layout`) are MinerU's
+content list: `bbox` is in **per-mille of the page** (0–1000, top-left
+origin), headings are `text` blocks with `text_level`, and the block types
+include `chart`, `code` and `list` besides `text`/`image`/`table`/`equation`.
+Files indexed before the MinerU 4 upgrade keep PDF-point bboxes and their
+old block set until they are re-indexed.
+
+**Comparing parsers.** `scripts/pdf_parse_compare.py` runs the app's own
+`PdfParser` from two installs (e.g. before and after a MinerU upgrade) over
+the same PDFs and prints text similarity, image counts, timings, memory and
+layout-type deltas against the upgrade gate.
 
 **Image ↔ chunk linkage:** every extracted image gets an *anchor chunk* (the
 chunk straddling its position in the markdown). Chunks within

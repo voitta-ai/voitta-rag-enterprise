@@ -372,9 +372,10 @@ def get_page_image(
 
     ``include_layout`` (default True) attaches a ``layout`` field with
     the parser's per-block list for this page — types are MinerU's
-    (``text``, ``title``, ``image``, ``table``, ``equation``, ...) plus
-    coordinates in PDF points (top-left origin) when the parser
-    provides them. ``layout`` is an empty list when the file was
+    (``text``, ``image``, ``chart``, ``table``, ``equation``, ``code``,
+    ``list``, ...; a heading is a ``text`` block with ``text_level``)
+    plus a ``bbox`` in per-mille of the page (0–1000, top-left origin)
+    when the parser provides it. ``layout`` is an empty list when the file was
     indexed before layout capture was added, or for non-PDF files. Set
     ``include_layout=False`` to skip the read + JSON parse.
     """
@@ -393,9 +394,13 @@ def get_page_layout(file_id: int, page: int) -> list[dict]:
     or isn't a PDF.
 
     Each block carries at least ``type`` and ``page``; PDFs from MinerU
-    typically also include ``bbox`` (PDF points, top-left origin),
-    ``text`` for text/title blocks, and ``img_path`` for image/table
-    blocks. Other fields are passed through as-is.
+    typically also include ``bbox`` (per-mille of the page, 0–1000 on
+    both axes, top-left origin; files indexed before the MinerU 4 upgrade
+    carry PDF points until re-indexed), ``text`` for text blocks (headings
+    are ``text`` with an int ``text_level``), ``img_path`` plus captions
+    for image/chart/table blocks, ``table_body`` (HTML) for tables,
+    ``list_items`` for lists and ``code_body`` for code. Other fields are
+    passed through as-is.
     """
     return retrieval.get_page_layout(_viewer(), file_id, page)
 

@@ -23,14 +23,14 @@ dependencies = [
     "fastmcp>=2.0",
     "email-validator>=2.0",
     "python-multipart>=0.0.9",
-    # MinerU's PIPELINE backend only (pp_doclayout — what pdf_parser.py uses).
-    # NOT mineru[all]: on Linux that pulls in mineru[vllm] → the vllm GPU stack,
-    # which (a) we never use — the app only runs the pipeline backend with
-    # parse_method auto/txt/ocr — and (b) its tight pin tree drives pip's
-    # resolver into ResolutionTooDeep on a clean build. The [pipeline] extra
-    # brings torch + torchvision + transformers, which the pp_doclayout model
-    # needs (without it PDF parsing dies on "No module named 'torchvision'").
-    "mineru[pipeline]>=2.0",
+    # MinerU 4 with its Torch extra: the ``basic`` tier (layout / OCR / formula
+    # / table models, no VLM) that pdf_parser.py runs, on CUDA or MPS. Without
+    # [torch] MinerU falls back to its ONNX small models on CPU. NOT
+    # mineru[all]: that adds the VLM engines (vllm, lmdeploy) we never call.
+    # The base package also pulls docvortex, pypdfium2 5.x and gradio (a hard
+    # dependency upstream, unused here). Pinned below 4.1: 4.0 is young and its
+    # changelog has broken APIs between minor releases — read it before a bump.
+    "mineru[torch]>=4.0.12,<4.1",
     # SVG rasterization rides PyMuPDF (MuPDF statically linked). Do NOT
     # reintroduce cairosvg — it dlopen()s a system libcairo the packaged
     # desktop app doesn't ship, which broke every .svg on end-user Macs.
@@ -51,13 +51,15 @@ dependencies = [
     # markdown (headings, bold, lists, tables) instead of the lossy fallback.
     "markdownify>=0.13",
     # Real text embedder backbone (e5-base-v2 via SentenceTransformer).
-    # ``transformers`` and ``torch`` arrive transitively via mineru[pipeline],
+    # ``transformers`` and ``torch`` arrive transitively via mineru[torch],
     # so adding this here is essentially a no-op install-size-wise — but
     # it keeps prod deploys from breaking the moment someone unsets
     # VOITTA_USE_FAKE_EMBEDDERS. Dev and CI use the fake embedder env var
     # and pay the install cost without ever loading the model.
-    "sentence-transformers>=3.2",
-    "transformers>=4.45",
+    # transformers 5 (MinerU 4 requires >=5.10.1); sentence-transformers 6 is
+    # the line that supports it.
+    "sentence-transformers>=6.1",
+    "transformers>=5.10.1,<6",
     "tree-sitter-language-pack>=1.8",
     # CAD: STEP / STP file parsing + on-demand rendering.
     #

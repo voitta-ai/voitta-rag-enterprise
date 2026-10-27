@@ -6,6 +6,7 @@ full list.
 
 from __future__ import annotations
 
+import logging
 import os
 from functools import lru_cache
 from pathlib import Path
@@ -177,8 +178,16 @@ class Settings(BaseSettings):
 
     # PDF parsing (MinerU)
     pdf_pages_per_bucket: int = 20
-    pdf_parse_method: str = "auto"  # MinerU parse_method: auto|txt|ocr
-    pdf_lang: str = "en"
+    # MinerU parse_mode: auto (text layer where usable, OCR elsewhere) |
+    # txt (text layer only) | ocr (OCR every page).
+    pdf_parse_method: Literal["auto", "txt", "ocr"] = "auto"
+    # MinerU tier. ``basic``: layout/OCR/formula/table models, no VLM (~0.9 GB
+    # of weights, CUDA/MPS/CPU). ``flash``: the PDF's own text layer only, no
+    # models — fast, but scans come out empty. The VLM tiers (standard,
+    # advanced) need a VLM endpoint we do not configure, so they are not
+    # offered. OCR language is chosen by MinerU (multilingual model); there
+    # is no language setting.
+    pdf_parse_tier: Literal["flash", "basic"] = "basic"
     # Per-bucket wall-clock budget. MinerU has been observed to wedge in
     # native code on certain PDFs (no GPU activity, no progress logs) — the
     # parent has no way to interrupt that since CPython can't deliver
@@ -326,6 +335,15 @@ class Settings(BaseSettings):
         if isinstance(v, str) and v:
             return Path(os.path.expanduser(v))
         return v
+
+    @model_validator(mode="after")
+    def _warn_removed_settings(self) -> "Settings":
+        if os.environ.get("VOITTA_PDF_LANG"):
+            logging.getLogger(__name__).warning(
+                "VOITTA_PDF_LANG is no longer used: MinerU 4 picks the OCR "
+                "language itself. Remove it from the environment."
+            )
+        return self
 
     @model_validator(mode="after")
     def _check_standalone_url(self) -> "Settings":
