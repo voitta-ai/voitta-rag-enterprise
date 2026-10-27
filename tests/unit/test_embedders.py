@@ -71,3 +71,36 @@ def test_image_embedder_text_and_image_have_same_dim(env: None) -> None:
     vec_text = e.embed_text("a red logo")
     vec_image = e.embed_image(b"\x89PNG fake bytes")
     assert len(vec_text) == len(vec_image) == e.dim
+
+
+def test_siglip_query_is_padded_to_the_trained_length() -> None:
+    """SigLIP pools the last token of a 64-token sequence; a query that is
+    not padded to 64 lands far from every image (live image search was
+    near-random with ``padding=True``)."""
+    import torch
+
+    from voitta_rag_enterprise.services.embedding.image import SiglipImageEmbedder
+
+    calls: list[dict] = []
+
+    def processor(**kwargs):
+        calls.append(kwargs)
+        return {"input_ids": torch.zeros((1, 64), dtype=torch.long)}
+
+    class Model:
+        def get_text_features(self, input_ids):
+            return torch.ones((1, 4))
+
+    emb = SiglipImageEmbedder("stub")
+    emb._processor, emb._model = processor, Model()
+    vec = emb.embed_text("bar chart of revenue by quarter")
+    assert calls == [
+        {
+            "text": ["bar chart of revenue by quarter"],
+            "return_tensors": "pt",
+            "padding": "max_length",
+            "max_length": 64,
+            "truncation": True,
+        }
+    ]
+    assert vec == [0.5, 0.5, 0.5, 0.5]
