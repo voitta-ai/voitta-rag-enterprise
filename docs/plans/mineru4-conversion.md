@@ -224,6 +224,25 @@ anchored per page.
 Verdict: **the gate passes**; MinerU 4 is at least as good everywhere measured except
 stacked-row tables, and better on recovered text, ligatures and table structure.
 
+### End-to-end and packaging (2026-10-27)
+
+- **App on moon** (blank single-user install, embedded Qdrant, port 10001, localhost only):
+  14 real PDFs (306 pages incl. a 128-page 10-K that runs in 7 page-range buckets) indexed
+  in 165 s: 13 indexed, the encrypted one `unsupported`, 0 errors; 744 chunks, 451 images.
+  `/api/search` returns relevant chunks and images; `/layout`, `/images`, `/page-images`
+  populated for every page; chunk payloads carry working `layout_n_title` /
+  `layout_max_text_level` (always 0 before, see the title fix).
+- **Cancel under load**: `POST /api/jobs/cancel-all` during a live MinerU parse returned in
+  0.32 s with `killed_running: 1`; 3 s later neither the daemon nor its docvortex render
+  worker existed; a follow-up full reindex finished all files.
+- **Docker**: `docker build --target runtime` succeeds (27.2 GB with CUDA torch); both
+  `basic`-tier model sets are baked into `/opt/mineru`; with `--network none` the container
+  parses the fixture as user `voitta` on GPU in 7.6 s and maps `encrypted.pdf` to
+  `UnsupportedDocumentError`.
+- **Mac** (MinerU 4 in a throwaway venv): the 9 real-MinerU tests pass on MPS.
+- **Embedders under transformers 5.21** vs 4.57 on the same machine: e5-base-v2 vectors are
+  bit-identical; SigLIP-2 image vectors cosine ≥ 0.99998. Existing collections stay valid.
+
 If the gate fails: the Gemma migration proceeds with its fallback (MinerU 3 in a separate
 virtualenv), and this plan waits for a later MinerU 4.x.
 
