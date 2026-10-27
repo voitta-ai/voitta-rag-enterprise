@@ -8,6 +8,7 @@ one vector space for text and images.
 from __future__ import annotations
 
 import logging
+import threading
 
 from ...config import get_settings
 from .gemma import FakeGemmaEmbedder, GemmaEmbedder
@@ -89,6 +90,7 @@ def _build_image_embedder() -> ImageEmbedder:
         return FakeImageEmbedder()
 
 
+_shared_lock = threading.Lock()
 _shared: GemmaEmbedder | FakeGemmaEmbedder | None = None
 
 
@@ -96,8 +98,12 @@ def _unified() -> GemmaEmbedder | FakeGemmaEmbedder:
     """The one text+image embedder of a unified profile."""
     global _shared
     if _shared is None:
-        if get_settings().use_fake_embedders:
-            _shared = FakeGemmaEmbedder()
-        else:
-            _shared = GemmaEmbedder(active().dense_model)
+        # Locked: two first callers must get the SAME instance (one model
+        # load; ``get_text_embedder() is get_image_embedder()``).
+        with _shared_lock:
+            if _shared is None:
+                if get_settings().use_fake_embedders:
+                    _shared = FakeGemmaEmbedder()
+                else:
+                    _shared = GemmaEmbedder(active().dense_model)
     return _shared

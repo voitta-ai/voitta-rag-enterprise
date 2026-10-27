@@ -676,6 +676,11 @@ def run() -> None:
     settings = get_settings()
     logging.basicConfig(level=logging.INFO)
     app = build_app()
+    # Fail at startup, not per request, if the profile does not match the
+    # collections (the unified app does this in its lifespan instead).
+    from .services.embedding.profiles import resolve
+
+    resolve()
     uvicorn.run(app, host="0.0.0.0", port=settings.mcp_port)
 
 

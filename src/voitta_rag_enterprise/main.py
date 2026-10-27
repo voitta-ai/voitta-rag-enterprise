@@ -113,9 +113,13 @@ def _recovery_sync(set_phase):
         )
 
         with session_scope() as _s:
-            known_image_ids = set(_s.execute(select(_Image.id)).scalars())
+            live_images = dict(
+                _s.execute(
+                    select(_Image.id, _Image.image_cas_id).where(_Image.kind == "figure")
+                ).all()
+            )
             known_chunk_ids = set(_s.execute(select(_Chunk.id)).scalars())
-        deleted_imgs = delete_orphan_image_points(known_image_ids)
+        deleted_imgs = delete_orphan_image_points(live_images)
         if deleted_imgs:
             logger.warning(
                 "deleted %d orphan image point(s) from Qdrant "
@@ -380,13 +384,14 @@ def create_app() -> FastAPI:
             from .services.qdrant_process import start_managed_qdrant
 
             start_managed_qdrant()
-        # Resolve the embedding profile before anything can index or search.
-        # A profile chosen explicitly against collections another profile
-        # built raises ProfileMismatchError here and aborts startup, rather
+        # Resolve the embedding profile before anything can index or search,
+        # and record it on first start (services/embedding/profiles.py). A
+        # profile that does not match the recorded one or the collections'
+        # builders raises ProfileMismatchError and aborts startup, rather
         # than writing one model's vectors into another model's space.
-        from .services.embedding.profiles import resolve as resolve_embedding_profile
+        from .services.embedding import profiles as embedding_profiles
 
-        resolve_embedding_profile()
+        embedding_profiles.commit()
         events.install_loop(asyncio.get_running_loop())
         _seed_users()
         _seed_auth_providers()

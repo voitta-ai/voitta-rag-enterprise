@@ -114,7 +114,7 @@ The models download lazily on first use: `google/embeddinggemma-2` (text and ima
 
 Measured on our own folders: text MRR@10 +6.4 over e5 at the deployed fusion (+12.1 after a blinded audit of missing relevance labels); image search 82.3 vs 48.3 MRR@10 for SigLIP-2. The price is indexing speed on an RTX 5070: 128 vs 466 chunks/s for text, 8 vs 222 images/s. Measurements and method: [docs/plans/gemma-migration.md](docs/plans/gemma-migration.md).
 
-The active profile is `VOITTA_EMBEDDING_PROFILE` if set, else the one a completed migration recorded, else the install default (`VOITTA_DEFAULT_EMBEDDING_PROFILE`). An install that already holds `e5-siglip` data keeps running it after upgrading and says so in the settings overview. The app refuses to start when a profile is set explicitly against another profile's data, so one model's vectors never land in another model's collection. To move an existing install, see "Switching embedding profile" in [docs/OPERATIONS.md](docs/OPERATIONS.md).
+An install picks its profile on first start and records it: `VOITTA_EMBEDDING_PROFILE` if set, else `e5-siglip` if it already holds content indexed before profiles existed, else the install default (`VOITTA_DEFAULT_EMBEDDING_PROFILE`). After that only the migration command changes it, and the app refuses to start if the environment, the recorded profile and the collections disagree — so one model's vectors never land in another model's collection. To move an install, see "Switching embedding profile" in [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 ## MCP server
 

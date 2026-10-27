@@ -118,58 +118,74 @@ the models, the version stamps written into payloads, and the collection names.
 | `gemma2` | EmbeddingGemma-2 (`title: {rel_path} \| text: …`, 512 tokens) | EmbeddingGemma-2, 560 vision tokens, same model instance | `chunks__gemma2`, `images__gemma2` |
 | `e5-siglip` | e5-base-v2 (`passage: …`) | SigLIP-2 base (queries padded to 64 tokens) | `chunks`, `images` |
 
-**Resolution at startup** (first match wins): `VOITTA_EMBEDDING_PROFILE` →
-the `embedding_profile` row in SQLite `app_settings` (written by a completed
-migration) → `VOITTA_DEFAULT_EMBEDDING_PROFILE` (`gemma2`; the desktop
-launcher sets `e5-siglip`). The startup log line and the settings overview
-(`embedding` block) show the result and where it came from.
+**The profile is decided once and recorded** in SQLite `app_settings`
+(`embedding_profile`). On an install's first start the app takes
+`VOITTA_EMBEDDING_PROFILE` if set; else `e5-siglip` if SQL already holds
+indexed content (every install from before profiles is e5 + SigLIP, even one
+whose Qdrant data was lost); else `VOITTA_DEFAULT_EMBEDDING_PROFILE`
+(`gemma2`; the desktop launcher sets `e5-siglip`). After that only
+`migrate_embedding_profile.py --finish` changes it. The startup log line and
+the settings overview (`embedding` block) show the profile and why.
 
-**Safety check.** All three models emit 768-d vectors, so Qdrant would accept
-one model's vectors into another's collection without complaint. SQLite
-`collection_meta` records which profile built each collection (pre-profile
-`chunks` / `images` are backfilled as `e5-siglip` on first start). Then:
+**Safety checks — startup aborts with `ProfileMismatchError` when:**
 
-- defaulted profile, but only the other profile's collections hold data →
-  the app **adopts** that profile (an upgraded install keeps working) and the
-  settings overview says "running the legacy profile";
-- explicitly chosen profile (env or `app_settings`) whose collections are
-  empty while the other's hold data, or that a migration is still filling →
-  `ProfileMismatchError`, **startup aborts** with both ways out in the message.
+- `VOITTA_EMBEDDING_PROFILE` disagrees with the recorded profile (switching
+  needs the data migrated first; the message says how);
+- the profile's collections were built by another profile, another model or
+  another vector size — SQLite `collection_meta` records all three per
+  collection (pre-profile `chunks` / `images` are backfilled as `e5-siglip`).
+  All the models emit 768-d vectors, so Qdrant itself would never object;
+- the profile is marked as still being migrated to.
 
-`gpu_lock`, orphan sweeps, `reembed_stale.py` and `rebuild_index.py` act on
+Startup also fails if Qdrant cannot be read: an unreachable store is an error,
+never "no collections", so it can neither change the profile nor make search
+silently empty.
+
+`VOITTA_DENSE_MODEL`, `VOITTA_IMAGE_MODEL`, `VOITTA_DENSE_VERSION` and
+`VOITTA_IMAGE_VERSION` configure `e5-siglip` only; `gemma2` ignores them and
+logs a warning. Orphan sweeps, `reembed_stale.py` and `rebuild_index.py` act on
 the active profile's collections only.
 
 ### Switching embedding profile
 
 `scripts/migrate_embedding_profile.py` re-embeds from what is already stored —
-chunk text in SQL, image blobs in the CAS — so nothing is re-parsed.
+chunk text in SQL, figure blobs in the CAS — so nothing is re-parsed.
 
 ```bash
 python scripts/migrate_embedding_profile.py --to gemma2 --dry-run   # counts + time estimate
-python scripts/migrate_embedding_profile.py --to gemma2             # fill chunks__gemma2 / images__gemma2
-# restart the app: it now resolves gemma2 from app_settings
-python scripts/migrate_embedding_profile.py --to gemma2             # catch-up, idempotent
+python scripts/migrate_embedding_profile.py --to gemma2             # bulk; the app keeps serving
+# stop the app
+python scripts/migrate_embedding_profile.py --to gemma2 --finish    # last pass + switch
+# start the app: it serves gemma2
 python scripts/migrate_embedding_profile.py --to gemma2 --drop-old  # later: delete chunks / images
 ```
 
-- Runs beside the live app only with standalone Qdrant (`VOITTA_QDRANT_URL`,
-  the server / Docker setup). With embedded or managed Qdrant (the desktop
-  default) the store belongs to one process: stop the app first. It writes
-  only the target collections and takes `gpu_lock` per batch.
-- While it runs, `app_settings.embedding_migration` marks the target as in
-  progress: an app restart stays on the old profile, and forcing the target
-  with `VOITTA_EMBEDDING_PROFILE` aborts startup.
-- Resumable: each pass diffs SQL against the target (chunk ids per file,
-  image CAS ids per file, model versions) and embeds only the difference.
-  Passes repeat until one finds nothing to do, so files the app re-indexed
-  meanwhile are picked up. Then it records the profile and clears the mark.
-- Rollback before completion: stop it. After completion: set
-  `VOITTA_EMBEDDING_PROFILE=e5-siglip` (old collections are kept until
-  `--drop-old`).
+- **Bulk phase** (no flag) runs beside the live app with standalone Qdrant
+  (`VOITTA_QDRANT_URL`, the server / Docker setup). With embedded or managed
+  Qdrant (the desktop default) the store belongs to one process: stop the app
+  for every phase. It writes only the target's collections — which the app
+  never touches while it serves the other profile — and marks the migration
+  in progress in `app_settings`.
+- **`--finish`** needs the app stopped. It repeats passes until one finds
+  nothing to do, then records the new profile and clears the mark in one
+  transaction. Items that could not be embedded (undecodable image, missing
+  CAS blob) are listed and block the switch unless `--accept-failures`.
+- **Resumable**: each pass diffs SQL against the target (chunk ids and
+  content hashes per file, figure CAS ids per file, version stamps) and
+  embeds only the difference; folder cards are rebuilt and target-side
+  orphans swept. Page renders are never embedded.
+- **Rollback**: before `--finish`, stop and do nothing — the old profile kept
+  serving. After it, migrate back the same way (`--to e5-siglip`, bulk then
+  `--finish`): the old collections were kept, so only what changed since is
+  re-embedded. Do not flip `VOITTA_EMBEDDING_PROFILE` instead; the app
+  refuses, because the old collections stopped receiving updates at the
+  switch.
+- **GPU**: the script is a separate process, so the app's `gpu_lock` does
+  not cover it. On a shared card the target model (EmbeddingGemma-2, ~2.2 GB
+  peak) comes on top of the app's embedders and the MinerU daemon; run the
+  bulk phase when indexing is quiet or check `nvidia-smi` first.
 - Throughput on an RTX 5070: 128 chunks/s and 8 images/s for `gemma2`,
-  about 2 h per million chunks plus 3.5 h per 100k images.
-- `VOITTA_EMBEDDING_PROFILE` in the environment overrides the recorded
-  profile; the script warns if it is set to something else.
+  about 2 h per million chunks plus 3.5 h per 100k figures.
 - Docker images bake in only `PREWARM_PROFILES` (default `gemma2`); build
   with `--build-arg PREWARM_PROFILES=gemma2,e5-siglip` for an install that
   serves `e5-siglip` until it migrates.

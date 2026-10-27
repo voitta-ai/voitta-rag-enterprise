@@ -257,7 +257,7 @@ def _install_qdrant(reporter: InstallReporter, phase: int) -> None:
         tgz = Path(td) / _QDRANT_ASSET
         # Explicit certifi-backed context — the bundled Python's urllib has no
         # default CA store. Stream the body so we can drive a byte-progress bar.
-        with urllib.request.urlopen(_QDRANT_URL, context=ctx) as r, tgz.open("wb") as f:  # noqa: S310 — pinned official URL
+        with urllib.request.urlopen(_QDRANT_URL, context=ctx) as r, tgz.open("wb") as f:
             total = int(r.headers.get("Content-Length") or 0)
             got = 0
             mb = 1024 * 1024
@@ -295,21 +295,33 @@ def _prewarm_models(reporter: InstallReporter, phase: int) -> None:
     _ensure_ca_env()
     reporter.log(">>> warming embedders")
     try:
-        # Download the weights the server would otherwise fetch on its first
-        # query. Only download: resolving the profile needs the database
-        # (not there yet), and pinning one would bypass the server's startup
-        # check in this same process.
-        from huggingface_hub import snapshot_download  # noqa: PLC0415
+        # Load each model of the profile the server will serve, the way the
+        # server loads it, so exactly the files it needs are downloaded (a
+        # whole-repo snapshot pulls every alternative weight format: ~1.75 GB
+        # extra for e5-base-v2 alone). The embedder classes are used directly:
+        # going through the factory would pin a profile in this process and
+        # bypass the server's own startup check.
+        from voitta_rag_enterprise.config import get_settings
+        from voitta_rag_enterprise.db.database import init_db
+        from voitta_rag_enterprise.services.embedding import profiles
+        from voitta_rag_enterprise.services.embedding.gemma import GemmaEmbedder
+        from voitta_rag_enterprise.services.embedding.image import (
+            SiglipImageEmbedder,
+        )
+        from voitta_rag_enterprise.services.embedding.text import E5TextEmbedder
 
-        from voitta_rag_enterprise.config import get_settings  # noqa: PLC0415
-        from voitta_rag_enterprise.services.embedding.profiles import profile  # noqa: PLC0415
-
+        init_db()
         s = get_settings()
-        p = profile(s.embedding_profile or s.default_embedding_profile)
-        for repo in dict.fromkeys((p.dense_model, p.image_model)):
-            reporter.log(f"    {repo}")
-            snapshot_download(repo)
-    except Exception as exc:  # noqa: BLE001 — never fail install on prewarm
+        name = profiles.read_stored_profile() or s.embedding_profile or s.default_embedding_profile
+        p = profiles.profile(name)
+        reporter.log(f"    profile {name}")
+        # Reading ``dim`` loads the model, which is what downloads it.
+        if p.unified:
+            _ = GemmaEmbedder(p.dense_model).dim
+        else:
+            _ = E5TextEmbedder(p.dense_model).dim
+            _ = SiglipImageEmbedder(p.image_model).dim
+    except Exception as exc:
         # Best-effort: models download lazily on first use if this is skipped.
         reporter.log(f"!!! model prewarm skipped: {type(exc).__name__}: {exc}")
     reporter.log(">>> downloading PDF parser models (MinerU basic tier)")
@@ -327,7 +339,7 @@ def _prewarm_models(reporter: InstallReporter, phase: int) -> None:
         ).returncode
         if rc != 0:
             reporter.log(f"!!! MinerU model download rc={rc}; they download on the first PDF instead")
-    except Exception as exc:  # noqa: BLE001 — never fail install on prewarm
+    except Exception as exc:
         reporter.log(f"!!! MinerU model download skipped: {type(exc).__name__}: {exc}")
 
 
@@ -364,7 +376,7 @@ def install_all(resources_dir: Path, reporter: InstallReporter) -> None:
                 runners[step](resources_dir, reporter, idx)
             else:
                 runners[step](reporter, idx)
-        except Exception as exc:  # noqa: BLE001 — surface, mark the row, re-raise
+        except Exception as exc:
             reporter.phase_fail(idx, str(exc))
             raise
         done.add(step)

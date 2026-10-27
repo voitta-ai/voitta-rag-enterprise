@@ -11,24 +11,31 @@ Two profiles exist:
 
 Both profiles use BM25 (fastembed) for the sparse half of hybrid search.
 
-Resolution order for the active profile, highest first:
+The deployment's profile is decided once and recorded. ``app_settings`` row
+``embedding_profile`` holds the profile this deployment serves:
 
-1. ``VOITTA_EMBEDDING_PROFILE`` (``Settings.embedding_profile``).
-2. The ``embedding_profile`` row in ``app_settings`` — written by
-   ``scripts/migrate_embedding_profile.py`` when a migration completes.
-3. ``Settings.default_embedding_profile`` (``gemma2``; the desktop launcher
-   sets ``e5-siglip``).
+* on the first start of an install (no row yet) the app picks
+  ``VOITTA_EMBEDDING_PROFILE`` if set, else ``e5-siglip`` when SQL already
+  holds indexed content (every install from before profiles existed is
+  e5 + SigLIP — this holds even if its Qdrant data was lost), else
+  ``Settings.default_embedding_profile`` (``gemma2``; the desktop launcher
+  sets ``e5-siglip``), and records it (:func:`commit`);
+* afterwards only ``scripts/migrate_embedding_profile.py --finish`` changes
+  it. ``VOITTA_EMBEDDING_PROFILE`` must then agree with the row; a
+  different value refuses to start rather than serve collections nobody
+  has kept up to date.
 
-Safety rule: all three profiles' models emit 768-d vectors, so Qdrant would
+Safety rule: all profiles' models emit 768-d vectors, so Qdrant would
 silently accept vectors from the wrong model. ``collection_meta`` records
-which profile built each collection and :func:`resolve` checks it:
+the profile, model and dimension that built each collection; resolution
+refuses to start when the active profile's collections were built by
+anything else, and fails outright when Qdrant cannot be read (an empty
+view of the store must never decide which vector space to serve).
 
-* the profile came from the default (step 3) but only another profile's
-  collections hold data → adopt that profile (an existing install keeps
-  working after an upgrade) and say so;
-* the profile was chosen explicitly (step 1 or 2) and its collections are
-  recorded under another profile → :class:`ProfileMismatchError`. The app
-  refuses to start rather than mix vector spaces.
+``VOITTA_DENSE_MODEL`` / ``VOITTA_IMAGE_MODEL`` / ``VOITTA_DENSE_VERSION`` /
+``VOITTA_IMAGE_VERSION`` predate profiles and configure ``e5-siglip`` only;
+``gemma2`` ignores them (with a warning) so an old ``.env`` cannot put e5
+weights or version stamps into the Gemma collections.
 """
 
 from __future__ import annotations
@@ -87,6 +94,8 @@ _BASE: dict[str, Profile] = {
     ),
 }
 PROFILE_NAMES: tuple[str, ...] = tuple(_BASE)
+# Every install from before profiles existed embedded with e5 + SigLIP.
+LEGACY_PROFILE = "e5-siglip"
 # Every Qdrant collection any profile uses — for offline maintenance tools
 # that operate on a raw Qdrant store without an app config.
 ALL_COLLECTIONS: tuple[str, ...] = tuple(
@@ -116,32 +125,47 @@ _lock = threading.Lock()
 
 
 def profile(name: str) -> Profile:
-    """The named profile with the ``VOITTA_*`` model/version overrides applied."""
+    """The named profile; ``e5-siglip`` with the legacy ``VOITTA_*`` overrides applied."""
     if name not in _BASE:
         raise ValueError(f"unknown embedding profile {name!r}; expected one of {PROFILE_NAMES}")
     base = _BASE[name]
+    if name != LEGACY_PROFILE:
+        _warn_ignored_overrides(name)
+        return base
     s = get_settings()
-    dense_model = s.dense_model or base.dense_model
-    image_model = s.image_model or base.image_model
-    if base.unified and image_model != dense_model:
-        # A unified profile shares one model between text and images; letting
-        # the two drift apart would put text and images in different spaces
-        # under one profile name.
-        if s.image_model and s.dense_model:
-            raise ValueError(
-                f"profile {name} embeds text and images with one model; "
-                f"VOITTA_DENSE_MODEL={s.dense_model} and VOITTA_IMAGE_MODEL={s.image_model} differ"
-            )
-        image_model = dense_model = s.dense_model or s.image_model or base.dense_model
     return Profile(
         name=base.name,
-        dense_model=dense_model,
-        image_model=image_model,
+        dense_model=s.dense_model or base.dense_model,
+        image_model=s.image_model or base.image_model,
         dense_version=s.dense_version or base.dense_version,
         image_version=s.image_version or base.image_version,
         chunks_collection=base.chunks_collection,
         images_collection=base.images_collection,
     )
+
+
+_warned_overrides: set[str] = set()
+
+
+def _warn_ignored_overrides(name: str) -> None:
+    s = get_settings()
+    present = {
+        k: v
+        for k, v in (
+            ("VOITTA_DENSE_MODEL", s.dense_model),
+            ("VOITTA_IMAGE_MODEL", s.image_model),
+            ("VOITTA_DENSE_VERSION", s.dense_version),
+            ("VOITTA_IMAGE_VERSION", s.image_version),
+        )
+        if v
+    }
+    key = f"{name}:{sorted(present.items())}"
+    if present and key not in _warned_overrides:
+        _warned_overrides.add(key)
+        logger.warning(
+            "embedding profile %s ignores %s (they configure the %s profile only)",
+            name, ", ".join(sorted(present)), LEGACY_PROFILE,
+        )
 
 
 def active() -> Profile:
@@ -152,6 +176,13 @@ def active() -> Profile:
 def resolve() -> Resolution:
     global _resolved
     if _resolved is None:
+        from ..vector_store import on_qdrant_thread
+
+        if on_qdrant_thread():
+            # Resolution itself queries Qdrant through the one-worker pool;
+            # starting it from that worker would deadlock. Every entry point
+            # resolves before it touches Qdrant, so this is a programming error.
+            raise RuntimeError("embedding profile used on the Qdrant thread before it was resolved")
         with _lock:
             if _resolved is None:
                 _resolved = _resolve()
@@ -163,6 +194,19 @@ def resolve() -> Resolution:
                     f" — {r.note}" if r.note else "",
                 )
     return _resolved
+
+
+def commit() -> None:
+    """Record the resolved profile as this deployment's, if none is recorded yet.
+
+    Called by the app once startup has resolved it. From then on the
+    profile cannot drift with the environment or with what Qdrant happens
+    to contain; only a finished migration changes it.
+    """
+    r = resolve()
+    if r.source not in ("app_settings", "pinned") and read_stored_profile() is None:
+        write_stored_profile(r.name)
+        logger.info("embedding profile %s recorded for this deployment", r.name)
 
 
 def pin(name: str) -> None:
@@ -188,69 +232,130 @@ def reset_profile_cache() -> None:
 
 def _resolve() -> Resolution:
     s = get_settings()
-    if s.embedding_profile:
-        chosen, source = s.embedding_profile, "env"
-    else:
-        stored = read_stored_profile()
-        if stored:
-            chosen, source = stored, "app_settings"
-        else:
-            chosen, source = s.default_embedding_profile, "default"
-    if chosen not in _BASE:
-        raise ValueError(f"unknown embedding profile {chosen!r} (from {source})")
-
-    backfill_legacy_collections()
-    built = _populated_collections_by_profile()
+    env = s.embedding_profile or None
+    if env is not None and env not in _BASE:
+        raise ValueError(f"unknown embedding profile {env!r} (VOITTA_EMBEDDING_PROFILE)")
+    recorded = read_stored_profile()
     migrating = read_setting(MIGRATION_SETTING_KEY)
-    if migrating:
-        if chosen == migrating and source != "default":
+    # Qdrant must be readable: this raises on connection errors.
+    backfill_legacy_collections()
+
+    if recorded is not None:
+        if env is not None and env != recorded:
             raise ProfileMismatchError(
-                f"embedding profile {chosen} ({_source_hint(source)}) is still being "
-                f"migrated to; finish it with scripts/migrate_embedding_profile.py "
-                f"--to {chosen}, or unset the profile until then"
+                f"this deployment serves embedding profile {recorded}, but "
+                f"VOITTA_EMBEDDING_PROFILE={env}. Switching profiles needs its data: "
+                f"python scripts/migrate_embedding_profile.py --to {env} (then --finish "
+                f"with the app stopped). Or set VOITTA_EMBEDDING_PROFILE={recorded} / unset it."
             )
-        # Half-filled collections must not look like a usable profile.
-        built[migrating] = 0
-    mine = profile(chosen)
-    own = {mine.chunks_collection, mine.images_collection}
-    foreign = {
-        name: prof for name, prof in _recorded_profiles().items()
-        if name in own and prof != chosen
-    }
-    if foreign:
-        # Our collection names carry the profile, so this only happens when a
-        # collection was created by hand or a profile's names were changed.
+        res = Resolution(recorded, "app_settings")
+    elif _sql_has_indexed_content():
+        # No record but indexed content: an install from before profiles
+        # existed, which can only be e5 + SigLIP.
+        built = _profiles_with_collections()
+        if built - {LEGACY_PROFILE}:
+            raise ProfileMismatchError(
+                f"indexed content exists but no profile is recorded and collections of "
+                f"{sorted(built)} exist; finish a migration with "
+                f"python scripts/migrate_embedding_profile.py --to <profile> --finish"
+            )
+        if env is not None and env != LEGACY_PROFILE:
+            raise ProfileMismatchError(
+                f"VOITTA_EMBEDDING_PROFILE={env}, but this install's indexed content was "
+                f"embedded with {LEGACY_PROFILE}. Migrate it first: "
+                f"python scripts/migrate_embedding_profile.py --to {env} (then --finish "
+                f"with the app stopped), or set VOITTA_EMBEDDING_PROFILE={LEGACY_PROFILE}."
+            )
+        default = s.default_embedding_profile
+        if env is not None:
+            res = Resolution(LEGACY_PROFILE, "env")
+        elif default == LEGACY_PROFILE:
+            res = Resolution(LEGACY_PROFILE, "default")
+        else:
+            res = Resolution(
+                LEGACY_PROFILE,
+                "adopted",
+                f"default is {default}, but this install's content was embedded with "
+                f"{LEGACY_PROFILE}; serving {LEGACY_PROFILE}. Move with "
+                f"scripts/migrate_embedding_profile.py --to {default}",
+            )
+    else:
+        name = env or s.default_embedding_profile
+        if name not in _BASE:
+            raise ValueError(f"unknown embedding profile {name!r} (default)")
+        res = Resolution(name, "env" if env else "default")
+
+    if migrating is not None and migrating == res.name:
+        # --finish records the target and clears the mark in one
+        # transaction, so this means the mark was left by hand.
         raise ProfileMismatchError(
-            f"embedding profile {chosen} ({source}) would use collections "
-            f"{sorted(foreign)} that collection_meta records as built by "
-            f"{sorted(set(foreign.values()))}"
+            f"embedding profile {res.name} is marked as still being migrated to; "
+            f"run python scripts/migrate_embedding_profile.py --to {res.name} --finish"
         )
-    if built.get(chosen):
-        return Resolution(chosen, source)
-    others = sorted(p for p, n in built.items() if n and p != chosen)
-    if not others:
-        return Resolution(chosen, source)  # nothing indexed anywhere yet
-    if source == "default":
-        adopted = others[0]
-        return Resolution(
-            adopted,
-            "adopted",
-            f"default is {chosen}, but only {adopted} collections hold data; "
-            f"running {adopted}. Migrate with scripts/migrate_embedding_profile.py --to {chosen}",
-        )
-    raise ProfileMismatchError(
-        f"embedding profile {chosen} was set explicitly ({_source_hint(source)}) but its "
-        f"collections are empty while {', '.join(others)} collections hold data. Either set "
-        f"VOITTA_EMBEDDING_PROFILE={others[0]}, or migrate the data first: "
-        f"python scripts/migrate_embedding_profile.py --to {chosen}"
-    )
+    _check_collections_match(res.name)
+    return res
 
 
-def _source_hint(source: str) -> str:
-    return {
-        "env": "VOITTA_EMBEDDING_PROFILE",
-        "app_settings": "app_settings row written by a migration",
-    }.get(source, source)
+def _check_collections_match(name: str) -> None:
+    """Refuse when the profile's collections were built by another
+    profile, model or vector size (``collection_meta`` vs the profile and
+    what Qdrant reports)."""
+    from sqlalchemy import select
+
+    from ...db.database import session_scope
+    from ...db.models import CollectionMeta
+    from ..vector_store import collection_dims
+
+    prof = profile(name)
+    want = {
+        prof.chunks_collection: prof.dense_model,
+        prof.images_collection: prof.image_model,
+    }
+    dims = collection_dims(list(want))
+    with session_scope() as s:
+        rows = {
+            m.collection_name: (m.profile, m.dense_model or m.image_model, m.dim)
+            for m in s.execute(
+                select(CollectionMeta).where(CollectionMeta.collection_name.in_(list(want)))
+            ).scalars()
+        }
+    problems = []
+    for coll, model in want.items():
+        if coll not in rows:
+            continue
+        built_profile, built_model, dim = rows[coll]
+        if built_profile != name:
+            problems.append(f"{coll} was built by profile {built_profile}")
+        elif built_model != model:
+            problems.append(f"{coll} was built with {built_model}, profile {name} now uses {model}")
+        elif coll in dims and dims[coll] != dim:
+            problems.append(f"{coll} has {dims[coll]}-d vectors, collection_meta records {dim}")
+    if problems:
+        raise ProfileMismatchError(
+            f"embedding profile {name} cannot use its collections: " + "; ".join(problems)
+            + ". Vectors from different models must not share a collection."
+        )
+
+
+def _sql_has_indexed_content() -> bool:
+    from sqlalchemy import select
+
+    from ...db.database import session_scope
+    from ...db.models import Chunk, Image
+
+    with session_scope() as s:
+        return (
+            s.execute(select(Chunk.id).limit(1)).first() is not None
+            or s.execute(select(Image.id).where(Image.kind == "figure").limit(1)).first()
+            is not None
+        )
+
+
+def _profiles_with_collections() -> set[str]:
+    """Profiles that have at least one collection present in Qdrant."""
+    from ..vector_store import collection_dims
+
+    return {_BASE_BY_COLLECTION[c] for c in collection_dims(list(_BASE_BY_COLLECTION))}
 
 
 # ---------------------------------------------------------------------------
@@ -279,18 +384,25 @@ def read_setting(key: str) -> str | None:
 
 def write_setting(key: str, value: str | None) -> None:
     """Upsert ``key``; ``None`` deletes it."""
+    write_settings({key: value})
+
+
+def write_settings(values: dict[str, str | None]) -> None:
+    """Upsert several keys in ONE transaction (``None`` deletes a key)."""
     from ...db.database import session_scope
     from ...db.models import AppSetting
 
+    now = int(time.time())
     with session_scope() as s:
-        row = s.get(AppSetting, key)
-        if value is None:
-            if row is not None:
-                s.delete(row)
-        elif row is None:
-            s.add(AppSetting(key=key, value=value, updated_at=int(time.time())))
-        else:
-            row.value, row.updated_at = value, int(time.time())
+        for key, value in values.items():
+            row = s.get(AppSetting, key)
+            if value is None:
+                if row is not None:
+                    s.delete(row)
+            elif row is None:
+                s.add(AppSetting(key=key, value=value, updated_at=now))
+            else:
+                row.value, row.updated_at = value, now
 
 
 def record_collection(name: str, prof: Profile, *, dim: int, kind: Literal["chunks", "images"]) -> None:
@@ -335,17 +447,6 @@ def backfill_legacy_collections() -> None:
         if name in dims and name not in recorded:
             record_collection(name, legacy, dim=dims[name], kind=kind)
             logger.info("collection_meta: backfilled %s as e5-siglip", name)
-
-
-def _populated_collections_by_profile() -> dict[str, int]:
-    """Points per profile, summed over its two collections (0 if absent)."""
-    from ..vector_store import collection_point_counts
-
-    counts = collection_point_counts(list(_BASE_BY_COLLECTION))
-    out: dict[str, int] = {name: 0 for name in _BASE}
-    for coll, n in counts.items():
-        out[_BASE_BY_COLLECTION[coll]] += n
-    return out
 
 
 _BASE_BY_COLLECTION = {

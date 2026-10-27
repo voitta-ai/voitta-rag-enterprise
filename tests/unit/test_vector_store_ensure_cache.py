@@ -45,6 +45,10 @@ class _CountingClient:
         self.get_collection_calls += 1
         return object()  # exists
 
+    def collection_exists(self, name) -> bool:
+        self.get_collection(name)
+        return True
+
     def create_collection(self, *a, **k) -> None:
         self.create_collection_calls += 1
 

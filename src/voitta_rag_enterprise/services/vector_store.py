@@ -81,6 +81,11 @@ def _ensure_executor() -> ThreadPoolExecutor:
     return _executor
 
 
+def on_qdrant_thread() -> bool:
+    """True on the dedicated Qdrant worker thread."""
+    return threading.current_thread().name.startswith(_QDRANT_THREAD_PREFIX)
+
+
 def run_on_qdrant(fn) -> Any:
     """Run ``fn()`` on the dedicated Qdrant thread; return its result.
 
@@ -88,7 +93,7 @@ def run_on_qdrant(fn) -> Any:
     called from the Qdrant thread itself it runs ``fn`` inline — submitting
     would queue behind the caller on the one-worker pool and deadlock.
     """
-    if threading.current_thread().name.startswith(_QDRANT_THREAD_PREFIX):
+    if on_qdrant_thread():
         return fn()
     return _ensure_executor().submit(fn).result()
 
@@ -387,11 +392,13 @@ def ensure_collections(text_dim: int, image_dim: int) -> None:
 
 
 def _collection_exists(client: QdrantClient, name: str) -> bool:
-    try:
-        client.get_collection(name)
-        return True
-    except Exception:
-        return False
+    """Whether ``name`` exists. Connection and server errors RAISE.
+
+    Treating "Qdrant unreachable" as "collection absent" made search
+    silently return nothing and let profile resolution decide on an empty
+    view of the store.
+    """
+    return client.collection_exists(name)
 
 
 def count_points_for_folder(collection: str, folder_id: int) -> int:
@@ -456,6 +463,9 @@ class ChunkPoint:
     # Optional ``meta_*``-prefixed fields from a ``.voitta.meta`` sidecar.
     # Merged flat into the payload so each field is independently filterable.
     meta_payload: dict | None = None
+    # sha256 of the chunk text. Lets the profile migration see that a
+    # file's content changed even when SQLite reused its chunk ids.
+    chunk_hash: str | None = None
 
 
 # Payload discriminator for synthetic folder-card points living in the
@@ -499,6 +509,9 @@ class ImagePoint:
     # Same ``meta_*`` source-provenance fields as ChunkPoint, so image search
     # can prefilter by owner/date identically to chunk search.
     meta_payload: dict | None = None
+    # The Image row search hands to ``get_image``. Defaults to ``point_id``;
+    # differs when an existing point (keyed by an earlier row) is re-embedded.
+    image_id: int | None = None
 
 
 # Max points per Qdrant upsert request. Qdrant rejects request bodies over
@@ -517,10 +530,12 @@ def replace_chunks_for_file(file_id: int, points: list[ChunkPoint]) -> None:
     spreadsheets) don't exceed Qdrant's per-request size limit.
     """
 
+    collection_name = chunks_collection()  # resolved on the caller's thread
+
     def _do() -> None:
         client = get_client()
         client.delete(
-            chunks_collection(),
+            collection_name,
             points_selector=qm.FilterSelector(
                 filter=qm.Filter(
                     must=[
@@ -556,7 +571,7 @@ def replace_chunks_for_file(file_id: int, points: list[ChunkPoint]) -> None:
         last_start = ((len(structs) - 1) // _UPSERT_BATCH_POINTS) * _UPSERT_BATCH_POINTS
         for start in range(0, len(structs), _UPSERT_BATCH_POINTS):
             client.upsert(
-                chunks_collection(),
+                collection_name,
                 points=structs[start : start + _UPSERT_BATCH_POINTS],
                 wait=(start == last_start),
             )
@@ -567,10 +582,12 @@ def replace_chunks_for_file(file_id: int, points: list[ChunkPoint]) -> None:
 def find_image_point_by_cas(image_cas_id: str) -> dict[str, Any] | None:
     """Return the existing image point payload, or ``None`` if not indexed yet."""
 
+    collection_name = images_collection()  # resolved on the caller's thread
+
     def _do() -> dict[str, Any] | None:
         client = get_client()
         res, _ = client.scroll(
-            images_collection(),
+            collection_name,
             scroll_filter=qm.Filter(
                 must=[
                     qm.FieldCondition(
@@ -589,12 +606,65 @@ def find_image_point_by_cas(image_cas_id: str) -> dict[str, Any] | None:
     return run_on_qdrant(_do)
 
 
-def add_file_to_image_point(point_id: int, file_id: int) -> None:
-    """Append ``file_id`` to an existing image point's ``file_ids`` list."""
+def find_image_points_by_cas(image_cas_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """Batch form of :func:`find_image_point_by_cas`: ``{cas_id: {id, payload}}``
+    for those already indexed (one request instead of one per image)."""
+    wanted = list(dict.fromkeys(image_cas_ids))
+    if not wanted:
+        return {}
+    collection = images_collection()
+
+    def _do() -> dict[str, dict[str, Any]]:
+        client = get_client()
+        if not _collection_exists(client, collection):
+            return {}
+        found: dict[str, dict[str, Any]] = {}
+        offset = None
+        while True:
+            res, offset = client.scroll(
+                collection,
+                scroll_filter=qm.Filter(
+                    must=[qm.FieldCondition(key="image_cas_id", match=qm.MatchAny(any=wanted))]
+                ),
+                limit=len(wanted) + 16,
+                with_payload=True,
+                offset=offset,
+            )
+            for p in res:
+                payload = dict(p.payload or {})
+                found.setdefault(payload.get("image_cas_id"), {"id": p.id, "payload": payload})
+            if offset is None:
+                return found
+
+    return run_on_qdrant(_do)
+
+
+def upsert_image_points(points: list[tuple[ImagePoint, list[int]]]) -> None:
+    """Batch form of :func:`upsert_image_point` (``[(point, file_ids)]``)."""
+    collection = images_collection()
 
     def _do() -> None:
         client = get_client()
-        existing = client.retrieve(images_collection(), ids=[point_id], with_payload=True)
+        for start in range(0, len(points), _UPSERT_BATCH_POINTS):
+            client.upsert(
+                collection,
+                points=[
+                    qm.PointStruct(id=pt.point_id, vector={"image": pt.image}, payload=_image_payload(pt, ids))
+                    for pt, ids in points[start : start + _UPSERT_BATCH_POINTS]
+                ],
+            )
+
+    run_on_qdrant(_do)
+
+
+def add_file_to_image_point(point_id: int, file_id: int) -> None:
+    """Append ``file_id`` to an existing image point's ``file_ids`` list."""
+
+    collection_name = images_collection()  # resolved on the caller's thread
+
+    def _do() -> None:
+        client = get_client()
+        existing = client.retrieve(collection_name, ids=[point_id], with_payload=True)
         if not existing:
             return
         payload = dict(existing[0].payload or {})
@@ -602,17 +672,19 @@ def add_file_to_image_point(point_id: int, file_id: int) -> None:
         if file_id not in file_ids:
             file_ids.append(file_id)
             client.set_payload(
-                images_collection(), payload={"file_ids": file_ids}, points=[point_id]
+                collection_name, payload={"file_ids": file_ids}, points=[point_id]
             )
 
     run_on_qdrant(_do)
 
 
 def upsert_image_point(point: ImagePoint, file_ids: list[int]) -> None:
+    collection_name = images_collection()  # resolved on the caller's thread
+
     def _do() -> None:
         client = get_client()
         client.upsert(
-            images_collection(),
+            collection_name,
             points=[
                 qm.PointStruct(
                     id=point.point_id,
@@ -637,6 +709,7 @@ def _chunk_payload(p: ChunkPoint) -> dict:
     """
     payload: dict = {
         "chunk_id": p.chunk_id,
+        "chunk_hash": p.chunk_hash,
         "file_id": p.file_id,
         "folder_id": p.folder_id,
         "file_path": p.file_path,
@@ -662,7 +735,7 @@ def _chunk_payload(p: ChunkPoint) -> dict:
 
 def _image_payload(p: ImagePoint, file_ids: list[int]) -> dict:
     payload: dict = {
-        "image_id": p.point_id,
+        "image_id": p.image_id if p.image_id is not None else p.point_id,
         "image_cas_id": p.image_cas_id,
         "file_ids": file_ids,
         "folder_id": p.folder_id,
@@ -687,12 +760,14 @@ def remove_file_from_image_points(file_id: int) -> list[int]:
     have nothing to clean up.
     """
 
+    collection_name = images_collection()  # resolved on the caller's thread
+
     def _do() -> list[int]:
         client = get_client()
-        if not client.collection_exists(images_collection()):
+        if not client.collection_exists(collection_name):
             return []
         res, _ = client.scroll(
-            images_collection(),
+            collection_name,
             scroll_filter=qm.Filter(
                 must=[
                     qm.FieldCondition(key="file_ids", match=qm.MatchValue(value=file_id))
@@ -706,9 +781,9 @@ def remove_file_from_image_points(file_id: int) -> list[int]:
             payload = dict(p.payload or {})
             file_ids = [fid for fid in (payload.get("file_ids") or []) if fid != file_id]
             if file_ids:
-                client.set_payload(images_collection(), payload={"file_ids": file_ids}, points=[p.id])
+                client.set_payload(collection_name, payload={"file_ids": file_ids}, points=[p.id])
             else:
-                client.delete(images_collection(), points_selector=qm.PointIdsList(points=[p.id]))
+                client.delete(collection_name, points_selector=qm.PointIdsList(points=[p.id]))
                 deleted.append(p.id)
         return deleted
 
@@ -780,20 +855,66 @@ def _delete_orphans_for_collection(
     return run_on_qdrant(_do)
 
 
-def delete_orphan_image_points(known_image_ids: set[int]) -> int:
-    """Remove image points whose ``image_id`` payload is not in ``known_image_ids``.
+def delete_orphan_image_points(live_images: dict[int, str]) -> int:
+    """Reconcile image points with the live figure rows (``image_id → image_cas_id``).
 
-    Backfill for the pre-fix re-extract leak where ``_commit_indexing``
-    deleted Image DB rows without touching Qdrant. The CAS-dedup path
-    then attached new file_ids to the orphan point instead of writing a
-    fresh one, leaving Qdrant points whose ``image_id`` no longer
-    matches any DB row.
+    Image points are deduplicated by content: one point per CAS id, keyed by
+    the first Image row that brought it, with every file using it in
+    ``file_ids``. So a point whose ``image_id`` row is gone is NOT an orphan
+    while another row still uses the same image — it is re-keyed to that
+    row: same vector and payload under the live row's id (search hands
+    ``image_id`` to ``get_image``, and a point id must never be a dead row
+    id that SQLite may hand out again for a different image). Only points
+    whose content no live row uses are deleted.
 
-    Caller supplies the canonical set of Image row IDs. Returns the
-    count of deleted points. Safe to run at startup or on demand;
-    idempotent on subsequent runs.
+    Also the backfill for the pre-fix re-extract leak where
+    ``_commit_indexing`` deleted Image rows without touching Qdrant.
+    Returns the count of deleted points. Idempotent.
     """
-    return _delete_orphans_for_collection(images_collection(), "image_id", known_image_ids)
+    by_cas: dict[str, int] = {}
+    for iid, cas in live_images.items():
+        if cas not in by_cas or iid < by_cas[cas]:
+            by_cas[cas] = iid
+    collection = images_collection()
+
+    def _do() -> int:
+        client = get_client()
+        if not _collection_exists(client, collection):
+            return 0
+        deleted = 0
+        offset = None
+        while True:
+            res, offset = client.scroll(
+                collection, limit=8192, with_payload=["image_id", "image_cas_id"], offset=offset
+            )
+            stale: list = []
+            for p in res:
+                pl = p.payload or {}
+                iid, cas = pl.get("image_id"), pl.get("image_cas_id")
+                if iid in live_images and live_images[iid] == cas:
+                    continue
+                if cas in by_cas:
+                    _rekey_image_point(client, collection, p.id, by_cas[cas])
+                else:
+                    stale.append(p.id)
+            if stale:
+                client.delete(collection, points_selector=qm.PointIdsList(points=stale))
+                deleted += len(stale)
+            if offset is None:
+                break
+        return deleted
+
+    return run_on_qdrant(_do)
+
+
+def _rekey_image_point(client: QdrantClient, collection: str, old_id: int, new_id: int) -> None:
+    """Move an image point to ``new_id`` (vector and payload kept)."""
+    (pt,) = client.retrieve(collection, ids=[old_id], with_payload=True, with_vectors=True)
+    if not client.retrieve(collection, ids=[new_id]):
+        payload = {**(pt.payload or {}), "image_id": new_id}
+        client.upsert(collection, points=[qm.PointStruct(id=new_id, vector=pt.vector, payload=payload)])
+    client.delete(collection, points_selector=qm.PointIdsList(points=[old_id]))
+    logger.info("image point %s re-keyed to live image %d", old_id, new_id)
 
 
 def delete_orphan_chunk_points(known_chunk_ids: set[int]) -> int:
@@ -813,12 +934,14 @@ def delete_orphan_chunk_points(known_chunk_ids: set[int]) -> int:
 
 
 def delete_chunks_for_file(file_id: int) -> None:
+    collection_name = chunks_collection()  # resolved on the caller's thread
+
     def _do() -> None:
         client = get_client()
-        if not client.collection_exists(chunks_collection()):
+        if not client.collection_exists(collection_name):
             return
         client.delete(
-            chunks_collection(),
+            collection_name,
             points_selector=qm.FilterSelector(
                 filter=qm.Filter(
                     must=[
@@ -851,14 +974,16 @@ def delete_chunks_for_files(file_ids: list[int]) -> None:
     if not file_ids:
         return
 
+    collection_name = chunks_collection()  # resolved on the caller's thread
+
     def _do() -> None:
         client = get_client()
-        if not client.collection_exists(chunks_collection()):
+        if not client.collection_exists(collection_name):
             return
         for start in range(0, len(file_ids), _DELETE_FILTER_BATCH):
             batch = file_ids[start : start + _DELETE_FILTER_BATCH]
             client.delete(
-                chunks_collection(),
+                collection_name,
                 points_selector=qm.FilterSelector(
                     filter=qm.Filter(
                         must=[
@@ -886,12 +1011,14 @@ def delete_chunks_for_folder(folder_id: int) -> None:
     re-extract path would recreate them), hence the ``must_not`` guard.
     """
 
+    collection_name = chunks_collection()  # resolved on the caller's thread
+
     def _do() -> None:
         client = get_client()
-        if not client.collection_exists(chunks_collection()):
+        if not client.collection_exists(collection_name):
             return
         client.delete(
-            chunks_collection(),
+            collection_name,
             points_selector=qm.FilterSelector(
                 filter=qm.Filter(
                     must=[
@@ -929,12 +1056,14 @@ def list_folder_cards(folder_id: int) -> list[dict[str, Any]]:
     folder has at most a few hundred cards, so this is one cheap scroll.
     """
 
+    collection_name = chunks_collection()  # resolved on the caller's thread
+
     def _do() -> list[dict[str, Any]]:
         client = get_client()
-        if not client.collection_exists(chunks_collection()):
+        if not client.collection_exists(collection_name):
             return []
         res, _ = client.scroll(
-            chunks_collection(),
+            collection_name,
             scroll_filter=_folder_cards_filter(folder_id),
             limit=10_000,
             with_payload=True,
@@ -951,10 +1080,12 @@ def replace_cards_for_folder(folder_id: int, points: list[FolderCardPoint]) -> N
     upsert with the final batch's ``wait=True`` as the durability barrier.
     """
 
+    collection_name = chunks_collection()  # resolved on the caller's thread
+
     def _do() -> None:
         client = get_client()
         client.delete(
-            chunks_collection(),
+            collection_name,
             points_selector=qm.FilterSelector(filter=_folder_cards_filter(folder_id)),
         )
         if not points:
@@ -984,7 +1115,7 @@ def replace_cards_for_folder(folder_id: int, points: list[FolderCardPoint]) -> N
         last_start = ((len(structs) - 1) // _UPSERT_BATCH_POINTS) * _UPSERT_BATCH_POINTS
         for start in range(0, len(structs), _UPSERT_BATCH_POINTS):
             client.upsert(
-                chunks_collection(),
+                collection_name,
                 points=structs[start : start + _UPSERT_BATCH_POINTS],
                 wait=(start == last_start),
             )
@@ -995,12 +1126,14 @@ def replace_cards_for_folder(folder_id: int, points: list[FolderCardPoint]) -> N
 def delete_cards_for_folder(folder_id: int) -> None:
     """Drop every folder-card point of ``folder_id`` (folder deletion)."""
 
+    collection_name = chunks_collection()  # resolved on the caller's thread
+
     def _do() -> None:
         client = get_client()
-        if not client.collection_exists(chunks_collection()):
+        if not client.collection_exists(collection_name):
             return
         client.delete(
-            chunks_collection(),
+            collection_name,
             points_selector=qm.FilterSelector(filter=_folder_cards_filter(folder_id)),
         )
 
@@ -1016,15 +1149,17 @@ def sweep_orphan_folder_cards(live_folder_ids: set[int]) -> int:
     Returns the number of deleted points; idempotent.
     """
 
+    collection_name = chunks_collection()  # resolved on the caller's thread
+
     def _do() -> int:
         client = get_client()
-        if not client.collection_exists(chunks_collection()):
+        if not client.collection_exists(collection_name):
             return 0
         deleted = 0
         offset = None
         while True:
             res, offset = client.scroll(
-                chunks_collection(),
+                collection_name,
                 scroll_filter=qm.Filter(
                     must=[
                         qm.FieldCondition(
@@ -1045,7 +1180,7 @@ def sweep_orphan_folder_cards(live_folder_ids: set[int]) -> int:
             ]
             if stale_ids:
                 client.delete(
-                    chunks_collection(), points_selector=qm.PointIdsList(points=stale_ids)
+                    collection_name, points_selector=qm.PointIdsList(points=stale_ids)
                 )
                 deleted += len(stale_ids)
             if offset is None:
@@ -1072,14 +1207,16 @@ def remove_files_from_image_points(file_ids: list[int]) -> int:
         return 0
     target = set(file_ids)
 
+    collection_name = images_collection()  # resolved on the caller's thread
+
     def _do() -> int:
         client = get_client()
-        if not client.collection_exists(images_collection()):
+        if not client.collection_exists(collection_name):
             return 0
         # ``MatchAny`` on an array field matches points whose array contains
         # at least one of the listed values — exactly what we want.
         res, _ = client.scroll(
-            images_collection(),
+            collection_name,
             scroll_filter=qm.Filter(
                 must=[qm.FieldCondition(key="file_ids", match=qm.MatchAny(any=list(target)))]
             ),
@@ -1092,11 +1229,11 @@ def remove_files_from_image_points(file_ids: list[int]) -> int:
             payload = dict(p.payload or {})
             remaining = [fid for fid in (payload.get("file_ids") or []) if fid not in target]
             if remaining:
-                client.set_payload(images_collection(), payload={"file_ids": remaining}, points=[p.id])
+                client.set_payload(collection_name, payload={"file_ids": remaining}, points=[p.id])
             else:
                 to_delete.append(p.id)
         if to_delete:
-            client.delete(images_collection(), points_selector=qm.PointIdsList(points=to_delete))
+            client.delete(collection_name, points_selector=qm.PointIdsList(points=to_delete))
             deleted = len(to_delete)
         return deleted
 

@@ -667,11 +667,11 @@ def test_delete_orphan_image_points_removes_stale_rows(
         s.execute(sa_delete(Image))
 
     # Sweep with no known ids → every point is an orphan.
-    deleted = vector_store.delete_orphan_image_points(set())
+    deleted = vector_store.delete_orphan_image_points({})
     assert deleted >= 1
 
     # Idempotent: the point is gone, second run finds nothing.
-    deleted_again = vector_store.delete_orphan_image_points(set())
+    deleted_again = vector_store.delete_orphan_image_points({})
     assert deleted_again == 0
 
 
@@ -685,8 +685,8 @@ def test_delete_orphan_image_points_keeps_known_rows(
     _seed_and_index(tmp_path / "src", {"figure.png": _png()})
 
     with session_scope() as s:
-        live_ids = {iid for (iid,) in s.execute(select(Image.id)).all()}
-    deleted = vector_store.delete_orphan_image_points(live_ids)
+        live = dict(s.execute(select(Image.id, Image.image_cas_id)).all())
+    deleted = vector_store.delete_orphan_image_points(live)
     assert deleted == 0
 
 

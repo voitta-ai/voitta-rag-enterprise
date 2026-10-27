@@ -146,6 +146,7 @@ def embed_file_chunks(file_id: int, *, round_token: int | None = None) -> int | 
                 _nearby_image_ids(s, c.id),
                 c.char_start,
                 c.char_end,
+                c.chunk_hash,
             )
             for c in chunks
         ]
@@ -175,7 +176,7 @@ def embed_file_chunks(file_id: int, *, round_token: int | None = None) -> int | 
         vector_store.ensure_chunks_collection(text_dim=text_emb.dim)
 
     if chunk_data:
-        texts = [t for _, t, _, _, _, _ in chunk_data]
+        texts = [row[1] for row in chunk_data]
         # Embed in batches and emit per-batch progress — a big spreadsheet
         # (1000s of chunks) is otherwise a single multi-minute call that
         # shows zero movement. Each batch acquires gpu_lock independently,
@@ -191,7 +192,7 @@ def embed_file_chunks(file_id: int, *, round_token: int | None = None) -> int | 
                     "embed_text", min(i + _EMBED_PROGRESS_BATCH, total), total
                 )
         points: list = []
-        for (cid, text, idx, nearby, c_start, c_end), dense, sparse in zip(
+        for (cid, text, idx, nearby, c_start, c_end, c_hash), dense, sparse in zip(
             chunk_data, denses, sparses, strict=True
         ):
             primary_page = (
@@ -210,6 +211,7 @@ def embed_file_chunks(file_id: int, *, round_token: int | None = None) -> int | 
             points.append(
                 vector_store.ChunkPoint(
                     chunk_id=cid,
+                    chunk_hash=c_hash,
                     file_id=file_id,
                     folder_id=folder_id,
                     file_path=rel_path,
@@ -326,19 +328,27 @@ def embed_image_targets(targets: list[ImageTarget]) -> int:
     with _stage("embed_image.ensure_collection"):
         vector_store.ensure_images_collection(image_dim=image_emb.dim)
 
+    version = active_profile().image_version
     fresh: dict[str, list[ImageTarget]] = {}
+    # CAS ids whose point exists but carries an older version stamp: re-embed
+    # INTO that point (same id, its file_ids kept) — never a second point
+    # for the same content.
+    restamp: dict[str, tuple[int, list[int]]] = {}
+    with _stage("embed_image.find_existing", count=len(targets)):
+        found = vector_store.find_image_points_by_cas([t.cas_id for t in targets])
     for t in targets:
         if t.cas_id in fresh:
             fresh[t.cas_id].append(t)
             continue
-        with _stage("embed_image.find_existing"):
-            existing = vector_store.find_image_point_by_cas(t.cas_id)
-        if existing is not None:
+        existing = found.get(t.cas_id)
+        if existing is not None and existing["payload"].get("image_model_version") == version:
             with _stage("embed_image.attach_existing"):
                 vector_store.add_file_to_image_point(existing["id"], t.file_id)
             logger.info("embed_image dedup: reused cas=%s", t.cas_id)
-        else:
-            fresh[t.cas_id] = [t]
+            continue
+        if existing is not None:
+            restamp[t.cas_id] = (existing["id"], list(existing["payload"].get("file_ids") or []))
+        fresh[t.cas_id] = [t]
     if not fresh:
         return 0
 
@@ -349,12 +359,18 @@ def embed_image_targets(targets: list[ImageTarget]) -> int:
         batch = getattr(image_emb, "embed_images", None)
         vecs = batch(blobs) if batch else [image_emb.embed_image(b) for b in blobs]
 
-    version = active_profile().image_version
+    points: list[tuple[vector_store.ImagePoint, list[int]]] = []
     for t, vec in zip(firsts, vecs, strict=True):
-        with _stage("embed_image.upsert"):
-            vector_store.upsert_image_point(
+        point_id, file_ids = restamp.get(t.cas_id, (t.image_id, []))
+        # Same image more than once in this batch: one point, every file.
+        for f in [t.file_id, *(d.file_id for d in fresh[t.cas_id][1:])]:
+            if f not in file_ids:
+                file_ids = [*file_ids, f]
+        points.append(
+            (
                 vector_store.ImagePoint(
-                    point_id=t.image_id,
+                    point_id=point_id,
+                    image_id=t.image_id,
                     image_cas_id=t.cas_id,
                     file_id=t.file_id,
                     folder_id=t.folder_id,
@@ -367,13 +383,13 @@ def embed_image_targets(targets: list[ImageTarget]) -> int:
                     layout_summary=t.layout_summary,
                     meta_payload=t.meta_payload,
                 ),
-                file_ids=[t.file_id],
+                file_ids,
             )
-        logger.info("embed_image done: cas=%s", t.cas_id)
-        # Same image again within this batch: attach, as the dedup above
-        # would have had the first one already been written.
-        for dup in fresh[t.cas_id][1:]:
-            vector_store.add_file_to_image_point(t.image_id, dup.file_id)
+        )
+    with _stage("embed_image.upsert", count=len(points)):
+        vector_store.upsert_image_points(points)
+    for t in firsts:
+        logger.info("embed_image done: cas=%s%s", t.cas_id, " (re-stamped)" if t.cas_id in restamp else "")
     return len(firsts)
 
 
