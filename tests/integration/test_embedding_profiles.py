@@ -27,6 +27,15 @@ from voitta_rag_enterprise.services.embedding.profiles import ProfileMismatchErr
 from .test_search_route import _png, _seed_and_index
 
 
+@pytest.fixture(autouse=True)
+def _app_defaults(env: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests assert the app's own default rules; a run-level
+    ``--embedding-profile`` would change the default under them."""
+    monkeypatch.delenv("VOITTA_DEFAULT_EMBEDDING_PROFILE", raising=False)
+    reset_settings_cache()
+    reset_embedder_caches()
+
+
 def _fresh(monkeypatch: pytest.MonkeyPatch, **env: str) -> None:
     for k, v in env.items():
         monkeypatch.setenv(k, v)
