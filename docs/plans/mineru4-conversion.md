@@ -172,6 +172,58 @@ Pass criteria:
 - Peak VRAM on moon within the `MinerU GPU budget` the app allows beside the embedders.
 - Loguru sink intact after a parse; no MinerU output on stderr of the parent.
 
+### Results (2026-10-27, moon RTX 5070, MinerU 3.1.7 vs 4.0.12 `basic`)
+
+Corpus: 220 PDFs, 14,069 pages, copied read-only from saturn's indexed folders (papers, books,
+manuals, business/financial documents, scans), stratified by folder and size, plus saturn's
+slowest PDFs and its one errored PDF. Both runs used the same code path (`PdfParser`), page
+renders off. Report: `pdf_parse_compare.py compare runs/v3 runs/v4`.
+
+| Criterion | Result | |
+| --- | --- | --- |
+| Median similarity ≥ 0.95 | 0.972 | pass |
+| ≤ 5 % of files below 0.85 | 9 files, 4.1 % | pass |
+| Text-layer word recall, mean (209 PDFs with a text layer) | 3.x 0.847 → 4.x 0.866; 27 files gain > 5 points, 1 loses > 5 | pass on average, 1 file explained below |
+| Images within ±10 % | 8,577 → 8,588 (+0.1 %) | pass |
+| Figure→page spot check | 17/17 figures on the claimed page (incl. buckets 81–100, 161–180, 301–320); 16/17 bbox match > 0.9 | pass |
+| No new failures | 219 ok / 1 unsupported (encrypted) in both | pass |
+| Median parse time ≤ 1.5× | 2.29 s vs 2.49 s (0.92×); total 2,964 s vs 2,783 s | pass |
+| Peak VRAM | 2.5 GB vs 6.4 GB | pass |
+| Mac (M-series), 10 PDFs / 175 pages | MPS 1.59 s/page, ONNX CPU 2.40 s/page, peak RSS 3.5 / 3.7 GB; MPS vs CPU similarity median 0.999 | recorded |
+
+How the content measures were made fair: 3.x writes tables as HTML and 4.x as Markdown pipe
+tables, image refs changed from hashes to `page_N_*` names, and 4.x bolds labels; the
+comparison strips that markup. Similarity between two parsers cannot say which one is right,
+so the script also scores each run against the PDF's own text layer (PyMuPDF) — an outside
+reference where a drop is a loss.
+
+Every file below 0.85, and every recall drop, was read:
+
+- **3.x lost text that 4.x recovers** (most of the 27 recall gains): whole paragraphs and
+  footnotes missing from 3.x output (e.g. Tetlock 2008: recall 0.42 → 0.96), and broken
+  `fi`/`fl` ligatures throughout 3.x output of the SAP books ("workfl ow", "confi guration") that
+  4.x writes correctly — those words were unsearchable before.
+- **Tables re-rendered**: financial statements score low on similarity only because of the
+  HTML → pipe-table change; 4.x also separates labels from values that 3.x ran together
+  (recall 0.62–0.75 → 0.92).
+- **IRS forms** (3 files): field reading order differs; recall equal or higher in 4.x.
+- **Scans** (no text layer): Fighters of WWII has 26 k more words in 4.x — paragraphs 3.x
+  dropped, plus some OCR noise from labelled cutaway diagrams; other scans equal.
+- **Known regression, 1 file** (2608.17171 Polaris, recall 0.845 → 0.732): tables that stack
+  three methods inside one visual row are merged into one row with the numbers glued
+  (`.66.61.65`). 3.x kept the rows but left cells empty. Corpus-wide, glued-number cells are
+  otherwise level (183 vs 204 excluding this paper). A MinerU table-model issue; nothing in our
+  code to fix without post-processing MinerU output, which we do not do.
+- **Book indexes and running headers**: 4.x classifies back-of-book indexes as `index` (109
+  blocks) and drops running page headers from the body, as it should.
+
+Layout: block counts by type are within 1–5 % except the new `index` type; headings counted
+the same way are 14,682 → 14,706. Char→page anchor coverage rises from 0.757 to 0.789 pages
+anchored per page.
+
+Verdict: **the gate passes**; MinerU 4 is at least as good everywhere measured except
+stacked-row tables, and better on recovered text, ligatures and table structure.
+
 If the gate fails: the Gemma migration proceeds with its fallback (MinerU 3 in a separate
 virtualenv), and this plan waits for a later MinerU 4.x.
 

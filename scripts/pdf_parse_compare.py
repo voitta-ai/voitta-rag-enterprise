@@ -6,7 +6,8 @@ Step 1 runs in each install's own virtualenv and records what its
     <venv-a>/bin/python scripts/pdf_parse_compare.py run --out runs/a --list pdfs.txt
     <venv-b>/bin/python scripts/pdf_parse_compare.py run --out runs/b --list pdfs.txt
 
-Step 2 (any interpreter) compares the two runs and prints a gate report:
+Step 2 compares the two runs and prints a gate report (needs PyMuPDF and
+the PDFs at their recorded paths for the text-layer recall):
 
     python scripts/pdf_parse_compare.py compare runs/a runs/b [--json report.json]
 
@@ -17,6 +18,14 @@ and ``<out>/md/<n>.md``. It resumes: PDFs already in results.jsonl are
 skipped. Page renders are switched off — they are PyMuPDF, not MinerU, and
 would only add noise to the timings.
 
+Two content measures are reported:
+
+* similarity between the two runs' markup-free word sequences — sensitive
+  to any change, but cannot tell an improvement from a regression;
+* recall of the PDF's own text layer (PyMuPDF), per run — an outside
+  reference, so a drop is a loss. Scanned PDFs have no text layer and are
+  judged by similarity and by eye only.
+
 The gate thresholds are the ones in docs/plans/mineru4-conversion.md.
 """
 
@@ -25,8 +34,10 @@ from __future__ import annotations
 import argparse
 import difflib
 import hashlib
+import html
 import json
 import os
+import re
 import statistics
 import subprocess
 import sys
@@ -34,6 +45,7 @@ import tempfile
 import threading
 import time
 from collections import Counter
+from itertools import pairwise
 from pathlib import Path
 
 
@@ -179,17 +191,78 @@ def _load(run_dir: Path) -> dict[str, dict]:
 # whitespace-normalised lines instead (books, 500-page manuals).
 _WORD_LEVEL_MAX = 40_000
 
+# Real tags only (``<td rowspan=2>``, ``</table>``): a bare "<" in prose
+# ("x < y … >") must not swallow the text up to the next ">".
+_HTML_TAG_RE = re.compile(r"</?[A-Za-z][A-Za-z0-9]*(?:\s[^<>\n]*)?/?>")
+_IMG_REF_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
+# Markdown emphasis and backslash escapes: 4.x bolds labels and best table
+# values ("**From:**", "**.7869**"); both versions escape "~ $ _" differently.
+_EMPHASIS_RE = re.compile(r"\*\*|__|(?<!\w)[*_]|[*_](?!\w)")
+_ESCAPE_RE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!~$|<>])")
+_TABLE_RULE_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$", re.MULTILINE)
+
+
+def _normalise(md: str) -> list[str]:
+    """Words of the document with markup removed.
+
+    Both MinerU versions emit the same content in different markup: 3.x
+    writes tables as HTML, 4.x as Markdown pipe tables (HTML only for merged
+    cells), and image refs are content hashes in 3.x but page-based names in
+    4.x. Comparing raw markdown would score those as content changes, so
+    tags, entities, table rules, pipes, emphasis and backslash escapes are
+    stripped and every image ref becomes one ``<img>`` token.
+
+    LaTeX is left as is: 3.x spells it with every symbol space-separated,
+    4.x compactly, so formula-heavy papers score low here even when nothing
+    is lost — which is what the text-layer recall below is for.
+    """
+    md = _IMG_REF_RE.sub(" <img> ", md)
+    md = _TABLE_RULE_RE.sub(" ", md)
+    md = _HTML_TAG_RE.sub(" ", md.replace("<img>", "\0IMG\0"))
+    md = html.unescape(md).replace("\0IMG\0", " <img> ")
+    md = md.replace("|", " ")
+    md = _ESCAPE_RE.sub(r"\1", _EMPHASIS_RE.sub("", md))
+    return md.split()
+
 
 def _similarity(a: str, b: str) -> float:
-    """Whitespace-normalised similarity (difflib ratio over words, or over
-    lines for very long documents)."""
-    wa, wb = a.split(), b.split()
+    """Similarity of the markup-free word sequences (difflib ratio).
+
+    Very long documents (books) would make the word-level match quadratic;
+    for those, the score is the overlap of word-bigram multisets
+    (2·|A∩B| / (|A|+|B|)), which is order-insensitive beyond two words but
+    still drops when text is lost, duplicated or garbled.
+    """
+    wa, wb = _normalise(a), _normalise(b)
     if not wa and not wb:
         return 1.0
     if max(len(wa), len(wb)) > _WORD_LEVEL_MAX:
-        wa = [" ".join(line.split()) for line in a.splitlines() if line.strip()]
-        wb = [" ".join(line.split()) for line in b.splitlines() if line.strip()]
+        ba, bb = Counter(pairwise(wa)), Counter(pairwise(wb))
+        total = sum(ba.values()) + sum(bb.values())
+        return 2 * sum((ba & bb).values()) / total if total else 1.0
     return difflib.SequenceMatcher(None, wa, wb, autojunk=False).ratio()
+
+
+# A page with fewer words than this in its text layer counts as scanned
+# (or image-only); text-layer recall is not computed for such documents.
+_TEXT_LAYER_MIN_WORDS_PER_PAGE = 25
+
+
+def _text_layer_words(pdf: str) -> Counter | None:
+    """Words of the PDF's own text layer, or None for scanned documents."""
+    import fitz
+
+    with fitz.open(pdf) as doc:
+        words = Counter(" ".join(page.get_text() for page in doc).split())
+        pages = len(doc)
+    if sum(words.values()) < _TEXT_LAYER_MIN_WORDS_PER_PAGE * max(1, pages):
+        return None
+    return words
+
+
+def _recall(md: str, truth: Counter) -> float:
+    """Share of the text layer's words (as a multiset) present in ``md``."""
+    return sum((Counter(_normalise(md)) & truth).values()) / sum(truth.values())
 
 
 def _pct(xs: list[float], q: float) -> float:
@@ -208,6 +281,9 @@ def cmd_compare(args: argparse.Namespace) -> int:
         if ra["status"] == rb["status"] == "ok":
             ma = (a_dir / "md" / _md_name(pdf)).read_text(encoding="utf-8")
             mb = (b_dir / "md" / _md_name(pdf)).read_text(encoding="utf-8")
+            truth = _text_layer_words(pdf) if Path(pdf).exists() else None
+            if truth is not None:
+                row["recall"] = (round(_recall(ma, truth), 4), round(_recall(mb, truth), 4))
             row.update(
                 sim=round(_similarity(ma, mb), 4),
                 chars=(ra["md_chars"], rb["md_chars"]),
@@ -238,6 +314,14 @@ def cmd_compare(args: argparse.Namespace) -> int:
         layout_a.update(r["layout"][0])
         layout_b.update(r["layout"][1])
 
+    with_layer = [r for r in both if "recall" in r]
+    recall_a = statistics.mean(r["recall"][0] for r in with_layer) if with_layer else float("nan")
+    recall_b = statistics.mean(r["recall"][1] for r in with_layer) if with_layer else float("nan")
+    recall_drops = sorted(
+        (r for r in with_layer if r["recall"][1] < r["recall"][0] - 0.05),
+        key=lambda r: r["recall"][1] - r["recall"][0],
+    )
+
     median_sim = statistics.median(sims) if sims else float("nan")
     low_share = len(low) / len(both) if both else float("nan")
     img_delta = (img_b - img_a) / img_a if img_a else float("nan")
@@ -245,6 +329,8 @@ def cmd_compare(args: argparse.Namespace) -> int:
     gates = {
         "median similarity >= 0.95": median_sim >= 0.95,
         "<= 5% of files below 0.85": low_share <= 0.05,
+        "text-layer recall: b >= a on average": recall_b >= recall_a,
+        "text-layer recall: no file drops > 5 points": not recall_drops,
         "images within +-10%": abs(img_delta) <= 0.10,
         "no new failures": not new_failures,
         "median parse time <= 1.5x": time_ratio <= 1.5,
@@ -254,6 +340,11 @@ def cmd_compare(args: argparse.Namespace) -> int:
     print(f"status pairs (a, b): {dict(statuses)}")
     print(f"text similarity: median {median_sim:.4f}  p10 {_pct(sims, 0.10):.4f}  min {min(sims, default=float('nan')):.4f}")
     print(f"files below 0.85: {len(low)} ({low_share:.1%})")
+    print(f"text-layer word recall ({len(with_layer)} PDFs with a text layer): mean a {recall_a:.4f}  b {recall_b:.4f}")
+    print(f"  files where b gains > 5 points: {sum(1 for r in with_layer if r['recall'][1] > r['recall'][0] + 0.05)}"
+          f"   loses > 5 points: {len(recall_drops)}")
+    for r in recall_drops:
+        print(f"    {r['recall'][0]:.3f} → {r['recall'][1]:.3f}  {Path(r['pdf']).name[:80]}")
     print(f"images: a {img_a}  b {img_b}  delta {img_delta:+.1%}")
     print(f"parse time: median a {statistics.median(t_a):.2f}s  b {statistics.median(t_b):.2f}s  ratio {time_ratio:.2f}"
           f"   total a {sum(t_a):.0f}s  b {sum(t_b):.0f}s")
@@ -276,7 +367,8 @@ def cmd_compare(args: argparse.Namespace) -> int:
     if low:
         print("lowest similarity:")
         for r in low[:25]:
-            print(f"  {r['sim']:.3f} chars {r['chars'][0]:>7}→{r['chars'][1]:<7} img {r['images'][0]}→{r['images'][1]}  {Path(r['pdf']).name[:80]}")
+            rec = "recall {:.2f}→{:.2f}".format(*r["recall"]) if "recall" in r else "no text layer   "
+            print(f"  {r['sim']:.3f} {rec} chars {r['chars'][0]:>7}→{r['chars'][1]:<7} img {r['images'][0]}→{r['images'][1]}  {Path(r['pdf']).name[:80]}")
     print("gates:")
     for name, ok in gates.items():
         print(f"  [{'PASS' if ok else 'FAIL'}] {name}")

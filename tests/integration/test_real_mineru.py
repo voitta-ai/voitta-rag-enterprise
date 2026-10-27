@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -43,7 +44,9 @@ def _bucket_size(monkeypatch: pytest.MonkeyPatch, pages: int) -> None:
 
 def test_single_parse_end_to_end(real_parser: pdf_parser.PdfParser) -> None:
     result = real_parser.parse(FIXTURES / "sample.pdf")
-    assert result.content.startswith("## Annual Operating Review")
+    # Heading level differs by device (CUDA rates the title level 2, MPS
+    # level 1); the heading itself must come first either way.
+    assert re.match(r"#{1,2} Annual Operating Review\n", result.content)
     assert "| Hardware | 412.5 | 18.2 |" in result.content
     assert [(i.page, i.mime) for i in result.images] == [(1, "image/jpeg")]
     assert [p.page for p in result.page_images] == [1, 2, 3]
