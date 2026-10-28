@@ -967,6 +967,55 @@ name + download + body. Provenance lives only on the Meta tab.)
 
 ---
 
+### When search misses content: check and repair the index
+
+SQL holds every chunk's text and every figure's blob; Qdrant holds the
+vectors built from them. If vectors go missing (a lost or swept
+collection), files still show `indexed` while search silently skips
+them. `scripts/repair_index.py` compares the two id by id:
+
+```bash
+python -m scripts.repair_index                       # check, read-only
+python -m scripts.repair_index --folder "McKinsey Quarterly" -v
+python -m scripts.repair_index --repair --wait       # fix, wait, re-check
+```
+
+Run it with the app's own settings (same `.env`, same
+`VOITTA_QDRANT_MODE` / `VOITTA_QDRANT_URL`). It reports per folder:
+
+| Column | Meaning | `--repair` does |
+|---|---|---|
+| missing | chunk of an indexed file without a vector | `embed_text` for the file |
+| stale | vector from another model version (or other text) | `embed_text` for the file |
+| img miss | no vector carries a figure's blob | `embed_image` for one row per blob |
+| unattach | the blob's vector does not list this file | `embed_image` for the row (attach only) |
+| img stale | blob vector from another model version | delete it, `embed_image` again |
+| empty | indexed file with no chunks and no figures | nothing: Reindex it if unexpected |
+
+and, for a whole-index run, *defunct* points whose row is gone from SQL
+(`--repair` deletes them).
+
+How the repair behaves:
+
+* **Nothing is parsed again.** It queues the app's own embed jobs, so the
+  app must be running; they re-embed from SQL text and CAS blobs, below
+  normal priority, carrying the file's current `embed_round` (a re-index
+  that starts meanwhile wins and the repair job aborts).
+* **A blob shared by several files takes two passes** (embed once, then
+  attach the others). `--wait` waits for the jobs and repeats, up to
+  `--passes` (default 3).
+* **Deleting is bounded.** It refuses when SQL holds no chunks at all, and
+  when more than 1 % of a collection (at least 100 points) looks defunct,
+  unless `--allow-large-delete`.
+* **A missing collection fails the check** instead of reading as empty:
+  with the wrong `VOITTA_QDRANT_MODE` the script would otherwise read a
+  fresh, empty store and report every chunk missing. If the collection
+  really was lost, restart the app (it recreates the collection) and pass
+  `--assume-empty`.
+
+Exit codes: 0 consistent, 1 drift remains, 2 refused. Scanning saturn
+(2.3 M chunks, 1.26 M points) takes about 100 s and 1.7 GB of RAM.
+
 ## 7. Identity & accounts: sign-in gate, Clerk directory, switching
 
 ### Named Clerk instances
