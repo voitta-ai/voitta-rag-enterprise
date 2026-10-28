@@ -86,7 +86,11 @@ def _format_exception(prefix: str) -> str:
     tb = traceback.format_exc()
     msg = f"{prefix}\n{tb}"
     if len(msg) > _ERROR_FIELD_MAX:
-        msg = msg[: _ERROR_FIELD_MAX - 3] + "..."
+        # Keep the end: the exception and its message are the last lines
+        # of a traceback (e.g. Qdrant's "Vector dimension error ..."); the
+        # outer frames are the part that can go.
+        keep = _ERROR_FIELD_MAX - len(prefix) - 5
+        msg = f"{prefix}\n...\n{tb[-keep:]}"
     return msg
 
 
