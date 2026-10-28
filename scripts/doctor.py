@@ -150,26 +150,36 @@ def main() -> int:
     _section("Index health")
     try:
         from voitta_rag_enterprise.db.database import init_db, session_scope
-        from voitta_rag_enterprise.services.reconcile import all_folder_health
+        from voitta_rag_enterprise.services.reconcile import all_folder_health, image_health
 
         init_db()
         with session_scope() as s:
             healths = all_folder_health(s)
+            images = image_health(s)
         if not healths:
             _warn("no folders registered yet")
         else:
             for h in healths:
                 line = (
-                    f"folder {h.folder_id} {h.display_name!r}: "
-                    f"{h.indexed_files} indexed in DB / {h.qdrant_chunk_points} points in Qdrant"
+                    f"folder {h.folder_id} {h.display_name!r}: {h.indexed_files} indexed "
+                    f"file(s), {h.qdrant_chunk_points}/{h.expected_chunk_points} chunk points in Qdrant"
                 )
                 if h.status == "out_of_sync":
-                    _fail(f"{line} — Reindex needed")
+                    _fail(f"{line} — {h.missing_chunk_points} missing, Reindex needed")
                     failures += 1
                 elif h.status == "empty":
                     _warn(f"{line} (no indexed files yet)")
                 else:
                     _ok(line)
+            line = (
+                f"figure images: {images.qdrant_image_points}/{images.expected_image_points} "
+                f"points in Qdrant"
+            )
+            if images.missing_image_points:
+                _fail(f"{line} — {images.missing_image_points} missing, Reindex the affected folders")
+                failures += 1
+            else:
+                _ok(line)
     except Exception as e:
         _fail(f"index-health check failed: {e}")
         failures += 1

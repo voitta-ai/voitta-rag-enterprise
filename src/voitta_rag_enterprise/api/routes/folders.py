@@ -815,14 +815,16 @@ class IndexHealth(BaseModel):
     Qdrant agree?
 
     ``status`` values:
-    - ``"ok"``      — Qdrant has chunk points for this folder
+    - ``"ok"``      — every chunk of an indexed file has its Qdrant point
     - ``"empty"``   — nothing indexed yet (no expectation either way)
-    - ``"out_of_sync"`` — SQLite says indexed, Qdrant has 0 points; needs
-                        Reindex to repopulate the vector store
+    - ``"out_of_sync"`` — fewer points than the indexed files have chunks
+                        (``expected_chunk_points``); search skips the
+                        missing ones, Reindex repopulates them
     """
 
     status: str
     qdrant_chunk_points: int
+    expected_chunk_points: int
 
 
 class FolderStats(BaseModel):

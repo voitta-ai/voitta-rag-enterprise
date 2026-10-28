@@ -184,9 +184,17 @@ def _pass(n: int, known_failures: set[str]) -> PassResult:
         live_images = dict(
             s.execute(select(Image.id, Image.image_cas_id).where(Image.kind == "figure")).all()
         )
-    swept = vector_store.delete_orphan_chunk_points(chunk_ids) + vector_store.delete_orphan_image_points(
-        live_images
-    )
+    swept = 0
+    for what, sweep in (
+        ("chunk", lambda: vector_store.delete_orphan_chunk_points(chunk_ids)),
+        ("image", lambda: vector_store.delete_orphan_image_points(live_images)),
+    ):
+        try:
+            swept += sweep()
+        except vector_store.OrphanSweepRefused as e:
+            # Leftover points are harmless (search drops hits whose row is
+            # gone); a mass delete against the wrong database is not.
+            logger.warning("pass %d: orphan %s sweep refused: %s", n, what, e)
     if swept:
         logger.info("pass %d: swept %d orphan point(s)", n, swept)
     out.work += swept

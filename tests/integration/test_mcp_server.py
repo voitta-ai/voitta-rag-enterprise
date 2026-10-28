@@ -653,27 +653,30 @@ def test_delete_orphan_image_points_removes_stale_rows(
     """
     from voitta_rag_enterprise.services import vector_store
 
-    _seed_and_index(tmp_path / "src", {"figure.png": _png()})
+    def png(color: tuple[int, int, int]) -> bytes:
+        buf = io.BytesIO()
+        PILImage.new("RGB", (8, 8), color).save(buf, format="PNG")
+        return buf.getvalue()
 
+    _seed_and_index(tmp_path / "src", {"kept.png": png((10, 20, 30)), "gone.png": png((200, 0, 0))})
+
+    # Delete one file's Image row out of band to simulate the orphan
+    # state — its point is still in Qdrant.
+    from sqlalchemy import delete as sa_delete
     with session_scope() as s:
-        image_row = s.execute(select(Image)).scalar_one()
-        live_image_id = image_row.id
+        gone = s.execute(
+            select(Image.id).join(File, Image.file_id == File.id).where(File.rel_path == "gone.png")
+        ).scalar_one()
+        s.execute(sa_delete(Image).where(Image.id == gone))
+        live = dict(s.execute(select(Image.id, Image.image_cas_id)).all())
 
-    # Manually delete the DB row to simulate the orphan state — the
-    # point is still in Qdrant.
-    with session_scope() as s:
-        s.execute(select(Image)).scalar_one()
-        from sqlalchemy import delete as sa_delete
-        s.execute(sa_delete(Image))
-
-    # Sweep with no known ids → every point is an orphan.
-    deleted = vector_store.delete_orphan_image_points({})
-    assert deleted >= 1
+    assert vector_store.delete_orphan_image_points(live) == 1
+    client = vector_store.get_client()
+    assert client.retrieve(vector_store.images_collection(), ids=[gone]) == []
+    assert len(client.retrieve(vector_store.images_collection(), ids=list(live))) == 1
 
     # Idempotent: the point is gone, second run finds nothing.
-    deleted_again = vector_store.delete_orphan_image_points({})
-    assert deleted_again == 0
-
+    assert vector_store.delete_orphan_image_points(live) == 0
 
 def test_delete_orphan_image_points_keeps_known_rows(
     env: None, tmp_path: Path,
@@ -698,23 +701,121 @@ def test_delete_orphan_chunk_points_removes_stale_rows(
     sweep removes it."""
     from voitta_rag_enterprise.services import vector_store
 
-    _seed_and_index(tmp_path / "src", {"d.md": "alpha beta gamma"})
+    _seed_and_index(tmp_path / "src", {"kept.md": "alpha beta gamma", "gone.md": "delta epsilon"})
 
-    # Sanity: there's at least one Qdrant chunk point.
     client = vector_store.get_client()
     pre = client.count(vector_store.chunks_collection()).count
-    assert pre >= 1
 
-    # Drop every Chunk DB row directly — Qdrant points remain.
+    # Drop one file's Chunk rows directly — their Qdrant points remain.
     from sqlalchemy import delete as sa_delete
     with session_scope() as s:
-        s.execute(sa_delete(Chunk))
+        gone = set(
+            s.execute(
+                select(Chunk.id).join(File, Chunk.file_id == File.id).where(File.rel_path == "gone.md")
+            ).scalars()
+        )
+        s.execute(sa_delete(Chunk).where(Chunk.id.in_(gone)))
+        live_ids = set(s.execute(select(Chunk.id)).scalars())
+    assert gone and live_ids
 
-    deleted = vector_store.delete_orphan_chunk_points(set())
-    assert deleted == pre
+    assert vector_store.delete_orphan_chunk_points(live_ids) == len(gone)
+    assert client.count(vector_store.chunks_collection()).count == pre - len(gone)
 
     # Idempotent: a second run finds nothing.
-    assert vector_store.delete_orphan_chunk_points(set()) == 0
+    assert vector_store.delete_orphan_chunk_points(live_ids) == 0
+
+def _drop_sql_index_rows() -> None:
+    """Empty the chunk and image tables, as if the app were pointed at a
+    different (or fresh) database next to a populated Qdrant."""
+    from sqlalchemy import delete as sa_delete
+    with session_scope() as s:
+        s.execute(sa_delete(ChunkImageLink))
+        s.execute(sa_delete(Chunk))
+        s.execute(sa_delete(Image))
+
+
+def test_orphan_sweeps_refuse_to_empty_a_collection(env: None, tmp_path: Path) -> None:
+    """An empty database never means every point is stale: both sweeps
+    refuse and delete nothing."""
+    import pytest
+
+    from voitta_rag_enterprise.services import vector_store
+
+    _seed_and_index(tmp_path / "src", {"d.md": "alpha beta gamma", "figure.png": _png()})
+    client = vector_store.get_client()
+    chunks = client.count(vector_store.chunks_collection()).count
+    images = client.count(vector_store.images_collection()).count
+    assert chunks and images
+    _drop_sql_index_rows()
+
+    with pytest.raises(vector_store.OrphanSweepRefused):
+        vector_store.delete_orphan_chunk_points(set())
+    with pytest.raises(vector_store.OrphanSweepRefused):
+        vector_store.delete_orphan_image_points({})
+    assert client.count(vector_store.chunks_collection()).count == chunks
+    assert client.count(vector_store.images_collection()).count == images
+
+
+def test_orphan_sweeps_refuse_more_than_their_limit(
+    env: None, tmp_path: Path, monkeypatch
+) -> None:
+    """Orphans beyond ORPHAN_SWEEP_MAX_SHARE of the collection: nothing is
+    deleted (not even the first batch), the sweep raises."""
+    import pytest
+
+    from voitta_rag_enterprise.services import vector_store
+
+    def png(color: tuple[int, int, int]) -> bytes:
+        buf = io.BytesIO()
+        PILImage.new("RGB", (8, 8), color).save(buf, format="PNG")
+        return buf.getvalue()
+
+    _seed_and_index(
+        tmp_path / "src",
+        {"kept.md": "alpha beta", "gone.md": "gamma delta", "kept.png": png((1, 2, 3)), "gone.png": png((9, 8, 7))},
+    )
+    from sqlalchemy import delete as sa_delete
+    with session_scope() as s:
+        gone_files = select(File.id).where(File.rel_path.in_(["gone.md", "gone.png"]))
+        s.execute(sa_delete(Chunk).where(Chunk.file_id.in_(gone_files)))
+        s.execute(sa_delete(Image).where(Image.file_id.in_(gone_files)))
+        live_chunks = set(s.execute(select(Chunk.id)).scalars())
+        live_images = dict(s.execute(select(Image.id, Image.image_cas_id)).all())
+    client = vector_store.get_client()
+    chunks = client.count(vector_store.chunks_collection()).count
+    images = client.count(vector_store.images_collection()).count
+
+    # Half of each collection is orphaned; with no floor the 1% share refuses.
+    monkeypatch.setattr(vector_store, "ORPHAN_SWEEP_MIN_LIMIT", 0)
+    with pytest.raises(vector_store.OrphanSweepRefused):
+        vector_store.delete_orphan_chunk_points(live_chunks)
+    with pytest.raises(vector_store.OrphanSweepRefused):
+        vector_store.delete_orphan_image_points(live_images)
+    assert client.count(vector_store.chunks_collection()).count == chunks
+    assert client.count(vector_store.images_collection()).count == images
+
+
+def test_startup_against_an_empty_database_keeps_the_index(env: None, tmp_path: Path) -> None:
+    """The Oct 2026 incident: the startup orphan sweep ran with an empty
+    set of known ids and deleted the index from the lowest id up. Startup
+    must leave every point in place and still finish (watcher started)."""
+    from voitta_rag_enterprise.main import _recovery_sync
+    from voitta_rag_enterprise.services import vector_store
+
+    _seed_and_index(tmp_path / "src", {"d.md": "alpha beta gamma", "figure.png": _png()})
+    client = vector_store.get_client()
+    chunks = client.count(vector_store.chunks_collection()).count
+    images = client.count(vector_store.images_collection()).count
+    _drop_sql_index_rows()
+
+    watcher = _recovery_sync(lambda phase: None)
+    try:
+        assert watcher is not None
+    finally:
+        if watcher is not None:
+            watcher.stop()
+    assert client.count(vector_store.chunks_collection()).count == chunks
+    assert client.count(vector_store.images_collection()).count == images
 
 
 def test_delete_orphan_chunk_points_keeps_known_rows(

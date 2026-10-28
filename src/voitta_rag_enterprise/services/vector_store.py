@@ -403,11 +403,12 @@ def _collection_exists(client: QdrantClient, name: str) -> bool:
 
 def count_points_for_folder(collection: str, folder_id: int) -> int:
     """Return the number of points in ``collection`` whose payload's
-    ``folder_id`` matches. Used by the reconcile health check.
+    ``folder_id`` matches, folder cards excluded. Used by the reconcile
+    health check, which compares it with the folder's SQL chunk count —
+    so it is exact (a filtered count on the indexed ``folder_id`` is cheap).
 
     Returns 0 when the collection doesn't exist (fresh deployment, never
-    embedded). Approximate counting is fine — we use it to flag big
-    SQLite-vs-Qdrant gaps, not for exact bookkeeping.
+    embedded).
     """
 
     def _do() -> int:
@@ -421,9 +422,14 @@ def count_points_for_folder(collection: str, folder_id: int) -> int:
                     qm.FieldCondition(
                         key="folder_id", match=qm.MatchValue(value=folder_id)
                     )
-                ]
+                ],
+                must_not=[
+                    qm.FieldCondition(
+                        key="kind", match=qm.MatchValue(value=FOLDER_CARD_KIND)
+                    )
+                ],
             ),
-            exact=False,
+            exact=True,
         )
         return int(result.count)
 
@@ -790,6 +796,55 @@ def remove_file_from_image_points(file_id: int) -> list[int]:
     return run_on_qdrant(_do)
 
 
+# Orphan sweeps delete the points no SQL row claims. Run against an empty
+# or wrong database (a mis-set VOITTA_DATA_DIR, a fresh SQLite next to a
+# populated Qdrant) they would delete the whole index, and nothing could
+# rebuild it short of a full re-index — a production install lost a
+# million chunk vectors that way in Oct 2026. A healthy install only
+# gathers a few orphans (a delete that failed while Qdrant was down), and
+# orphans are harmless clutter: search drops hits whose row is gone. So a
+# sweep that would remove more than this share of a collection deletes
+# nothing and raises instead.
+ORPHAN_SWEEP_MAX_SHARE = 0.01
+# Below this many orphans a sweep always proceeds, so a small index can
+# still be cleaned when one file's worth of points is stale.
+ORPHAN_SWEEP_MIN_LIMIT = 100
+
+
+class OrphanSweepRefused(RuntimeError):
+    """A sweep would delete too much to be trusted; it deleted nothing."""
+
+
+def _orphan_limit(client: QdrantClient, collection: str, sql_rows: int) -> int:
+    """How many orphans a sweep of ``collection`` may delete.
+
+    Raises :class:`OrphanSweepRefused` when SQL has no rows at all while the
+    collection has points: that is a wrong or empty database, never a
+    state where every point is stale.
+    """
+    total = client.count(
+        collection,
+        count_filter=qm.Filter(
+            must_not=[qm.FieldCondition(key="kind", match=qm.MatchValue(value=FOLDER_CARD_KIND))]
+        ),
+        exact=True,
+    ).count
+    if total and not sql_rows:
+        raise OrphanSweepRefused(
+            f"{collection}: the database has no rows for its {total} point(s); "
+            f"refusing to delete them all (is this the right database?)"
+        )
+    return max(ORPHAN_SWEEP_MIN_LIMIT, int(total * ORPHAN_SWEEP_MAX_SHARE))
+
+
+def _refuse_large_sweep(collection: str, found: int, limit: int) -> OrphanSweepRefused:
+    return OrphanSweepRefused(
+        f"{collection}: more than {limit} point(s) have no database row "
+        f"({found} found before stopping); deleted nothing. A healthy install "
+        f"never has this many — check that the app uses the right database"
+    )
+
+
 def _delete_orphans_for_collection(
     collection: str,
     id_key: str,
@@ -801,10 +856,11 @@ def _delete_orphans_for_collection(
     Shared body for the chunk / image orphan sweeps. Same algorithm
     either way:
 
-    1. Scroll up to 1024 points + their payload.
-    2. Bucket point.ids by whether their payload's id_key value is in
-       ``known_ids``.
-    3. Delete the orphans in one bulk call; continue scrolling.
+    1. Scroll the collection, collecting the ids of points whose
+       ``payload[id_key]`` is not in ``known_ids``.
+    2. Stop and raise :class:`OrphanSweepRefused`, deleting nothing, once
+       more than the limit (see ``ORPHAN_SWEEP_MAX_SHARE``) are found.
+    3. Otherwise delete the orphans in one bulk call.
 
     Caller is expected to supply ``known_ids`` from a fresh SQL query
     (``SELECT id FROM chunks`` / ``SELECT id FROM images``) and to
@@ -826,9 +882,10 @@ def _delete_orphans_for_collection(
 
     def _do() -> int:
         client = get_client()
-        if not client.collection_exists(collection):
+        if not _collection_exists(client, collection):
             return 0
-        deleted = 0
+        limit = _orphan_limit(client, collection, len(known_ids))
+        stale_ids: list = []
         offset = None
         while True:
             res, offset = client.scroll(
@@ -837,20 +894,18 @@ def _delete_orphans_for_collection(
                 with_payload=[id_key, "kind"],
                 offset=offset,
             )
-            stale_ids = [
+            stale_ids.extend(
                 p.id for p in res
                 if (p.payload or {}).get("kind") != FOLDER_CARD_KIND
                 and (p.payload or {}).get(id_key) not in known_ids
-            ]
-            if stale_ids:
-                client.delete(
-                    collection,
-                    points_selector=qm.PointIdsList(points=stale_ids),
-                )
-                deleted += len(stale_ids)
+            )
+            if len(stale_ids) > limit:
+                raise _refuse_large_sweep(collection, len(stale_ids), limit)
             if offset is None:
                 break
-        return deleted
+        if stale_ids:
+            client.delete(collection, points_selector=qm.PointIdsList(points=stale_ids))
+        return len(stale_ids)
 
     return run_on_qdrant(_do)
 
@@ -869,7 +924,9 @@ def delete_orphan_image_points(live_images: dict[int, str]) -> int:
 
     Also the backfill for the pre-fix re-extract leak where
     ``_commit_indexing`` deleted Image rows without touching Qdrant.
-    Returns the count of deleted points. Idempotent.
+    Returns the count of deleted points. Idempotent. Raises
+    :class:`OrphanSweepRefused`, changing nothing, when it would touch more
+    points than a healthy install can have orphaned.
     """
     by_cas: dict[str, int] = {}
     for iid, cas in live_images.items():
@@ -881,28 +938,34 @@ def delete_orphan_image_points(live_images: dict[int, str]) -> int:
         client = get_client()
         if not _collection_exists(client, collection):
             return 0
-        deleted = 0
+        limit = _orphan_limit(client, collection, len(live_images))
+        stale: list = []
+        rekey: list[tuple] = []
         offset = None
         while True:
             res, offset = client.scroll(
                 collection, limit=8192, with_payload=["image_id", "image_cas_id"], offset=offset
             )
-            stale: list = []
             for p in res:
                 pl = p.payload or {}
                 iid, cas = pl.get("image_id"), pl.get("image_cas_id")
                 if iid in live_images and live_images[iid] == cas:
                     continue
                 if cas in by_cas:
-                    _rekey_image_point(client, collection, p.id, by_cas[cas])
+                    rekey.append((p.id, by_cas[cas]))
                 else:
                     stale.append(p.id)
-            if stale:
-                client.delete(collection, points_selector=qm.PointIdsList(points=stale))
-                deleted += len(stale)
+            # Re-keys count too: against a wrong database they would point
+            # live vectors at unrelated rows.
+            if len(stale) + len(rekey) > limit:
+                raise _refuse_large_sweep(collection, len(stale) + len(rekey), limit)
             if offset is None:
                 break
-        return deleted
+        for old_id, new_id in rekey:
+            _rekey_image_point(client, collection, old_id, new_id)
+        if stale:
+            client.delete(collection, points_selector=qm.PointIdsList(points=stale))
+        return len(stale)
 
     return run_on_qdrant(_do)
 
@@ -929,6 +992,8 @@ def delete_orphan_chunk_points(known_chunk_ids: set[int]) -> int:
     propagate to Qdrant) gets cleaned up here.
 
     Returns the count of deleted points. Idempotent on subsequent runs.
+    Raises :class:`OrphanSweepRefused`, deleting nothing, when it would
+    delete more than a healthy install can have orphaned.
     """
     return _delete_orphans_for_collection(chunks_collection(), "chunk_id", known_chunk_ids)
 

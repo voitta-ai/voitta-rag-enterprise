@@ -146,6 +146,24 @@ silently empty.
 logs a warning. Orphan sweeps, `reembed_stale.py` and `rebuild_index.py` act on
 the active profile's collections only.
 
+### Index safety
+
+Every start sweeps Qdrant for *orphans*: points whose chunk or figure row is
+gone from SQLite. Run against an empty or wrong database, that sweep would
+delete the whole index, so it refuses — deleting nothing and logging
+`orphan … sweep refused` at ERROR — when SQLite has no rows for a populated
+collection, or when more than 1% of a collection (and more than 100 points)
+would go. A healthy install never has that many orphans, and leftover ones
+are harmless (search drops hits whose row is gone). If you see the refusal,
+first check that `VOITTA_DATA_DIR` points at this install's database.
+
+The opposite drift — points missing for files SQLite calls indexed — makes
+search silently skip those files. Startup logs it per folder
+(`index health: folder …: N of M chunk(s) … have no point in Qdrant`), the
+folder panel shows "⚠ Reindex needed", and `scripts/doctor.py` fails on it,
+for text chunks per folder and for figures install-wide. Reindex the folder
+to repopulate.
+
 ### Switching embedding profile
 
 `scripts/migrate_embedding_profile.py` re-embeds from what is already stored —
@@ -760,9 +778,10 @@ to saturate the GIL and starve the single indexer worker while the GPU sat at
   publish is what made the count ~⅓ of all Qdrant traffic and contends with the
   indexer's own upserts on the single Qdrant worker. The REST endpoint computes
   it (`include_health=True`) so the "⚠ Reindex needed" badge is accurate on
-  folder-select; the frontend guards its absence, and a mid-indexing
-  `out_of_sync` (SQLite-indexed but embeds not yet in Qdrant) is transient
-  anyway, so hiding it live avoids a false alarm.
+  folder-select; the frontend guards its absence. `out_of_sync` means fewer
+  chunk points than the folder's indexed files have chunks (see "Index
+  safety"); a file only becomes `indexed` once its points are written, so
+  indexing in progress never trips it.
 
 `publish_folder_stats(session, folder_id)` (used directly by the single-file
 `delete` and the once-per-folder `reindex` paths, which aren't the O(N²) hot

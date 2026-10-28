@@ -235,8 +235,11 @@ def test_a_shared_image_survives_its_owner_being_deleted(legacy_install: int) ->
     # Re-keyed: the point id is the live row's, never a dead (reusable) one.
     assert point.id == point.payload["image_id"] == other != owner
     assert owner_file in point.payload["file_ids"]  # file detachment is the deleter's job
-    # And with no live copy left the point goes.
-    assert vs.delete_orphan_image_points({}) == 1
+    # With no figure row left at all the sweep refuses rather than empty
+    # the collection (that is a wrong database, not a stale point).
+    with pytest.raises(vs.OrphanSweepRefused):
+        vs.delete_orphan_image_points({})
+    assert len(_points("images__gemma2")) == 1
 
 
 def test_a_failing_item_is_reported_and_blocks_the_switch(legacy_install: int, monkeypatch: pytest.MonkeyPatch) -> None:

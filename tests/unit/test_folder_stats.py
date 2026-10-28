@@ -413,7 +413,7 @@ def test_include_health_toggle(env: None) -> None:
         lite = compute_folder_stats(s, folder, include_health=False)
     # REST/default path carries the health block…
     assert "index_health" in full
-    assert set(full["index_health"]) == {"status", "qdrant_chunk_points"}
+    assert set(full["index_health"]) == {"status", "qdrant_chunk_points", "expected_chunk_points"}
     # …the live-push path omits it (no per-publish Qdrant count).
     assert "index_health" not in lite
     # Everything else is identical.

@@ -200,6 +200,7 @@ def compute_folder_stats(
         out["index_health"] = {
             "status": health.status,
             "qdrant_chunk_points": int(health.qdrant_chunk_points),
+            "expected_chunk_points": int(health.expected_chunk_points),
         }
     return out
 

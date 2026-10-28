@@ -12,7 +12,7 @@ from PIL import Image as PILImage
 from sqlalchemy import select
 
 from voitta_rag_enterprise.db.database import init_db, session_scope
-from voitta_rag_enterprise.db.models import File, Folder
+from voitta_rag_enterprise.db.models import File, Folder, Image
 from voitta_rag_enterprise.services.indexing import (
     run_embed_text,
     run_extract,
@@ -166,8 +166,99 @@ def test_log_startup_warnings_emits_warning_per_out_of_sync_folder(
         logger.removeHandler(handler)
 
     assert any(
-        "0 chunk points in Qdrant" in r.getMessage() for r in records
+        "have no point in Qdrant" in r.getMessage() for r in records
     ), [r.getMessage() for r in records]
+
+
+def test_folder_health_out_of_sync_when_some_files_lost_their_points(
+    env: None, tmp_path: Path
+) -> None:
+    """The Oct 2026 incident shape: Qdrant lost the points of most files
+    in a folder but kept one file's. The old zero-points rule reported the
+    folder ``ok``; it is out of sync, with the gap counted."""
+    from voitta_rag_enterprise.main import create_app
+    from voitta_rag_enterprise.services import vector_store
+
+    app = create_app()
+    with TestClient(app) as client:
+        fid = _seed_indexed_folder(
+            app,
+            client,
+            tmp_path / "a",
+            {"kept.md": "alpha", "lost1.md": "beta", "lost2.md": "gamma"},
+            "alice@x",
+        )
+    with session_scope() as s:
+        lost = [
+            f.id
+            for f in s.execute(select(File).where(File.folder_id == fid)).scalars()
+            if f.rel_path.startswith("lost")
+        ]
+    for f_id in lost:
+        vector_store.delete_chunks_for_file(f_id)
+
+    with session_scope() as s:
+        h = folder_health(s, s.get(Folder, fid))
+    assert h.status == "out_of_sync"
+    assert h.qdrant_chunk_points >= 1
+    assert h.missing_chunk_points == h.expected_chunk_points - h.qdrant_chunk_points >= 2
+
+
+def test_folder_health_ignores_folder_cards(env: None, tmp_path: Path) -> None:
+    """Folder-card points share the folder_id but are not chunk points: a
+    folder whose chunk points are all gone stays out of sync even when its
+    cards remain."""
+    from voitta_rag_enterprise.main import create_app
+    from voitta_rag_enterprise.services import vector_store
+    from voitta_rag_enterprise.services.indexing import folder_cards
+
+    app = create_app()
+    with TestClient(app) as client:
+        fid = _seed_indexed_folder(
+            app, client, tmp_path / "a", {"sub/a.md": "alpha"}, "alice@x"
+        )
+    folder_cards.rebuild_cards_for_folder(fid)
+    assert vector_store.list_folder_cards(fid)
+    with session_scope() as s:
+        for f in s.execute(select(File).where(File.folder_id == fid)).scalars():
+            vector_store.delete_chunks_for_file(f.id)
+
+    with session_scope() as s:
+        h = folder_health(s, s.get(Folder, fid))
+    assert h.qdrant_chunk_points == 0
+    assert h.status == "out_of_sync"
+
+
+def test_image_health_counts_missing_figure_points(env: None, tmp_path: Path) -> None:
+    from voitta_rag_enterprise.main import create_app
+    from voitta_rag_enterprise.services import vector_store
+    from voitta_rag_enterprise.services.indexing import run_embed_image
+    from voitta_rag_enterprise.services.reconcile import image_health
+
+    app = create_app()
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "figure.png").write_bytes(_png())
+    with TestClient(app) as client:
+        _seed_indexed_folder(app, client, tmp_path / "a", {}, "alice@x")
+        with session_scope() as s:
+            f_id = s.execute(select(File.id).where(File.rel_path == "figure.png")).scalar_one()
+            image_ids = [i.id for i in s.execute(select(Image).where(Image.kind == "figure")).scalars()]
+        for i in image_ids:
+            asyncio.run(run_embed_image({"image_id": i}))
+
+    with session_scope() as s:
+        assert s.get(File, f_id).state == "indexed"
+        h = image_health(s)
+    assert h.expected_image_points == h.qdrant_image_points == 1
+    assert h.missing_image_points == 0
+
+    def _drop():
+        vector_store.get_client().delete_collection(vector_store.images_collection())
+
+    vector_store.run_on_qdrant(_drop)
+    with session_scope() as s:
+        h = image_health(s)
+    assert (h.expected_image_points, h.qdrant_image_points, h.missing_image_points) == (1, 0, 1)
 
 
 def test_stats_endpoint_carries_index_health(env: None, tmp_path: Path) -> None:
@@ -184,6 +275,10 @@ def test_stats_endpoint_carries_index_health(env: None, tmp_path: Path) -> None:
         assert "index_health" in body
         assert body["index_health"]["status"] == "ok"
         assert body["index_health"]["qdrant_chunk_points"] >= 1
+        assert (
+            body["index_health"]["expected_chunk_points"]
+            == body["index_health"]["qdrant_chunk_points"]
+        )
 
 
 def test_all_folder_health_orders_by_id(env: None, tmp_path: Path) -> None:

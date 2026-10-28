@@ -102,55 +102,56 @@ def _recovery_sync(set_phase):
     #     Image DB rows but not their Qdrant points.
     #   - Chunks: shouldn't accumulate (replace_chunks_for_file is atomic),
     #     but we sweep anyway as defense-in-depth.
-    # Idempotent on subsequent runs.
+    # Idempotent on subsequent runs. A sweep that would delete more than a
+    # healthy install can have orphaned refuses and deletes nothing (see
+    # vector_store.ORPHAN_SWEEP_MAX_SHARE); each sweep runs on its own so
+    # one refusal doesn't skip the others.
     set_phase("sweeping orphan vectors")
-    try:
-        from .db.models import Chunk as _Chunk
-        from .db.models import Image as _Image
-        from .services.vector_store import (
-            delete_orphan_chunk_points,
-            delete_orphan_image_points,
-        )
+    from .db.models import Chunk as _Chunk
+    from .db.models import Image as _Image
+    from .services.indexing.folder_cards import sweep_orphan_cards
+    from .services.vector_store import (
+        OrphanSweepRefused,
+        delete_orphan_chunk_points,
+        delete_orphan_image_points,
+    )
 
+    def _sweep(what: str, run) -> None:
+        try:
+            deleted = run()
+        except OrphanSweepRefused as e:
+            logger.error("orphan %s sweep refused: %s", what, e)
+        except Exception:  # pragma: no cover — never fail boot for this
+            logger.exception("orphan %s sweep failed at startup", what)
+        else:
+            if deleted:
+                logger.warning("deleted %d orphan %s point(s) from Qdrant", deleted, what)
+
+    def _live_images() -> dict[int, str]:
         with session_scope() as _s:
-            live_images = dict(
+            return dict(
                 _s.execute(
                     select(_Image.id, _Image.image_cas_id).where(_Image.kind == "figure")
                 ).all()
             )
-            known_chunk_ids = set(_s.execute(select(_Chunk.id)).scalars())
-        deleted_imgs = delete_orphan_image_points(live_images)
-        if deleted_imgs:
-            logger.warning(
-                "deleted %d orphan image point(s) from Qdrant "
-                "(stale image_id payloads from a pre-fix re-extract)",
-                deleted_imgs,
-            )
-        deleted_chunks = delete_orphan_chunk_points(known_chunk_ids)
-        if deleted_chunks:
-            logger.warning(
-                "deleted %d orphan chunk point(s) from Qdrant "
-                "(stale chunk_id payloads)",
-                deleted_chunks,
-            )
-        # Folder cards have their own sweep (they're exempt from the chunk
-        # sweep above — no chunk_id): drop cards whose folder was deleted
-        # while the process was down.
-        from .services.indexing.folder_cards import sweep_orphan_cards
 
-        deleted_cards = sweep_orphan_cards()
-        if deleted_cards:
-            logger.warning(
-                "deleted %d orphan folder-card point(s) from Qdrant",
-                deleted_cards,
-            )
-    except Exception:  # pragma: no cover — never fail boot for this
-        logger.exception("orphan-point sweep failed at startup")
+    def _known_chunk_ids() -> set[int]:
+        with session_scope() as _s:
+            return set(_s.execute(select(_Chunk.id)).scalars())
 
-    # Index health: warn if any folder has files marked indexed in SQLite
-    # but no chunk points in Qdrant (the Qdrant store was wiped or moved).
-    # The user has to Reindex to repopulate; we surface it on startup so
-    # they don't discover it via empty search results an hour later.
+    _sweep("image", lambda: delete_orphan_image_points(_live_images()))
+    _sweep("chunk", lambda: delete_orphan_chunk_points(_known_chunk_ids()))
+    # Folder cards have their own sweep (they're exempt from the chunk
+    # sweep above — no chunk_id): drop cards whose folder was deleted
+    # while the process was down. Cards are rebuilt from SQL on demand, so
+    # this one needs no limit.
+    _sweep("folder-card", sweep_orphan_cards)
+
+    # Index health: warn if indexed files' chunks or figures are missing
+    # their Qdrant points (the store was wiped, moved or partly deleted) —
+    # search silently skips them. The user has to Reindex to repopulate; we
+    # surface it on startup so they don't discover it via missing search
+    # results an hour later.
     set_phase("checking index health")
     try:
         from .services.reconcile import log_startup_warnings
