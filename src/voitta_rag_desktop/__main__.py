@@ -78,10 +78,17 @@ def _maybe_run_as_interpreter() -> int | None:
     was misreported as a 600s timeout. Routing ``-m``/``-c`` here makes the
     stub behave like ``python`` so those subprocesses actually run.
 
+    Interpreter options before ``-m`` / ``-c`` are skipped: multiprocessing's
+    spawn passes this interpreter's own flags first
+    (``<exe> -B -I -c "...spawn_main..." --multiprocessing-fork``, the
+    embedded Python runs with ``-B -I`` set), and MinerU 4's render pool is
+    launched exactly that way. The flags already describe this interpreter,
+    so dropping them changes nothing.
+
     Returns an exit code to propagate (we handled the invocation), or ``None``
     to fall through to the normal menu-bar launch.
     """
-    argv = sys.argv
+    argv = [sys.argv[0], *_strip_interpreter_options(sys.argv[1:])]
     if len(argv) >= 2 and argv[1] in ("-m", "-c"):
         # The embedded (Briefcase) Python does NOT install CPython's default
         # SIGPIPE→SIG_IGN, so the MinerU daemon and its spawn render workers
@@ -110,6 +117,27 @@ def _maybe_run_as_interpreter() -> int | None:
         exec(compile(code, "<string>", "exec"), {"__name__": "__main__"})  # noqa: S102
         return 0
     return None
+
+
+# CPython options that take no argument, which may be combined ("-BI").
+_FLAG_LETTERS = set("bBdEhiIOPqsSuvx")
+
+
+def _strip_interpreter_options(args: list[str]) -> list[str]:
+    """Drop leading interpreter options (``-B``, ``-I``, ``-X opt``, ``-W arg``
+    …) so ``args`` starts at ``-m`` / ``-c`` / the script, as CPython reads it."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in ("-m", "-c") or not a.startswith("-") or a == "-":
+            break
+        if a in ("-X", "-W"):
+            i += 2  # option with a separate argument
+        elif a[:2] in ("-X", "-W") or (a[1:] and set(a[1:]) <= _FLAG_LETTERS):
+            i += 1
+        else:
+            break  # not an interpreter option: leave it for the app
+    return args[i:]
 
 
 def _is_mp_child() -> bool:
