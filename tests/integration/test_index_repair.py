@@ -294,3 +294,31 @@ def test_script_checks_and_repairs(env: None, tmp_path: Path, monkeypatch, capsy
     _drain()
     monkeypatch.setattr("sys.argv", ["repair_index"])
     assert repair_index.main() == 0
+
+
+def test_wrong_qdrant_is_refused_not_reported_as_all_missing(env: None, tmp_path: Path) -> None:
+    """Pointed at a Qdrant without this database's collections (another
+    mode, URL or data dir), the check must not call every chunk missing —
+    a repair would then re-embed the whole install into the wrong store."""
+    _seed(tmp_path / "d", {"a.md": "alpha", "logo.png": _png()})
+    _q(lambda c: c.delete_collection(vector_store.CHUNKS))
+    with pytest.raises(index_repair.IndexUnreadable, match="does not exist"):
+        _check()
+    # The operator knows it was lost: then it is all missing, and repair rebuilds it.
+    with session_scope() as s:
+        report = index_repair.check(s, assume_empty=True)
+    assert not report.ok and report.chunk_points == 0
+    vector_store._ensured_collections.clear()  # the app restart that recreates it
+    _repair(report)
+    _drain()
+    assert _check().ok
+
+
+def test_script_refuses_wrong_qdrant(env: None, tmp_path: Path, monkeypatch, capsys) -> None:
+    from scripts import repair_index
+
+    _seed(tmp_path / "d", {"a.md": "alpha"})
+    _q(lambda c: c.delete_collection(vector_store.CHUNKS))
+    monkeypatch.setattr("sys.argv", ["repair_index", "--repair"])
+    assert repair_index.main() == 2
+    assert "cannot check" in capsys.readouterr().err

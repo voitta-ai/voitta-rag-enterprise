@@ -12,8 +12,9 @@ work them off) and deletes points whose rows are gone from SQL. A blob
 shared by several files needs two passes (embed, then attach); ``--wait``
 does them. See ``services/index_repair.py`` for what each category means.
 
-Exits 0 when the index is consistent, 1 when drift remains, 2 when a repair
-was refused.
+Exits 0 when the index is consistent, 1 when drift remains, 2 when the
+check or the repair was refused (e.g. the Qdrant it reached is not this
+database's: a missing collection is reported, not taken as empty).
 """
 
 from __future__ import annotations
@@ -50,6 +51,7 @@ def _resolve_folders(names: list[str]) -> list[int] | None:
 
 def _print(report: index_repair.IndexReport, *, verbose: bool) -> None:
     rows = [r for r in report.folders if verbose or not r.ok]
+    print(f"Qdrant: {report.qdrant}")
     print(
         f"SQL chunks {report.sql_chunks:,} · chunk points {report.chunk_points:,} · "
         f"image points {report.image_points:,}"
@@ -108,6 +110,12 @@ def main() -> int:
     ap.add_argument("--wait", action="store_true", help="with --repair: wait for the jobs, re-check, repeat")
     ap.add_argument("--passes", type=int, default=3, help="with --wait: at most this many passes")
     ap.add_argument("--allow-large-delete", action="store_true", help="delete defunct points past the 1%% bound")
+    ap.add_argument(
+        "--assume-empty",
+        action="store_true",
+        help="treat a collection that does not exist as lost (default: refuse, it is usually the "
+        "wrong Qdrant); restart the app first so it recreates the collection",
+    )
     ap.add_argument("--json", action="store_true", help="print the report as JSON")
     ap.add_argument("-v", "--verbose", action="store_true", help="list healthy folders too")
     args = ap.parse_args()
@@ -116,9 +124,16 @@ def main() -> int:
     init_db()
     folder_ids = _resolve_folders(args.folder)
     passes = args.passes if (args.repair and args.wait) else 1
-    for n in range(1, passes + 1):
+    def _check() -> index_repair.IndexReport:
         with session_scope() as s:
-            report = index_repair.check(s, folder_ids)
+            return index_repair.check(s, folder_ids, assume_empty=args.assume_empty)
+
+    for n in range(1, passes + 1):
+        try:
+            report = _check()
+        except index_repair.IndexUnreadable as e:
+            print(f"cannot check: {e}", file=sys.stderr)
+            return 2
         if args.json:
             print(json.dumps(asdict(report) | {"ok": report.ok}, default=str))
         else:
@@ -139,8 +154,7 @@ def main() -> int:
             print("the app's workers run the jobs; run again without --repair to confirm")
             return 1
         _wait(result.job_ids)
-    with session_scope() as s:
-        report = index_repair.check(s, folder_ids)
+    report = _check()
     _print(report, verbose=args.verbose)
     return 0 if report.ok else 1
 

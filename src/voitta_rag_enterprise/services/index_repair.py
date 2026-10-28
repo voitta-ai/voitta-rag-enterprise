@@ -59,6 +59,16 @@ class RepairRefused(RuntimeError):
     """A repair would delete more points than a healthy index ever needs."""
 
 
+class IndexUnreadable(RuntimeError):
+    """The Qdrant this process reaches does not hold this database's index.
+
+    A collection that does not exist while SQL holds its rows is far more
+    often the wrong Qdrant (another mode, URL or data dir) than a lost one;
+    reporting every chunk as missing would send a repair to re-embed the
+    whole install into it.
+    """
+
+
 @dataclass
 class FolderReport:
     folder_id: int
@@ -89,6 +99,7 @@ class FolderReport:
 @dataclass
 class IndexReport:
     folders: list[FolderReport]
+    qdrant: str  # which Qdrant was read, e.g. "standalone http://localhost:6335"
     sql_chunks: int
     chunk_points: int
     image_points: int
@@ -117,13 +128,29 @@ class RepairResult:
 # ---------------------------------------------------------------------------
 
 
+def describe_qdrant() -> str:
+    s = get_settings()
+    if s.qdrant_mode == "standalone":
+        return f"standalone {s.qdrant_url}"
+    if s.qdrant_mode == "managed":
+        return "managed (app-spawned)"
+    return f"embedded {s.resolved_qdrant_path()}"
+
+
+def _existing_collections() -> set[str]:
+    """Collection names; raises when Qdrant cannot be reached (an
+    unreachable store must never read as an empty one)."""
+    return {
+        c.name
+        for c in vector_store.run_on_qdrant(
+            lambda: vector_store.get_client().get_collections()
+        ).collections
+    }
+
+
 def _scroll(collection: str, keys: list[str]) -> list:
     """Every point's id + the named payload keys, one Qdrant call per page
     (the app's single Qdrant thread stays free for search in between)."""
-    if not vector_store.run_on_qdrant(
-        lambda: vector_store._collection_exists(vector_store.get_client(), collection)
-    ):
-        return []
     out: list = []
     offset = None
     while True:
@@ -148,8 +175,15 @@ def _scroll(collection: str, keys: list[str]) -> list:
 # ---------------------------------------------------------------------------
 
 
-def check(db: Session, folder_ids: list[int] | None = None) -> IndexReport:
-    """Compare SQL with Qdrant. Read-only."""
+def check(
+    db: Session, folder_ids: list[int] | None = None, *, assume_empty: bool = False
+) -> IndexReport:
+    """Compare SQL with Qdrant. Read-only.
+
+    Raises :class:`IndexUnreadable` when a collection is absent although
+    SQL holds its rows, unless ``assume_empty`` (the operator knows the
+    collection itself was lost).
+    """
     settings = get_settings()
     folders = {
         f.id: f
@@ -186,14 +220,30 @@ def check(db: Session, folder_ids: list[int] | None = None) -> IndexReport:
         if kind == "figure" and file_id in files:
             figures_by_cas[cas].append((iid, file_id))
 
-    chunk_points = _scroll(
-        vector_store.CHUNKS, ["kind", "dense_model_version", "sparse_model_version"]
+    existing = _existing_collections()
+    for collection, rows in (
+        (vector_store.CHUNKS, len(all_chunk_ids)),
+        (vector_store.IMAGES, len(all_cas)),
+    ):
+        if collection not in existing and rows and not assume_empty:
+            raise IndexUnreadable(
+                f"collection {collection!r} does not exist in Qdrant ({describe_qdrant()}) "
+                f"but SQL holds {rows:,} rows for it. Check VOITTA_QDRANT_MODE / "
+                f"VOITTA_QDRANT_URL; if that collection really was lost, pass --assume-empty"
+            )
+    chunk_points = (
+        _scroll(vector_store.CHUNKS, ["kind", "dense_model_version", "sparse_model_version"])
+        if vector_store.CHUNKS in existing
+        else []
     )
-    image_points = _scroll(
-        vector_store.IMAGES, ["image_cas_id", "file_ids", "image_model_version"]
+    image_points = (
+        _scroll(vector_store.IMAGES, ["image_cas_id", "file_ids", "image_model_version"])
+        if vector_store.IMAGES in existing
+        else []
     )
     report = IndexReport(
         folders=[],
+        qdrant=describe_qdrant(),
         sql_chunks=len(all_chunk_ids),
         chunk_points=len(chunk_points),
         image_points=len(image_points),
