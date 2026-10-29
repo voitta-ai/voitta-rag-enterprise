@@ -45,6 +45,7 @@ import logging
 import mimetypes
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -91,6 +92,15 @@ class MineruParseError(RuntimeError):
 
     The daemon is alive and answered, so unlike a timeout or a dead worker
     this is usually confined to one page, and ``PdfParser`` retries around it.
+    """
+
+
+class MineruWorkerDied(RuntimeError):
+    """The MinerU worker exited mid-request — not on a watchdog timeout.
+
+    Almost always the OS killing it (rc=-9) once its footprint grew too big.
+    That is about the worker's history, not the file in hand, so
+    ``PdfParser`` retries the range once on a fresh daemon.
     """
 
 
@@ -186,20 +196,37 @@ def _parse_range(
     are not about one page, and per-page retries could multiply their cost.
     """
     settings = get_settings()
+
+    def attempt() -> _BucketResult:
+        return _parse_bucket(
+            pdf_path,
+            out_dir=out_dir,
+            # Whole-document parses send no range, so MinerU reads the file
+            # as-is instead of rewriting it.
+            page_range="" if whole_document else f"{page_start}-{page_end}",
+            tier=settings.pdf_parse_tier,
+            parse_mode=settings.pdf_parse_method,
+            page_start=page_start,
+            page_end=page_end,
+        )
+
     try:
-        return [
-            _parse_bucket(
-                pdf_path,
-                out_dir=out_dir,
-                # Whole-document parses send no range, so MinerU reads the
-                # file as-is instead of rewriting it.
-                page_range="" if whole_document else f"{page_start}-{page_end}",
-                tier=settings.pdf_parse_tier,
-                parse_mode=settings.pdf_parse_method,
-                page_start=page_start,
-                page_end=page_end,
+        try:
+            return [attempt()]
+        except MineruWorkerDied as e:
+            # The worker was killed (usually the OS, over the footprint it had
+            # built up across earlier files), not failed on this range. The
+            # next request gets a fresh daemon; give the range that one retry.
+            # A second death is this range's own doing and fails the file.
+            logger.warning(
+                "pdf pages %d-%d of %s: %s; retrying once on a fresh MinerU worker",
+                page_start,
+                page_end,
+                pdf_path.name,
+                e,
             )
-        ]
+            shutil.rmtree(out_dir, ignore_errors=True)
+            return [attempt()]
     except MineruParseError as e:
         if page_start == page_end:
             logger.warning(
@@ -288,6 +315,7 @@ def _parse_bucket(
             tier=tier,
             parse_mode=parse_mode,
             timeout_s=timeout_s,
+            pages=page_end - page_start + 1,
         )
     elapsed = time.perf_counter() - started
 
@@ -485,6 +513,43 @@ def _dimensions(data: bytes) -> tuple[int | None, int | None]:
 # ---------------------------------------------------------------------------
 
 
+# Growth recycling waits for this many pages after a spawn: MinerU loads its
+# models lazily on the first pages that need each one, so the footprint
+# jumps early without leaking.
+_RECYCLE_MIN_PAGES = 50
+
+
+def _process_memory_bytes(pid: int) -> int | None:
+    """Memory the OS charges ``pid`` for, or None when it cannot be read.
+
+    macOS: the physical footprint (what jetsam kills on, and the only figure
+    that includes MPS/unified-memory allocations; RSS undercounts it).
+    Linux: VmRSS. Elsewhere: None, and growth recycling is off.
+    """
+    if sys.platform == "darwin":
+        import ctypes
+
+        try:
+            libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+        except OSError:
+            return None
+        # struct rusage_info_v2: 16-byte uuid, then uint64s; ri_phys_footprint
+        # is the 8th of them, at byte 72.
+        buf = ctypes.create_string_buffer(512)
+        if libproc.proc_pid_rusage(ctypes.c_int(pid), ctypes.c_int(2), buf) != 0:
+            return None
+        return int.from_bytes(buf.raw[72:80], sys.byteorder)
+    if sys.platform.startswith("linux"):
+        try:
+            with open(f"/proc/{pid}/status") as fh:
+                for line in fh:
+                    if line.startswith("VmRSS:"):
+                        return int(line.split()[1]) * 1024
+        except OSError:
+            return None
+    return None
+
+
 class _MineruDaemon:
     """Persistent MinerU subprocess. Talks JSON over stdio.
 
@@ -500,6 +565,12 @@ class _MineruDaemon:
     Lifecycle: lazy-spawn on first ``parse``; respawn after a kill or any
     exit. The first request after a respawn pays MinerU's model-load cost
     (~5s); subsequent requests reuse the warm process.
+
+    Recycling: the daemon's footprint grows with the pages it has parsed and
+    is never fully returned; left alone, the OS eventually kills it mid-parse
+    (seen at ~4,800 pages on a 36 GB Mac). So between requests it is retired
+    once it has served ``mineru_recycle_pages`` pages or grown
+    ``mineru_recycle_growth_gb`` past its footprint after the first request.
     """
 
     def __init__(self) -> None:
@@ -509,6 +580,9 @@ class _MineruDaemon:
         # The render timeout the live daemon was started with; None when the
         # operator fixed MINERU_PDF_RENDER_TIMEOUT in the environment.
         self._render_timeout: int | None = None
+        # Per-process recycling state, reset whenever a new daemon starts.
+        self._pages_served = 0
+        self._baseline_bytes: int | None = None
 
     def _spawn(self) -> None:
         # Use the same Python that's running the parent so the subprocess
@@ -589,6 +663,8 @@ class _MineruDaemon:
             logger.warning(
                 "MinerU daemon exited (rc=%s); respawning", self._proc.returncode
             )
+        self._pages_served = 0
+        self._baseline_bytes = None
         self._spawn()
 
     def _kill(self, reason: str) -> None:
@@ -611,6 +687,39 @@ class _MineruDaemon:
             logger.error("MinerU daemon pid=%d still not reaped after SIGKILL; abandoning it", proc.pid)
             if self._proc is proc:
                 self._proc = None
+
+    def _recycle_if_due(self, pages: int) -> None:
+        """Retire the daemon between requests if it is due; see the class
+        docstring. The next request spawns a fresh one."""
+        proc = self._proc
+        if proc is None or proc.poll() is not None:
+            return
+        settings = get_settings()
+        self._pages_served += pages
+        reason = None
+        if settings.mineru_recycle_pages > 0 and self._pages_served >= settings.mineru_recycle_pages:
+            reason = f"page budget reached ({self._pages_served} pages)"
+        elif settings.mineru_recycle_growth_gb > 0:
+            used = _process_memory_bytes(proc.pid)
+            if used is not None and self._baseline_bytes is None:
+                self._baseline_bytes = used
+            elif used is not None and self._pages_served >= _RECYCLE_MIN_PAGES:
+                grown = used - self._baseline_bytes
+                if grown >= settings.mineru_recycle_growth_gb * 2**30:
+                    reason = (
+                        f"footprint grew {grown / 2**30:.1f} GB to {used / 2**30:.1f} GB "
+                        f"over {self._pages_served} pages"
+                    )
+        if reason is None:
+            return
+        logger.info("recycling MinerU daemon pid=%d: %s", proc.pid, reason)
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        with contextlib.suppress(OSError):
+            proc.kill()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=5)
+        self._proc = None
 
     def _reap_after_pipe_closed(self) -> int | None:
         """Wait for the daemon whose stdout just closed; return its exit code.
@@ -642,6 +751,7 @@ class _MineruDaemon:
         tier: str,
         parse_mode: str,
         timeout_s: int,
+        pages: int = 0,
     ) -> None:
         label = f"{pdf_path.name}" + (f" pages {page_range}" if page_range else "")
         with self._lock:
@@ -666,7 +776,7 @@ class _MineruDaemon:
                 # Subprocess died between ensure_alive and write. Respawn
                 # and surface as a transient error so the job can be retried.
                 self._kill("broken pipe before request")
-                raise RuntimeError(f"MinerU daemon broken pipe: {e}") from e
+                raise MineruWorkerDied(f"MinerU daemon broken pipe: {e}") from e
 
             # Watchdog: if no response in `timeout_s` we kill the subprocess.
             # Killing closes our stdout pipe, which unblocks the readline()
@@ -703,7 +813,7 @@ class _MineruDaemon:
                     raise TimeoutError(
                         f"MinerU parse exceeded {timeout_s}s on {label}"
                     )
-                raise RuntimeError(
+                raise MineruWorkerDied(
                     f"MinerU worker died mid-parse (rc={rc}) on {label}"
                     + (
                         " — SIGKILL, likely the OS reclaiming memory (OOM)"
@@ -719,6 +829,9 @@ class _MineruDaemon:
                 raise RuntimeError(
                     f"MinerU daemon returned non-JSON: {resp_line[:200]!r}"
                 ) from e
+
+            # Error responses count too: the pages were worked on either way.
+            self._recycle_if_due(pages)
 
             if resp.get("status") != "ok":
                 code = resp.get("code")

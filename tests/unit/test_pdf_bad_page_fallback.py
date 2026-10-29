@@ -39,23 +39,36 @@ def _make_pdf(path: Path, pages: int) -> Path:
 class _StubDaemon:
     """Writes one MinerU-shaped block per page; raises on ``bad`` pages.
 
-    ``error`` is what a range containing a bad page raises.
+    ``error`` is what a range containing a bad page raises; ``deaths`` is
+    how many calls raise ``MineruWorkerDied`` first, partial output left
+    behind, as when the OS kills the worker mid-parse.
     """
 
     def __init__(
-        self, pages: int, bad: set[int], error: type[Exception] = pdf_parser.MineruParseError
+        self,
+        pages: int,
+        bad: set[int],
+        error: type[Exception] = pdf_parser.MineruParseError,
+        deaths: int = 0,
     ):
         self.pages = pages
         self.bad = bad
         self.error = error
+        self.deaths = deaths
         self.calls: list[str] = []
+        self.page_counts: list[int] = []
 
-    def parse(self, *, pdf_path, page_range, out_dir, tier, parse_mode, timeout_s):
+    def parse(self, *, pdf_path, page_range, out_dir, tier, parse_mode, timeout_s, pages):
         self.calls.append(page_range)
+        self.page_counts.append(pages)
         if page_range:
             lo, hi = (int(p) for p in page_range.split("-"))
         else:
             lo, hi = 1, self.pages
+        if self.deaths:
+            self.deaths -= 1
+            (out_dir / "images").mkdir(parents=True)
+            raise pdf_parser.MineruWorkerDied("MinerU worker died mid-parse (rc=-9)")
         if self.bad & set(range(lo, hi + 1)):
             raise self.error("MinerU error: ValueError('Unsupported warp settings')")
         out_dir.mkdir(parents=True)
@@ -135,6 +148,24 @@ def test_timeouts_are_not_retried_per_page(stub, tmp_path: Path) -> None:
     with pytest.raises(TimeoutError):
         pdf_parser.PdfParser().parse(_make_pdf(tmp_path / "a.pdf", 3))
     assert daemon.calls == [""]
+
+
+def test_worker_death_retries_the_range_once(stub, tmp_path: Path) -> None:
+    daemon = stub(pages=5, bad=set(), bucket=2, deaths=1)
+    result = pdf_parser.PdfParser().parse(_make_pdf(tmp_path / "a.pdf", 5))
+
+    # The killed bucket is re-run whole on the fresh worker, not split.
+    assert daemon.calls == ["1-2", "1-2", "3-4", "5-5"]
+    assert daemon.page_counts == [2, 2, 2, 1]
+    assert "text_fallback_pages" not in result.metadata
+    assert [_page_of(result, f"page {n}") for n in range(1, 6)] == [1, 2, 3, 4, 5]
+
+
+def test_worker_dying_twice_fails_the_file(stub, tmp_path: Path) -> None:
+    daemon = stub(pages=3, bad=set(), deaths=2)
+    with pytest.raises(pdf_parser.MineruWorkerDied):
+        pdf_parser.PdfParser().parse(_make_pdf(tmp_path / "a.pdf", 3))
+    assert daemon.calls == ["", ""]
 
 
 # --- daemon-side crop guard (needs the real MinerU) -------------------------

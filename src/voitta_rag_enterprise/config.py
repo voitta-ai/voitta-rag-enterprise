@@ -219,6 +219,12 @@ class Settings(BaseSettings):
     # batch ratio 2: slower, but fits beside other GPU tenants). 0 = let
     # MinerU auto-detect (right for a dedicated GPU).
     mineru_vram_gb: int = 0
+    # The MinerU daemon's footprint grows with every page and is never fully
+    # returned; left alone the OS kills it mid-parse (rc=-9). Retire it
+    # between requests after this many pages, or once it has grown this many
+    # GB past its post-warm-up footprint. 0 disables either check.
+    mineru_recycle_pages: int = 2000
+    mineru_recycle_growth_gb: float = 8.0
     # Test override: when true, the PDF parser returns a deterministic stub
     # without invoking MinerU. Used by the test suite to keep runs fast.
     use_fake_pdf_parser: bool = False

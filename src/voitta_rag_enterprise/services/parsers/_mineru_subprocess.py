@@ -145,6 +145,30 @@ def _handle_request(req: dict) -> dict:
     return {"status": "ok"}
 
 
+def _release_memory() -> None:
+    """Hand back what the last request left behind before the next one.
+
+    The daemon parses thousands of pages over its life. Without this, Python
+    garbage from one parse (page images, layout results) waits for the cyclic
+    GC, and torch's MPS / CUDA allocator keeps every freed block cached for a
+    tensor shape that may never recur. The parent also recycles the daemon on
+    a memory cap (``_MineruDaemon``); this keeps it from getting there early.
+    """
+    import gc
+
+    gc.collect()
+    torch = sys.modules.get("torch")
+    if torch is None:
+        return
+    try:
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass  # Best effort: a cache release must never fail a parse.
+
+
 def _error_code(exc: BaseException) -> str | None:
     try:
         from mineru.errors import MineruError
@@ -208,6 +232,9 @@ def main() -> None:
                 "detail": repr(e),
                 "traceback": traceback.format_exc(),
             }
+        # Before answering, so the parent's memory reading taken right after
+        # the response sees the released footprint.
+        _release_memory()
         proto.write(json.dumps(resp) + "\n")
         proto.flush()
     for parser in _PARSERS.values():
