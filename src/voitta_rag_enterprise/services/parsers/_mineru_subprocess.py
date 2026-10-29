@@ -54,10 +54,62 @@ _PDFIUM_ERR_CODES = {
 }
 
 
+_CROP_GUARD_INSTALLED = False
+
+
+def _install_degenerate_crop_guard() -> None:
+    """Stop one sub-pixel OCR box from failing a whole PDF (MinerU 4.0.12).
+
+    OCR detection can return a quadrilateral whose short side is under one
+    pixel. ``mineru.model.ocr.image.get_rotate_crop_image`` truncates that
+    side to a 0 px crop size and hands it to ``docvortex.warp_image``, which
+    raises ``ValueError("Unsupported warp settings")`` for any size <= 0
+    (OpenCV, which MinerU used before docvortex, tolerated it). The error
+    escapes the page and fails the entire document.
+
+    For exactly that case we return a blank 1 px crop instead. Not ``None``:
+    of the callers only the ONNX OCR path filters ``None`` out — the Torch OCR
+    path passes the list straight to the recognizer, and the formula-number
+    path raises unless it gets one OCR result per crop. A blank crop keeps
+    every list aligned and recognizes as low-confidence noise, which the
+    callers' score filters already drop. Any other ValueError still raises.
+
+    Callers import ``get_rotate_crop_image_for_text_rec`` by name, and it
+    looks up ``get_rotate_crop_image`` in its module at call time, so
+    replacing the module attribute covers all of them.
+    """
+    global _CROP_GUARD_INSTALLED
+    if _CROP_GUARD_INSTALLED:
+        return
+    import numpy as np
+    from mineru.model.ocr import image as ocr_image
+
+    original = ocr_image.get_rotate_crop_image
+
+    def get_rotate_crop_image(img, points):
+        try:
+            return original(img, points)
+        except ValueError:
+            # Same size arithmetic as the original.
+            width = int(
+                max(np.linalg.norm(points[0] - points[1]), np.linalg.norm(points[2] - points[3]))
+            )
+            height = int(
+                max(np.linalg.norm(points[0] - points[3]), np.linalg.norm(points[1] - points[2]))
+            )
+            if width >= 1 and height >= 1:
+                raise
+            return np.full((max(height, 1), max(width, 1), *img.shape[2:]), 255, dtype=img.dtype)
+
+    ocr_image.get_rotate_crop_image = get_rotate_crop_image
+    _CROP_GUARD_INSTALLED = True
+
+
 def _parser(tier: str, parse_mode: str):
     key = (tier, parse_mode)
     parser = _PARSERS.get(key)
     if parser is None:
+        _install_degenerate_crop_guard()
         from mineru.parser import MinerUParser
 
         # image_analysis drives VLM figure descriptions, which only the

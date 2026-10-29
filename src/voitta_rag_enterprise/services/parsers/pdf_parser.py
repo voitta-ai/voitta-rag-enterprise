@@ -26,6 +26,14 @@ per bucket. MinerU reports ``page_idx`` against the original document, so
 pages need no per-bucket offset; the markdown is concatenated and image and
 page anchors are offset by the cumulative length of the prior buckets'
 markdown plus the ``\\n\\n`` joiner.
+
+Bad pages
+---------
+When MinerU raises on a range (``MineruParseError``), the range is re-parsed
+one page at a time and any page that still fails is indexed from PyMuPDF's
+text layer, listed in ``metadata["text_fallback_pages"]``. One bad page
+costs that page's fidelity, not the whole file. If every page fails, the
+file fails as before.
 """
 
 from __future__ import annotations
@@ -78,6 +86,14 @@ def _render_timeout_s() -> int:
     return max(1, min(_MINERU_RENDER_TIMEOUT_S, int(get_caps().pdf_parse_timeout_s * 0.8)))
 
 
+class MineruParseError(RuntimeError):
+    """MinerU raised inside its own pipeline and reported it back.
+
+    The daemon is alive and answered, so unlike a timeout or a dead worker
+    this is usually confined to one page, and ``PdfParser`` retries around it.
+    """
+
+
 @dataclass
 class _BucketResult:
     saved: mineru_result.SavedResult
@@ -120,6 +136,7 @@ class PdfParser(BaseParser):
         with tempfile.TemporaryDirectory(prefix="mineru-") as tmp:
             tmp_path = Path(tmp)
             bucket_results: list[_BucketResult] = []
+            failed: dict[int, MineruParseError] = {}
             for i, (start_page, end_page) in enumerate(ranges):
                 logger.info(
                     "pdf bucket %d/%d: pages %d-%d",
@@ -128,21 +145,109 @@ class PdfParser(BaseParser):
                     start_page,
                     end_page,
                 )
-                bucket_results.append(
-                    _parse_bucket(
+                bucket_results.extend(
+                    _parse_range(
                         file_path,
                         out_dir=tmp_path / f"out-{i:03d}",
-                        # Whole-document parses send no range, so MinerU
-                        # reads the file as-is instead of rewriting it.
-                        page_range=f"{start_page}-{end_page}" if use_buckets else "",
-                        tier=settings.pdf_parse_tier,
-                        parse_mode=settings.pdf_parse_method,
                         page_start=start_page,
                         page_end=end_page,
+                        whole_document=not use_buckets,
+                        failed=failed,
                     )
                 )
 
-            return _merge_buckets(bucket_results, file_path, page_count)
+            # Every page failing is not one bad page: it is MinerU itself
+            # (or the file) that is broken, and a plain-text index would hide
+            # that. Fail the file as before.
+            if len(failed) == page_count:
+                raise failed[1]
+            result = _merge_buckets(bucket_results, file_path, page_count)
+            if failed:
+                result.metadata["text_fallback_pages"] = sorted(failed)
+            return result
+
+
+def _parse_range(
+    pdf_path: Path,
+    *,
+    out_dir: Path,
+    page_start: int,
+    page_end: int,
+    whole_document: bool,
+    failed: dict[int, MineruParseError],
+) -> list[_BucketResult]:
+    """Parse pages ``page_start..page_end`` with MinerU, routing around bad pages.
+
+    A ``MineruParseError`` is MinerU raising inside its own pipeline, usually
+    over one page (a degenerate OCR box, an odd table). Rather than lose the
+    whole range, re-parse it one page at a time; a page that still fails
+    alone gets PyMuPDF's text layer instead and is recorded in ``failed``.
+    Timeouts, a dead worker and unsupported documents are not retried: they
+    are not about one page, and per-page retries could multiply their cost.
+    """
+    settings = get_settings()
+    try:
+        return [
+            _parse_bucket(
+                pdf_path,
+                out_dir=out_dir,
+                # Whole-document parses send no range, so MinerU reads the
+                # file as-is instead of rewriting it.
+                page_range="" if whole_document else f"{page_start}-{page_end}",
+                tier=settings.pdf_parse_tier,
+                parse_mode=settings.pdf_parse_method,
+                page_start=page_start,
+                page_end=page_end,
+            )
+        ]
+    except MineruParseError as e:
+        if page_start == page_end:
+            logger.warning(
+                "pdf page %d of %s: MinerU failed, indexing its text layer instead: %s",
+                page_start,
+                pdf_path.name,
+                str(e).splitlines()[0],
+            )
+            failed[page_start] = e
+            return [_text_layer_bucket(pdf_path, page_start, out_dir)]
+        logger.warning(
+            "pdf pages %d-%d of %s: MinerU failed, retrying page by page: %s",
+            page_start,
+            page_end,
+            pdf_path.name,
+            str(e).splitlines()[0],
+        )
+    out: list[_BucketResult] = []
+    for page in range(page_start, page_end + 1):
+        out.extend(
+            _parse_range(
+                pdf_path,
+                out_dir=out_dir.with_name(f"{out_dir.name}-p{page:04d}"),
+                page_start=page,
+                page_end=page,
+                whole_document=False,
+                failed=failed,
+            )
+        )
+    return out
+
+
+def _text_layer_bucket(pdf_path: Path, page_no: int, out_dir: Path) -> _BucketResult:
+    """One page as PyMuPDF's plain text layer — the fallback for a page MinerU
+    cannot parse. No layout, figures or OCR, so a scanned page comes back
+    empty; the page render is kept."""
+    doc = fitz.open(pdf_path)
+    try:
+        text = doc.load_page(page_no - 1).get_text("text").strip()
+    finally:
+        doc.close()
+    return _BucketResult(
+        saved=mineru_result.SavedResult(markdown=text, content_list=[], root=out_dir),
+        page_start=page_no,
+        page_end=page_no,
+        elapsed_s=0.0,
+        page_renders=_render_pages(pdf_path, page_no, page_no),
+    )
 
 
 def _page_count(file_path: Path) -> int:
@@ -635,7 +740,7 @@ class _MineruDaemon:
                 # raise site and exception message, which carry the path)
                 # so the stored error is self-sufficient.
                 tail = "\n".join(tb.strip().splitlines()[-6:])
-                raise RuntimeError(
+                raise MineruParseError(
                     f"MinerU error{f' [{code}]' if code else ''}: {detail}"
                     + (f"\n--- subprocess traceback tail ---\n{tail}" if tail else "")
                 )
