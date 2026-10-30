@@ -28,6 +28,7 @@ import logging
 import logging.config
 import os
 import sys
+import threading
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
@@ -153,6 +154,32 @@ def setup_logging(log_dir: Path, level: str | None = None) -> None:
     logging.config.dictConfig(config)
     _strip_console_handlers()
     _redirect_loguru(log_dir)
+    _install_thread_excepthook()
+
+
+def _install_thread_excepthook() -> None:
+    """Log uncaught exceptions from background threads to our files.
+
+    ``threading``'s default hook prints them to stderr only — the screen
+    session, not ``indexing.log`` — so a dead watcher observer or timer
+    thread used to leave no trace at all. We log, then chain to the
+    previous hook so stderr still gets the traceback too.
+    """
+    previous = threading.excepthook
+    if getattr(previous, "_voitta", False):
+        return
+
+    def hook(args: threading.ExceptHookArgs) -> None:
+        if args.exc_type is not SystemExit:
+            logging.getLogger("voitta_rag_enterprise.threads").error(
+                "uncaught exception in thread %s — the thread is dead",
+                args.thread.name if args.thread is not None else "?",
+                exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+            )
+        previous(args)
+
+    hook._voitta = True  # type: ignore[attr-defined]
+    threading.excepthook = hook
 
 
 def _redirect_loguru(log_dir: Path) -> None:

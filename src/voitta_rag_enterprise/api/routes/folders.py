@@ -552,6 +552,15 @@ async def upload_file(
         rel_path_override=rel_path,
     )
     if uploaded:
+        # The watcher registers these files, not this handler — logging the
+        # batch makes "uploaded but never registered" visible in the log.
+        logger.info(
+            "upload: folder %d, %d file(s), %d bytes, rel_dir=%r",
+            folder_id,
+            len(uploaded),
+            sum(item.size_bytes for item in uploaded),
+            rel_dir,
+        )
         # New paths may introduce subdirectories — refresh the folder cards.
         # The watcher hasn't inserted the File rows yet, but the rebuild job
         # runs behind the extract queue and no-ops if nothing changed.

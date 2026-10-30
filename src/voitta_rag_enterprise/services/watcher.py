@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import sys
 import threading
 import time
+import traceback
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -48,11 +50,18 @@ class _Debouncer:
 
     def __init__(self, delay: float, max_workers: int = 4) -> None:
         self._delay = delay
+        self.max_workers = max_workers
         self._timers: dict[str, threading.Timer] = {}
         self._lock = threading.Lock()
         self._executor = ThreadPoolExecutor(
             max_workers=max_workers, thread_name_prefix="watcher-db"
         )
+        # Health bookkeeping read by WatcherManager's health thread: which
+        # executor thread runs which key since when, plus outcome counters.
+        self._stats_lock = threading.Lock()
+        self._inflight: dict[int, tuple[str, float]] = {}
+        self._done = 0
+        self._failed = 0
 
     def schedule(self, key: str, fn: Callable[[], None]) -> None:
         with self._lock:
@@ -61,10 +70,45 @@ class _Debouncer:
                 existing.cancel()
             # Timer fires a lightweight submit(); actual DB work runs inside
             # the bounded executor so at most max_workers sessions are open.
-            timer = threading.Timer(self._delay, self._executor.submit, args=(fn,))
+            timer = threading.Timer(self._delay, self._submit, args=(key, fn))
             timer.daemon = True
             self._timers[key] = timer
             timer.start()
+
+    def _submit(self, key: str, fn: Callable[[], None]) -> None:
+        try:
+            self._executor.submit(self._run, key, fn)
+        except RuntimeError:
+            # Executor already shut down (app stopping) or no threads left.
+            logger.warning("watcher: could not submit %s", key, exc_info=True)
+
+    def _run(self, key: str, fn: Callable[[], None]) -> None:
+        # The executor's Future swallows exceptions and nobody reads it —
+        # log here, or a failing upsert drops the file without a trace.
+        ident = threading.get_ident()
+        with self._stats_lock:
+            self._inflight[ident] = (key, time.monotonic())
+        try:
+            fn()
+        except Exception:
+            with self._stats_lock:
+                self._failed += 1
+            logger.exception("watcher: handling %s failed", key)
+        else:
+            with self._stats_lock:
+                self._done += 1
+        finally:
+            with self._stats_lock:
+                self._inflight.pop(ident, None)
+
+    def snapshot(self) -> tuple[dict[int, tuple[str, float]], int, int, int, int]:
+        """``(inflight, done, failed, pending_timers, queued_in_executor)``."""
+        with self._lock:
+            pending = sum(1 for t in self._timers.values() if t.is_alive())
+        queue = getattr(self._executor, "_work_queue", None)
+        queued = queue.qsize() if queue is not None else -1
+        with self._stats_lock:
+            return dict(self._inflight), self._done, self._failed, pending, queued
 
     def cancel_all(self) -> None:
         with self._lock:
@@ -100,6 +144,17 @@ class _FolderHandler(FileSystemEventHandler):
 
     def _key(self, rel: str) -> str:
         return f"{self.folder_id}:{rel}"
+
+    def dispatch(self, event: FileSystemEvent) -> None:
+        # watchdog's dispatcher loop only catches queue.Empty: anything we
+        # raise here kills the observer thread, and every later event —
+        # uploads included — is silently dropped until restart.
+        try:
+            super().dispatch(event)
+        except Exception:
+            logger.exception(
+                "watcher: folder %d failed to handle %s", self.folder_id, event
+            )
 
     def on_created(self, event: FileSystemEvent) -> None:
         if event.is_directory:
@@ -141,6 +196,12 @@ class _FolderHandler(FileSystemEventHandler):
         except OSError:
             return
         if stat.st_size > self.max_file_bytes:
+            logger.info(
+                "watcher: skipping %s in folder %d — %d bytes exceeds max_file_bytes",
+                rel,
+                self.folder_id,
+                stat.st_size,
+            )
             return
         file_id: int | None = None
         with session_scope() as s:
@@ -179,6 +240,13 @@ class _FolderHandler(FileSystemEventHandler):
             # unchanged, so bulk drops cost one-ish rebuild, not thousands.
             if is_new_row and "/" in rel:
                 self._enqueue_card_rebuild(s)
+        logger.debug(
+            "watcher: %s %s in folder %d (file_id=%s)",
+            "registered" if is_new_row else "updated",
+            rel,
+            self.folder_id,
+            file_id,
+        )
         # Outside the session: tell the SPA the row exists *now*, in
         # ``state='pending'``. Without this the file stays invisible to
         # the UI until the worker finishes extracting and emits its own
@@ -242,18 +310,28 @@ class _RootDispatcher(FileSystemEventHandler):
         return self._handlers.get(rel.parts[0]) if rel.parts else None
 
     def dispatch(self, event: FileSystemEvent) -> None:
-        targets = []
-        h = self._handler_for(event.src_path)
-        if h is not None:
-            targets.append(h)
-        dest_h = self._handler_for(getattr(event, "dest_path", ""))
-        if dest_h is not None and dest_h not in targets:
-            targets.append(dest_h)
-        for target in targets:
-            target.dispatch(event)
+        # Same guard as _FolderHandler.dispatch: an exception escaping here
+        # would kill the one observer thread every managed folder shares.
+        try:
+            targets = []
+            h = self._handler_for(event.src_path)
+            if h is not None:
+                targets.append(h)
+            dest_h = self._handler_for(getattr(event, "dest_path", ""))
+            if dest_h is not None and dest_h not in targets:
+                targets.append(dest_h)
+            for target in targets:
+                target.dispatch(event)
+        except Exception:
+            logger.exception("watcher: root dispatch failed for %s", event)
 
 
 class WatcherManager:
+    # Health thread cadence, and how long one debounced upsert may run
+    # before its stack is dumped to the log (it's normally milliseconds).
+    HEALTH_INTERVAL_S = 60.0
+    STUCK_AFTER_S = 60.0
+
     def __init__(self, debounce_s: float = 0.5) -> None:
         self._observer: BaseObserver = Observer()
         self._debouncer = _Debouncer(debounce_s)
@@ -273,6 +351,11 @@ class WatcherManager:
         self._managed_dirname: dict[int, str] = {}
         self._root_watch: object | None = None
         self._started = False
+        self._health_stop = threading.Event()
+        self._health_thread: threading.Thread | None = None
+        # Each failure is reported once, not every tick.
+        self._reported: set[object] = set()
+        self._last_stats: tuple[int, ...] | None = None
 
     def _is_managed(self, folder_root: Path) -> bool:
         """True when ``folder_root`` is a real direct child of the root.
@@ -351,6 +434,69 @@ class WatcherManager:
             return
         self._observer.start()
         self._started = True
+        self._health_stop.clear()
+        self._health_thread = threading.Thread(
+            target=self._health_loop, name="watcher-health", daemon=True
+        )
+        self._health_thread.start()
+
+    def _health_loop(self) -> None:
+        while not self._health_stop.wait(self.HEALTH_INTERVAL_S):
+            try:
+                self.check_health()
+            except Exception:
+                logger.exception("watcher: health check failed")
+
+    def check_health(self) -> None:
+        """Log what a stack dump would otherwise be needed for.
+
+        A watcher that stops registering files fails silently — no event
+        means no error. This surfaces the three ways it can stall: the
+        observer (dispatch) thread died, an emitter (inotify reader) died,
+        or the bounded ``watcher-db`` executor is wedged on stuck upserts —
+        for those, the stuck thread's current stack goes to the log.
+        """
+        if not self._observer.is_alive() and "observer" not in self._reported:
+            self._reported.add("observer")
+            logger.error(
+                "watcher: observer thread is dead — on-disk changes (uploads "
+                "included) are NOT picked up until restart"
+            )
+        for emitter in list(self._observer.emitters):
+            if not emitter.is_alive() and emitter not in self._reported:
+                self._reported.add(emitter)
+                logger.error(
+                    "watcher: emitter for %s is dead — changes under it are "
+                    "NOT picked up until restart",
+                    emitter.watch.path,
+                )
+
+        inflight, done, failed, pending, queued = self._debouncer.snapshot()
+        now = time.monotonic()
+        frames = sys._current_frames()
+        for ident, (key, started) in inflight.items():
+            if now - started < self.STUCK_AFTER_S or (ident, started) in self._reported:
+                continue
+            self._reported.add((ident, started))
+            frame = frames.get(ident)
+            stack = "".join(traceback.format_stack(frame)) if frame else "<no frame>\n"
+            logger.warning(
+                "watcher: %s stuck for %.0fs (%d/%d watcher-db threads busy, "
+                "%d queued behind) — stack:\n%s",
+                key,
+                now - started,
+                len(inflight),
+                self._debouncer.max_workers,
+                queued,
+                stack,
+            )
+        stats = (done, failed, pending, queued, len(inflight))
+        if stats != self._last_stats:
+            self._last_stats = stats
+            logger.debug(
+                "watcher: health done=%d failed=%d pending=%d queued=%d inflight=%d",
+                *stats,
+            )
 
     def stop(self) -> None:
         """Tear down at ANY lifecycle point — including after a failed
@@ -362,6 +508,7 @@ class WatcherManager:
         this on ``_started`` (which is only set on full success) would leak
         them — so the teardown is unconditional and idempotent.
         """
+        self._health_stop.set()
         with contextlib.suppress(RuntimeError):
             self._observer.stop()
             if self._observer.is_alive():

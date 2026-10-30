@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from pathlib import Path
 
+import pytest
 from sqlalchemy import select
 
 from voitta_rag_enterprise.db.database import init_db, session_scope
@@ -493,3 +495,121 @@ def test_oversize_file_is_skipped(env: None, tmp_path: Path) -> None:
         mgr.stop()
 
     assert _extract_jobs() == []
+
+
+@pytest.fixture
+def watcher_log():
+    """Records from the watcher logger. caplog can't see them: an earlier
+    test's ``setup_logging`` sets ``propagate=False`` on our logger tree."""
+    records: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    logger = logging.getLogger("voitta_rag_enterprise.services.watcher")
+    handler = _Capture(level=logging.DEBUG)
+    logger.addHandler(handler)
+    try:
+        yield records
+    finally:
+        logger.removeHandler(handler)
+
+
+def test_handler_exception_is_logged_and_observer_survives(
+    env: None, tmp_path: Path, monkeypatch, watcher_log
+) -> None:
+    """A raising handler used to kill watchdog's observer thread silently —
+    every later event (uploads included) was then dropped until restart."""
+    init_db()
+    root = tmp_path / "src"
+    root.mkdir()
+    folder_id = _make_folder(root)
+
+    mgr = WatcherManager(debounce_s=0.1)
+    with session_scope() as s:
+        folder = s.get(Folder, folder_id)
+        mgr.watch(folder, max_file_bytes=10**9, ignore=IgnoreMatcher([]))
+    handler = mgr._root_handlers[root.name]
+    calls = {"n": 0}
+
+    def flaky(event):
+        # on_any_event runs first for every event type, so the very first
+        # event raises regardless of how the platform reports the write.
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(handler, "on_any_event", flaky)
+    mgr.start()
+
+    try:
+        (root / "first.txt").write_text("a")
+        _wait_until(lambda: calls["n"] >= 1)
+        (root / "second.txt").write_text("b")
+        jobs = _wait_until(lambda: _extract_jobs() or None)
+        assert mgr._observer.is_alive()
+    finally:
+        mgr.stop()
+
+    assert jobs is not None
+    assert any("failed to handle" in r.getMessage() for r in watcher_log)
+
+
+def test_failing_upsert_is_logged(env: None, tmp_path: Path, watcher_log) -> None:
+    from voitta_rag_enterprise.services.watcher import _Debouncer
+
+    deb = _Debouncer(delay=0.01)
+
+    def fail() -> None:
+        raise ValueError("db exploded")
+
+    try:
+        deb.schedule("1:a.txt", fail)
+        _wait_until(lambda: deb.snapshot()[2] == 1)
+    finally:
+        deb.cancel_all()
+
+    assert deb.snapshot()[2] == 1
+    assert any(
+        "handling 1:a.txt failed" in r.getMessage() and r.exc_info
+        for r in watcher_log
+    )
+
+
+def test_health_check_dumps_stuck_upsert_stack(
+    env: None, tmp_path: Path, watcher_log
+) -> None:
+    import threading
+
+    mgr = WatcherManager(debounce_s=0.01)
+    mgr.STUCK_AFTER_S = 0.0
+    release = threading.Event()
+
+    def wedged_upsert() -> None:
+        release.wait(5)
+
+    try:
+        mgr._debouncer.schedule("7:stuck.pdf", wedged_upsert)
+        _wait_until(lambda: mgr._debouncer.snapshot()[0] or None)
+        mgr.check_health()
+        mgr.check_health()  # reported once, not every tick
+    finally:
+        release.set()
+        mgr.stop()
+
+    stuck = [r for r in watcher_log if "stuck" in r.getMessage()]
+    assert len(stuck) == 1
+    assert "7:stuck.pdf" in stuck[0].getMessage()
+    assert "wedged_upsert" in stuck[0].getMessage()
+
+
+def test_health_check_reports_dead_observer(env: None, watcher_log) -> None:
+    mgr = WatcherManager(debounce_s=0.01)  # never started → observer not alive
+    try:
+        mgr.check_health()
+        mgr.check_health()
+    finally:
+        mgr.stop()
+    dead = [r for r in watcher_log if "observer thread is dead" in r.getMessage()]
+    assert len(dead) == 1
