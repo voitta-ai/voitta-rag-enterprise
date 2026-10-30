@@ -16,7 +16,7 @@ import {
 import { renderJobs } from "./render/jobs.js";
 import { renderSidebar } from "./render/sidebar.js";
 import { updateJobsTabIndicator } from "./render/tabs.js";
-import { renderFoldersFiltered, setFolderFilter } from "./render/tree.js";
+import { getFolderSort, renderFoldersFiltered, setFolderFilter, setFolderSort } from "./render/tree.js";
 // Register preview plugins in priority order. Each import has a side
 // effect of calling registerPlugin(); unsupported.js is always last.
 import "./render/preview/plugins/image.js";
@@ -243,6 +243,17 @@ const folderSearchInput = $("#folder-search");
 if (folderSearchInput) {
     folderSearchInput.addEventListener("input", () => {
         setFolderFilter(folderSearchInput.value);
+        renderFoldersFiltered();
+    });
+}
+
+// ----- Folder sort -----
+
+const folderSortSelect = $("#folder-sort");
+if (folderSortSelect) {
+    folderSortSelect.value = getFolderSort();
+    folderSortSelect.addEventListener("change", () => {
+        setFolderSort(folderSortSelect.value);
         renderFoldersFiltered();
     });
 }

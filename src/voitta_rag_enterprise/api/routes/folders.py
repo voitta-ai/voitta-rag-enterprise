@@ -17,7 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ...config import get_settings
-from ...db.models import File, Folder, FolderDirMeta, FolderSyncSource, Image, Job
+from ...db.models import File, Folder, FolderDirMeta, FolderSyncSource, Image, Job, User
 from ...services import events, job_queue
 from ...services.indexing import file_event_payload, publish_file_upserted
 from ...services.indexing import folder_cards
@@ -78,6 +78,11 @@ class FolderOut(BaseModel):
     sync_status: str = "idle"
     # Ownership / sharing — see services/acl.py docstring.
     owner_id: int | None = None
+    # Owner display label (display_name, else email) — shown on folders
+    # shared TO the viewer ("Shared with you by …"). Every FolderOut
+    # publisher must fill it: client folder.upserted merges overwrite
+    # fields, so a defaulted None would wipe the name off the row.
+    owner_name: str | None = None
     owned: bool = False  # True if the calling user owns this folder
     # True when the caller may modify FILES here: the owner, or an admin
     # the folder is shared with (services/acl can_write_folder). Gates the
@@ -170,6 +175,7 @@ def _to_folder_out(
     owned: bool = False,
     active: bool = True,
     share_counts: tuple[int, int] = (0, 0),
+    owner_name: str | None = None,
     # None = "same as owned" — the right default everywhere the viewer is
     # the owner (create/rename/share responses). List/snapshot builders
     # pass the real admin-aware value.
@@ -186,6 +192,7 @@ def _to_folder_out(
         sync_source_kind=sync_source_kind,
         sync_status=sync_status,
         owner_id=f.owner_id,
+        owner_name=owner_name,
         owned=owned,
         writable=owned if writable is None else writable,
         shared=bool(f.shared),
@@ -193,6 +200,27 @@ def _to_folder_out(
         share_people=share_counts[1],
         active=active,
     )
+
+
+def owner_label(db: Session, owner_id: int | None) -> str | None:
+    """Display label for one folder owner (display_name, else email)."""
+    if owner_id is None:
+        return None
+    u = db.get(User, owner_id)
+    if u is None:
+        return None
+    return (u.display_name or "").strip() or u.email
+
+
+def bulk_owner_labels(db: Session, folders: list[Folder]) -> dict[int, str]:
+    """owner user_id → display label, one query for a whole listing."""
+    owner_ids = {f.owner_id for f in folders if f.owner_id is not None}
+    if not owner_ids:
+        return {}
+    rows = db.execute(
+        select(User.id, User.display_name, User.email).where(User.id.in_(owner_ids))
+    ).all()
+    return {uid: ((name or "").strip() or email) for uid, name, email in rows}
 
 
 def share_counts_for_folder(db: Session, folder_id: int) -> tuple[int, int]:
@@ -431,7 +459,10 @@ def create_folder(
     folder_cards.enqueue_rebuild(db, folder.id)
     db.commit()
     watch_folder_in_default(folder)
-    out = _to_folder_out(folder, owned=True, active=True)
+    out = _to_folder_out(
+        folder, owned=True, active=True,
+        owner_name=owner_label(db, folder.owner_id),
+    )
     events.publish("folders", {"type": "folder.added", "folder": out.model_dump()})
     # The scan may have INSERTed File rows for files that already lived
     # at this path (folder pre-existed on disk). Publish file.upserted
@@ -975,6 +1006,7 @@ def set_share(
         owned=True,
         active=folder_active_for_user(db, folder_id, user.id),
         share_counts=share_counts_for_folder(db, folder_id),
+        owner_name=owner_label(db, folder.owner_id),
     )
     # A shared-flag flip changes visibility for *every* user — recompute all
     # connections' visible sets, then push the new state.
@@ -1012,6 +1044,7 @@ def set_active_endpoint(
         writable=can_write_folder(db, folder_id, user.id),
         active=bool(body.active),
         share_counts=share_counts_for_folder(db, folder_id),
+        owner_name=owner_label(db, folder.owner_id),
     )
 
 
@@ -1227,6 +1260,7 @@ def rename_folder(
         owned=True,
         active=folder_active_for_user(db, folder_id, user.id),
         share_counts=share_counts_for_folder(db, folder_id),
+        owner_name=owner_label(db, folder.owner_id),
     )
     events.publish("folders", {"type": "folder.upserted", "folder": out.model_dump()})
     return out
@@ -1243,6 +1277,7 @@ def list_folders(
         s.folder_id: s for s in sync_rows
     }
     share_by_folder = bulk_share_counts(db)
+    owner_labels = bulk_owner_labels(db, rows)
     if get_settings().single_user:
         return [
             _to_folder_out(
@@ -1257,6 +1292,7 @@ def list_folders(
                 owned=True,
                 active=folder_active_for_user(db, f.id, user.id),
                 share_counts=share_by_folder.get(f.id, (0, 0)),
+                owner_name=owner_labels.get(f.owner_id),
             )
             for f in rows
         ]
@@ -1284,6 +1320,7 @@ def list_folders(
                 writable=owned or admin_writer,
                 active=folder_active_for_user(db, f.id, user.id),
                 share_counts=share_by_folder.get(f.id, (0, 0)),
+                owner_name=owner_labels.get(f.owner_id),
             )
         )
     return out
