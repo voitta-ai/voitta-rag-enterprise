@@ -474,13 +474,15 @@
                 </div>
                 <div class="toolbar-divider"></div>
                 <div class="toolbar-group">
-                    <button id="btn-new-subfolder" class="btn btn-secondary" disabled title="Create a subfolder inside the selected managed folder">📂 New subfolder</button>
                     <button id="btn-upload" class="btn btn-secondary" disabled title="Upload one or more files into the selected managed folder">⬆ Upload files</button>
                     <button id="btn-upload-folder" class="btn btn-secondary" disabled title="Upload one folder with its full subtree. To add several folders at once, drag them straight onto the folder area below.">📁 Upload folder</button>
                     <button id="btn-reindex" class="btn btn-secondary" disabled title="Hard re-index every file under the selected folder or subfolder">↻ Reindex</button>
                     <button id="btn-sync" class="btn btn-secondary" disabled title="Configure or run a remote sync (e.g. GitHub) for this folder">🔄 Sync</button>
                     <button id="btn-rename" class="btn btn-secondary" disabled title="Rename the selected folder (label and/or directory on disk)">✏ Rename</button>
-                    <button id="btn-remove" class="btn btn-secondary" disabled title="Unregister the selected folder">🗑 Remove</button>
+                </div>
+                <div class="toolbar-divider"></div>
+                <div class="toolbar-group">
+                    <button id="btn-remove" class="btn btn-secondary btn-danger-quiet" disabled title="Remove the selected folder or file">🗑 Remove</button>
                 </div>
                 <input type="file" id="upload-input" multiple hidden>
                 <input type="file" id="upload-folder-input" webkitdirectory directory multiple hidden>
@@ -708,7 +710,8 @@
             <div id="modal-managed" class="modal-body">
                 <label>Folder name</label>
                 <input type="text" id="managed-name" placeholder="project-x">
-                <p class="hint">Created under <code id="modal-root"></code>.</p>
+                <p class="hint" id="modal-root-hint">Created under <code id="modal-root"></code>.</p>
+                <p class="hint" id="modal-parent-hint" hidden>Created inside <code id="modal-parent"></code>.</p>
                 <div class="actions actions-right">
                     <button id="managed-create" class="btn btn-primary">Create folder</button>
                 </div>
@@ -1520,6 +1523,26 @@
                     <button id="sync-trigger" class="btn btn-primary">Sync now</button>
                 </div>
                 <p id="sync-status-line" class="hint" hidden></p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: confirm a removal. One modal for every delete path (toolbar
+         and row-level ✕): names exactly what will be removed, keeps Cancel
+         as the focused default so Enter never destroys anything. -->
+    <div id="remove-backdrop" class="modal-backdrop" hidden>
+        <div class="modal">
+            <div class="modal-header">
+                <h3 id="remove-title">Remove</h3>
+                <button id="remove-close" class="btn-text">×</button>
+            </div>
+            <div class="modal-body">
+                <p id="remove-body" style="margin-top:0;"></p>
+                <p id="remove-detail" class="hint"></p>
+                <div class="actions actions-right">
+                    <button id="remove-cancel" class="btn btn-secondary">Cancel</button>
+                    <button id="remove-confirm" class="btn btn-danger">Delete</button>
+                </div>
             </div>
         </div>
     </div>
