@@ -9,8 +9,10 @@ from __future__ import annotations
 import io
 from pathlib import Path
 
+import pytest
 from PIL import Image as PILImage
 
+from voitta_rag_enterprise.services.parsers.base import UnsupportedDocumentError
 from voitta_rag_enterprise.services.parsers.image_parser import ImageFileParser
 from voitta_rag_enterprise.services.parsers.registry import (
     build_default_registry,
@@ -188,12 +190,11 @@ def test_image_file_parser_returns_one_image(tmp_path: Path) -> None:
     assert img.position == 0
 
 
-def test_image_file_parser_rejects_non_image(tmp_path: Path) -> None:
+def test_image_file_parser_marks_non_image_unsupported(tmp_path: Path) -> None:
     p = tmp_path / "fake.png"
     p.write_text("not actually a png")
-    r = ImageFileParser().parse(p)
-    assert not r.success
-    assert "decode" in (r.error or "")
+    with pytest.raises(UnsupportedDocumentError, match="not a decodable image"):
+        ImageFileParser().parse(p)
 
 
 def test_registry_dispatches_by_extension(tmp_path: Path) -> None:
