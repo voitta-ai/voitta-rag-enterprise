@@ -37,6 +37,12 @@
 .btn-danger { background: #dc3545; color: #fff; }
 .btn-danger:hover:not(:disabled) { background: #c82333; }
 
+/* Quiet danger — toolbar Remove: secondary geometry, red text, and the
+ * full danger fill only once the pointer commits to it. Keeps the button
+ * visually separate from the neutral actions it used to sit flush with. */
+.btn-danger-quiet { color: #dc3545; }
+.btn-danger-quiet:hover:not(:disabled) { background: #dc3545; color: #fff; }
+
 .btn-text {
     background: transparent;
     color: var(--color-accent);

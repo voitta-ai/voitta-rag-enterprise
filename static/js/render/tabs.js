@@ -11,7 +11,7 @@ import { jobs } from "../store.js";
 
 const $ = (sel) => document.querySelector(sel);
 
-const SIDEBAR_TABS = ["details", "meta", "jobs"];
+const SIDEBAR_TABS = ["details", "jobs"];
 let activeSidebarTab = "details";
 
 export function setSidebarTab(name) {

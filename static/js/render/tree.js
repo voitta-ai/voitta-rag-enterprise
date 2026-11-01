@@ -81,6 +81,7 @@ import {
 } from "../flows/tree-model.js";
 import { activeFolders, connStatus, files, folders, me, syncSources } from "../store.js";
 import { openShareModal } from "../modals/share.js";
+import { confirmRemoval } from "../modals/confirm-remove.js";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -738,7 +739,10 @@ async function onDeleteFile(li) {
     const fileId = Number(li.dataset.fileId);
     const folderId = Number(li.dataset.folderId);
     const name = li._refs.text.textContent;
-    if (!confirm(`Delete "${name}"?\n\nThis cannot be undone.`)) return;
+    if (!await confirmRemoval({
+        title: "Delete file",
+        body: `Delete "${name}"?`,
+    })) return;
     try {
         await api.deleteFile(folderId, fileId);
         files.update((list) => list.filter((f) => f.id !== fileId));
@@ -752,7 +756,10 @@ async function onDeleteDir(li) {
     const folderId = Number(li.dataset.folderId);
     const rel = li.dataset.relDir;
     const name = li._refs.text.textContent;
-    if (!confirm(`Delete folder "${name}" and all its contents?\n\nThis cannot be undone.`)) return;
+    if (!await confirmRemoval({
+        title: "Delete folder",
+        body: `Delete folder "${name}" and all its contents?`,
+    })) return;
     try {
         await api.deleteSubdir(folderId, rel);
         removeGhostDir(folderId, rel);

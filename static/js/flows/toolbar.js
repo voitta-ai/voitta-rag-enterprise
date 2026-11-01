@@ -6,10 +6,10 @@
 // click handlers.
 
 import { api } from "../api.js";
-import { renderFoldersFiltered } from "../render/tree.js";
-import { closeModal, openModal } from "../modals/new-folder.js";
+import { closeModal, openModal, openSubfolderModal } from "../modals/new-folder.js";
+import { confirmRemoval } from "../modals/confirm-remove.js";
 import { openRenameModal } from "../modals/rename-folder.js";
-import { addGhostDir, expand, getLocation, getSelectedFileId, getSelectedFolderId, getSelectedRelDir, openLocation, removeGhostDir, setSelection } from "./selection.js";
+import { getLocation, getSelectedFileId, getSelectedFolderId, getSelectedRelDir, openLocation, removeGhostDir, setSelection } from "./selection.js";
 import { scheduleFullRender } from "../render/render-loop.js";
 import { files, folders, jobs } from "../store.js";
 
@@ -34,10 +34,24 @@ export function updateToolbarState() {
     const syncedTip = "Disabled — this folder is synced from a remote source " +
         "(Git, Google Drive, …). Add files at the source and re-sync instead.";
 
-    $("#btn-new-subfolder").disabled = !folder || readOnly || syncBlocked;
-    $("#btn-new-subfolder").title = syncBlocked
-        ? syncedTip
-        : "Create a subfolder inside the selected managed folder";
+    // "New folder" is context-aware: at the top level it creates a managed
+    // root folder; inside an open folder it creates a subfolder there (the
+    // separate "New subfolder" button is gone — the standard flow is "New
+    // folder" from inside the folder itself).
+    const loc = getLocation();
+    const newBtn = $("#btn-new-folder");
+    if (loc.folderId === null) {
+        newBtn.disabled = false;
+        newBtn.title = "Create a managed folder under VOITTA_ROOT_PATH";
+    } else {
+        const locFolder = folders.get().find((f) => f.id === loc.folderId);
+        const locBlocked =
+            (locFolder?.sync_source_kind || "regular") !== "regular";
+        newBtn.disabled = !locFolder || !locFolder.writable || locBlocked;
+        newBtn.title = locBlocked
+            ? syncedTip
+            : "Create a folder inside this folder";
+    }
     $("#btn-upload").disabled = !folder || readOnly || syncBlocked;
     $("#btn-upload").title = syncBlocked
         ? syncedTip
@@ -92,35 +106,23 @@ export function updateToolbarState() {
     $("#btn-rename").disabled = !folder || !isOwned || !isRoot;
 }
 
-async function createSubfolder() {
-    const folder = folders.get().find((f) => f.id === getSelectedFolderId());
-    if (!folder) return;
-    const name = prompt("Subfolder name:");
-    if (!name?.trim()) return;
-    const target = getSelectedRelDir()
-        ? `${getSelectedRelDir()}/${name.trim()}`
-        : name.trim();
-    try {
-        await api.mkdir(folder.id, target);
-        addGhostDir(folder.id, target);
-        expand(folder.id, getSelectedRelDir());
-        renderFoldersFiltered();
-    } catch (err) {
-        alert(err.message);
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Module-load wiring
 // ---------------------------------------------------------------------------
 
-$("#btn-new-folder").addEventListener("click", openModal);
+$("#btn-new-folder").addEventListener("click", () => {
+    const loc = getLocation();
+    if (loc.folderId === null) {
+        openModal();
+        return;
+    }
+    const folder = folders.get().find((f) => f.id === loc.folderId);
+    if (folder) openSubfolderModal(folder, loc.relDir);
+});
 $("#modal-close").addEventListener("click", closeModal);
 $("#modal-backdrop").addEventListener("click", (e) => {
     if (e.target.id === "modal-backdrop") closeModal();
 });
-
-$("#btn-new-subfolder").addEventListener("click", createSubfolder);
 
 // ---------------------------------------------------------------------------
 // Reindex scope chooser — opened by the Reindex button. Three checkboxes
@@ -241,7 +243,10 @@ $("#btn-remove").addEventListener("click", async () => {
             // Delete a single file.
             const fileObj = files.get().find((f) => f.id === fileId);
             const name = fileObj ? fileObj.rel_path.split("/").pop() : `file #${fileId}`;
-            if (!confirm(`Delete "${name}"?\n\nThis cannot be undone.`)) return;
+            if (!await confirmRemoval({
+                title: "Delete file",
+                body: `Delete "${name}"?`,
+            })) return;
             await api.deleteFile(folderId, fileId);
             // Remove from files store immediately; WS event will confirm.
             files.update((list) => list.filter((f) => f.id !== fileId));
@@ -250,7 +255,10 @@ $("#btn-remove").addEventListener("click", async () => {
         } else if (relDir) {
             // Delete a subdirectory.
             const dirName = relDir.split("/").pop();
-            if (!confirm(`Delete folder "${dirName}" and all its contents?\n\nThis cannot be undone.`)) return;
+            if (!await confirmRemoval({
+                title: "Delete folder",
+                body: `Delete folder "${dirName}" and all its contents?`,
+            })) return;
             await api.deleteSubdir(folderId, relDir);
             // Remove dir and all its children from ghost dirs, files store.
             removeGhostDir(folderId, relDir);
@@ -270,7 +278,12 @@ $("#btn-remove").addEventListener("click", async () => {
             }
         } else {
             // Delete the top-level folder.
-            if (!confirm(`Delete folder "${folder.display_name}"?\n\nThe folder and all its files will be permanently removed from disk.`)) return;
+            if (!await confirmRemoval({
+                title: "Delete folder",
+                body: `Delete folder "${folder.display_name}"?`,
+                detail: "The folder and all its files will be permanently "
+                    + "removed from disk. This cannot be undone.",
+            })) return;
             await api.deleteFolder(folderId);
             openLocation(null, "", { history: "replace" });
         }
