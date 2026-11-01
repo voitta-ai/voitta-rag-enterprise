@@ -56,6 +56,12 @@ export function renderSidebar() {
         ? `${folder.path}/${getSelectedRelDir()}`
         : folder.path;
     $("#folder-source-badge").textContent = folder.source_type;
+    // Ownership + age come from the folder row itself (not the stats
+    // snapshot): "you" for owned folders keeps the answer instant.
+    $("#kv-owner").textContent = folder.owned ? "you" : (folder.owner_name || "—");
+    $("#kv-folder-created").textContent = folder.created_at
+        ? new Date(folder.created_at * 1000).toLocaleDateString()
+        : "—";
 
     // EVERY number in this panel renders from ONE server stats snapshot
     // (folder-level pushed via folder.stats_changed; subtree-level fetched

@@ -484,7 +484,13 @@
                 </div>
                 <input type="file" id="upload-input" multiple hidden>
                 <input type="file" id="upload-folder-input" webkitdirectory directory multiple hidden>
-                <input id="folder-search" type="search" placeholder="Search folders…" autocomplete="off" style="margin-left:auto;height:28px;padding:0 8px;border:1px solid var(--color-border);border-radius:var(--radius-sm);background:var(--color-bg);color:var(--color-text-primary);font-size:12px;width:200px;">
+                <input id="folder-search" type="search" placeholder="Search folders &amp; files…" autocomplete="off" title="Matches folder names, subfolders and file names" style="margin-left:auto;height:28px;padding:0 8px;border:1px solid var(--color-border);border-radius:var(--radius-sm);background:var(--color-bg);color:var(--color-text-primary);font-size:12px;width:200px;">
+                <select id="folder-sort" title="Sort folders" style="height:28px;padding:0 6px;border:1px solid var(--color-border);border-radius:var(--radius-sm);background:var(--color-bg);color:var(--color-text-primary);font-size:12px;">
+                    <option value="name-asc">Name A–Z</option>
+                    <option value="name-desc">Name Z–A</option>
+                    <option value="created-desc">Newest first</option>
+                    <option value="created-asc">Oldest first</option>
+                </select>
                 <div id="upload-progress" class="upload-progress" hidden>
                     <button type="button" id="upload-pill" class="upload-pill" aria-expanded="false" title="Show upload details">
                         <span class="upload-pill-icon">⬆</span>
@@ -589,6 +595,8 @@
                                 <span id="folder-sync-badge" class="badge" hidden style="background:#10b981;color:#fff;"></span>
                             </div>
                             <div class="kv-grid">
+                                <span class="k" title="Who created this folder and controls its sharing">Owner</span><span class="v" id="kv-owner">–</span>
+                                <span class="k" title="When this folder was added to Voitta">Created</span><span class="v" id="kv-folder-created">–</span>
                                 <span class="k" title="All files found in this folder, including ones not indexed yet">Files</span><span class="v" id="kv-files">–</span>
                                 <span class="k" title="Files parsed successfully — their content is searchable">Indexed</span><span class="v" id="kv-indexed">–</span>
                                 <span class="k" title="Files that failed to parse or index — the Jobs tab has the details">Errors</span><span class="v" id="kv-errors">–</span>

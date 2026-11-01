@@ -6,7 +6,7 @@
 // click handlers.
 
 import { api } from "../api.js";
-import { renderFolders } from "../render/tree.js";
+import { renderFoldersFiltered } from "../render/tree.js";
 import { closeModal, openModal } from "../modals/new-folder.js";
 import { openRenameModal } from "../modals/rename-folder.js";
 import { addGhostDir, expand, getLocation, getSelectedFileId, getSelectedFolderId, getSelectedRelDir, openLocation, removeGhostDir, setSelection } from "./selection.js";
@@ -104,7 +104,7 @@ async function createSubfolder() {
         await api.mkdir(folder.id, target);
         addGhostDir(folder.id, target);
         expand(folder.id, getSelectedRelDir());
-        renderFolders(folders.get());
+        renderFoldersFiltered();
     } catch (err) {
         alert(err.message);
     }

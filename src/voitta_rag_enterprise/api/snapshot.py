@@ -36,15 +36,21 @@ def _folders_snapshot(
     db: Session, user_id: int, visible: set[int] | None
 ) -> list[dict[str, Any]]:
     """FolderOut payloads for every visible folder (mirrors ``list_folders``)."""
-    from .routes.folders import _sync_source_kind, _to_folder_out, bulk_share_counts
+    from .routes.folders import (
+        _sync_source_kind,
+        _to_folder_out,
+        bulk_owner_labels,
+        bulk_share_counts,
+    )
 
     rows = db.execute(select(Folder).order_by(Folder.id)).scalars().all()
     sync_by_folder = {
         s.folder_id: s
         for s in db.execute(select(FolderSyncSource)).scalars().all()
     }
-    # Bulk (three queries total) — this builder must never go per-folder.
+    # Bulk (four queries total) — this builder must never go per-folder.
     share_by_folder = bulk_share_counts(db)
+    owner_labels = bulk_owner_labels(db, rows)
     see_all = visible is None
     # One person-level admin lookup for the whole snapshot: every folder
     # emitted below is visible to the viewer, so admin ⇒ writable on each.
@@ -66,6 +72,7 @@ def _folders_snapshot(
                 writable=owned or admin_writer,
                 active=folder_active_for_user(db, f.id, user_id),
                 share_counts=share_by_folder.get(f.id, (0, 0)),
+                owner_name=owner_labels.get(f.owner_id),
             ).model_dump()
         )
     return out
