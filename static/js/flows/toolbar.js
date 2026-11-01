@@ -6,7 +6,7 @@
 // click handlers.
 
 import { api } from "../api.js";
-import { closeModal, openModal, openSubfolderModal } from "../modals/new-folder.js";
+import { closeModal, isRootConfigured, openModal, openSubfolderModal } from "../modals/new-folder.js";
 import { confirmRemoval } from "../modals/confirm-remove.js";
 import { openRenameModal } from "../modals/rename-folder.js";
 import { getLocation, getSelectedFileId, getSelectedFolderId, getSelectedRelDir, openLocation, removeGhostDir, setSelection } from "./selection.js";
@@ -41,8 +41,12 @@ export function updateToolbarState() {
     const loc = getLocation();
     const newBtn = $("#btn-new-folder");
     if (loc.folderId === null) {
-        newBtn.disabled = false;
-        newBtn.title = "Create a managed folder under VOITTA_ROOT_PATH";
+        // Root folders can't materialise without VOITTA_ROOT_PATH — keep
+        // the gate boot.js sets, which every render here would otherwise undo.
+        newBtn.disabled = !isRootConfigured();
+        newBtn.title = newBtn.disabled
+            ? "Disabled — set VOITTA_ROOT_PATH to create managed folders"
+            : "Create a managed folder under VOITTA_ROOT_PATH";
     } else {
         const locFolder = folders.get().find((f) => f.id === loc.folderId);
         const locBlocked =

@@ -26,6 +26,10 @@ export function setRootInfo(info) {
     rootInfo = info;
 }
 
+export function isRootConfigured() {
+    return !!rootInfo.configured;
+}
+
 // null → root mode; {folderId, relDir} → subfolder mode.
 let _subTarget = null;
 
