@@ -1033,12 +1033,12 @@ function emitTreeRow({ targetRows, seenKeys, folder, node, relDir, displayName, 
     seenKeys.add(cacheKey);
 
     if (!isOpen) return;
-    emitChildRows({ targetRows, seenKeys, folder, node, relDir, depth: depth + 1, folderActive });
+    emitChildRows({ targetRows, seenKeys, folder, node, relDir, depth: depth + 1, folderActive, forceOpen });
 }
 
 // The subdirectories and files directly under ``node`` (plus whatever of
 // them is expanded), at ``depth``. ``match`` optionally filters them by name.
-function emitChildRows({ targetRows, seenKeys, folder, node, relDir, depth, folderActive, match = null }) {
+function emitChildRows({ targetRows, seenKeys, folder, node, relDir, depth, folderActive, match = null, forceOpen = false }) {
     for (const [name, child] of [...node.dirs.entries()].sort()) {
         if (match && !match(name)) continue;
         emitTreeRow({
